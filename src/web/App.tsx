@@ -228,6 +228,12 @@ export function App() {
         </div>
       </main>
 
+      <footer className="px-6 py-3 text-xs text-muted-foreground flex gap-4 border-t border-border">
+        <a href="/terms" className="hover:underline">Terms</a>
+        <a href="/privacy" className="hover:underline">Privacy</a>
+        <a href="mailto:support@flaregit.com" className="hover:underline">Support</a>
+      </footer>
+
       {/* 4. Product Decision Modal */}
       <DecisionModal
         decision={activeDecision}

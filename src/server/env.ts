@@ -12,6 +12,8 @@ export interface Env {
   ARTIFACTS: ArtifactsBinding;
   AI: AiBinding;
   ASSETS: Fetcher;
+  /** Per-user API rate limit (Workers Rate Limiting binding). */
+  API_LIMITER: { limit(opts: { key: string }): Promise<{ success: boolean }> };
   /** Clerk frontend API URL (the JWT issuer), e.g. https://example.clerk.accounts.dev (var). */
   CLERK_ISSUER?: string;
   /** Comma-separated origins allowed to mint session tokens (`azp`), e.g. https://flaregit.com (var). */

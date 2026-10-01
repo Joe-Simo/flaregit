@@ -40,6 +40,8 @@ export default {
       const auth = await authenticate(request, env);
       if (auth instanceof Response) return auth;
       const projectId = await projectIdFor(auth.id);
+      const { success: withinLimit } = await env.API_LIMITER.limit({ key: projectId });
+      if (!withinLimit) return new Response("Too many requests. Please slow down.", { status: 429, headers: { "Retry-After": "60" } });
       const ledger = ledgerOf(env, projectId);
 
       if (url.pathname === "/api/config" && request.method === "GET") return Response.json({ aiConfigured: true, previewBase: env.PREVIEW_ORIGIN });

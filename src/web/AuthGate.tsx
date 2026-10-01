@@ -34,6 +34,9 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
             <p className="text-sm text-muted-foreground mt-1">Work in parallel. Integration happens automatically.</p>
           </div>
           <SignIn routing="hash" />
+          <p className="text-xs text-muted-foreground">
+            By continuing you agree to the <a className="underline" href="/terms">Terms</a> and <a className="underline" href="/privacy">Privacy Policy</a>.
+          </p>
         </div>
       </SignedOut>
       <SignedIn>
