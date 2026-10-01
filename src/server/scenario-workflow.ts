@@ -105,6 +105,7 @@ export class FlareGitScenarioWorkflow extends WorkflowEntrypoint<Env, ScenarioPa
     if (!r.success) throw new Error(`push failed: ${r.stderr.slice(-300)}`);
 
     await ledger.ingestCheckpoint({ eventId: `push-${task.id}-${commit}`, taskId: task.id, commit, ready: true });
+    await repo.revokeToken(token).catch(() => false); // the agent's credential dies with its run
     await sb.destroy();
     return { commit };
   }

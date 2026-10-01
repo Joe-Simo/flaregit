@@ -84,7 +84,7 @@ export async function createCheckout(env: Env, opts: { projectId: string; email:
     body: JSON.stringify({
       products: [env.POLAR_PRODUCT_ID],
       external_customer_id: `${CUSTOMER_PREFIX}${opts.projectId}`,
-      customer_email: opts.email,
+      ...(opts.email ? { customer_email: opts.email } : {}),
       success_url: opts.successUrl,
       metadata: { app: "flaregit", projectId: opts.projectId },
     }),

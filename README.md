@@ -16,7 +16,7 @@ A Git-compatible platform for humans and AI agents working concurrently. Contrib
 | Accept | `publishAcceptedCandidate` re-checks evidence↔commit↔tree↔base↔policy and moves the ref with CAS (`update-ref old` locally, `push --force-with-lease` to Artifacts). Journal: PREPARED → REF_UPDATED → ACCEPTED. |
 | Decide | Requirements whose assertions give different outputs for the same input are contradictions (`decision/contradiction.ts`); the chosen requirement's `policyPatch` updates the verifier policy and integration re-runs. |
 
-Cloudflare mapping (`wrangler.jsonc`): Worker (API + Access JWT auth), Durable Object + SQLite ledger (`durable-object.ts`), Workflow (`workflow.ts`), Queue (`queue.ts`), Container-backed integrator DO (`integrator.ts`), Artifacts binding (`artifacts/cloudflare.ts`), R2 (evidence, immutable per-commit builds), Workers AI (+ optional AI Gateway), Access.
+Cloudflare mapping (`wrangler.jsonc`): Worker (API + Clerk session-token auth), Durable Object + SQLite ledger (`durable-object.ts`), Workflow (`workflow.ts`), Queue (`queue.ts`), Container-backed integrator DO (`integrator.ts`), Artifacts binding (`artifacts/cloudflare.ts`), R2 (evidence, immutable per-commit builds), Workers AI through AI Gateway. Customer sign-in is Clerk (Cloudflare has no customer-identity product; Access is a workforce tool).
 
 ## Run locally
 
@@ -39,7 +39,7 @@ Without Workers AI credentials the server and `demo` refuse to run scenarios (th
 - Act I: two agents in separate agent containers pushed to their own Artifacts forks; the integration Workflow found the Git conflict, the first candidate failed protected verification, a repair passed, the ref moved by compare-and-swap, the journal reads ACCEPTED and the exact build is served from `preview.flaregit.com`.
 - Act II: the clean merge was detected as broken, repaired and accepted.
 - Act III: paused with one question; the accepted head did not move.
-- `/api` returns 401 without a valid Access JWT.
+- `/api` returns 401 without a valid Clerk session token (forged tokens too).
 - A decision resolved through the cloud API triggered FlareGit to re-run, verify and accept the chosen behavior (third landing, journal ACCEPTED).
 - Cancelling a task mid-run: the integration Workflow returned `not_started` and the accepted head did not move.
 - Tenant isolation: each Access identity gets its own Durable Object ledger, Artifacts canonical repo and daily run quota (`MAX_SCENARIO_RUNS_PER_DAY`); a new identity starts uninitialized.

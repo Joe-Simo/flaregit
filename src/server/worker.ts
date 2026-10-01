@@ -17,7 +17,12 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    // Polar webhooks are not behind Access (Polar cannot log in); the HMAC signature is the authentication.
+    // The publishable key is public by design; the SPA needs it before the user can sign in.
+    if (url.pathname === "/auth-config" && request.method === "GET") {
+      return Response.json({ publishableKey: env.CLERK_PUBLISHABLE_KEY ?? null });
+    }
+
+    // Polar webhooks are not behind login (Polar cannot log in); the HMAC signature is the authentication.
     if (url.pathname === "/webhooks/polar" && request.method === "POST") {
       const body = await request.text();
       let event: unknown;
@@ -34,7 +39,7 @@ export default {
     if (url.pathname.startsWith("/api/")) {
       const auth = await authenticate(request, env);
       if (auth instanceof Response) return auth;
-      const projectId = await projectIdFor(auth.email);
+      const projectId = await projectIdFor(auth.id);
       const ledger = ledgerOf(env, projectId);
 
       if (url.pathname === "/api/config" && request.method === "GET") return Response.json({ aiConfigured: true, previewBase: env.PREVIEW_ORIGIN });
@@ -63,6 +68,68 @@ export default {
         return Response.json({ instanceId: instance.id }, { status: 202 });
       }
 
+      // Humans (or any git client) participate with plain git: create a task, push to its fork, mark it ready.
+      if (url.pathname === "/api/tasks" && request.method === "POST") {
+        const body = (await request.json().catch(() => ({}))) as { taskId?: string; goal?: string; allowedScope?: string[] };
+        if (!body.taskId || !/^[a-z0-9][a-z0-9-]{2,40}$/.test(body.taskId) || !body.goal) {
+          return new Response("taskId (3-41 chars: a-z, 0-9, -) and goal are required", { status: 400 });
+        }
+        try {
+          const state = await ledger.getState();
+          const canonical = await env.ARTIFACTS.get(state.canonicalRepoName);
+          const repoName = `task-${projectId}-${body.taskId}`;
+          const fork = await canonical.fork(repoName, { description: body.goal });
+          const forkRepo = await env.ARTIFACTS.get(repoName);
+          const token = (await forkRepo.createToken("write", 3600)).plaintext;
+          const now = new Date().toISOString();
+          await ledger.createTask({
+            id: body.taskId,
+            goal: body.goal,
+            contributor: { id: `human-${await projectIdFor(auth.id)}`, name: auth.email ?? `user-${auth.id.slice(-6)}`, type: "human" },
+            baseCommit: state.acceptedState.currentCommit,
+            allowedScope: body.allowedScope ?? ["src/"],
+            status: "working",
+            requirements: [],
+            workspace: { repoName, remote: fork.remote, branch: `task/${body.taskId}` },
+            checkpoints: [],
+            currentCommit: state.acceptedState.currentCommit,
+            createdAt: now,
+            updatedAt: now,
+          });
+          return Response.json({
+            remote: fork.remote,
+            branch: `task/${body.taskId}`,
+            token,
+            howTo: `git -c http.extraHeader="Authorization: Bearer <token>" clone ${fork.remote} && git checkout -b task/${body.taskId} && (edit, commit) && git -c http.extraHeader="Authorization: Bearer <token>" push origin task/${body.taskId}`,
+          });
+        } catch (err) {
+          return new Response(err instanceof Error ? err.message : "could not create task", { status: 500 });
+        }
+      }
+
+      const ready = /^\/api\/tasks\/([a-z0-9-]+)\/ready$/.exec(url.pathname);
+      if (ready && request.method === "POST") {
+        const state = await ledger.getState();
+        const task = state.tasks[ready[1]!];
+        if (!task) return new Response("Unknown task", { status: 404 });
+        const repo = await env.ARTIFACTS.get(task.workspace.repoName);
+        const head = (await repo.log({ ref: `refs/heads/${task.workspace.branch}`, limit: 1 }))[0]?.hash ?? (await repo.log({ ref: task.workspace.branch, limit: 1 }))[0]?.hash;
+        if (!head) return new Response(`Nothing pushed to ${task.workspace.branch} yet`, { status: 409 });
+        const { applied } = await ledger.ingestCheckpoint({ eventId: `ready-${task.id}-${head}`, taskId: task.id, commit: head, ready: true });
+        return Response.json({ task: task.id, commit: head, applied });
+      }
+
+      if (url.pathname === "/api/integrations" && request.method === "POST") {
+        const body = (await request.json().catch(() => ({}))) as { taskIds?: string[] };
+        if (!Array.isArray(body.taskIds) || body.taskIds.length !== 2) return new Response("taskIds must list exactly two tasks", { status: 400 });
+        const { plan } = await ledger.getBilling();
+        const quota = await ledger.consumeRun(planLimits(env)[plan]);
+        if (!quota.allowed) return new Response("Daily run limit reached", { status: 429 });
+        const eventId = `integ-${projectId}-${Date.now().toString(36)}`;
+        await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds: body.taskIds as [string, string], eventId } satisfies QueueMessage);
+        return Response.json({ queued: eventId }, { status: 202 });
+      }
+
       const cancel = /^\/api\/tasks\/([\w-]+)\/cancel$/.exec(url.pathname);
       if (cancel && request.method === "POST") {
         try {
@@ -88,7 +155,7 @@ export default {
 
       if (url.pathname === "/api/billing/checkout" && request.method === "POST") {
         try {
-          const checkoutUrl = await createCheckout(env, { projectId, email: auth.email, successUrl: `${url.origin}/?checkout=success` });
+          const checkoutUrl = await createCheckout(env, { projectId, email: auth.email ?? "", successUrl: `${url.origin}/?checkout=success` });
           return Response.json({ url: checkoutUrl });
         } catch (err) {
           return new Response(err instanceof Error ? err.message : "checkout failed", { status: 503 });

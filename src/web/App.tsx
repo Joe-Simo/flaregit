@@ -1,3 +1,4 @@
+import { apiFetch } from "./api";
 import React, { useState, useEffect } from "react";
 import { Header } from "./components/Header";
 import { BillingBar } from "./components/BillingBar";
@@ -31,8 +32,16 @@ export function App() {
   // Fetch initial state
   useEffect(() => {
     const load = () =>
-      fetch("/api/state")
-        .then((res) => {
+      apiFetch("/api/state")
+        .then(async (res) => {
+          if (res.status === 404) {
+            // First visit: create this customer's isolated workspace (repo + ledger).
+            setStatusMessage("Setting up your workspace");
+            setStatusDetail("Creating your private repository…");
+            const created = await apiFetch("/api/projects/bootstrap", { method: "POST" });
+            if (!created.ok) throw new Error(`Workspace setup failed (${created.status})`);
+            res = await apiFetch("/api/state");
+          }
           if (!res.ok) throw new Error(`Backend responded ${res.status}`);
           return res.json() as Promise<FlareGitProjectState>;
         })
@@ -50,7 +59,7 @@ export function App() {
         .catch((err: Error) => setLoadError(err.message));
     load();
     refreshRef.current = load;
-    fetch("/api/config").then((r) => r.json() as Promise<{ previewBase: string }>).then((c) => setPreviewBase(c.previewBase)).catch(() => undefined);
+    apiFetch("/api/config").then((r) => r.json() as Promise<{ previewBase: string }>).then((c) => setPreviewBase(c.previewBase)).catch(() => undefined);
 
     // Connect to Server-Sent Events (SSE)
     const eventSource = new EventSource("/api/events");
@@ -124,7 +133,7 @@ export function App() {
     setStatusMessage("Contributors are working");
     setStatusDetail("Two agents implement their tasks in isolated workspaces.");
     try {
-      const res = await fetch("/api/scenarios/run", {
+      const res = await apiFetch("/api/scenarios/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ act }),
@@ -144,7 +153,7 @@ export function App() {
   const handleResolveDecision = async (decisionId: string, selectedOptionId: string) => {
     setIsResolvingDecision(true);
     try {
-      const res = await fetch("/api/decisions/resolve", {
+      const res = await apiFetch("/api/decisions/resolve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ decisionId, selectedOptionId }),

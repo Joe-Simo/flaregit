@@ -3,19 +3,39 @@ import type { Env } from "./env.js";
 
 const jwks = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
-/** Validates the Cloudflare Access JWT. Fails closed when Access is not configured. */
-export async function authenticate(request: Request, env: Env): Promise<{ email: string } | Response> {
-  if (!env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD) return new Response("Access is not configured", { status: 503 });
-  const token = request.headers.get("Cf-Access-Jwt-Assertion");
-  if (!token) return new Response("Unauthorized", { status: 401 });
-  let keys = jwks.get(env.ACCESS_TEAM_DOMAIN);
+function keysFor(url: string) {
+  let keys = jwks.get(url);
   if (!keys) {
-    keys = createRemoteJWKSet(new URL(`https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`));
-    jwks.set(env.ACCESS_TEAM_DOMAIN, keys);
+    keys = createRemoteJWKSet(new URL(url));
+    jwks.set(url, keys);
   }
+  return keys;
+}
+
+export interface Identity {
+  /** Stable, unique subject (Clerk user id or Access subject); the tenant key is derived from it. */
+  id: string;
+  email?: string;
+}
+
+/**
+ * Authenticates a customer request with a Clerk session token (Authorization: Bearer). Verifies signature,
+ * issuer, expiry and authorized party. Fails closed when Clerk is not configured.
+ */
+export async function authenticate(request: Request, env: Env): Promise<Identity | Response> {
+  if (!env.CLERK_ISSUER) return new Response("Authentication is not configured", { status: 503 });
+  const header = request.headers.get("Authorization");
+  const token = header?.startsWith("Bearer ") ? header.slice(7) : undefined;
+  if (!token) return new Response("Unauthorized", { status: 401 });
   try {
-    const { payload } = await jwtVerify(token, keys, { issuer: `https://${env.ACCESS_TEAM_DOMAIN}`, audience: env.ACCESS_AUD });
-    return { email: String(payload.email ?? payload.sub ?? "unknown") };
+    const { payload } = await jwtVerify(token, keysFor(`${env.CLERK_ISSUER}/.well-known/jwks.json`), { issuer: env.CLERK_ISSUER });
+    // `azp` is the origin that requested the session; reject tokens minted for any other site.
+    const allowed = (env.CLERK_AUTHORIZED_PARTIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (allowed.length > 0 && !(typeof payload.azp === "string" && allowed.includes(payload.azp))) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+    if (!payload.sub) return new Response("Unauthorized", { status: 401 });
+    return { id: payload.sub, email: typeof payload.email === "string" ? payload.email : undefined };
   } catch {
     return new Response("Unauthorized", { status: 401 });
   }

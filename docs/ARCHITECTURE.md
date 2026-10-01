@@ -4,6 +4,7 @@
 - **Contributors / agents** write only to their task repository (scope `src/`). Protected paths (`.flaregit/`, `tests/`, `package.json`, …) are rejected in contributor commits and in model repairs.
 - **Verifier** lives in platform code (`src/fixtures/*/checks.ts`), never in the candidate repo. Candidate code runs only in a child process with a scrubbed environment (`PATH`, `HOME`, `TMPDIR`, `NODE_ENV`), a 30 s timeout and an output cap. Results are returned on a line prefixed with a per-run nonce delivered over stdin before any candidate code is imported.
 - **Acceptance** is deterministic code: evidence must be `passed`, match candidate commit and tree, accepted base, and policy version; the ref moves only if it still equals the verified base.
+- **Customer auth**: Clerk session tokens (`Authorization: Bearer`) are verified in the Worker (signature via the instance JWKS, issuer, expiry, authorized party `azp`). The verified Clerk user id, hashed, is the tenant key. Production runs on `clerk.flaregit.com`; mail is sent from the verified domain (SPF/DKIM via the `clkmail`/`clk._domainkey` CNAMEs).
 - **Secrets**: Artifacts tokens are short-lived and passed as `Authorization: Bearer` (`http.extraHeader` / `GIT_CONFIG_*` env), never in URLs. Workers AI is called from the Worker binding; the browser holds no credentials.
 
 ## Production flow (Cloudflare)

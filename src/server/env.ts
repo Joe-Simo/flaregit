@@ -12,10 +12,12 @@ export interface Env {
   ARTIFACTS: ArtifactsBinding;
   AI: AiBinding;
   ASSETS: Fetcher;
-  /** Cloudflare Access team domain, e.g. myteam.cloudflareaccess.com (var). */
-  ACCESS_TEAM_DOMAIN: string;
-  /** Cloudflare Access application audience tag (var). */
-  ACCESS_AUD: string;
+  /** Clerk frontend API URL (the JWT issuer), e.g. https://example.clerk.accounts.dev (var). */
+  CLERK_ISSUER?: string;
+  /** Comma-separated origins allowed to mint session tokens (`azp`), e.g. https://flaregit.com (var). */
+  CLERK_AUTHORIZED_PARTIES?: string;
+  /** Clerk publishable key; public by design, served to the SPA via /api/config-free endpoint (var). */
+  CLERK_PUBLISHABLE_KEY?: string;
   /** Dedicated origin serving previews (e.g. https://preview.flaregit.com), isolated from the app origin. */
   PREVIEW_ORIGIN: string;
   AI_GATEWAY_ID?: string;

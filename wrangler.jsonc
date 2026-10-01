@@ -4,7 +4,7 @@
   "main": "src/server/worker.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
-  "assets": { "directory": "./dist", "binding": "ASSETS", "run_worker_first": ["/api/*", "/preview/*", "/webhooks/*"], "not_found_handling": "single-page-application" },
+  "assets": { "directory": "./dist", "binding": "ASSETS", "run_worker_first": ["/api/*", "/preview/*", "/webhooks/*", "/auth-config"], "not_found_handling": "single-page-application" },
   "vars": {
     "CANONICAL_REPO": "flaregit-canonical",
     "AI_GATEWAY_ID": "default",
@@ -13,8 +13,9 @@
     "POLAR_SERVER": "sandbox",
     "POLAR_PRODUCT_ID": "55dca3a3-71b0-4a54-b7f9-098f6b57a200",
     "PREVIEW_ORIGIN": "https://preview.flaregit.com",
-    "ACCESS_TEAM_DOMAIN": "simolink.cloudflareaccess.com",
-    "ACCESS_AUD": "bbfdea277de662ebabe2598383181eef6d5302eb96ca30ead794d2c3595f4ae5"
+    "CLERK_ISSUER": "https://clerk.flaregit.com",
+    "CLERK_AUTHORIZED_PARTIES": "https://flaregit.com",
+    "CLERK_PUBLISHABLE_KEY": "pk_live_Y2xlcmsuZmxhcmVnaXQuY29tJA"
   },
   "durable_objects": {
     "bindings": [

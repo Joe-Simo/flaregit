@@ -1,3 +1,4 @@
+import { apiFetch } from "../api";
 import React, { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -17,7 +18,7 @@ export function BillingBar({ refreshKey }: { refreshKey: number }) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    fetch("/api/billing")
+    apiFetch("/api/billing")
       .then((r) => (r.ok ? (r.json() as Promise<Billing>) : Promise.reject(new Error(String(r.status)))))
       .then(setBilling)
       .catch(() => setBilling(null));
@@ -29,7 +30,7 @@ export function BillingBar({ refreshKey }: { refreshKey: number }) {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/billing/checkout", { method: "POST" });
+      const res = await apiFetch("/api/billing/checkout", { method: "POST" });
       if (!res.ok) throw new Error(await res.text());
       const { url } = (await res.json()) as { url: string };
       window.location.assign(url);

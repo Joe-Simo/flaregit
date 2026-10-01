@@ -15,6 +15,7 @@
     "server": "bun run src/server/local.ts"
   },
   "dependencies": {
+    "@clerk/clerk-react": "^5.61.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "jose": "^6.2.12",

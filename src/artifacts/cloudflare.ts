@@ -18,6 +18,7 @@ export interface ArtifactsBinding {
 interface ArtifactsRepoCapability {
   info(): Promise<Record<string, any>>;
   createToken(scope?: "read" | "write", ttl?: number): Promise<{ plaintext: string; expiresAt?: string }>;
+  revokeToken(tokenOrId: string): Promise<boolean>;
   fork(name: string, opts?: Record<string, unknown>): Promise<{ name: string; remote: string; defaultBranch?: string; token?: string }>;
   log(opts?: Record<string, unknown>): Promise<Array<Record<string, any>>>;
   readCommit(hash: string): Promise<Record<string, any> | null>;
