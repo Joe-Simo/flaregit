@@ -56,3 +56,7 @@ Setup (secrets are never committed or put in the browser):
 1. In Polar, create a **FlareGit Pro** subscription product and an Organization Access Token (`checkouts:write`, `events:write`); add a webhook endpoint `https://preview.flaregit.com/webhooks/polar` for subscription events.
 2. Set `POLAR_PRODUCT_ID` in `wrangler.jsonc`, then `wrangler secret put POLAR_ACCESS_TOKEN` and `wrangler secret put POLAR_WEBHOOK_SECRET`. Use `POLAR_SERVER=sandbox` to test first.
 3. Free plan: 3 model-backed runs/day per project; Pro: 100 (`FREE_RUNS_PER_DAY`, `PRO_RUNS_PER_DAY`).
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md). Copyright 2026 Joe Simo.

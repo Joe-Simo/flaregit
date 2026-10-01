@@ -2,7 +2,7 @@
   "name": "flaregit",
   "version": "0.1.0",
   "description": "FlareGit - A standalone Git-compatible platform where humans and AI agents work in parallel and integration happens automatically.",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "private": true,
   "type": "module",
   "scripts": {
