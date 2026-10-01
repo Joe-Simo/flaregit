@@ -1,0 +1,44 @@
+{
+  "name": "flaregit",
+  "version": "0.1.0",
+  "description": "FlareGit - A standalone Git-compatible platform where humans and AI agents work in parallel and integration happens automatically.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/ --ext .ts,.tsx || true",
+    "test": "bun test",
+    "spike": "bun run src/cli/spike.ts",
+    "demo": "bun run src/cli/demo.ts",
+    "eval": "bun run src/cli/eval.ts",
+    "server": "bun run src/server/local.ts"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "^1.0.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.49.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "tailwind-merge": "^3.7.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261001.1",
+    "@types/bun": "latest",
+    "@types/node": "^26.6.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "autoprefixer": "^10.6.1",
+    "eslint": "^10.11.0",
+    "postcss": "^8.5.28",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.2",
+    "wrangler": "^4.146.0"
+  }
+}

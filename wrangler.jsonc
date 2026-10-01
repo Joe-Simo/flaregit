@@ -1,0 +1,71 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "flaregit",
+  "main": "src/server/worker.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "REPOSITORY_CONTROLLER",
+        "class_name": "RepositoryController"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RepositoryController"]
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  },
+  "artifacts": [
+    {
+      "binding": "ARTIFACTS",
+      "namespace": "flaregit-default"
+    }
+  ],
+  "routes": [
+    {
+      "pattern": "flaregit.com/*",
+      "custom_domain": true
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "EVIDENCE_BUCKET",
+      "bucket_name": "flaregit-evidence"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "INTEGRATION_QUEUE",
+        "queue": "flaregit-integration-events"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "flaregit-integration-events",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5
+      }
+    ]
+  },
+  "workflows": [
+    {
+      "name": "flaregit-integration-workflow",
+      "binding": "INTEGRATION_WORKFLOW",
+      "class_name": "FlareGitIntegrationWorkflow"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
