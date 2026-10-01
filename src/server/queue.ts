@@ -1,34 +1,22 @@
-/**
- * Cloudflare Queue: FlareGit Async Event & Checkpoint Consumer
- * 
- * Ingests Git push events and checkpoint submissions asynchronously.
- * Reconciles authoritative repository refs and triggers background workflow runs.
- */
+import type { Env, QueueMessage } from "./env.js";
+import type { IntegrationParams } from "./workflow.js";
+import { ledgerOf } from "./scenario-workflow.js";
+import { PROTECTED_PATHS } from "./shell.js";
 
-export interface QueueMessage {
-  type: "checkpoint.ingest" | "git.push" | "workflow.trigger";
-  taskId?: string;
-  repoName?: string;
-  ref?: string;
-  commitHash?: string;
-  timestamp: string;
-}
-
-export async function handleQueueBatch(
-  batch: { messages: Array<{ body: QueueMessage; ack: () => void; retry: () => void }> },
-  env: any
-): Promise<void> {
+/** Consumes push/integration events. The Durable Object de-duplicates by event id, so redelivery is safe. */
+export async function handleQueueBatch(batch: MessageBatch<QueueMessage>, env: Env): Promise<void> {
   for (const msg of batch.messages) {
     try {
-      const payload = msg.body;
-      if (payload.type === "git.push") {
-        console.log(`[Queue] Ingested Git push to ${payload.repoName} at ${payload.commitHash}`);
-      } else if (payload.type === "checkpoint.ingest") {
-        console.log(`[Queue] Ingested checkpoint for task ${payload.taskId}`);
+      const body = msg.body;
+      if (body.type === "git.push") {
+        await ledgerOf(env, body.projectId).ingestCheckpoint({ eventId: body.eventId, taskId: body.taskId, commit: body.commit, ready: body.ready });
+      } else {
+        const params: IntegrationParams = { projectId: body.projectId, taskIds: body.taskIds, fixture: "ticket-booking", protectedPaths: PROTECTED_PATHS };
+        await env.INTEGRATION_WORKFLOW.create({ id: body.eventId, params });
       }
       msg.ack();
     } catch (err) {
-      console.error("[Queue] Processing error:", err);
+      console.error("queue message failed", err instanceof Error ? err.message : String(err));
       msg.retry();
     }
   }

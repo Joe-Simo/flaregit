@@ -1,5 +1,5 @@
 import React from "react";
-import { GitMerge, Cpu, CheckCircle2, ShieldCheck, Clock, FileCheck, ArrowRight, AlertTriangle } from "lucide-react";
+import { GitMerge, Cpu, ShieldCheck } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import type { CandidateGeneration, PublicationJournalEntry } from "@/core/types";
@@ -30,7 +30,7 @@ export function CandidateJournal({
             </CardTitle>
           </div>
           <span className="text-xs text-muted-foreground">
-            {candidateList.length} Compositions
+            {candidateList.length} Compositions • {journal.length} CAS Logs
           </span>
         </div>
       </CardHeader>

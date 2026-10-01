@@ -4,7 +4,7 @@ import { calculateQuote } from "./pricing.js";
 import type { QuoteResult } from "./types.js";
 
 export function App() {
-  const [selectedEventId, setSelectedEventId] = useState<string>("cf-connect-2026");
+  const [selectedEventId] = useState<string>("cf-connect-2026");
   const [ticketCount, setTicketCount] = useState<number>(4);
   const [isRefundable, setIsRefundable] = useState<boolean>(true);
   const [confirmed, setConfirmed] = useState<boolean>(false);

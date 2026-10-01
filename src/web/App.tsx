@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Header } from "./components/Header";
+import { BillingBar } from "./components/BillingBar";
 import { StatusBanner, type PipelineStage } from "./components/StatusBanner";
 import { TaskPanel } from "./components/TaskPanel";
 import { CandidateJournal } from "./components/CandidateJournal";
@@ -7,7 +8,7 @@ import { LivePreview } from "./components/LivePreview";
 import { DecisionModal } from "./components/DecisionModal";
 import { EvidenceDrawer } from "./components/EvidenceDrawer";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import type { FlareGitProjectState, ProductDecision, Requirement } from "@/core/types";
+import type { FlareGitProjectState, ProductDecision } from "@/core/types";
 
 export function App() {
   const [state, setState] = useState<FlareGitProjectState | null>(null);
@@ -22,63 +23,34 @@ export function App() {
   const [activeAct, setActiveAct] = useState<string | null>(null);
   const [isResolvingDecision, setIsResolvingDecision] = useState<boolean>(false);
   const [leftTab, setLeftTab] = useState<string>("tasks");
-
-  // Current policy defaults
-  const [policy, setPolicy] = useState({
-    groupDiscountPercent: 0.15,
-    minTicketsForDiscount: 4,
-    refundFeePerTicket: 5.0,
-    discountAppliesToRefundFee: false,
-  });
+  const [previewBase, setPreviewBase] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [scenarioError, setScenarioError] = useState<string | null>(null);
+  const refreshRef = React.useRef<() => void>(() => undefined);
 
   // Fetch initial state
   useEffect(() => {
-    fetch("/api/state")
-      .then((res) => res.json() as Promise<FlareGitProjectState>)
-      .then((data) => {
-        setState(data);
-        // Check for pending decision
-        const pending = Object.values(data.decisions || {}).find((d) => d.status === "pending");
-        if (pending) {
-          setActiveDecision(pending);
-          setPipelineStage("decision_needed");
-          setStatusMessage("Product Decision Required");
-          setStatusDetail("Contradictory business rules detected between parallel contributors.");
-        }
-      })
-      .catch((err) => {
-        console.warn("Could not connect to live backend, running with initial local state:", err);
-        // Provide rich mock state if running purely in static browser
-        setState({
-          projectId: "flaregit-primary",
-          projectName: "FlareGit Platform",
-          canonicalRepoName: "flaregit-canonical",
-          acceptedState: {
-            currentCommit: "b84a5f8",
-            acceptedAt: new Date().toISOString(),
-            buildDigest: "sha256:verified_init",
-            activeRequirements: [
-              {
-                id: "REQ-BASE-SINGLE-TICKET",
-                title: "Baseline Ticket Checkout",
-                description: "1 ticket @ $40 without extras equals exactly $40.00",
-                version: 1,
-                status: "approved",
-                originTaskId: "task-seed",
-                approvedAt: new Date().toISOString(),
-                assertions: [],
-              },
-            ],
-            history: [],
-          },
-          tasks: {},
-          candidates: {},
-          evidence: {},
-          decisions: {},
-          journal: [],
-          policyVersion: 1,
-        });
-      });
+    const load = () =>
+      fetch("/api/state")
+        .then((res) => {
+          if (!res.ok) throw new Error(`Backend responded ${res.status}`);
+          return res.json() as Promise<FlareGitProjectState>;
+        })
+        .then((data) => {
+          setState(data);
+          setLoadError(null);
+          const pending = Object.values(data.decisions || {}).find((d) => d.status === "pending");
+          if (pending) {
+            setActiveDecision(pending);
+            setPipelineStage("decision_needed");
+            setStatusMessage("Product decision required");
+            setStatusDetail("The last accepted version stays live until you choose.");
+          }
+        })
+        .catch((err: Error) => setLoadError(err.message));
+    load();
+    refreshRef.current = load;
+    fetch("/api/config").then((r) => r.json() as Promise<{ previewBase: string }>).then((c) => setPreviewBase(c.previewBase)).catch(() => undefined);
 
     // Connect to Server-Sent Events (SSE)
     const eventSource = new EventSource("/api/events");
@@ -101,186 +73,93 @@ export function App() {
     switch (event.type) {
       case "candidate.frozen":
         setPipelineStage("analyzing");
-        setStatusMessage("Analyzing compatibility & freezing generation...");
-        setStatusDetail("Generating candidate inputs across parallel task workspaces.");
+        setStatusMessage("Combining contributors' work");
+        setStatusDetail("Composing the candidate on top of the accepted version.");
         break;
-
       case "candidate.repairing":
         setPipelineStage("repairing");
-        setStatusMessage("Autonomous Bounded Repair in Progress...");
-        setStatusDetail(
-          `Invoking Cloudflare Workers AI for Round ${event.payload?.round || 1} synthesis.`
-        );
+        setStatusMessage(`Repairing (round ${event.payload?.round ?? 1})`);
+        setStatusDetail("Workers AI proposes a fix; it is only accepted if protected verification passes.");
         break;
-
       case "candidate.verifying":
         setPipelineStage("verifying");
-        setStatusMessage("Running Independent Protected Verification...");
-        setStatusDetail("Executing test suite against candidate commit in isolated sandbox.");
+        setStatusMessage("Verifying the exact candidate");
+        setStatusDetail("Protected checks run against the candidate commit in an isolated workspace.");
         break;
-
       case "candidate.verified":
-        setStatusMessage("Verification Passed! Preparing CAS publication...");
-        setStatusDetail("Candidate satisfies all behavioral contracts.");
+        setStatusMessage("Verification passed");
+        setStatusDetail("Publishing the exact verified commit.");
         break;
-
       case "candidate.accepted":
         setPipelineStage("accepted");
-        setStatusMessage("Exact Version Accepted & Published!");
-        setStatusDetail(
-          `Canonical HEAD advanced to commit ${event.payload?.record?.commit?.slice(0, 7)}.`
-        );
-        if (state) {
-          setState({
-            ...state,
-            acceptedState: event.payload.acceptedState,
-          });
-        }
+        setStatusMessage("Accepted");
+        setStatusDetail(`Canonical head is now ${String(event.payload?.record?.commit ?? "").slice(0, 7)}.`);
         break;
-
+      case "candidate.failed":
+        setPipelineStage("blocked");
+        setStatusMessage("Blocked");
+        setStatusDetail(`${event.payload?.failureBlocker ?? "Integration failed"} — the last accepted version is unchanged.`);
+        break;
+      case "candidate.stale":
+        setStatusMessage("Accepted version moved; recomposing");
+        break;
       case "decision.needed":
         setActiveDecision(event.payload);
         setPipelineStage("decision_needed");
-        setStatusMessage("Contradictory Requirements Detected");
-        setStatusDetail("Zero downtime: preserved last accepted version while waiting for decision.");
+        setStatusMessage("Product decision required");
+        setStatusDetail("The last accepted version stays live until you choose.");
         break;
-
       case "decision.resolved":
         setActiveDecision(null);
-        setPipelineStage("accepted");
-        setStatusMessage("Decision Applied & Integrated!");
-        setStatusDetail("Approved policy synthesized and verified.");
-        if (event.payload?.discountAppliesToRefundFee !== undefined) {
-          setPolicy((prev) => ({
-            ...prev,
-            discountAppliesToRefundFee: event.payload.discountAppliesToRefundFee,
-          }));
-        }
-        break;
-
-      case "state.updated":
-        setState(event.payload);
         break;
     }
+    refreshRef.current();
   };
 
   const handleRunScenario = async (act: "act1" | "act2" | "act3") => {
     setIsRunningScenario(true);
     setActiveAct(act);
-
-    if (act === "act1") {
-      setPipelineStage("composing");
-      setStatusMessage("Running Act I: Concurrent agents with textual conflict...");
-      setStatusDetail("Agent A (15% discount) and Agent B ($5 refund surcharge) editing src/pricing.ts.");
-    } else if (act === "act2") {
-      setPipelineStage("verifying");
-      setStatusMessage("Running Act II: Clean merge with semantic units mismatch...");
-      setStatusDetail("Clean Git merge produced broken behavior; catching via protected verifier.");
-    } else if (act === "act3") {
-      setPipelineStage("analyzing");
-      setStatusMessage("Running Act III: Incompatible requirements...");
-      setStatusDetail("Detecting contradictory business rules and pausing safely for product decision.");
-    }
-
+    setScenarioError(null);
+    setPipelineStage("working");
+    setStatusMessage("Contributors are working");
+    setStatusDetail("Two agents implement their tasks in isolated workspaces.");
     try {
       const res = await fetch("/api/scenarios/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ act }),
       });
-      const data = await res.json() as any;
-
-      // Refresh state
-      const stateRes = await fetch("/api/state");
-      const newState = await stateRes.json() as FlareGitProjectState;
-      setState(newState);
-
-      // Check for decision
-      const pending = Object.values(newState.decisions || {}).find((d) => d.status === "pending");
-      if (pending) {
-        setActiveDecision(pending);
-        setPipelineStage("decision_needed");
-        setStatusMessage("Product Decision Required");
-        setStatusDetail("Contradictory requirements detected between parallel contributors.");
-      } else {
-        setPipelineStage("accepted");
-        setStatusMessage(`Scenario ${act.toUpperCase()} Completed Successfully!`);
-        setStatusDetail(`All behavioral contracts satisfied and verified.`);
-      }
-    } catch (err: any) {
-      console.error("Scenario execution error:", err);
-      // For local visual demonstration fallback
-      if (act === "act3") {
-        setActiveDecision({
-          id: "dec-demo-contradiction",
-          question: "Should the group discount apply to the refundable surcharge?",
-          explanation: "Contributor A submitted a requirement that group discount applies to the total order, while Contributor B specified the refund guarantee fee is strictly non-discountable.",
-          conflictingRequirementIds: ["req-a", "req-b"],
-          options: [
-            {
-              id: "discount_tickets_only",
-              label: "Apply group discount only to base tickets (Recommended)",
-              description: "The 15% discount applies strictly to tickets. Refund fee ($5/ea) is paid in full.",
-              concreteExample: "Four $40 refundable tickets cost: $156.00 ($160 × 0.85 + $20)",
-            },
-            {
-              id: "discount_includes_refund",
-              label: "Apply group discount to both tickets and refund surcharge",
-              description: "The 15% discount applies to the entire basket including the refund surcharge.",
-              concreteExample: "Four $40 refundable tickets cost: $153.00 ($160 × 0.85 + $20 × 0.85)",
-            },
-          ],
-          status: "pending",
-          createdAt: new Date().toISOString(),
-        });
-        setPipelineStage("decision_needed");
-        setStatusMessage("Product Decision Required");
-      }
+      if (!res.ok) throw new Error(await res.text());
+    } catch (err) {
+      setScenarioError(err instanceof Error ? err.message : "Scenario failed");
+      setPipelineStage("blocked");
+      setStatusMessage("Scenario could not run");
     } finally {
       setIsRunningScenario(false);
       setActiveAct(null);
+      refreshRef.current();
     }
   };
 
   const handleResolveDecision = async (decisionId: string, selectedOptionId: string) => {
     setIsResolvingDecision(true);
     try {
-      await fetch("/api/decisions/resolve", {
+      const res = await fetch("/api/decisions/resolve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ decisionId, selectedOptionId }),
       });
-
-      const appliesToRefund = selectedOptionId === "discount_includes_refund";
-      setPolicy((prev) => ({
-        ...prev,
-        discountAppliesToRefundFee: appliesToRefund,
-      }));
-
+      if (!res.ok) throw new Error(await res.text());
       setActiveDecision(null);
-      setPipelineStage("accepted");
-      setStatusMessage("Decision Applied & Integrated!");
-      setStatusDetail("Repaired code verified in isolated sandbox and accepted to canonical main.");
-
-      // Refresh state
-      const stateRes = await fetch("/api/state");
-      const newState = await stateRes.json() as FlareGitProjectState;
-      setState(newState);
     } catch (err) {
-      console.error("Failed to resolve decision:", err);
-      // Fallback
-      setPolicy((prev) => ({
-        ...prev,
-        discountAppliesToRefundFee: selectedOptionId === "discount_includes_refund",
-      }));
-      setActiveDecision(null);
-      setPipelineStage("accepted");
+      setScenarioError(err instanceof Error ? err.message : "Could not apply decision");
     } finally {
       setIsResolvingDecision(false);
+      refreshRef.current();
     }
   };
 
-  const currentCommit = state?.acceptedState?.currentCommit || "b84a5f8";
+  const currentCommit = state?.acceptedState?.currentCommit ?? "";
   const activeRequirements = state?.acceptedState?.activeRequirements || [];
   const evidenceList = Object.values(state?.evidence || {});
   const journal = state?.journal || [];
@@ -298,6 +177,8 @@ export function App() {
         activeAct={activeAct}
       />
 
+      <BillingBar refreshKey={Object.keys(tasks).length} />
+
       {/* 2. Real-time Status Banner */}
       <StatusBanner
         stage={pipelineStage}
@@ -305,6 +186,12 @@ export function App() {
         detail={statusDetail}
         lastAcceptedCommit={currentCommit}
       />
+
+      {(loadError || scenarioError) && (
+        <div role="alert" className="mx-6 mt-4 rounded-md border border-destructive/50 bg-destructive/10 px-4 py-2 text-sm text-destructive">
+          {loadError ? `Cannot reach the FlareGit backend: ${loadError}` : scenarioError}
+        </div>
+      )}
 
       {/* 3. Main Two-Column Layout */}
       <main className="flex-1 p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 max-w-[1700px] w-full mx-auto">
@@ -328,7 +215,7 @@ export function App() {
 
         {/* Right Column: Live Application Preview (7 cols) */}
         <div className="lg:col-span-7 h-[calc(100vh-160px)] min-h-[600px]">
-          <LivePreview currentCommit={currentCommit} policy={policy} />
+          {currentCommit && previewBase ? <LivePreview currentCommit={currentCommit} previewBase={previewBase} /> : null}
         </div>
       </main>
 

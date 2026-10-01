@@ -1,5 +1,5 @@
 import React from "react";
-import { GitBranch, GitCommit, Play, FileText, CheckCircle2, ShieldCheck, Sparkles, Layers } from "lucide-react";
+import { GitBranch, GitCommit, Play, FileText, Sparkles, Layers } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 

@@ -1,109 +1,18 @@
-# FlareGit Technical Architecture
+# Architecture and known limits
 
-> **Cloudflare-Native Autonomous Git Platform**  
-> Custom Domain: [flaregit.com](https://flaregit.com)
+## Trust boundaries
+- **Contributors / agents** write only to their task repository (scope `src/`). Protected paths (`.flaregit/`, `tests/`, `package.json`, …) are rejected in contributor commits and in model repairs.
+- **Verifier** lives in platform code (`src/fixtures/*/checks.ts`), never in the candidate repo. Candidate code runs only in a child process with a scrubbed environment (`PATH`, `HOME`, `TMPDIR`, `NODE_ENV`), a 30 s timeout and an output cap. Results are returned on a line prefixed with a per-run nonce delivered over stdin before any candidate code is imported.
+- **Acceptance** is deterministic code: evidence must be `passed`, match candidate commit and tree, accepted base, and policy version; the ref moves only if it still equals the verified base.
+- **Secrets**: Artifacts tokens are short-lived and passed as `Authorization: Bearer` (`http.extraHeader` / `GIT_CONFIG_*` env), never in URLs. Workers AI is called from the Worker binding; the browser holds no credentials.
 
----
+## Production flow (Cloudflare)
+Queue (`git.push`, deduplicated by event id in the DO) → Durable Object ledger → Workflow: `claim-landing` (lease + frozen candidate) → `compose-repair-verify` (integrator container) → `prepare-publish` (DO validates invariants, journals PREPARED) → `cas-push-to-artifacts` → `complete-publish`. Builds of the verified commit are stored in R2 under the commit hash and served from `PREVIEW_ORIGIN`.
 
-## 1. Executive Architectural Overview
-
-FlareGit is designed from first principles for the **Cloudflare Developer Platform**. It removes the serialization bottleneck of traditional Git pull-request queues without sacrificing behavioral correctness.
-
-### Core Architectural Invariant
-> **The exact commit accepted into canonical `main` and published to live previews MUST be the identical cryptographic tree that passed independent protected verification in an isolated sandbox.**
-
-No human or agent commit is ever merged directly into canonical history without passing through candidate composition, bounded repair, independent verification, and a transactional Compare-And-Swap (CAS) reservation.
-
----
-
-## 2. Cloudflare Service Topology
-
-FlareGit utilizes Cloudflare's complete infrastructure stack, mapping each capability to its native Cloudflare primitive:
-
-```
-+----------------------------------------------------------------------------------------------------+
-|                                      EDGE INGRESS & ROUTING                                        |
-|  flaregit.com  •  Cloudflare Workers  •  Static Asset Binding (ASSETS)  •  Cloudflare Access       |
-+----------------------------------------------------------------------------------------------------+
-                                                  │
-                                                  ▼
-+----------------------------------------------------------------------------------------------------+
-|                                    AUTHORITATIVE CONTROL PLANE                                     |
-|  Cloudflare Durable Objects + Embedded SQLite (RepositoryController)                               |
-|  - Authoritative Project State (Active Requirements, Accepted Commits, History)                    |
-|  - CAS Ref Publication Locks (Atomic update-ref with expected-base validation)                     |
-|  - Real-Time WebSockets & Server-Sent Events (SSE) Client Broadcast                                 |
-+------------------------------------+-----------------------------------+---------------------------+
-                                     │                                   │
-                                     ▼                                   ▼
-+------------------------------------+-----------+   +-------------------+---------------------------+
-|               ORCHESTRATION ENGINE             |   |                 EVENT INGESTION               |
-|  Cloudflare Workflows                          |   |  Cloudflare Queues                            |
-|  - Step 1: Detect Compatibility (Diff Tree)    |   |  - Async Git Push Events                      |
-|  - Step 2: Native Git Composition in Sandbox   |   |  - Checkpoint Ingestion & Event Deduplication |
-|  - Step 3: Bounded Repair (Cloudflare AI)      |   |  - Ref Reconciliation                         |
-|  - Step 4: Protected Independent Verification  |   +-----------------------------------------------+
-|  - Step 5: Exact-Version CAS Acceptance        |
-+------------------------------------+-----------+
-                                     │
-                                     ▼
-+----------------------------------------------------------------------------------------------------+
-|                                      EXECUTION & REPAIR PLANE                                      |
-|                                                                                                    |
-|  +--------------------------------+  +-------------------------------+  +-----------------------+  |
-|  |      Cloudflare Sandboxes      |  |     Cloudflare Workers AI     |  |  Cloudflare Artifacts |  |
-|  | Containerized Linux execution  |  | Model: DeepSeek-R1 Distill    |  | Canonical & Task Git  |  |
-|  | Native git clone, merge, diff  |  | Fallback: Llama 3.1 8B FP8    |  | Repositories via HTTP |  |
-|  | Isolated test runner sandbox   |  | Routed via AI Gateway         |  | Real Git commits & ref|  |
-|  +--------------------------------+  +-------------------------------+  +-----------------------+  |
-+----------------------------------------------------------------------------------------------------+
-                                                  │
-                                                  ▼
-+----------------------------------------------------------------------------------------------------+
-|                                     IMMUTABLE AUDIT & EVIDENCE                                     |
-|  Cloudflare R2 Bucket (flaregit-evidence)                                                           |
-|  - Test bundle fingerprints and toolchain digests                                                  |
-|  - Execution logs and candidate build artifacts                                                    |
-|  - JSON publication journal records                                                                |
-+----------------------------------------------------------------------------------------------------+
-```
-
----
-
-## 3. Data Storage & State Machine
-
-### Authoritative SQLite State (Durable Object)
-Each project repository is governed by an authoritative Durable Object running transactional SQLite (`this.ctx.storage.sql`):
-
-1. **`project_meta`**: Authoritative repository head, policy version, and active requirement IDs.
-2. **`tasks`**: Active human and agent tasks, workspace branches, and checkpoint sequences.
-3. **`candidates`**: Candidate generation records, composition methods, and repair attempts.
-4. **`evidence`**: Cryptographic test verification reports with suite item results.
-5. **`publication_journal`**: CAS transaction log tracking the 3-state transition:
-   - `PREPARED`: Candidate verified; CAS lock requested against `expectedHead`.
-   - `REF_UPDATED`: Git ref atomically pointed to candidate commit.
-   - `ACCEPTED`: Authoritative state updated; event broadcast to live subscribers.
-
----
-
-## 4. Cloudflare Workers AI Model Strategy
-
-FlareGit delegates integration repair and conflict reasoning to **Cloudflare Workers AI**:
-
-- **Primary Reasoning Model**: `@cf/deepseek-ai/deepseek-r1-distill-qwen-32b`
-  - High mathematical and programmatic reasoning capacity.
-  - Successfully resolves multi-variable pricing equations and module contract mismatches.
-- **Fast Instruct Model**: `@cf/meta/llama-3.1-8b-instruct-fp8`
-  - Low-latency inference for prompt generation and candidate diff summarization.
-- **AI Gateway Integration**:
-  - Telemetry: Latency, prompt tokens, completion tokens recorded per repair attempt.
-  - Zero external third-party model dependencies.
-
----
-
-## 5. Security & Isolation Boundaries
-
-1. **Workspace Isolation**: Contributor tasks run in isolated repository forks. They cannot mutate canonical `main` directly.
-2. **Execution Sandboxing**: All Git merges and verification tests execute within ephemeral Cloudflare Sandboxes. Network egress is restricted to local package artifacts.
-3. **Test Immutability**: The verification test suite is bundled and hashed (`testBundleDigest`). Contributors cannot modify verification assertions in their task branch to manufacture a passing build.
-4. **CAS Protection**: If another candidate lands while a generation is undergoing verification, the publication step detects that `currentCanonicalHead !== expectedAcceptedBase`, marks the candidate `stale`, and triggers automatic recomposition against the new base.
+## Known limits
+- Candidate code and the checks share one process during verification; a hostile candidate can crash or time out the run (fails closed) and, in theory, tamper with in-process state. The container boundary in production is the real defense; run verification in a dedicated, network-restricted container for hostile contributors.
+- Integrator containers have outbound internet (needed for git to Artifacts). They hold no secrets at the time candidate code runs, but candidate code could exfiltrate the candidate source.
+- Contradiction detection needs structured assertions (`input` + `expectedOutput`) on requirements; free-text requirements are not compared.
+- Only two-task landings are implemented.
+- Container images must be digest-pinned and bound to the container application in `wrangler.jsonc` (`image: ./Dockerfile`); `deploy` builds and pushes them.
+- Previews are served from a separate origin (`PREVIEW_ORIGIN`) so builds cannot reach the app origin or its cookies.

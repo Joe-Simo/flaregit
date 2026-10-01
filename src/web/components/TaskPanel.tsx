@@ -1,5 +1,5 @@
 import React from "react";
-import { Users, Bot, User, GitBranch, GitCommit, CheckSquare, Clock, ArrowRight, ShieldCheck, AlertCircle } from "lucide-react";
+import { Users, Bot, User, GitBranch, GitCommit, CheckSquare } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import type { Task, TaskStatus } from "@/core/types";
@@ -17,6 +17,8 @@ export function TaskPanel({ tasks, onSelectTask, selectedTaskId }: TaskPanelProp
     switch (status) {
       case "working":
         return <Badge variant="secondary">Working</Badge>;
+      case "checkpointed":
+        return <Badge variant="secondary">Working · checkpointed</Badge>;
       case "ready":
         return <Badge variant="info">Ready to Integrate</Badge>;
       case "integrating":

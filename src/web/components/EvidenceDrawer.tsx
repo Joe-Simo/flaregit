@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { X, ShieldCheck, FileText, CheckCircle2, Clock, Cpu, GitCommit, Database, Lock } from "lucide-react";
+import { ShieldCheck, CheckCircle2, Cpu } from "lucide-react";
 import { Sheet, SheetHeader, SheetTitle, SheetDescription, SheetClose } from "@/components/ui/sheet";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";

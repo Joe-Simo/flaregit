@@ -1,20 +1,21 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { spawnSync } from "node:child_process";
 import type { ArtifactsClient } from "../artifacts/types.js";
 import { isolateTaskWorkspace } from "./pipeline/isolate.js";
 import { recordCheckpoint } from "./pipeline/checkpoint.js";
 import { detectCompatibility, type DetectionResult } from "./pipeline/detect.js";
 import { freezeCandidateGeneration } from "./pipeline/freeze.js";
 import { composeCandidateCommits } from "./pipeline/compose.js";
-import { repairCandidate } from "./pipeline/repair.js";
-import { verifyCandidateCommit } from "./pipeline/verify.js";
-import { publishAcceptedCandidate } from "./pipeline/accept.js";
-import { detectContradiction, createProductDecision } from "./decision/contradiction.js";
+import { MAX_REPAIR_ROUNDS, repairCandidate, type RepairModel } from "./pipeline/repair.js";
+import { publishAcceptedCandidate, reconcileJournalEntry } from "./pipeline/accept.js";
+import { authArgs, changedFiles, git, gitOrThrow } from "./pipeline/git.js";
+import { createProductDecision, detectContradiction } from "./decision/contradiction.js";
+import type { ProtectedVerifier } from "./verifier.js";
 import type {
-  FlareGitProjectState,
   CandidateGeneration,
+  FlareGitProjectState,
   ProductDecision,
+  PublicationJournalEntry,
   Requirement,
   Task,
   VerificationEvidence,
@@ -22,26 +23,54 @@ import type {
 
 export type EventSubscriber = (event: { type: string; payload: unknown }) => void;
 
+export interface ControllerDeps {
+  artifacts: ArtifactsClient;
+  verifier: ProtectedVerifier;
+  repairModel: RepairModel;
+  storageDir: string;
+  /** Canonical branch contributors' work lands on. */
+  defaultBranch?: string;
+}
+
+export interface IntegrationOutcome {
+  success: boolean;
+  candidate?: CandidateGeneration;
+  evidence?: VerificationEvidence;
+  decision?: ProductDecision;
+  error?: string;
+}
+
+/** Repairs are platform-authored, so they may touch any project source (never protected paths). */
+const REPAIR_SCOPE = ["src/"];
+const MAX_STALE_RETRIES = 2;
+const MAX_REPAIR_CONTEXT_BYTES = 120_000;
+
 export class FlareGitRepositoryController {
   private state: FlareGitProjectState;
-  private readonly artifacts: ArtifactsClient;
-  private readonly storageDir: string;
-  private subscribers: Set<EventSubscriber> = new Set();
-  private isProcessingIntegration = false;
+  private readonly deps: ControllerDeps;
+  private readonly defaultBranch: string;
+  private readonly subscribers = new Set<EventSubscriber>();
+  /** Serializes landings: one candidate at a time may compose, verify and publish. */
+  private landingQueue: Promise<unknown> = Promise.resolve();
+  private readonly seenCheckpoints = new Set<string>();
 
-  constructor(
-    artifacts: ArtifactsClient,
-    initialState: FlareGitProjectState,
-    storageDir?: string
-  ) {
-    this.artifacts = artifacts;
+  constructor(deps: ControllerDeps, initialState: FlareGitProjectState) {
+    this.deps = deps;
+    this.defaultBranch = deps.defaultBranch ?? "main";
     this.state = initialState;
-    this.storageDir =
-      storageDir ?? path.resolve(process.cwd(), ".flaregit-storage", "projects", initialState.projectId);
+    if (!this.state.verificationPolicy) this.state.verificationPolicy = { ...deps.verifier.defaultPolicy };
+    fs.mkdirSync(deps.storageDir, { recursive: true });
+    this.persist();
+  }
 
-    if (!fs.existsSync(this.storageDir)) {
-      fs.mkdirSync(this.storageDir, { recursive: true });
-    }
+  /** Reload persisted state after a crash and settle anything that was in flight. */
+  static async restore(deps: ControllerDeps, projectId: string): Promise<FlareGitRepositoryController | null> {
+    const file = path.join(deps.storageDir, `${projectId}.state.json`);
+    if (!fs.existsSync(file)) return null;
+    const state = JSON.parse(fs.readFileSync(file, "utf-8")) as FlareGitProjectState;
+    const controller = new FlareGitRepositoryController(deps, state);
+    await controller.recoverInterruptedWork();
+    return controller;
   }
 
   getState(): FlareGitProjectState {
@@ -63,385 +92,475 @@ export class FlareGitRepositoryController {
     }
   }
 
-  // 1. Create a new task (agent or human)
+  private persist(): void {
+    const file = path.join(this.deps.storageDir, `${this.state.projectId}.state.json`);
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(this.state, null, 2));
+    fs.renameSync(tmp, file);
+  }
+
+  private setStatus(tasks: Task[], status: Task["status"], reason?: string): void {
+    for (const t of tasks) {
+      t.status = status;
+      t.blockedReason = status === "blocked" ? reason : undefined;
+      t.updatedAt = new Date().toISOString();
+    }
+    this.persist();
+    this.emit("task.status_changed", { taskIds: tasks.map((t) => t.id), status, reason });
+  }
+
+  private async canonicalDir(): Promise<string> {
+    return (await (await this.deps.artifacts.get(this.state.canonicalRepoName)).info()).remote;
+  }
+
+  /** Short-lived write token, only for https (Artifacts) remotes. */
+  private async canonicalToken(remote: string): Promise<string | undefined> {
+    if (!/^https:\/\//.test(remote)) return undefined;
+    return (await (await this.deps.artifacts.get(this.state.canonicalRepoName)).createToken("write", 900)).plaintext;
+  }
+
+  /** Crash recovery: settle unfinished publications against the real ref; re-queue stuck tasks. */
+  async recoverInterruptedWork(): Promise<void> {
+    const canonical = await this.canonicalDir();
+    const ref = `refs/heads/${this.defaultBranch}`;
+    const head = /^https:\/\//.test(canonical)
+      ? git(this.deps.storageDir, [...authArgs(canonical, await this.canonicalToken(canonical)), "ls-remote", canonical, ref]).stdout.split("\t")[0]?.trim() ?? ""
+      : git(canonical, ["rev-parse", "--verify", ref], { gitDir: true }).stdout.trim();
+    this.state.journal = this.state.journal.map((e): PublicationJournalEntry =>
+      e.state === "PREPARED" || e.state === "REF_UPDATED" ? reconcileJournalEntry(head, e) : e
+    );
+    const settled = this.state.journal.find((e) => e.state === "ACCEPTED" && e.newHead === head);
+    if (head && head !== this.state.acceptedState.currentCommit && settled) {
+      const candidate = this.state.candidates[settled.candidateId];
+      this.state.acceptedState.currentCommit = head;
+      this.state.acceptedState.buildDigest = settled.outputDigest;
+      if (candidate) {
+        candidate.status = "accepted";
+        for (const id of candidate.participatingTaskIds) {
+          const task = this.state.tasks[id];
+          if (task) task.status = task.currentCommit === candidate.participatingCommits[id] ? "accepted" : "ready";
+        }
+      }
+    }
+    for (const task of Object.values(this.state.tasks)) {
+      if (task.status === "integrating" || task.status === "verifying") task.status = "ready";
+    }
+    for (const candidate of Object.values(this.state.candidates)) {
+      if (["composing", "repairing", "verifying"].includes(candidate.status)) candidate.status = "failed";
+    }
+    this.persist();
+  }
+
   async createTask(opts: {
     taskId: string;
     goal: string;
     contributorName: string;
     contributorType: "human" | "agent";
     requirements?: Requirement[];
+    allowedScope?: string[];
   }): Promise<Task> {
-    const baseCommit = this.state.acceptedState.currentCommit;
-
-    const task = await isolateTaskWorkspace(this.artifacts, {
+    if (this.state.tasks[opts.taskId]) throw new Error(`Task ${opts.taskId} already exists`);
+    const task = await isolateTaskWorkspace(this.deps.artifacts, {
       projectId: this.state.projectId,
       taskId: opts.taskId,
       goal: opts.goal,
       contributorName: opts.contributorName,
       contributorType: opts.contributorType,
       canonicalRepoName: this.state.canonicalRepoName,
-      baseCommit,
+      baseCommit: this.state.acceptedState.currentCommit,
+      allowedScope: opts.allowedScope,
+      workspacesDir: path.join(this.deps.storageDir, "workspaces", opts.taskId),
     });
-
-    if (opts.requirements) {
-      task.requirements = opts.requirements;
-    }
-
+    if (opts.requirements) task.requirements = opts.requirements;
     this.state.tasks[task.id] = task;
+    this.persist();
     this.emit("task.created", task);
     return task;
   }
 
-  // 2. Ingest Checkpoint
-  recordTaskCheckpoint(opts: {
-    taskId: string;
-    message?: string;
-    isReadyForIntegration: boolean;
-  }): Task {
+  /** Idempotent: re-delivering the same checkpoint (same commit, same readiness) is a no-op. */
+  recordTaskCheckpoint(opts: { taskId: string; message?: string; isReadyForIntegration: boolean }): Task {
     const task = this.state.tasks[opts.taskId];
     if (!task) throw new Error(`Task ${opts.taskId} not found`);
+    if (task.status === "cancelled") throw new Error(`Task ${opts.taskId} was cancelled`);
+    if (task.status === "integrating" || task.status === "verifying") {
+      throw new Error(`Task ${opts.taskId} is being integrated; checkpoint again once the candidate settles`);
+    }
 
-    const { task: updatedTask, checkpoint } = recordCheckpoint({
+    const { task: updated, checkpoint } = recordCheckpoint({
       task,
       message: opts.message,
       isReadyForIntegration: opts.isReadyForIntegration,
     });
+    const key = `${task.id}:${checkpoint.commitHash}:${opts.isReadyForIntegration}`;
+    if (this.seenCheckpoints.has(key)) return task;
+    this.seenCheckpoints.add(key);
 
-    this.state.tasks[opts.taskId] = updatedTask;
-    this.emit("task.checkpointed", { task: updatedTask, checkpoint });
-
-    return updatedTask;
+    this.state.tasks[task.id] = updated;
+    this.persist();
+    this.emit("task.checkpointed", { task: updated, checkpoint });
+    return updated;
   }
 
-  // 3. Early Compatibility Analysis
-  analyzeCompatibility(taskA_id: string, taskB_id: string): DetectionResult {
-    const taskA = this.state.tasks[taskA_id];
-    const taskB = this.state.tasks[taskB_id];
+  cancelTask(taskId: string): Task {
+    const task = this.state.tasks[taskId];
+    if (!task) throw new Error(`Task ${taskId} not found`);
+    if (task.status === "accepted") throw new Error(`Task ${taskId} is already accepted`);
+    this.setStatus([task], "cancelled");
+    return task;
+  }
+
+  async analyzeCompatibility(taskAId: string, taskBId: string): Promise<DetectionResult> {
+    const taskA = this.state.tasks[taskAId];
+    const taskB = this.state.tasks[taskBId];
     if (!taskA || !taskB) throw new Error("Tasks not found");
-
-    const baseCommit = this.state.acceptedState.currentCommit;
-    const repoDir = taskA.workspace.localPath!;
-    const sourceB = taskB.workspace.localPath ?? taskB.workspace.remote;
-
-    const result = detectCompatibility(baseCommit, taskA, taskB, repoDir, sourceB);
-    this.emit("compatibility.analyzed", { taskA_id, taskB_id, result });
-    return result;
+    const workspace = await this.prepareIntegrationWorkspace(`analysis-${Date.now()}`, [taskA, taskB]);
+    try {
+      const result = await detectCompatibility({
+        repoDir: workspace,
+        acceptedBase: this.state.acceptedState.currentCommit,
+        taskA,
+        taskB,
+        verifier: this.deps.verifier,
+        policy: this.state.verificationPolicy,
+        requirementsVersion: this.state.policyVersion,
+      });
+      this.emit("compatibility.analyzed", { taskAId, taskBId, result });
+      return result;
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
   }
 
-  // 4. Run Integration Pipeline for ready tasks
-  async runIntegrationPipeline(
-    taskIds: [string, string],
-    policyOverride?: {
-      groupDiscountPercent?: number;
-      minTicketsForDiscount?: number;
-      refundFeePerTicket?: number;
-      discountAppliesToRefundFee?: boolean;
+  /** A clone of canonical used only by the integrator; contributor workspaces are never touched. */
+  private async prepareIntegrationWorkspace(id: string, tasks: Task[]): Promise<string> {
+    const canonical = await this.canonicalDir();
+    const dir = path.join(this.deps.storageDir, "integration", id);
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(dir), { recursive: true });
+    gitOrThrow(path.dirname(dir), [...authArgs(canonical, await this.canonicalToken(canonical)), "clone", "--quiet", "--no-hardlinks", canonical, dir]);
+    for (const task of tasks) {
+      gitOrThrow(dir, [...authArgs(task.workspace.remote, task.workspace.token), "fetch", "--quiet", task.workspace.remote, `+refs/heads/${task.workspace.branch}:refs/flaregit/tasks/${task.id}`]);
+      const fetched = gitOrThrow(dir, ["rev-parse", `refs/flaregit/tasks/${task.id}`]);
+      if (fetched !== task.currentCommit) {
+        throw new Error(`Task ${task.id} remote is at ${fetched.slice(0, 7)} but checkpoint recorded ${task.currentCommit.slice(0, 7)}`);
+      }
     }
-  ): Promise<{
-    success: boolean;
-    candidate: CandidateGeneration;
-    evidence?: VerificationEvidence;
-    decision?: ProductDecision;
-    error?: string;
-  }> {
-    if (this.isProcessingIntegration) {
-      throw new Error("Another integration operation is currently in progress.");
+    return dir;
+  }
+
+  private policyViolations(repoDir: string, task: Task): string[] {
+    const files = changedFiles(repoDir, this.state.acceptedState.currentCommit, task.currentCommit);
+    const scoped = (f: string) =>
+      task.allowedScope.some((s) => (s.endsWith("/**/*") ? f.startsWith(s.slice(0, -4)) : s.endsWith("/") ? f.startsWith(s) : f === s));
+    const protectedHit = (f: string) => this.deps.verifier.protectedPaths.some((p) => (p.endsWith("/") ? f.startsWith(p) : f === p));
+    return files.flatMap((f) =>
+      protectedHit(f) ? [`${f} is protected verification/configuration`] : scoped(f) ? [] : [`${f} is outside the allowed scope`]
+    );
+  }
+
+  /** Public entry point: queued so concurrent landing attempts are strictly serialized. */
+  runIntegrationPipeline(taskIds: [string, string]): Promise<IntegrationOutcome> {
+    const run = this.landingQueue.then(() => this.integrate(taskIds));
+    this.landingQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async integrate(taskIds: [string, string]): Promise<IntegrationOutcome> {
+    for (let attempt = 1; ; attempt++) {
+      const outcome = await this.integrateOnce(taskIds, attempt);
+      if (!outcome.candidate || outcome.candidate.status !== "stale" || attempt > MAX_STALE_RETRIES) return outcome;
     }
-    this.isProcessingIntegration = true;
+  }
+
+  private async integrateOnce(taskIds: [string, string], attemptNumber: number): Promise<IntegrationOutcome> {
+    const tasks = taskIds.map((id) => this.state.tasks[id]);
+    if (tasks.some((t) => !t)) throw new Error("Tasks not found for integration");
+    const [taskA, taskB] = tasks as [Task, Task];
+
+    for (const t of [taskA, taskB]) {
+      if (t.status === "accepted") return { success: false, error: `Task ${t.id} is already accepted (duplicate request ignored).` };
+      if (t.status === "cancelled") return { success: false, error: `Task ${t.id} was cancelled.` };
+      if (t.status === "needs_decision") return { success: false, error: `Task ${t.id} awaits a product decision.` };
+      if (t.status === "working" || t.status === "checkpointed") {
+        return { success: false, error: `Task ${t.id} has not been marked ready for integration.` };
+      }
+    }
+
+    // Contradictory approved requirements pause everything; the accepted version is untouched.
+    for (const reqA of taskA.requirements.filter((r) => r.status === "approved")) {
+      for (const reqB of taskB.requirements.filter((r) => r.status === "approved")) {
+        if (!detectContradiction(reqA, reqB)) continue;
+        const decision = createProductDecision(reqA, reqB);
+        this.state.decisions[decision.id] = decision;
+        this.setStatus([taskA, taskB], "needs_decision");
+        this.emit("decision.needed", decision);
+        return { success: false, decision, error: "Contradictory requirements. Paused for a product decision." };
+      }
+    }
+
+    this.setStatus([taskA, taskB], "integrating");
+    const acceptedBase = this.state.acceptedState.currentCommit;
+    const candidate = freezeCandidateGeneration({
+      tasks: [taskA, taskB],
+      acceptedBaseCommit: acceptedBase,
+      policyVersion: this.state.policyVersion,
+      verificationPolicy: this.state.verificationPolicy,
+      approvedRequirements: [...this.state.acceptedState.activeRequirements, ...taskA.requirements, ...taskB.requirements].filter(
+        (r) => r.status === "approved"
+      ),
+      attemptNumber,
+    });
+    this.state.candidates[candidate.id] = candidate;
+    taskA.activeCandidateId = taskB.activeCandidateId = candidate.id;
+    this.persist();
+    this.emit("candidate.frozen", candidate);
+
+    const fail = (message: string, evidence?: VerificationEvidence): IntegrationOutcome => {
+      candidate.status = "failed";
+      candidate.failureBlocker = message;
+      candidate.updatedAt = new Date().toISOString();
+      this.setStatus([taskA, taskB], "blocked", message);
+      this.emit("candidate.failed", candidate);
+      return { success: false, candidate, evidence, error: message };
+    };
+
+    let workspace: string;
+    try {
+      workspace = await this.prepareIntegrationWorkspace(candidate.id, [taskA, taskB]);
+    } catch (err) {
+      return fail(`Could not prepare integration workspace: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
     try {
-      const [idA, idB] = taskIds;
-      const taskA = this.state.tasks[idA];
-      const taskB = this.state.tasks[idB];
-      if (!taskA || !taskB) throw new Error("Tasks not found for integration");
+      const violations = [...this.policyViolations(workspace, taskA), ...this.policyViolations(workspace, taskB)];
+      if (violations.length > 0) return fail(`Contributor change rejected: ${violations.join("; ")}`);
 
-      taskA.status = "integrating";
-      taskB.status = "integrating";
-      this.emit("task.status_changed", { taskIds, status: "integrating" });
-
-      // Step 1: Check for contradictory requirements
-      const combinedReqs = [...taskA.requirements, ...taskB.requirements];
-      for (const reqA of taskA.requirements) {
-        for (const reqB of taskB.requirements) {
-          if (detectContradiction(reqA, reqB)) {
-            const decision = createProductDecision(reqA, reqB);
-            this.state.decisions[decision.id] = decision;
-            taskA.status = "needs_decision";
-            taskB.status = "needs_decision";
-            this.emit("decision.needed", decision);
-            return {
-              success: false,
-              candidate: freezeCandidateGeneration({
-                tasks: [taskA, taskB],
-                acceptedBaseCommit: this.state.acceptedState.currentCommit,
-                policyVersion: this.state.policyVersion,
-                approvedRequirements: this.state.acceptedState.activeRequirements,
-              }),
-              decision,
-              error: "Contradictory requirements detected. Paused for product decision.",
-            };
-          }
-        }
-      }
-
-      // Step 2: Freeze candidate generation inputs
-      const candidate = freezeCandidateGeneration({
-        tasks: [taskA, taskB],
-        acceptedBaseCommit: this.state.acceptedState.currentCommit,
-        policyVersion: this.state.policyVersion,
-        approvedRequirements: [
-          ...this.state.acceptedState.activeRequirements,
-          ...combinedReqs,
-        ],
+      // Compose with native Git on top of the exact accepted head.
+      const composed = composeCandidateCommits({
+        repoDir: workspace,
+        candidateId: candidate.id,
+        acceptedBase,
+        commitA: taskA.currentCommit,
+        commitB: taskB.currentCommit,
+        labelA: taskA.id,
+        labelB: taskB.id,
       });
-      this.state.candidates[candidate.id] = candidate;
-      this.emit("candidate.frozen", candidate);
+      candidate.compositionMethod = composed.compositionMethod;
+      candidate.candidateCommit = composed.candidateCommit ?? undefined;
 
-      // Step 3: Compose using native Git
-      const repoDir = taskA.workspace.localPath!;
-      const sourceB = taskB.workspace.localPath ?? taskB.workspace.remote;
-      const composeResult = composeCandidateCommits(
-        repoDir,
-        candidate.id,
-        candidate.expectedAcceptedBase,
-        taskA.currentCommit,
-        taskB.currentCommit,
-        taskA.contributor.name,
-        taskB.contributor.name,
-        sourceB
-      );
-
-      candidate.compositionMethod = composeResult.compositionMethod;
-
-      let candidateCommit = composeResult.candidateCommit;
-
-      // Step 4: If textual merge conflict, execute Step F (Repair)
-      if (!composeResult.isClean || !candidateCommit) {
-        this.emit("candidate.repairing", {
-          candidateId: candidate.id,
-          round: 1,
-          conflictingFiles: composeResult.conflictingFiles,
-        });
-
-        const repairResult = await repairCandidate({
-          repoDir,
+      let round = 0;
+      const repair = async (
+        conflictType: "text_conflict" | "behavior_failure",
+        evidence?: VerificationEvidence
+      ): Promise<string | null> => {
+        round += 1;
+        candidate.status = "repairing";
+        this.persist();
+        this.emit("candidate.repairing", { candidateId: candidate.id, round, conflictType });
+        const editableFiles =
+          conflictType === "text_conflict" ? composed.conflictingFiles : this.editableSourceFiles(workspace, REPAIR_SCOPE);
+        const fileContents = this.readFiles(workspace, editableFiles);
+        const result = await repairCandidate({
+          repoDir: workspace,
           candidate,
           taskA,
           taskB,
-          round: 1,
-          conflictType: "text_conflict",
-          conflictingFiles: composeResult.conflictingFiles,
-          conflictDiff: composeResult.conflictDiff,
+          round,
+          conflictType,
+          editableFiles,
+          fileContents: conflictType === "text_conflict" ? { ...composed.conflictContents } : fileContents,
+          contextFiles: this.readFiles(
+            workspace,
+            this.editableSourceFiles(workspace, REPAIR_SCOPE).filter((f) => !editableFiles.includes(f))
+          ),
+          sideVersions:
+            conflictType === "text_conflict"
+              ? Object.fromEntries(
+                  editableFiles.map((f) => [
+                    f,
+                    {
+                      base: git(workspace, ["show", `:1:${f}`]).stdout,
+                      a: git(workspace, ["show", `${taskA.currentCommit}:${f}`]).stdout,
+                      b: git(workspace, ["show", `${taskB.currentCommit}:${f}`]).stdout,
+                    },
+                  ])
+                )
+              : undefined,
+          failureEvidence: evidence,
+          protectedPaths: this.deps.verifier.protectedPaths,
+          model: this.deps.repairModel,
         });
-
-        candidate.repairAttempts.push(repairResult.attempt);
-
-        if (!repairResult.success || !repairResult.candidateCommit) {
-          candidate.status = "failed";
-          candidate.failureBlocker = repairResult.error;
-          taskA.status = "blocked";
-          taskB.status = "blocked";
-          this.emit("candidate.failed", candidate);
-          return { success: false, candidate, error: repairResult.error };
-        }
-
-        candidateCommit = repairResult.candidateCommit;
-        candidate.candidateCommit = candidateCommit;
+        candidate.repairAttempts.push(result.attempt);
+        if (!result.success || !result.candidateCommit) return null;
+        candidate.candidateCommit = result.candidateCommit;
         candidate.compositionMethod = "repaired_merge";
-      } else {
-        candidate.candidateCommit = candidateCommit;
-      }
-
-      // Step 5: Protected Verification
-      candidate.status = "verifying";
-      taskA.status = "verifying";
-      taskB.status = "verifying";
-      this.emit("candidate.verifying", candidate);
-
-      const policy = policyOverride ?? {
-        groupDiscountPercent: 0.15,
-        minTicketsForDiscount: 4,
-        refundFeePerTicket: 5.0,
-        discountAppliesToRefundFee: false,
+        return result.candidateCommit;
       };
 
-      let verifyResult = await verifyCandidateCommit({
-        repoDir,
-        candidate,
-        policy,
-      });
-
-      // If behavioral check failed on a clean merge (Act II), attempt behavioral repair!
-      if (!verifyResult.passed) {
-        this.emit("candidate.repairing", {
-          candidateId: candidate.id,
-          round: 2,
-          reason: "Protected behavior check failed after clean merge",
-        });
-
-        const failingFiles = ["src/catalog.ts", "src/pricing.ts"];
-        const behaviorRepairResult = await repairCandidate({
-          repoDir,
-          candidate,
-          taskA,
-          taskB,
-          round: 2,
-          conflictType: "behavior_failure",
-          conflictingFiles: failingFiles,
-          failureEvidence: verifyResult.evidence,
-        });
-
-        candidate.repairAttempts.push(behaviorRepairResult.attempt);
-
-        if (!behaviorRepairResult.success || !behaviorRepairResult.candidateCommit) {
-          candidate.status = "failed";
-          candidate.failureBlocker = "Behavioral verification check failed and repair was unsuccessful.";
-          taskA.status = "blocked";
-          taskB.status = "blocked";
-          this.emit("candidate.failed", candidate);
-          return {
-            success: false,
-            candidate,
-            evidence: verifyResult.evidence,
-            error: candidate.failureBlocker,
-          };
-        }
-
-        candidate.candidateCommit = behaviorRepairResult.candidateCommit;
-        // Re-verify exact repaired commit!
-        verifyResult = await verifyCandidateCommit({
-          repoDir,
-          candidate,
-          policy,
-        });
-
-        if (!verifyResult.passed) {
-          candidate.status = "failed";
-          candidate.failureBlocker = "Repaired candidate failed reverification.";
-          taskA.status = "blocked";
-          taskB.status = "blocked";
-          this.emit("candidate.failed", candidate);
-          return {
-            success: false,
-            candidate,
-            evidence: verifyResult.evidence,
-            error: candidate.failureBlocker,
-          };
+      if (!composed.isClean) {
+        if (!(await repair("text_conflict"))) {
+          return fail(candidate.repairAttempts.at(-1)?.diagnosticError || "Conflict repair failed.");
         }
       }
 
-      // Candidate verified! Record evidence
+      let evidence: VerificationEvidence;
+      for (;;) {
+        candidate.status = "verifying";
+        this.setStatus([taskA, taskB], "verifying");
+        this.emit("candidate.verifying", candidate);
+        const commit = candidate.candidateCommit!;
+
+        const tampered = changedFiles(workspace, acceptedBase, commit).filter((f) =>
+          this.deps.verifier.protectedPaths.some((p) => (p.endsWith("/") ? f.startsWith(p) : f === p))
+        );
+        if (tampered.length > 0) return fail(`Candidate modifies protected paths: ${tampered.join(", ")}`);
+
+        evidence = await this.deps.verifier.verify({
+          repoDir: workspace,
+          candidateCommit: commit,
+          expectedBase: acceptedBase,
+          requirementsVersion: candidate.frozenPolicyVersion,
+          policy: candidate.frozenVerificationPolicy,
+        });
+        this.state.evidence[evidence.id] = evidence;
+        this.persist();
+        if (evidence.status === "passed") break;
+
+        if (round >= MAX_REPAIR_ROUNDS) {
+          return fail("Protected verification still fails after the maximum repair rounds; accepted version preserved.", evidence);
+        }
+        if (!(await repair("behavior_failure", evidence))) {
+          return fail(candidate.repairAttempts.at(-1)?.diagnosticError || "Behavioral repair failed.", evidence);
+        }
+      }
+
       candidate.status = "verified";
-      candidate.evidenceId = verifyResult.evidence.id;
-      this.state.evidence[verifyResult.evidence.id] = verifyResult.evidence;
-      this.emit("candidate.verified", { candidate, evidence: verifyResult.evidence });
+      candidate.evidenceId = evidence.id;
+      this.emit("candidate.verified", { candidate, evidence });
 
-      // Step 6: Exact-Version Acceptance and CAS publication
-      const canonicalHandle = await this.artifacts.get(this.state.canonicalRepoName);
-      const canonicalInfo = await canonicalHandle.info();
-      const canonicalRepoDir = canonicalInfo.remote;
-
-      const publishResult = publishAcceptedCandidate({
-        canonicalRepoDir,
-        candidate,
-        evidence: verifyResult.evidence,
-        currentCanonicalHead: this.state.acceptedState.currentCommit,
-        tasks: [taskA, taskB],
-        candidateRepoDir: repoDir,
-      });
-
-      this.state.journal.push(publishResult.journalEntry);
-
-      if (!publishResult.success || !publishResult.acceptanceRecord) {
-        if (publishResult.staleBase) {
-          candidate.status = "stale";
-          this.emit("candidate.stale", candidate);
-        } else {
-          candidate.status = "failed";
-          candidate.failureBlocker = publishResult.error;
-          this.emit("candidate.failed", candidate);
-        }
-        return {
-          success: false,
-          candidate,
-          evidence: verifyResult.evidence,
-          error: publishResult.error,
-        };
+      if (taskA.status === ("cancelled" as Task["status"]) || taskB.status === ("cancelled" as Task["status"])) {
+        return fail("A participating task was cancelled before publication.", evidence);
       }
 
-      // Step 7: Update Authoritative Accepted State
+      const canonicalRemote = await this.canonicalDir();
+      const published = publishAcceptedCandidate({
+        canonicalRepoDir: canonicalRemote,
+        canonicalToken: await this.canonicalToken(canonicalRemote),
+        defaultBranch: this.defaultBranch,
+        candidate,
+        evidence,
+        candidateRepoDir: workspace,
+        candidateRef: `refs/heads/candidate/${candidate.id}`,
+        onJournal: (entry) => this.upsertJournal(entry),
+      });
+
+      if (!published.success || !published.acceptanceRecord) {
+        if (published.staleBase) {
+          candidate.status = "stale";
+          this.setStatus([taskA, taskB], "ready");
+          this.emit("candidate.stale", candidate);
+          return { success: false, candidate, evidence, error: published.error };
+        }
+        return fail(published.error ?? "Publication refused.", evidence);
+      }
+
+      const record = published.acceptanceRecord;
       candidate.status = "accepted";
-      taskA.status = "accepted";
-      taskB.status = "accepted";
-
-      this.state.acceptedState.currentCommit = publishResult.acceptanceRecord.commit;
-      this.state.acceptedState.buildDigest = publishResult.acceptanceRecord.outputDigest;
-      this.state.acceptedState.acceptedAt = publishResult.acceptanceRecord.acceptedAt;
-      this.state.acceptedState.history.push(publishResult.acceptanceRecord);
-
-      for (const req of combinedReqs) {
-        if (!this.state.acceptedState.activeRequirements.some((r) => r.id === req.id)) {
+      for (const t of [taskA, taskB]) {
+        // A checkpoint that arrived after the freeze is newer work, not part of this landing.
+        t.status = t.currentCommit === candidate.participatingCommits[t.id] ? "accepted" : "ready";
+        t.updatedAt = new Date().toISOString();
+      }
+      this.state.acceptedState.currentCommit = record.commit;
+      this.state.acceptedState.buildDigest = record.outputDigest;
+      this.state.acceptedState.acceptedAt = record.acceptedAt;
+      this.state.acceptedState.history.push(record);
+      for (const req of [...taskA.requirements, ...taskB.requirements]) {
+        if (req.status === "approved" && !this.state.acceptedState.activeRequirements.some((r) => r.id === req.id)) {
           this.state.acceptedState.activeRequirements.push(req);
         }
       }
-
-      this.emit("candidate.accepted", {
-        candidate,
-        record: publishResult.acceptanceRecord,
-        acceptedState: this.state.acceptedState,
-      });
-
-      return {
-        success: true,
-        candidate,
-        evidence: verifyResult.evidence,
-      };
+      this.persist();
+      this.emit("candidate.accepted", { candidate, record, acceptedState: this.state.acceptedState });
+      return { success: true, candidate, evidence };
     } finally {
-      this.isProcessingIntegration = false;
+      fs.rmSync(workspace, { recursive: true, force: true });
     }
   }
 
-  // 5. Resolve Product Decision (Act III)
-  async resolveProductDecision(
-    decisionId: string,
-    selectedOptionId: string
-  ): Promise<{ decision: ProductDecision; appliedPolicy: any }> {
+  private upsertJournal(entry: PublicationJournalEntry): void {
+    const i = this.state.journal.findIndex((e) => e.id === entry.id);
+    if (i >= 0) this.state.journal[i] = entry;
+    else this.state.journal.push(entry);
+    this.persist();
+  }
+
+  private editableSourceFiles(repoDir: string, allowedScope: string[]): string[] {
+    const tracked = gitOrThrow(repoDir, ["ls-files"]).split("\n").filter(Boolean);
+    return tracked.filter(
+      (f) =>
+        allowedScope.some((s) => f.startsWith(s.replace(/\*\*\/\*$/, ""))) &&
+        !this.deps.verifier.protectedPaths.some((p) => (p.endsWith("/") ? f.startsWith(p) : f === p)) &&
+        /\.(ts|tsx|css|json|html)$/.test(f)
+    );
+  }
+
+  private readFiles(repoDir: string, files: string[]): Record<string, string> {
+    const out: Record<string, string> = {};
+    let total = 0;
+    for (const f of files) {
+      const content = fs.readFileSync(path.join(repoDir, f), "utf-8");
+      total += Buffer.byteLength(content);
+      if (total > MAX_REPAIR_CONTEXT_BYTES) break;
+      out[f] = content;
+    }
+    return out;
+  }
+
+  /**
+   * Apply the human's choice: the chosen requirement wins, the other is superseded, its policy
+   * patch is applied, and FlareGit re-runs integration (implementation + verification) itself.
+   */
+  async resolveProductDecision(decisionId: string, selectedOptionId: string): Promise<{ decision: ProductDecision; integration?: IntegrationOutcome }> {
     const decision = this.state.decisions[decisionId];
     if (!decision) throw new Error(`Decision ${decisionId} not found`);
+    if (decision.status === "resolved") return { decision }; // idempotent
+    const [idA, idB] = decision.conflictingRequirementIds;
+    if (selectedOptionId !== idA && selectedOptionId !== idB) throw new Error(`Unknown option ${selectedOptionId}`);
+    const loserId = selectedOptionId === idA ? idB : idA;
 
     decision.selectedOptionId = selectedOptionId;
     decision.status = "resolved";
     decision.resolvedAt = new Date().toISOString();
 
-    const [reqA_id, reqB_id] = decision.conflictingRequirementIds;
-    // Supersede the rejected requirement across tasks
+    const waiting: Task[] = [];
+    let winner: Requirement | undefined;
     for (const task of Object.values(this.state.tasks)) {
-      task.requirements = task.requirements.filter((r) => {
-        if (selectedOptionId === "discount_tickets_only" && r.id === reqA_id) {
-          r.status = "superseded";
-          return false;
-        }
-        if (selectedOptionId === "discount_includes_refund" && r.id === reqB_id) {
-          r.status = "superseded";
-          return false;
-        }
-        return true;
-      });
+      for (const req of task.requirements) {
+        if (req.id === loserId) req.status = "superseded";
+        if (req.id === selectedOptionId) winner = req;
+      }
+      if (task.status === "needs_decision") waiting.push(task);
     }
+    if (winner?.policyPatch) {
+      this.state.verificationPolicy = { ...this.state.verificationPolicy, ...winner.policyPatch };
+      this.state.policyVersion += 1;
+    }
+    this.setStatus(waiting, "ready");
+    this.emit("decision.resolved", { decision, verificationPolicy: this.state.verificationPolicy });
 
-    const discountAppliesToRefundFee = selectedOptionId === "discount_includes_refund";
+    if (waiting.length !== 2) return { decision };
+    const integration = await this.runIntegrationPipeline([waiting[0]!.id, waiting[1]!.id]);
+    return { decision, integration };
+  }
 
-    this.emit("decision.resolved", { decision, discountAppliesToRefundFee });
-
-    return {
-      decision,
-      appliedPolicy: {
-        groupDiscountPercent: 0.15,
-        minTicketsForDiscount: 4,
-        refundFeePerTicket: 5.0,
-        discountAppliesToRefundFee,
-      },
-    };
+  /** Retry blocked work (e.g. after a transient model outage). */
+  retryBlocked(taskIds: [string, string]): Promise<IntegrationOutcome> {
+    for (const id of taskIds) {
+      const t = this.state.tasks[id];
+      if (t?.status === "blocked") this.setStatus([t], "ready");
+    }
+    return this.runIntegrationPipeline(taskIds);
   }
 }
-

@@ -1,4 +1,4 @@
-import { execSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import crypto from "node:crypto";
@@ -24,7 +24,7 @@ export class LocalGitArtifactsRepoHandle implements ArtifactsRepoHandle {
   }
 
   async createToken(
-    scope: "read" | "write" = "write",
+    _scope: "read" | "write" = "write",
     ttl: number = 3600
   ): Promise<{ plaintext: string; expiresAt: string }> {
     const hex = Buffer.from(crypto.randomBytes(20)).toString("hex");

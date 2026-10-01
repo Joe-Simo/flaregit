@@ -1,5 +1,5 @@
 import React from "react";
-import { CheckCircle2, AlertTriangle, RefreshCw, Cpu, ShieldCheck, ArrowRight } from "lucide-react";
+import { CheckCircle2, AlertTriangle, RefreshCw, Cpu, ShieldCheck, Users } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
 export type PipelineStage =
@@ -10,7 +10,8 @@ export type PipelineStage =
   | "verifying"
   | "accepted"
   | "decision_needed"
-  | "failed";
+  | "working"
+  | "blocked";
 
 interface StatusBannerProps {
   stage: PipelineStage;
@@ -60,7 +61,15 @@ export function StatusBanner({
           bg: "bg-purple-950/20 border-purple-500/40",
           textColor: "text-purple-200",
         };
-      case "failed":
+      case "working":
+        return {
+          icon: <Users className="h-4 w-4 text-sky-400" />,
+          badgeVariant: "info" as const,
+          badgeText: "WORKING",
+          bg: "bg-sky-950/20 border-sky-500/30",
+          textColor: "text-sky-200",
+        };
+      case "blocked":
         return {
           icon: <AlertTriangle className="h-4 w-4 text-red-400" />,
           badgeVariant: "destructive" as const,
@@ -74,7 +83,7 @@ export function StatusBanner({
         return {
           icon: <CheckCircle2 className="h-4 w-4 text-emerald-400" />,
           badgeVariant: "success" as const,
-          badgeText: "ALL SYSTEMS STABLE",
+          badgeText: stage === "accepted" ? "ACCEPTED" : "ACCEPTED VERSION LIVE",
           bg: "bg-emerald-950/20 border-emerald-500/30",
           textColor: "text-emerald-200",
         };

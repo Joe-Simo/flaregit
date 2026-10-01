@@ -1,136 +1,73 @@
-import { spawnSync } from "node:child_process";
-import * as path from "node:path";
 import * as fs from "node:fs";
+import * as path from "node:path";
+import { git, gitOrThrow, PLATFORM_IDENTITY } from "./git.js";
 
 export interface ComposeResult {
-  success: boolean;
   isClean: boolean;
   candidateCommit: string | null;
   compositionMethod?: "clean_git_merge" | "repaired_merge";
+  /** Files with unresolved conflict markers (repair scope). */
   conflictingFiles: string[];
-  conflictDiff: string | null;
+  /** Working-tree content with conflict markers, keyed by path, for the repair engine. */
+  conflictContents: Record<string, string>;
   mergeBranch: string;
 }
 
-export function composeCandidateCommits(
-  repoDir: string,
-  candidateId: string,
-  baseCommit: string,
-  commitA: string,
-  commitB: string,
-  taskA_name: string,
-  taskB_name: string,
-  sourceB?: string
-): ComposeResult {
+/**
+ * Compose a candidate from the accepted base using native Git: merge task A, then task B, on top
+ * of the exact accepted head. Candidates therefore always descend from the accepted head, even if
+ * the tasks were branched from an older base. On conflict the work tree is left with native
+ * conflict markers for the repair step.
+ */
+export function composeCandidateCommits(opts: {
+  repoDir: string;
+  candidateId: string;
+  acceptedBase: string;
+  commitA: string;
+  commitB: string;
+  labelA: string;
+  labelB: string;
+}): ComposeResult {
+  const { repoDir, candidateId, acceptedBase, commitA, commitB, labelA, labelB } = opts;
   const mergeBranch = `candidate/${candidateId}`;
 
-  // 1. Fetch sourceB into repoDir so commitB is known locally
-  if (sourceB) {
-    spawnSync("git", ["-C", repoDir, "fetch", sourceB]);
-  }
+  git(repoDir, ["merge", "--abort"]);
+  gitOrThrow(repoDir, ["reset", "--hard", "--quiet"]);
+  gitOrThrow(repoDir, ["clean", "-fdq"]);
+  gitOrThrow(repoDir, ["checkout", "--quiet", "-B", mergeBranch, acceptedBase]);
 
-  // 2. Ensure working directory is clean
-  spawnSync("git", ["-C", repoDir, "reset", "--hard", "HEAD"]);
-  spawnSync("git", ["-C", repoDir, "clean", "-fd"]);
-
-  // 3. Checkout branch from commitA
-  const checkoutRes = spawnSync("git", [
-    "-C",
-    repoDir,
-    "checkout",
-    "-B",
-    mergeBranch,
-    commitA,
-  ]);
-  if (checkoutRes.status !== 0) {
-    throw new Error(`Failed to checkout ${commitA}: ${checkoutRes.stderr.toString()}`);
-  }
-
-  // 4. Attempt native Git merge with commitB
-  const mergeRes = spawnSync("git", [
-    "-C",
-    repoDir,
-    "-c",
-    "user.name=FlareGit Publisher",
-    "-c",
-    "user.email=publisher@flaregit.local",
-    "merge",
-    "--no-commit",
-    commitB,
-  ]);
-
-  if (mergeRes.status === 0) {
-    // Clean merge! Commit it now
-    const commitMsg = `FlareGit Candidate ${candidateId}: Merge ${taskA_name} (${commitA.slice(0, 7)}) and ${taskB_name} (${commitB.slice(0, 7)})`;
-    const finalCommit = spawnSync("git", [
-      "-C",
-      repoDir,
-      "-c",
-      "user.name=FlareGit Publisher",
-      "-c",
-      "user.email=publisher@flaregit.local",
-      "commit",
+  for (const [commit, label] of [
+    [commitA, labelA],
+    [commitB, labelB],
+  ] as const) {
+    const merged = git(repoDir, [
+      ...PLATFORM_IDENTITY,
+      "merge",
+      "--no-ff",
       "-m",
-      commitMsg,
+      `FlareGit candidate ${candidateId}: integrate ${label} (${commit.slice(0, 7)})`,
+      commit,
     ]);
-
-    const revParse = spawnSync("git", ["-C", repoDir, "rev-parse", "HEAD"]);
-    const candidateCommit = revParse.stdout.toString().trim();
-
-    return {
-      success: true,
-      isClean: true,
-      candidateCommit,
-      compositionMethod: "clean_git_merge",
-      conflictingFiles: [],
-      conflictDiff: null,
-      mergeBranch,
-    };
-  }
-
-  // Conflict occurred! Inspect conflicting files
-  const statusRes = spawnSync("git", ["-C", repoDir, "status", "--porcelain"]);
-  const statusLines = statusRes.stdout.toString().split("\n");
-  const conflictingFiles: string[] = [];
-
-  for (const line of statusLines) {
-    // "UU path/to/file" indicates unmerged / both modified
-    if (
-      line.startsWith("UU ") ||
-      line.startsWith("AA ") ||
-      line.startsWith("DU ") ||
-      line.startsWith("UD ") ||
-      line.startsWith("M  ") ||
-      line.startsWith(" M ")
-    ) {
-      const file = line.slice(3).trim();
-      if (file && !conflictingFiles.includes(file)) {
-        conflictingFiles.push(file);
+    if (!merged.ok) {
+      const unmerged = git(repoDir, ["diff", "--name-only", "--diff-filter=U"]).stdout.split("\n").filter(Boolean);
+      if (unmerged.length === 0) {
+        throw new Error(`git merge of ${label} failed without conflicts: ${merged.stderr.trim()}`);
       }
-    }
-  }
-
-  // Also check git diff for conflict markers (<<<<<<<)
-  const diffRes = spawnSync("git", ["-C", repoDir, "diff"]);
-  const conflictDiff = diffRes.stdout.toString();
-
-  // If no files were caught by status, extract from diff
-  if (conflictingFiles.length === 0) {
-    const diffFiles = conflictDiff
-      .split("\n")
-      .filter((l) => l.startsWith("diff --git a/"))
-      .map((l) => l.split(" ")[2]!.replace(/^a\//, ""));
-    for (const df of diffFiles) {
-      if (!conflictingFiles.includes(df)) conflictingFiles.push(df);
+      const conflictContents: Record<string, string> = {};
+      for (const file of unmerged) {
+        const full = path.join(repoDir, file);
+        conflictContents[file] = fs.existsSync(full) ? fs.readFileSync(full, "utf-8") : "";
+      }
+      return { isClean: false, candidateCommit: null, conflictingFiles: unmerged, conflictContents, mergeBranch };
     }
   }
 
   return {
-    success: false,
-    isClean: false,
-    candidateCommit: null,
-    conflictingFiles,
-    conflictDiff,
+    isClean: true,
+    candidateCommit: gitOrThrow(repoDir, ["rev-parse", "HEAD"]),
+    compositionMethod: "clean_git_merge",
+    conflictingFiles: [],
+    conflictContents: {},
     mergeBranch,
   };
 }

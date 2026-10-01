@@ -1,0 +1,8 @@
+node_modules
+dist
+.flaregit-storage
+.wrangler
+.git
+.claude
+*.log
+tests

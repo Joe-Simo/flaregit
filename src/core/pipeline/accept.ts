@@ -1,20 +1,26 @@
-import { spawnSync } from "node:child_process";
 import * as crypto from "node:crypto";
+import { authArgs, git } from "./git.js";
 import type {
   AcceptanceRecord,
   CandidateGeneration,
   PublicationJournalEntry,
-  Task,
   VerificationEvidence,
 } from "../types.js";
 
 export interface PublishOptions {
+  /** Bare canonical repository (Artifacts remote in production, local bare repo in tests). */
+  /** Bare repo path (local) or https remote (Artifacts). */
   canonicalRepoDir: string;
+  /** Short-lived write token for https remotes; sent as a Bearer header, never in the URL. */
+  canonicalToken?: string;
+  defaultBranch: string;
   candidate: CandidateGeneration;
   evidence: VerificationEvidence;
-  currentCanonicalHead: string;
-  tasks: Task[];
-  candidateRepoDir?: string;
+  /** Repository + ref holding the candidate objects (the integration workspace). */
+  candidateRepoDir: string;
+  candidateRef: string;
+  /** Called synchronously at every journal transition so state survives a crash. */
+  onJournal?: (entry: PublicationJournalEntry) => void;
 }
 
 export interface PublishResult {
@@ -25,183 +31,126 @@ export interface PublishResult {
   staleBase?: boolean;
 }
 
+function entry(
+  opts: PublishOptions,
+  state: PublicationJournalEntry["state"],
+  expectedHead: string,
+  error?: string,
+  id?: string
+): PublicationJournalEntry {
+  return {
+    id: id ?? `jrnl_${crypto.randomUUID().slice(0, 8)}`,
+    candidateId: opts.candidate.id,
+    candidateCommit: opts.candidate.candidateCommit ?? "",
+    candidateTree: opts.evidence.candidateTree,
+    expectedHead,
+    newHead: opts.candidate.candidateCommit ?? "",
+    outputDigest: opts.evidence.builtOutputDigest,
+    state,
+    timestamp: new Date().toISOString(),
+    ...(error ? { error } : {}),
+  };
+}
+
+/**
+ * Publish exactly the verified commit with a compare-and-swap ref update. The ref only moves if the
+ * canonical head is still the base this candidate was composed and verified against.
+ */
 export function publishAcceptedCandidate(opts: PublishOptions): PublishResult {
-  const { canonicalRepoDir, candidate, evidence, currentCanonicalHead, candidateRepoDir } = opts;
-  const candidateCommit = candidate.candidateCommit;
+  const { canonicalRepoDir, candidate, evidence } = opts;
+  const commit = candidate.candidateCommit;
+  const ref = `refs/heads/${opts.defaultBranch}`;
 
-  if (!candidateCommit) {
-    throw new Error(`Candidate ${candidate.id} has no candidate commit`);
-  }
-
-  // Ensure canonical repo has candidate commit objects
-  if (candidateRepoDir) {
-    spawnSync("git", [
-      "--git-dir",
-      canonicalRepoDir,
-      "fetch",
-      candidateRepoDir,
-      candidateCommit,
-    ]);
-  }
-
-  // Check 1: Invariant - candidate commit must match verified evidence commit
-  if (evidence.candidateCommit !== candidateCommit) {
-    return {
-      success: false,
-      journalEntry: {
-        id: `jrnl_${crypto.randomUUID().slice(0, 8)}`,
-        candidateId: candidate.id,
-        candidateCommit,
-        expectedHead: currentCanonicalHead,
-        newHead: candidateCommit,
-        outputDigest: evidence.builtOutputDigest,
-        state: "ABORTED",
-        timestamp: new Date().toISOString(),
-        error: "Invariant violation: candidate commit does not match verification evidence commit.",
-      },
-      error: "Invariant violation: candidate commit does not match verification evidence.",
-    };
-  }
-
-  // Check 2: Verification evidence must be passed
-  if (evidence.status !== "passed") {
-    return {
-      success: false,
-      journalEntry: {
-        id: `jrnl_${crypto.randomUUID().slice(0, 8)}`,
-        candidateId: candidate.id,
-        candidateCommit,
-        expectedHead: currentCanonicalHead,
-        newHead: candidateCommit,
-        outputDigest: evidence.builtOutputDigest,
-        state: "ABORTED",
-        timestamp: new Date().toISOString(),
-        error: "Verification evidence has not passed.",
-      },
-      error: "Candidate has not passed protected verification.",
-    };
-  }
-
-  // Check 3: Stale base check (CAS)
-  // Verify that the actual canonical HEAD matches expectedAcceptedBase
-  const actualHeadRes = spawnSync("git", [
-    "--git-dir",
-    canonicalRepoDir,
-    "rev-parse",
-    "HEAD",
-  ]);
-  const actualCanonicalHead = actualHeadRes.stdout.toString().trim();
-
-  if (actualCanonicalHead !== candidate.expectedAcceptedBase) {
-    return {
-      success: false,
-      staleBase: true,
-      journalEntry: {
-        id: `jrnl_${crypto.randomUUID().slice(0, 8)}`,
-        candidateId: candidate.id,
-        candidateCommit,
-        expectedHead: candidate.expectedAcceptedBase,
-        newHead: candidateCommit,
-        outputDigest: evidence.builtOutputDigest,
-        state: "ABORTED",
-        timestamp: new Date().toISOString(),
-        error: `Stale base detected: expected ${candidate.expectedAcceptedBase.slice(0, 7)}, canonical is now ${actualCanonicalHead.slice(0, 7)}`,
-      },
-      error: `Canonical base has moved. Candidate must be recomposed against ${actualCanonicalHead.slice(0, 7)}.`,
-    };
-  }
-
-  // Check 4: Ancestry check (prohibits history rewriting)
-  // Verify that current canonical head is an ancestor of the candidate commit
-  const mergeBaseRes = spawnSync("git", [
-    "--git-dir",
-    canonicalRepoDir,
-    "merge-base",
-    actualCanonicalHead,
-    candidateCommit,
-  ]);
-  const mergeBase = mergeBaseRes.stdout.toString().trim();
-  if (mergeBase !== actualCanonicalHead) {
-    return {
-      success: false,
-      journalEntry: {
-        id: `jrnl_${crypto.randomUUID().slice(0, 8)}`,
-        candidateId: candidate.id,
-        candidateCommit,
-        expectedHead: actualCanonicalHead,
-        newHead: candidateCommit,
-        outputDigest: evidence.builtOutputDigest,
-        state: "ABORTED",
-        timestamp: new Date().toISOString(),
-        error: "Ancestry check failed: candidate commit is not a direct descendant of canonical HEAD.",
-      },
-      error: "Ancestry check failed: history rewriting prohibited.",
-    };
-  }
-
-  // Journal Stage 1: PREPARED
-  const journalId = `jrnl_${crypto.randomUUID().slice(0, 8)}`;
-  let journalEntry: PublicationJournalEntry = {
-    id: journalId,
-    candidateId: candidate.id,
-    candidateCommit,
-    expectedHead: actualCanonicalHead,
-    newHead: candidateCommit,
-    outputDigest: evidence.builtOutputDigest,
-    state: "PREPARED",
-    timestamp: new Date().toISOString(),
+  const abort = (message: string, expectedHead = candidate.expectedAcceptedBase, stale = false): PublishResult => {
+    const journalEntry = entry(opts, "ABORTED", expectedHead, message);
+    opts.onJournal?.(journalEntry);
+    return { success: false, journalEntry, error: message, staleBase: stale };
   };
 
-  // Journal Stage 2: REF_UPDATED
-  // Perform atomic CAS ref update on canonical repository: update-ref refs/heads/main <new> <old>
-  const updateRefRes = spawnSync("git", [
-    "--git-dir",
-    canonicalRepoDir,
-    "update-ref",
-    "refs/heads/main",
-    candidateCommit,
-    actualCanonicalHead,
-  ]);
-
-  if (updateRefRes.status !== 0) {
-    journalEntry = {
-      ...journalEntry,
-      state: "ABORTED",
-      error: `Git update-ref failed: ${updateRefRes.stderr.toString()}`,
-      timestamp: new Date().toISOString(),
-    };
-    return {
-      success: false,
-      journalEntry,
-      error: `Atomic ref update failed: ${updateRefRes.stderr.toString()}`,
-    };
+  if (!commit) return abort("Candidate has no commit.");
+  if (evidence.status !== "passed") return abort("Candidate has not passed protected verification.");
+  if (evidence.candidateCommit !== commit) return abort("Invariant violation: verified commit differs from candidate commit.");
+  if (evidence.expectedAcceptedBase !== candidate.expectedAcceptedBase) {
+    return abort("Invariant violation: evidence was produced for a different accepted base.");
+  }
+  if (evidence.requirementsVersion !== candidate.frozenPolicyVersion) {
+    return abort("Invariant violation: evidence was produced under a different policy version.");
   }
 
-  journalEntry = {
-    ...journalEntry,
-    state: "REF_UPDATED",
-    timestamp: new Date().toISOString(),
-  };
+  const remote = /^https:\/\//.test(canonicalRepoDir);
+  const verifyRepo = remote ? opts.candidateRepoDir : canonicalRepoDir;
+  const q = remote ? {} : { gitDir: true };
 
-  // Journal Stage 3: ACCEPTED
-  journalEntry = {
-    ...journalEntry,
-    state: "ACCEPTED",
-    timestamp: new Date().toISOString(),
-  };
+  if (!remote) {
+    const fetched = git(canonicalRepoDir, ["fetch", "--quiet", opts.candidateRepoDir, `+${opts.candidateRef}:refs/flaregit/candidates/${candidate.id}`], { gitDir: true });
+    if (!fetched.ok) return abort(`Could not transfer candidate objects: ${fetched.stderr.trim()}`);
+    const fetchedHead = git(canonicalRepoDir, ["rev-parse", `refs/flaregit/candidates/${candidate.id}`], { gitDir: true }).stdout.trim();
+    if (fetchedHead !== commit) return abort("Transferred candidate ref does not point at the verified commit.");
+  } else if (git(opts.candidateRepoDir, ["rev-parse", "--verify", `${opts.candidateRef}^{commit}`]).stdout.trim() !== commit) {
+    return abort("Candidate ref does not point at the verified commit.");
+  }
 
-  const acceptanceRecord: AcceptanceRecord = {
-    commit: candidateCommit,
-    candidateId: candidate.id,
-    acceptedAt: new Date().toISOString(),
-    participatingTasks: candidate.participatingTaskIds,
-    evidenceId: evidence.id,
-    outputDigest: evidence.builtOutputDigest,
-  };
+  const tree = git(verifyRepo, ["rev-parse", `${commit}^{tree}`], q).stdout.trim();
+  if (tree !== evidence.candidateTree) return abort("Invariant violation: candidate tree differs from verified tree.");
+
+  const currentHead = remote
+    ? git(opts.candidateRepoDir, [...authArgs(canonicalRepoDir, opts.canonicalToken), "ls-remote", canonicalRepoDir, ref]).stdout.split("\t")[0]?.trim() ?? ""
+    : git(canonicalRepoDir, ["rev-parse", "--verify", ref], { gitDir: true }).stdout.trim();
+  if (currentHead !== candidate.expectedAcceptedBase) {
+    return abort(
+      `Canonical ${opts.defaultBranch} moved to ${currentHead.slice(0, 7) || "unknown"}; candidate must be recomposed against it.`,
+      candidate.expectedAcceptedBase,
+      true
+    );
+  }
+
+  const ancestor = git(verifyRepo, ["merge-base", "--is-ancestor", currentHead, commit], q);
+  if (!ancestor.ok) return abort("Ancestry check failed: candidate does not descend from canonical head (history rewrite refused).", currentHead);
+
+  const prepared = entry(opts, "PREPARED", currentHead);
+  opts.onJournal?.(prepared);
+
+  // Compare-and-swap: the ref moves only if it still equals the verified base.
+  const update = remote
+    ? git(opts.candidateRepoDir, [
+        ...authArgs(canonicalRepoDir, opts.canonicalToken),
+        "push",
+        "--quiet",
+        `--force-with-lease=${ref}:${currentHead}`,
+        canonicalRepoDir,
+        `${commit}:${ref}`,
+      ])
+    : git(canonicalRepoDir, ["update-ref", "-m", `flaregit accept ${candidate.id}`, ref, commit, currentHead], { gitDir: true });
+  if (!update.ok) {
+    const stale = /stale info|rejected|lock/i.test(update.stderr) || (!remote && git(canonicalRepoDir, ["rev-parse", "--verify", ref], { gitDir: true }).stdout.trim() !== currentHead);
+    const aborted = { ...entry(opts, "ABORTED", currentHead, `Atomic ref update refused: ${update.stderr.trim()}`, prepared.id) };
+    opts.onJournal?.(aborted);
+    return { success: false, journalEntry: aborted, error: aborted.error, staleBase: stale };
+  }
+
+  const refUpdated = entry(opts, "REF_UPDATED", currentHead, undefined, prepared.id);
+  opts.onJournal?.(refUpdated);
+  const accepted = entry(opts, "ACCEPTED", currentHead, undefined, prepared.id);
+  opts.onJournal?.(accepted);
 
   return {
     success: true,
-    journalEntry,
-    acceptanceRecord,
+    journalEntry: accepted,
+    acceptanceRecord: {
+      commit,
+      candidateId: candidate.id,
+      acceptedAt: new Date().toISOString(),
+      participatingTasks: candidate.participatingTaskIds,
+      evidenceId: evidence.id,
+      outputDigest: evidence.builtOutputDigest,
+    },
   };
+}
+
+/**
+ * Crash recovery: a journal entry stuck in PREPARED/REF_UPDATED is settled against the real ref.
+ */
+export function reconcileJournalEntry(head: string, stuck: PublicationJournalEntry): PublicationJournalEntry {
+  if (head === stuck.newHead) return { ...stuck, state: "ACCEPTED", timestamp: new Date().toISOString() };
+  return { ...stuck, state: "ABORTED", error: "Recovered: ref was never updated.", timestamp: new Date().toISOString() };
 }

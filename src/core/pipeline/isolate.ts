@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { authArgs } from "./git.js";
 import type { ArtifactsClient } from "../../artifacts/types.js";
 import type { Task, TaskWorkspace } from "../types.js";
 
@@ -22,7 +23,7 @@ export async function isolateTaskWorkspace(
 ): Promise<Task> {
   const workspacesDir =
     opts.workspacesDir ??
-    path.resolve(process.cwd(), ".flaregit-workspace", "tasks", opts.taskId);
+    path.resolve(process.cwd(), ".flaregit-storage", "workspaces", opts.taskId);
 
   if (fs.existsSync(workspacesDir)) {
     fs.rmSync(workspacesDir, { recursive: true, force: true });
@@ -37,7 +38,10 @@ export async function isolateTaskWorkspace(
   });
 
   // 2. Clone the task repository into the isolated local workspace path
-  const cloneRes = spawnSync("git", ["clone", forkMeta.remote, workspacesDir]);
+  const cloneRes = spawnSync("git", [...authArgs(forkMeta.remote, forkMeta.token), "clone", "--quiet", forkMeta.remote, workspacesDir], {
+    encoding: "utf-8",
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+  });
   if (cloneRes.status !== 0) {
     throw new Error(`Failed to clone task workspace: ${cloneRes.stderr.toString()}`);
   }

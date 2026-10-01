@@ -5,6 +5,7 @@ export interface FreezeCandidateOptions {
   tasks: Task[];
   acceptedBaseCommit: string;
   policyVersion: number;
+  verificationPolicy: Record<string, unknown>;
   approvedRequirements: Requirement[];
   attemptNumber?: number;
 }
@@ -33,6 +34,7 @@ export function freezeCandidateGeneration(
     participatingCommits,
     expectedAcceptedBase: opts.acceptedBaseCommit,
     frozenPolicyVersion: opts.policyVersion,
+    frozenVerificationPolicy: JSON.parse(JSON.stringify(opts.verificationPolicy)),
     frozenRequirements,
     repairAttempts: [],
     status: "composing",

@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { AlertTriangle, Check, ArrowRight, Shield, Sparkles } from "lucide-react";
+import { AlertTriangle, Check, Shield, Sparkles } from "lucide-react";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";

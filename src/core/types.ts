@@ -1,5 +1,3 @@
-import { z } from "zod";
-
 export type ContributorType = "human" | "agent";
 
 export interface Contributor {
@@ -36,6 +34,10 @@ export interface Requirement {
   assertions: RequirementAssertion[];
   originTaskId: string;
   approvedAt: string;
+  /** Concise product question to ask if this requirement contradicts another. */
+  clarifyingQuestion?: string;
+  /** Verification-policy changes that take effect if this requirement is chosen in a decision. */
+  policyPatch?: Record<string, unknown>;
 }
 
 export interface Checkpoint {
@@ -68,6 +70,8 @@ export interface Task {
   checkpoints: Checkpoint[];
   currentCommit: string;
   activeCandidateId?: string;
+  /** Human-readable reason when status is "blocked". */
+  blockedReason?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -91,6 +95,7 @@ export interface CandidateGeneration {
   participatingCommits: Record<string, string>; // taskId -> commitHash
   expectedAcceptedBase: string;
   frozenPolicyVersion: number;
+  frozenVerificationPolicy: Record<string, unknown>;
   frozenRequirements: Requirement[];
   compositionMethod?: CompositionMethod;
   candidateCommit?: string;
@@ -120,8 +125,11 @@ export interface TestResultItem {
 export interface VerificationEvidence {
   id: string;
   candidateCommit: string;
+  /** Git tree hash of the verified commit; publication must find this exact tree. */
+  candidateTree: string;
   expectedAcceptedBase: string;
   requirementsVersion: number;
+  policy: Record<string, unknown>;
   testBundleDigest: string;
   toolchainDigest: string;
   builtOutputDigest: string;
@@ -143,6 +151,7 @@ export interface PublicationJournalEntry {
   id: string;
   candidateId: string;
   candidateCommit: string;
+  candidateTree?: string;
   expectedHead: string;
   newHead: string;
   outputDigest: string;
@@ -198,5 +207,7 @@ export interface FlareGitProjectState {
   decisions: Record<string, ProductDecision>;
   journal: PublicationJournalEntry[];
   policyVersion: number;
+  /** Parameters of the protected verifier; changed only by an explicit product decision. */
+  verificationPolicy: Record<string, unknown>;
 }
 

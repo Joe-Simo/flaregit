@@ -1,129 +1,86 @@
-/**
- * FlareGit Cloudflare Workers AI Client
- * 
- * Invokes Cloudflare Workers AI models for code repair, conflict reasoning,
- * and requirement analysis. Supports both Worker binding (env.AI) and
- * Cloudflare REST API / AI Gateway.
- */
+import type { RepairModel } from "../core/pipeline/repair.js";
+
+export interface AiBinding {
+  run(model: string, input: Record<string, unknown>, options?: Record<string, unknown>): Promise<unknown>;
+}
 
 export interface WorkersAIConfig {
+  /** Worker `env.AI` binding (production). */
+  binding?: AiBinding;
+  /** REST access for local development only: both required, read from the environment. */
   accountId?: string;
   apiToken?: string;
+  /** AI Gateway id for logging, rate limits and spend caps. */
   gatewayId?: string;
-  modelId?: string;
-  aiBinding?: any; // Cloudflare Worker env.AI binding
+  model?: string;
+  maxOutputTokens?: number;
+  /** Hard spending control: calls allowed before the client refuses further work. */
+  maxCalls?: number;
 }
 
-export interface WorkersAIResponse {
-  modelId: string;
-  response: string;
-  latencyMs: number;
-  tokensUsed?: {
-    promptTokens?: number;
-    completionTokens?: number;
-    totalTokens?: number;
-  };
-  costEstimatedUsd: number;
+export const DEFAULT_CODE_MODEL = "@cf/openai/gpt-oss-120b";
+
+export class WorkersAINotConfiguredError extends Error {
+  constructor() {
+    super("Workers AI is not configured: provide the AI binding, or CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN.");
+  }
 }
 
-export const SUPPORTED_MODELS = {
-  REASONING_PRIMARY: "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
-  FAST_INSTRUCT: "@cf/meta/llama-3.1-8b-instruct-fp8",
-  CODE_GEN: "@cf/meta/llama-3.1-70b-instruct",
-} as const;
+function extractText(result: unknown): string {
+  const r = (result as { result?: unknown })?.result ?? result;
+  if (typeof r === "string") return r;
+  const obj = r as { response?: unknown; choices?: Array<{ message?: { content?: string } }> };
+  const text = typeof obj?.response === "string" ? obj.response : obj?.choices?.[0]?.message?.content;
+  if (typeof text !== "string") throw new Error("Workers AI returned no text");
+  return text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+}
 
 export class WorkersAIClient {
-  private accountId: string;
-  private apiToken?: string;
-  private gatewayId?: string;
-  private modelId: string;
-  private aiBinding?: any;
+  private calls = 0;
+  private readonly model: string;
+  private readonly maxTokens: number;
+  private readonly maxCalls: number;
 
-  constructor(config?: WorkersAIConfig) {
-    this.accountId = config?.accountId ?? process.env.CLOUDFLARE_ACCOUNT_ID ?? "9888fed381861dcc35a37b026ff176e9";
-    this.apiToken = config?.apiToken ?? process.env.CLOUDFLARE_API_TOKEN;
-    this.gatewayId = config?.gatewayId ?? process.env.CLOUDFLARE_AI_GATEWAY;
-    this.modelId = config?.modelId ?? SUPPORTED_MODELS.REASONING_PRIMARY;
-    this.aiBinding = config?.aiBinding;
+  constructor(private readonly cfg: WorkersAIConfig = {}) {
+    this.model = cfg.model ?? process.env.FLAREGIT_AI_MODEL ?? DEFAULT_CODE_MODEL;
+    this.maxTokens = cfg.maxOutputTokens ?? 8192;
+    this.maxCalls = cfg.maxCalls ?? 20;
   }
 
-  /**
-   * Run inference through Cloudflare Workers AI
-   */
-  async runInference(prompt: string, opts?: { modelId?: string; maxTokens?: number }): Promise<WorkersAIResponse> {
-    const selectedModel = opts?.modelId ?? this.modelId;
-    const startTime = Date.now();
+  get isConfigured(): boolean {
+    return Boolean(this.cfg.binding ?? (this.accountId && this.apiToken));
+  }
+  private get accountId() {
+    return this.cfg.accountId ?? process.env.CLOUDFLARE_ACCOUNT_ID;
+  }
+  private get apiToken() {
+    return this.cfg.apiToken ?? process.env.CLOUDFLARE_API_TOKEN;
+  }
 
-    // 1. If running inside a Cloudflare Worker with env.AI binding
-    if (this.aiBinding) {
-      const result = await this.aiBinding.run(selectedModel, {
-        prompt,
-        max_tokens: opts?.maxTokens ?? 2048,
-      });
+  async complete(prompt: string): Promise<string> {
+    if (!this.isConfigured) throw new WorkersAINotConfiguredError();
+    if (++this.calls > this.maxCalls) throw new Error(`Workers AI call budget exhausted (${this.maxCalls})`);
+    const input = { messages: [{ role: "user", content: prompt }], max_tokens: this.maxTokens };
 
-      const latencyMs = Date.now() - startTime;
-      const text = typeof result === "string" ? result : result.response ?? JSON.stringify(result);
-
-      return {
-        modelId: selectedModel,
-        response: text,
-        latencyMs,
-        tokensUsed: {
-          promptTokens: Math.ceil(prompt.length / 4),
-          completionTokens: Math.ceil(text.length / 4),
-          totalTokens: Math.ceil((prompt.length + text.length) / 4),
-        },
-        costEstimatedUsd: 0.0001,
-      };
+    if (this.cfg.binding) {
+      const options = this.cfg.gatewayId ? { gateway: { id: this.cfg.gatewayId } } : undefined;
+      return extractText(await this.cfg.binding.run(this.model, input, options));
     }
 
-    // 2. If running via Cloudflare REST API / AI Gateway
-    if (this.apiToken) {
-      let endpoint = `https://api.cloudflare.com/client/v4/accounts/${this.accountId}/ai/run/${selectedModel}`;
-      if (this.gatewayId) {
-        endpoint = `https://gateway.ai.cloudflare.com/v1/${this.accountId}/${this.gatewayId}/workers-ai/${selectedModel}`;
-      }
+    const base = this.cfg.gatewayId
+      ? `https://gateway.ai.cloudflare.com/v1/${this.accountId}/${this.cfg.gatewayId}/workers-ai`
+      : `https://api.cloudflare.com/client/v4/accounts/${this.accountId}/ai/run`;
+    const res = await fetch(`${base}/${this.model}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.apiToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!res.ok) throw new Error(`Workers AI error ${res.status}`);
+    return extractText(await res.json());
+  }
 
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.apiToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          prompt,
-          max_tokens: opts?.maxTokens ?? 2048,
-        }),
-      });
-
-      if (!res.ok) {
-        const errorText = await res.text();
-        throw new Error(`Cloudflare Workers AI API error (${res.status}): ${errorText}`);
-      }
-
-      const json = await res.json() as any;
-      const latencyMs = Date.now() - startTime;
-      const responseText = json.result?.response ?? json.response ?? "";
-
-      return {
-        modelId: selectedModel,
-        response: responseText,
-        latencyMs,
-        tokensUsed: {
-          promptTokens: json.result?.usage?.prompt_tokens ?? Math.ceil(prompt.length / 4),
-          completionTokens: json.result?.usage?.completion_tokens ?? Math.ceil(responseText.length / 4),
-          totalTokens: json.result?.usage?.total_tokens,
-        },
-        costEstimatedUsd: 0.0001,
-      };
-    }
-
-    // 3. Fallback when local without token: return informative mock response for offline development
-    return {
-      modelId: `${selectedModel} (local-fallback)`,
-      response: "```typescript\n// Synthesized by FlareGit Cloudflare Workers AI\n```",
-      latencyMs: 12,
-      costEstimatedUsd: 0.0,
-    };
+  asModel(): RepairModel {
+    return (prompt) => this.complete(prompt);
   }
 }

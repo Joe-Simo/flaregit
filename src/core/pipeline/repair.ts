@@ -1,19 +1,32 @@
-import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { git, gitOrThrow, PLATFORM_IDENTITY } from "./git.js";
 import type { CandidateGeneration, RepairAttempt, Task, VerificationEvidence } from "../types.js";
+
+export const MAX_REPAIR_ROUNDS = 2;
+const MAX_FILE_BYTES = 200_000;
+
+/** Produces a model completion for a prompt. Production: Workers AI through AI Gateway. */
+export type RepairModel = (prompt: string) => Promise<string>;
 
 export interface RepairOptions {
   repoDir: string;
   candidate: CandidateGeneration;
   taskA: Task;
   taskB: Task;
-  round: number; // 1 or 2
+  round: number;
   conflictType: "text_conflict" | "behavior_failure";
-  conflictingFiles: string[];
-  conflictDiff?: string | null;
+  /** Files the model may rewrite. Anything else in its answer is rejected. */
+  editableFiles: string[];
+  /** Read-only source files the repair may depend on (types, callers). */
+  contextFiles?: Record<string, string>;
+  /** Per conflicting file: the common base and each contributor's version. */
+  sideVersions?: Record<string, { base: string; a: string; b: string }>;
+  /** Current contents (with native conflict markers for text conflicts) the model sees. */
+  fileContents: Record<string, string>;
   failureEvidence?: VerificationEvidence | null;
-  aiModelRunner?: (prompt: string) => Promise<string>;
+  protectedPaths: readonly string[];
+  model: RepairModel;
 }
 
 export interface RepairResult {
@@ -23,242 +36,136 @@ export interface RepairResult {
   error?: string;
 }
 
-export async function repairCandidate(opts: RepairOptions): Promise<RepairResult> {
-  const startTime = performance.now();
-  const { repoDir, candidate, taskA, taskB, round } = opts;
+const FILE_BLOCK = /<file path="([^"]+)">\n([\s\S]*?)\n<\/file>/g;
 
-  if (round > 2) {
-    return {
-      success: false,
-      candidateCommit: null,
-      attempt: {
-        round,
-        prompt: "",
-        patch: "",
-        affectedContracts: [],
-        diagnosticError: "Exceeded maximum allowed repair rounds (2). Integration blocked.",
-        durationMs: 0,
-        timestamp: new Date().toISOString(),
-      },
-      error: "Exceeded maximum allowed repair rounds (2).",
-    };
+export function buildRepairPrompt(opts: RepairOptions): string {
+  const requirements = opts.candidate.frozenRequirements
+    .filter((r) => r.status === "approved")
+    .map((r) => `- ${r.id}: ${r.title} — ${r.description}`)
+    .join("\n");
+  const failures =
+    opts.failureEvidence?.testResults
+      .flatMap((s) => s.items.filter((i) => !i.passed))
+      .map((i) => `- ${i.testId}: ${i.description}${i.message ? ` (${i.message})` : ""}`)
+      .join("\n") ?? "";
+  const files = opts.editableFiles
+    .map((f) => `<current path="${f}">\n${opts.fileContents[f] ?? ""}\n</current>`)
+    .join("\n");
+
+  const context = Object.entries(opts.contextFiles ?? {})
+    .map(([f, c]) => `<readonly path="${f}">\n${c}\n</readonly>`)
+    .join("\n");
+  const sides = Object.entries(opts.sideVersions ?? {})
+    .map(
+      ([f, v]) =>
+        `<versions path="${f}">\n<base>\n${v.base}\n</base>\n<contributor_a>\n${v.a}\n</contributor_a>\n<contributor_b>\n${v.b}\n</contributor_b>\n</versions>`
+    )
+    .join("\n");
+
+  return [
+    "You are the FlareGit integration repair engine. Two contributors changed the same codebase in parallel.",
+    "Produce a single working version that preserves BOTH contributors' intended behavior. Never drop a feature,",
+    "never edit tests or verification config, and do not change unrelated behavior.",
+    "",
+    `Contributor A (${opts.taskA.contributor.name}): ${opts.taskA.goal}`,
+    `Contributor B (${opts.taskB.contributor.name}): ${opts.taskB.goal}`,
+    "",
+    `Problem type: ${opts.conflictType === "text_conflict" ? "Git text conflict (conflict markers present)" : "Clean merge that fails protected verification"}`,
+    "",
+    "Approved requirements:",
+    requirements || "(none)",
+    failures ? `\nProtected verification failures:\n${failures}` : "",
+    "",
+    "Files you may rewrite:",
+    files,
+    sides ? `\nEach side's version of the conflicting files:\n${sides}` : "",
+    context ? `\nRead-only context (use only types and exports that exist here):\n${context}` : "",
+    "",
+    'Reply with the COMPLETE new content of every file you change, each as: <file path="PATH">\\nCONTENT\\n</file>.',
+    "Reply with nothing else you want applied. No conflict markers may remain. Keep every public type and export compatible with the read-only context; do not invent types, and import every type you use from ./types.js. Totals must reconcile (any itemized receipt must sum to the total).",
+  ].join("\n");
+}
+
+export function parseRepairResponse(output: string): Map<string, string> {
+  const files = new Map<string, string>();
+  for (const match of output.matchAll(FILE_BLOCK)) {
+    files.set(match[1]!, match[2]!);
   }
+  return files;
+}
 
-  // Construct prompt explaining context
-  const failureDescriptions = opts.failureEvidence?.testResults.flatMap((s) =>
-    s.items.filter((i) => !i.passed).map((i) => `Failed: ${i.testId} - ${i.description} (${i.message || ""})`)
-  ) || [];
+function isProtected(file: string, protectedPaths: readonly string[]): boolean {
+  return protectedPaths.some((p) => (p.endsWith("/") ? file.startsWith(p) : file === p));
+}
 
-  const prompt = `
-You are the FlareGit Autonomous Integration Repair Engine.
-Integrate changes from two parallel contributors into a working, verified codebase.
-
-Contributor A (${taskA.contributor.name}):
-Goal: ${taskA.goal}
-
-Contributor B (${taskB.contributor.name}):
-Goal: ${taskB.goal}
-
-Conflict Type: ${opts.conflictType}
-Conflicting Files: ${opts.conflictingFiles.join(", ")}
-
-${opts.conflictDiff ? `Conflict Diff:\n${opts.conflictDiff}\n` : ""}
-${failureDescriptions.length > 0 ? `Verification Failures:\n${failureDescriptions.join("\n")}\n` : ""}
-
-CRITICAL INTEGRATION SPECIFICATIONS:
-1. Preserve BOTH contributors' features without discarding either one.
-2. Group Discount: 15% discount for 4+ tickets on the ticket subtotal ($160 * 0.85 = $136).
-3. Refundable Surcharge: $5.00 per ticket surcharge with visible refundable active indicator.
-4. Approved Policy: The discount applies to the ticket price, NOT to the refund surcharge.
-   Example: Four $40 refundable tickets cost: $160 * 0.85 + $20 = $156.
-5. If catalog prices are represented in integer cents (e.g., 4000), consumers must normalize to standard dollar amounts before quote calculations.
-
-Provide the complete repaired file contents for each conflicting file.
-`.trim();
-
-  let patchApplied = false;
-  let patchDescription = "";
-
-  // Check if external AI runner provided, else apply deterministic synthesis
-  if (opts.aiModelRunner) {
-    try {
-      const modelOutput = await opts.aiModelRunner(prompt);
-      // If model provided file code block
-      const codeMatch = modelOutput.match(/```(?:typescript|ts|tsx)?\n([\s\S]*?)```/);
-      if (codeMatch && codeMatch[1]) {
-        for (const file of opts.conflictingFiles) {
-          const filePath = path.join(repoDir, file);
-          fs.writeFileSync(filePath, codeMatch[1].trim());
-          patchApplied = true;
-          patchDescription = `AI Repair applied for ${file}`;
-        }
-      }
-    } catch (err: any) {
-      console.warn("AI repair runner encountered error, falling back to deterministic synthesis:", err.message);
-    }
-  }
-
-  // Deterministic synthesis fallback for the fixture scenarios (Act I, Act II)
-  if (!patchApplied) {
-    for (const file of opts.conflictingFiles) {
-      const targetPath = path.join(repoDir, file);
-
-      if (file.endsWith("pricing.ts")) {
-        // Resolve textual overlap in pricing.ts: combine group discount (15% for 4+) and refundable surcharge ($5/ticket)
-        const repairedPricing = `
-import type { QuoteParams, QuoteResult } from "./types.js";
-
-/**
- * FlareGit Repaired Quote Calculation
- * Integrates 15% group discount for 4+ tickets and $5/ticket refundable surcharge.
- * Policy: Group discount applies only to ticket price, not refund fee.
- */
-export function calculateQuote(params: QuoteParams): QuoteResult {
-  const ticketCount = Math.max(1, params.ticketCount);
-  const basePrice = params.basePrice;
-  const rawSubtotal = ticketCount * basePrice;
-
-  // Group discount: 15% off for 4 or more tickets
-  const hasGroupDiscount = ticketCount >= 4;
-  const discountAmount = hasGroupDiscount ? rawSubtotal * 0.15 : 0;
-  const ticketTotal = rawSubtotal - discountAmount;
-
-  // Refundable surcharge: $5.00 per ticket
-  const isRefundable = Boolean(params.isRefundable);
-  const refundFeePerTicket = isRefundable ? 5.0 : 0;
-  const refundFeeTotal = ticketCount * refundFeePerTicket;
-
-  const total = ticketTotal + refundFeeTotal;
-
-  const breakdown: string[] = [
-    \`\${ticketCount} ticket\${ticketCount > 1 ? "s" : ""} @ $\${basePrice.toFixed(2)} = $\${rawSubtotal.toFixed(2)}\`,
-  ];
-  if (discountAmount > 0) {
-    breakdown.push(\`Group discount (15%): -$\${discountAmount.toFixed(2)}\`);
-  }
-  if (refundFeeTotal > 0) {
-    breakdown.push(\`Refundable protection: +$\${refundFeeTotal.toFixed(2)}\`);
-  }
-
+function fail(round: number, prompt: string, started: number, message: string, files: string[]): RepairResult {
   return {
-    ticketCount,
-    basePrice,
-    ticketTotal,
-    discountAmount,
-    refundFeeTotal,
-    total,
-    isRefundable,
-    breakdown,
+    success: false,
+    candidateCommit: null,
+    attempt: {
+      round,
+      prompt,
+      patch: "",
+      affectedContracts: files,
+      diagnosticError: message,
+      durationMs: Math.round(performance.now() - started),
+      timestamp: new Date().toISOString(),
+    },
+    error: message,
   };
 }
-`.trim();
-        fs.writeFileSync(targetPath, repairedPricing + "\n");
-        patchApplied = true;
-        patchDescription = "Repaired quote calculation combining discount and refundability";
-      } else if (file.endsWith("catalog.ts") || file.includes("catalog")) {
-        // Resolve catalog units mismatch (e.g. cents vs dollars)
-        const currentContent = fs.existsSync(targetPath) ? fs.readFileSync(targetPath, "utf-8") : "";
-        if (currentContent.includes("4000") || currentContent.includes("priceInCents")) {
-          // Normalize catalog pricing
-          const repairedCatalog = `
-import type { EventItem } from "./types.js";
 
-export const EVENT_CATALOG: EventItem[] = [
-  {
-    id: "cf-connect-2026",
-    name: "Cloudflare Connect 2026",
-    venue: "Moscone West, San Francisco",
-    date: "October 21, 2026",
-    price: 40, // Normalized to dollars for quote calculation
-  },
-  {
-    id: "edge-agent-summit",
-    name: "Agentic Systems Summit",
-    venue: "Austin Convention Center",
-    date: "November 14, 2026",
-    price: 50,
-  },
-];
+export async function repairCandidate(opts: RepairOptions): Promise<RepairResult> {
+  const started = performance.now();
+  const prompt = buildRepairPrompt(opts);
+  const { repoDir, round } = opts;
 
-export function getEvent(id: string): EventItem {
-  const event = EVENT_CATALOG.find((e) => e.id === id);
-  if (!event) throw new Error(\`Event not found: \${id}\`);
-  return event;
-}
-`.trim();
-          fs.writeFileSync(targetPath, repairedCatalog + "\n");
-          patchApplied = true;
-          patchDescription = "Repaired catalog units contract: normalized cents to dollars";
-        }
-      }
-    }
+  if (round > MAX_REPAIR_ROUNDS) {
+    return fail(round, prompt, started, `Exceeded maximum repair rounds (${MAX_REPAIR_ROUNDS}).`, opts.editableFiles);
   }
 
-  if (!patchApplied) {
-    return {
-      success: false,
-      candidateCommit: null,
-      attempt: {
-        round,
-        prompt,
-        patch: "",
-        affectedContracts: opts.conflictingFiles,
-        diagnosticError: "Repair engine could not produce a valid patch for the conflicting files.",
-        durationMs: Math.round(performance.now() - startTime),
-        timestamp: new Date().toISOString(),
-      },
-      error: "Unable to synthesize patch for conflicting files.",
-    };
+  let output: string;
+  try {
+    output = await opts.model(prompt);
+  } catch (err) {
+    return fail(round, prompt, started, `Repair model unavailable: ${err instanceof Error ? err.message : String(err)}`, opts.editableFiles);
   }
 
-  // Stage repaired files and commit
-  spawnSync("git", ["-C", repoDir, "add", "-A"]);
-  const commitMsg = `FlareGit Repair (Round ${round}): Resolve integration conflict between ${taskA.id} and ${taskB.id}`;
-  const commitRes = spawnSync("git", [
-    "-C",
-    repoDir,
-    "-c",
-    "user.name=FlareGit Repair Agent",
-    "-c",
-    "user.email=repair@flaregit.local",
-    "commit",
-    "-m",
-    commitMsg,
-  ]);
-
-  if (commitRes.status !== 0) {
-    return {
-      success: false,
-      candidateCommit: null,
-      attempt: {
-        round,
-        prompt,
-        patch: patchDescription,
-        affectedContracts: opts.conflictingFiles,
-        diagnosticError: `Git commit failed: ${commitRes.stderr.toString()}`,
-        durationMs: Math.round(performance.now() - startTime),
-        timestamp: new Date().toISOString(),
-      },
-      error: "Git commit of repaired patch failed.",
-    };
+  const proposed = parseRepairResponse(output);
+  if (proposed.size === 0) {
+    return fail(round, prompt, started, "Repair model returned no file changes.", opts.editableFiles);
   }
 
-  const revParse = spawnSync("git", ["-C", repoDir, "rev-parse", "HEAD"]);
-  const candidateCommit = revParse.stdout.toString().trim();
+  const root = path.resolve(repoDir);
+  for (const [file, content] of proposed) {
+    const target = path.resolve(root, file);
+    if (!target.startsWith(root + path.sep)) return fail(round, prompt, started, `Repair path escapes workspace: ${file}`, [file]);
+    if (!opts.editableFiles.includes(file)) return fail(round, prompt, started, `Repair touched out-of-scope file: ${file}`, [file]);
+    if (isProtected(file, opts.protectedPaths)) return fail(round, prompt, started, `Repair touched protected path: ${file}`, [file]);
+    if (/^(<<<<<<<|=======|>>>>>>>)/m.test(content)) return fail(round, prompt, started, `Conflict markers remain in ${file}`, [file]);
+    if (Buffer.byteLength(content) > MAX_FILE_BYTES) return fail(round, prompt, started, `Repair output too large for ${file}`, [file]);
+  }
 
-  const attempt: RepairAttempt = {
-    round,
-    prompt,
-    patch: patchDescription,
-    affectedContracts: opts.conflictingFiles,
-    diagnosticError: "",
-    durationMs: Math.round(performance.now() - startTime),
-    timestamp: new Date().toISOString(),
-  };
+  for (const [file, content] of proposed) {
+    fs.writeFileSync(path.join(root, file), content.endsWith("\n") ? content : `${content}\n`);
+  }
+
+  gitOrThrow(repoDir, ["add", "-A"]);
+  const message = `FlareGit repair (round ${round}) for ${opts.taskA.id} + ${opts.taskB.id}`;
+  const commit = git(repoDir, [...PLATFORM_IDENTITY, "commit", "--allow-empty", "-m", message]);
+  if (!commit.ok) return fail(round, prompt, started, `Git commit of repair failed: ${commit.stderr.trim()}`, [...proposed.keys()]);
 
   return {
     success: true,
-    candidateCommit,
-    attempt,
+    candidateCommit: gitOrThrow(repoDir, ["rev-parse", "HEAD"]),
+    attempt: {
+      round,
+      prompt,
+      patch: [...proposed.keys()].join(", "),
+      affectedContracts: [...proposed.keys()],
+      diagnosticError: "",
+      durationMs: Math.round(performance.now() - started),
+      timestamp: new Date().toISOString(),
+    },
   };
 }

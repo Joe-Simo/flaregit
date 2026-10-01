@@ -6,7 +6,7 @@ export function App() {
   const [weightKg, setWeightKg] = useState<number>(5);
   const [speed, setSpeed] = useState<ShippingSpeed>("standard");
   const [isHazardous, setIsHazardous] = useState<boolean>(false);
-  const [insuranceValueUsd, setInsuranceValueUsd] = useState<number>(0);
+  const [insuranceValueUsd] = useState<number>(0);
 
   const quote: ShippingQuote = calculateShipping({
     weightKg,

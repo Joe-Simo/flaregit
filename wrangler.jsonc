@@ -4,68 +4,51 @@
   "main": "src/server/worker.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
-  "assets": {
-    "directory": "./dist",
-    "binding": "ASSETS"
+  "assets": { "directory": "./dist", "binding": "ASSETS", "run_worker_first": ["/api/*", "/preview/*", "/webhooks/*"], "not_found_handling": "single-page-application" },
+  "vars": {
+    "CANONICAL_REPO": "flaregit-canonical",
+    "AI_GATEWAY_ID": "default",
+    "FREE_RUNS_PER_DAY": "3",
+    "PRO_RUNS_PER_DAY": "100",
+    "POLAR_SERVER": "sandbox",
+    "POLAR_PRODUCT_ID": "55dca3a3-71b0-4a54-b7f9-098f6b57a200",
+    "PREVIEW_ORIGIN": "https://preview.flaregit.com",
+    "ACCESS_TEAM_DOMAIN": "simolink.cloudflareaccess.com",
+    "ACCESS_AUD": "bbfdea277de662ebabe2598383181eef6d5302eb96ca30ead794d2c3595f4ae5"
   },
   "durable_objects": {
     "bindings": [
-      {
-        "name": "REPOSITORY_CONTROLLER",
-        "class_name": "RepositoryController"
-      }
+      { "name": "REPOSITORY_CONTROLLER", "class_name": "RepositoryController" },
+      { "name": "INTEGRATOR", "class_name": "IntegratorSandbox" },
+      { "name": "AGENT", "class_name": "AgentSandbox" }
     ]
   },
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["RepositoryController"]
-    }
-  ],
-  "ai": {
-    "binding": "AI"
+  "exports": {
+    "RepositoryController": { "type": "durable-object", "storage": "sqlite" },
+    "IntegratorSandbox": { "type": "durable-object", "storage": "sqlite" },
+    "AgentSandbox": { "type": "durable-object", "storage": "sqlite" },
+    "IntegratorContainer": { "type": "durable-object", "state": "deleted" },
+    "AgentContainer": { "type": "durable-object", "state": "deleted" }
   },
-  "artifacts": [
-    {
-      "binding": "ARTIFACTS",
-      "namespace": "flaregit-default"
-    }
+  "containers": [
+    { "class_name": "IntegratorSandbox", "image": "./Dockerfile", "instance_type": "standard-2", "max_instances": 3 },
+    { "class_name": "AgentSandbox", "image": "./Dockerfile", "instance_type": "standard-2", "max_instances": 4 }
   ],
-  "routes": [
-    {
-      "pattern": "flaregit.com/*",
-      "custom_domain": true
-    }
-  ],
-  "r2_buckets": [
-    {
-      "binding": "EVIDENCE_BUCKET",
-      "bucket_name": "flaregit-evidence"
-    }
-  ],
+  "ai": { "binding": "AI" },
+  "artifacts": [{ "binding": "ARTIFACTS", "namespace": "flaregit-default" }],
+  "r2_buckets": [{ "binding": "EVIDENCE_BUCKET", "bucket_name": "flaregit-evidence" }],
   "queues": {
-    "producers": [
-      {
-        "binding": "INTEGRATION_QUEUE",
-        "queue": "flaregit-integration-events"
-      }
-    ],
-    "consumers": [
-      {
-        "queue": "flaregit-integration-events",
-        "max_batch_size": 10,
-        "max_batch_timeout": 5
-      }
-    ]
+    "producers": [{ "binding": "INTEGRATION_QUEUE", "queue": "flaregit-integration-events" }],
+    "consumers": [{ "queue": "flaregit-integration-events", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5 }]
   },
   "workflows": [
-    {
-      "name": "flaregit-integration-workflow",
-      "binding": "INTEGRATION_WORKFLOW",
-      "class_name": "FlareGitIntegrationWorkflow"
-    }
+    { "name": "flaregit-integration-workflow", "binding": "INTEGRATION_WORKFLOW", "class_name": "FlareGitIntegrationWorkflow" },
+    { "name": "flaregit-scenario-workflow", "binding": "SCENARIO_WORKFLOW", "class_name": "FlareGitScenarioWorkflow" }
   ],
-  "observability": {
-    "enabled": true
-  }
+  "routes": [
+    { "pattern": "flaregit.com", "custom_domain": true },
+    { "pattern": "preview.flaregit.com", "custom_domain": true }
+  ],
+  "workers_dev": true,
+  "observability": { "enabled": true }
 }
