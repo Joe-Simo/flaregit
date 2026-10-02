@@ -6,6 +6,7 @@ import { CandidateJournal } from "../components/CandidateJournal";
 import { LivePreview } from "../components/LivePreview";
 import { DecisionModal } from "../components/DecisionModal";
 import { EvidenceDrawer } from "../components/EvidenceDrawer";
+import { CandidateReview } from "../components/CandidateReview";
 import { apiJson } from "../api";
 import type { FlareGitProjectState, ProductDecision } from "@/core/types";
 
@@ -15,6 +16,7 @@ function summarize(state: FlareGitProjectState): { stage: PipelineStage; message
   if (Object.values(state.decisions).some((d) => d.status === "pending")) {
     return { stage: "decision_needed", message: "Decision needed", detail: "Two requirements contradict each other. The last accepted version stays live until you choose." };
   }
+  if (candidates.some((c) => c.status === "awaiting_review")) return { stage: "verifying", message: "Verified, waiting for your review", detail: "Checks passed on the exact candidate. Nothing lands until a person accepts it." };
   if (candidates.some((c) => c.status === "repairing")) return { stage: "repairing", message: "Repairing", detail: "Workers AI proposes a fix; it is only accepted if your protected checks pass." };
   if (candidates.some((c) => c.status === "verifying") || tasks.some((t) => t.status === "verifying")) {
     return { stage: "verifying", message: "Verifying the exact candidate", detail: "Your protected checks run against the candidate commit in an isolated workspace." };
@@ -93,13 +95,16 @@ export function IntegrationTab({
         </Button>
       </div>
       {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>}
+      {Object.values(state.candidates)
+        .filter((c) => c.status === "awaiting_review" || (c.review?.approved && c.status === "verified" && !state.journal.some((j) => j.candidateId === c.id)))
+        .map((c) => <CandidateReview key={c.id} projectId={projectId} candidate={c} evidence={c.evidenceId ? state.evidence[c.evidenceId] : undefined} onDone={reload} />)}
       <div className={`grid gap-4 ${kind === "demo" ? "lg:grid-cols-2" : ""}`}>
         <div className="min-h-[360px]">
           <CandidateJournal candidates={state.candidates} journal={state.journal} />
         </div>
         {kind === "demo" && (
           <div className="min-h-[560px]">
-            <LivePreview currentCommit={state.acceptedState.currentCommit} previewBase={previewBase} />
+            <LivePreview projectId={projectId} currentCommit={state.acceptedState.currentCommit} />
           </div>
         )}
       </div>

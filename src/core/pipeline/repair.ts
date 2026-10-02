@@ -12,8 +12,8 @@ export type RepairModel = (prompt: string) => Promise<string>;
 export interface RepairOptions {
   repoDir: string;
   candidate: CandidateGeneration;
-  taskA: Task;
-  taskB: Task;
+  /** Every change being combined, in merge order (one change rebasing onto newer accepted work is valid too). */
+  tasks: Task[];
   round: number;
   conflictType: "text_conflict" | "behavior_failure";
   /** Files the model may rewrite. Anything else in its answer is rejected. */
@@ -63,12 +63,13 @@ export function buildRepairPrompt(opts: RepairOptions): string {
     .join("\n");
 
   return [
-    "You are the FlareGit integration repair engine. Two contributors changed the same codebase in parallel.",
-    "Produce a single working version that preserves BOTH contributors' intended behavior. Never drop a feature,",
+    opts.tasks.length > 1
+      ? `You are the FlareGit integration repair engine. ${opts.tasks.length} contributors changed the same codebase in parallel.`
+      : "You are the FlareGit integration repair engine. A contributor's change was written against an older version and newer work has been accepted since.",
+    "Produce a single working version that preserves EVERY contributor's intended behavior, including the already accepted version. Never drop a feature,",
     "never edit tests or verification config, and do not change unrelated behavior.",
     "",
-    `Contributor A (${opts.taskA.contributor.name}): ${opts.taskA.goal}`,
-    `Contributor B (${opts.taskB.contributor.name}): ${opts.taskB.goal}`,
+    ...opts.tasks.map((t, i) => `Contributor ${String.fromCharCode(65 + i)} (${t.contributor.name}): ${t.goal}`),
     "",
     `Problem type: ${opts.conflictType === "text_conflict" ? "Git text conflict (conflict markers present)" : "Clean merge that fails protected verification"}`,
     "",
@@ -151,7 +152,7 @@ export async function repairCandidate(opts: RepairOptions): Promise<RepairResult
   }
 
   gitOrThrow(repoDir, ["add", "-A"]);
-  const message = `FlareGit repair (round ${round}) for ${opts.taskA.id} + ${opts.taskB.id}`;
+  const message = `FlareGit repair (round ${round}) for ${opts.tasks.map((t) => t.id).join(" + ")}`;
   const commit = git(repoDir, [...PLATFORM_IDENTITY, "commit", "--allow-empty", "-m", message]);
   if (!commit.ok) return fail(round, prompt, started, `Git commit of repair failed: ${commit.stderr.trim()}`, [...proposed.keys()]);
 

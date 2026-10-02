@@ -1,15 +1,17 @@
 import type { Env } from "./env.js";
 import { gitAuthEnv, q } from "./shell.js";
+import { buildPrefix } from "./preview-access.js";
 
 const MIME: Record<string, string> = { html: "text/html; charset=utf-8", js: "text/javascript", css: "text/css", svg: "image/svg+xml", json: "application/json" };
 
-/** Bundle the application at `commit` (no contributor code is executed) and store it under builds/<commit>/ in R2. */
+/** Bundle the application at `commit` (no contributor code is executed) and store it under builds/<project>/<commit>/ in R2. */
 export async function ensureBuild(env: Env, projectId: string, commit: string, canonicalRepo: string): Promise<void> {
-  if (await env.EVIDENCE_BUCKET.head(`builds/${commit}/index.html`)) return;
+  const prefix = buildPrefix(projectId, commit);
+  if (await env.EVIDENCE_BUCKET.head(`${prefix}/index.html`)) return;
   // A marker stops concurrent requests from each starting a container for the same commit.
-  const marker = await env.EVIDENCE_BUCKET.head(`builds/${commit}/.building`);
+  const marker = await env.EVIDENCE_BUCKET.head(`${prefix}/.building`);
   if (marker && Date.now() - marker.uploaded.getTime() < 10 * 60_000) return;
-  await env.EVIDENCE_BUCKET.put(`builds/${commit}/.building`, "1");
+  await env.EVIDENCE_BUCKET.put(`${prefix}/.building`, "1");
 
   const repo = await env.ARTIFACTS.get(canonicalRepo);
   const remote = String((await repo.info()).remote);
@@ -26,8 +28,8 @@ export async function ensureBuild(env: Env, projectId: string, commit: string, c
   for (const f of files) {
     const rel = f.replace(/^\.\//, "");
     const ext = rel.split(".").pop() ?? "";
-    await env.EVIDENCE_BUCKET.put(`builds/${commit}/${rel}`, await sb.readFile(`/tmp/build-out/${rel}`), { httpMetadata: { contentType: MIME[ext] ?? "application/octet-stream" } });
+    await env.EVIDENCE_BUCKET.put(`${prefix}/${rel}`, await sb.readFile(`/tmp/build-out/${rel}`), { httpMetadata: { contentType: MIME[ext] ?? "application/octet-stream" } });
   }
-  await env.EVIDENCE_BUCKET.delete(`builds/${commit}/.building`);
+  await env.EVIDENCE_BUCKET.delete(`${prefix}/.building`);
   await sb.destroy();
 }

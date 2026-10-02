@@ -13,6 +13,8 @@ export interface Env {
   ARTIFACTS: ArtifactsBinding;
   AI: AiBinding;
   ASSETS: Fetcher;
+  /** HMAC key for preview capability links (secret). */
+  PREVIEW_SIGNING_KEY?: string;
   /** Per-user API rate limit (Workers Rate Limiting binding). */
   API_LIMITER: { limit(opts: { key: string }): Promise<{ success: boolean }> };
   /** Clerk frontend API URL (the JWT issuer), e.g. https://example.clerk.accounts.dev (var). */
@@ -41,6 +43,6 @@ export interface Env {
 
 export type QueueMessage =
   | { type: "git.push"; projectId: string; taskId: string; commit: string; ready: boolean; eventId: string }
-  | { type: "integration.requested"; projectId: string; taskIds: [string, string]; eventId: string }
+  | { type: "integration.requested"; projectId: string; taskIds: string[]; eventId: string }
   | { type: "webhook.deliver"; projectId: string; deliveryId: string }
   | { type: "probe"; sentAt: number };

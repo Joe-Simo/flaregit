@@ -364,8 +364,7 @@ export class FlareGitRepositoryController {
         const result = await repairCandidate({
           repoDir: workspace,
           candidate,
-          taskA,
-          taskB,
+          tasks: [taskA, taskB],
           round,
           conflictType,
           editableFiles,

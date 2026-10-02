@@ -29,7 +29,14 @@ const CodeLine = React.memo(function CodeLine({ text, html }: { text: string; ht
   return html ? <span className="hljs-line" dangerouslySetInnerHTML={{ __html: html }} /> : <span>{text}</span>;
 });
 
-export function DiffViewer({ files, loadBlob }: { files: FileChange[]; loadBlob: (hash: string) => Promise<BlobResult> }) {
+export function DiffViewer({ files, loadBlob, onLineClick, commented }: {
+  files: FileChange[];
+  loadBlob: (hash: string) => Promise<BlobResult>;
+  /** Click a line number to start a comment anchored to that line. */
+  onLineClick?: (path: string, line: number) => void;
+  /** "path:line" keys that already have comments. */
+  commented?: Set<string>;
+}) {
   const [state, setState] = useState<Record<number, FileState>>({});
   const [helpOpen, setHelpOpen] = useState(false);
   const parentRef = useRef<HTMLDivElement>(null);
@@ -172,7 +179,16 @@ export function DiffViewer({ files, loadBlob }: { files: FileChange[]; loadBlob:
             return (
               <div key={v.key} style={style} className={`flex whitespace-pre ${bg}`}>
                 <span className="hidden sm:block w-10 shrink-0 text-right pr-2 text-muted-foreground select-none">{row.a ?? ""}</span>
-                <span className="sticky left-0 z-10 bg-background w-9 sm:w-10 shrink-0 text-right pr-2 text-muted-foreground select-none">{row.b ?? row.a ?? ""}</span>
+                {(() => {
+                  const line = row.b ?? row.a;
+                  const path = files[r.fileIndex]!.path;
+                  const has = line !== undefined && commented?.has(`${path}:${line}`);
+                  return onLineClick && line !== undefined ? (
+                    <button className={`sticky left-0 z-10 bg-background w-9 sm:w-10 shrink-0 text-right pr-2 select-none hover:text-orange-400 ${has ? "text-orange-400 font-bold" : "text-muted-foreground"}`} aria-label={`Comment on ${path} line ${line}`} onClick={() => onLineClick(path, line)}>{line}</button>
+                  ) : (
+                    <span className="sticky left-0 z-10 bg-background w-9 sm:w-10 shrink-0 text-right pr-2 text-muted-foreground select-none">{line ?? ""}</span>
+                  );
+                })()}
                 <span className="w-4 shrink-0 select-none">{row.t === "h" ? "" : row.t}</span>
                 <CodeLine text={row.text} html={row.html} />
               </div>

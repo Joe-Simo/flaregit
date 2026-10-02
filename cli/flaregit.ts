@@ -104,11 +104,15 @@ const HELP = `flaregit — JSON by default (--pretty for humans)
   repo delete <repo> --confirm <name>
   changes <repo>
   change new <repo> "<goal>" [--agent]
-  work <repo> "<goal>" [--dir D] [--on CHANGE]   create a change (stacked on CHANGE if given), clone it and check out its branch
+  work <repo> "<goal>" [--dir D] [--on CHANGE] [--issue N]   create a change (stacked on CHANGE if given), clone it and check out its branch
   push                                   push the current change branch (fresh credential)
   ready <repo> <change> | cancel <repo> <change>
   integrate <repo> <changeA> <changeB>
   log <repo> [--limit N] | tree <repo> [path] | cat <repo> <path>
+  issues <repo> [--state closed] | issue new <repo> "<title>" [--body T] | issue view|close|reopen <repo> <n>
+  comment <repo> "<text>" (--issue N | --change ID | --candidate ID) [--path P --line N]
+  candidates <repo> [--all]                      verified candidates waiting for review
+  accept|reject <repo> <candidate> [--note T]    decide what becomes history
   diff <repo> (--change ID | --commit SHA)
   review <repo> (--change ID | --commit SHA)   interactive terminal reviewer (j/k n/p c a q)
   clone <repo> [dir] | activity <repo> | status
@@ -184,7 +188,7 @@ async function main() {
     const goal = rest[0] ?? fail('Usage: flaregit work <repo> "<goal>"');
     const taskId = `${goal.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 24) || "change"}-${Math.random().toString(36).slice(2, 6)}`;
     const on = flag("on");
-    const created = await api<{ task: string; remote: string; branch: string; token: string }>("POST", `/p/${id}/tasks`, { taskId, goal, ...(on ? { dependsOn: on } : {}) });
+    const created = await api<{ task: string; remote: string; branch: string; token: string }>("POST", `/p/${id}/tasks`, { taskId, goal, ...(on ? { dependsOn: on } : {}), ...(flag("issue") ? { issue: Number(flag("issue")) } : {}) });
     const dir = flag("dir") ?? taskId;
     git(["clone", "--quiet", created.remote, dir], created.token);
     if (on) git(["checkout", "--quiet", `task/${on}`], undefined, dir);
@@ -202,6 +206,26 @@ async function main() {
     return out({ pushed: t.branch, change, next: `flaregit ready ${id} ${change}` });
   }
   if (cmd === "ready" || cmd === "cancel") return out(await api("POST", `/p/${await repo(sub)}/tasks/${rest[0] ?? fail("Specify a change id")}/${cmd}`));
+  if (cmd === "issues") return out(await api("GET", `/p/${await repo(sub)}/issues?state=${flag("state") === "closed" ? "closed" : "open"}`));
+  if (cmd === "issue") {
+    const id = await repo(rest[0]);
+    if (sub === "new") return out(await api("POST", `/p/${id}/issues`, { title: rest[1] ?? fail('Usage: flaregit issue new <repo> "<title>" [--body TEXT]'), body: flag("body") ?? "" }));
+    if (sub === "view") return out(await api("GET", `/p/${id}/issues/${rest[1] ?? fail("Specify an issue number")}`));
+    if (sub === "close" || sub === "reopen") return out(await api("PATCH", `/p/${id}/issues/${rest[1] ?? fail("Specify an issue number")}`, { state: sub === "close" ? "closed" : "open" }));
+    fail("Usage: flaregit issue new|view|close|reopen <repo> ...");
+  }
+  if (cmd === "comment") {
+    const subject = flag("issue") ? `issue:${flag("issue")}` : flag("change") ? `change:${flag("change")}` : flag("candidate") ? `candidate:${flag("candidate")}` : fail("Pass --issue N, --change ID or --candidate ID");
+    const line = flag("line");
+    return out(await api("POST", `/p/${await repo(sub)}/comments`, { subject, body: rest[0] ?? fail('Usage: flaregit comment <repo> "<text>" --change ID [--path P --line N]'), ...(flag("path") ? { path: flag("path") } : {}), ...(line ? { line: Number(line) } : {}) }));
+  }
+  if (cmd === "candidates") {
+    const st = await api<{ candidates: Record<string, { id: string; status: string; candidateCommit?: string; participatingTaskIds: string[]; expectedAcceptedBase: string }> }>("GET", `/p/${await repo(sub)}/state`);
+    return out(Object.values(st.candidates).filter((c) => flags.has("all") || c.status === "awaiting_review").map((c) => ({ id: c.id, status: c.status, commit: c.candidateCommit ?? null, base: c.expectedAcceptedBase, changes: c.participatingTaskIds })));
+  }
+  if (cmd === "accept" || cmd === "reject") {
+    return out(await api("POST", `/p/${await repo(sub)}/candidates/${rest[0] ?? fail(`Usage: flaregit ${cmd} <repo> <candidate> [--note TEXT]`)}/review`, { approved: cmd === "accept", note: flag("note") ?? "" }));
+  }
   if (cmd === "integrate") return out(await api("POST", `/p/${await repo(sub)}/integrations`, { taskIds: [rest[0], rest[1]] }));
   if (cmd === "activity") return out(await api("GET", `/p/${await repo(sub)}/activity`));
   if (cmd === "log") return out(await api("GET", `/p/${await repo(sub)}/commits?limit=${flag("limit") ?? 20}`));

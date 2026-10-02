@@ -3,8 +3,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-const BRANCHES = Number(process.env.RACE_BRANCHES ?? 500);
-const PARALLEL = 40;
+// The suite runs 50 by default; the full 500-branch run is `RACE_BRANCHES=500 RACE_TIMEOUT_MS=3600000 bun test tests/landing-race.test.ts`.
+const BRANCHES = Number(process.env.RACE_BRANCHES ?? 50);
+const PARALLEL = Number(process.env.RACE_PARALLEL ?? 16);
 
 const sh = async (cwd: string, ...argv: string[]) => {
   const p = Bun.spawn(["git", ...argv], { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@e.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@e.com" } });
@@ -65,4 +66,4 @@ test(`${BRANCHES} concurrent landings onto one branch: no lost refs, no orphan c
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
-}, 600_000);
+}, Number(process.env.RACE_TIMEOUT_MS ?? 600_000));

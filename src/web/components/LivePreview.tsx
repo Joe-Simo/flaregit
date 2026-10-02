@@ -2,28 +2,29 @@ import React, { useEffect, useState } from "react";
 import { Monitor, ShieldCheck } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { apiJson } from "../api";
 
 interface LivePreviewProps {
+  projectId: string;
   currentCommit: string;
-  /** Origin that serves previews; must differ from the app origin. */
-  previewBase: string;
 }
 
 /** Renders the real application built from the accepted commit (never a re-implementation). */
-export function LivePreview({ currentCommit, previewBase }: LivePreviewProps) {
-  const src = `${previewBase}/preview/${currentCommit}/`;
-  const [ready, setReady] = useState(false);
+export function LivePreview({ projectId, currentCommit }: LivePreviewProps) {
+  const [src, setSrc] = useState<string | null>(null);
+  const ready = src !== null;
 
   // The build for a commit is created on demand; poll until it exists instead of showing a blank pane.
   useEffect(() => {
     let cancelled = false;
     let attempts = 0;
-    setReady(false);
+    setSrc(null);
+    // Previews are private: ask the API (membership-checked) for a short-lived link once the build exists.
     const check = async () => {
       try {
-        const res = await fetch(src, { method: "GET" });
-        if (res.ok) {
-          if (!cancelled) setReady(true);
+        const r = await apiJson<{ ready: boolean; url?: string }>(`/p/${projectId}/preview?commit=${currentCommit}`);
+        if (r.ready && r.url) {
+          if (!cancelled) setSrc(r.url);
           return;
         }
       } catch {
@@ -35,7 +36,7 @@ export function LivePreview({ currentCommit, previewBase }: LivePreviewProps) {
     return () => {
       cancelled = true;
     };
-  }, [src]);
+  }, [projectId, currentCommit]);
 
   return (
     <Card className="h-full flex flex-col border-border/80 bg-card/70 backdrop-blur-sm overflow-hidden">

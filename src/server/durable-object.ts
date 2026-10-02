@@ -68,6 +68,37 @@ export interface TokenScope {
   expiresAt?: number;
 }
 
+export interface IssueRow {
+  number: number;
+  title: string;
+  body: string;
+  state: "open" | "closed";
+  author: string;
+  created_at: string;
+  updated_at: string;
+  closed_by: string | null;
+  comments: number;
+}
+
+/** One conversation model for issues, changes and candidates: subject is "issue:<n>", "change:<id>" or "candidate:<id>". */
+export interface CommentRow {
+  id: number;
+  subject: string;
+  author: string;
+  body: string;
+  path: string | null;
+  line: number | null;
+  commit: string | null;
+  created_at: string;
+}
+
+export interface Profile {
+  handle: string;
+  displayName: string;
+  bio: string;
+  joinedAt: string;
+}
+
 export interface DomainRow {
   domain: string;
   project_id: string;
@@ -120,6 +151,17 @@ export interface Ledger {
   setInboxState(id: number, state: "unread" | "archived" | "snoozed"): Promise<void>;
   inboxUnread(): Promise<{ direct: number; activity: number }>;
   domainsFor(projectId: string): Promise<DomainRow[]>;
+  getProfile(): Promise<Profile>;
+  listIssues(state: "open" | "closed"): Promise<IssueRow[]>;
+  getIssue(n: number): Promise<IssueRow | null>;
+  createIssue(i: { title: string; body: string; author: string }): Promise<IssueRow>;
+  setIssueState(n: number, state: "open" | "closed", by: string): Promise<IssueRow | null>;
+  listComments(subject: string): Promise<CommentRow[]>;
+  addComment(c: { subject: string; author: string; body: string; path?: string; line?: number; commit?: string }): Promise<CommentRow>;
+  setProfile(p: Profile): Promise<void>;
+  claimHandle(handle: string, accountKey: string): Promise<boolean>;
+  releaseHandle(handle: string, accountKey: string): Promise<void>;
+  accountForHandle(handle: string): Promise<string | null>;
   claimDomain(domain: string, projectId: string): Promise<DomainRow>;
   verifyDomain(domain: string, projectId: string): Promise<{ lostBy: string[] }>;
   releaseDomain(domain: string, projectId: string): Promise<void>;
@@ -145,8 +187,10 @@ export interface Ledger {
   createTask(task: Task): Promise<Task>;
   resolveDecision(decisionId: string, selectedOptionId: string): Promise<{ taskIds: string[] }>;
   getState(): Promise<FlareGitProjectState>;
-  claimLanding(req: { holder: string; taskIds: [string, string] }): Promise<ClaimResult>;
+  claimLanding(req: { holder: string; taskIds: string[] }): Promise<ClaimResult>;
   recordVerification(candidateId: string, commit: string, evidence: VerificationEvidence): Promise<void>;
+  awaitReview(candidateId: string, commit: string, workflowInstanceId: string): Promise<void>;
+  recordReview(candidateId: string, review: { approved: boolean; by: string; note?: string }): Promise<{ ok: boolean; instanceId?: string; error?: string }>;
   preparePublish(candidateId: string): Promise<PrepareResult>;
   completePublish(journalId: string): Promise<void>;
   abortPublish(candidateId: string, journalId: string | undefined, reason: string, outcome: "failed" | "stale"): Promise<void>;
@@ -182,6 +226,11 @@ export class RepositoryController extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS deliveries (id TEXT PRIMARY KEY, seq INTEGER NOT NULL DEFAULT 0, queue_ms INTEGER, webhook_id TEXT NOT NULL, event TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_status INTEGER, last_error TEXT, latency_ms INTEGER, payload TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS inbox (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, project_name TEXT NOT NULL, kind TEXT NOT NULL, type TEXT NOT NULL, title TEXT NOT NULL, created_at TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'unread');
       CREATE TABLE IF NOT EXISTS domains (domain TEXT NOT NULL, project_id TEXT NOT NULL, token TEXT NOT NULL, verified_at TEXT, PRIMARY KEY (domain, project_id));
+      CREATE TABLE IF NOT EXISTS profile (id INTEGER PRIMARY KEY CHECK (id = 1), doc TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS handles (handle TEXT PRIMARY KEY, account_key TEXT NOT NULL UNIQUE);
+      CREATE TABLE IF NOT EXISTS issues (number INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', author TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, closed_by TEXT);
+      CREATE TABLE IF NOT EXISTS comments (id INTEGER PRIMARY KEY AUTOINCREMENT, subject TEXT NOT NULL, author TEXT NOT NULL, body TEXT NOT NULL, path TEXT, line INTEGER, "commit" TEXT, created_at TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS comments_subject ON comments (subject, id);
       CREATE TABLE IF NOT EXISTS probes (id INTEGER PRIMARY KEY AUTOINCREMENT, component TEXT NOT NULL, at INTEGER NOT NULL, ok INTEGER NOT NULL, latency_ms INTEGER, detail TEXT);
       CREATE INDEX IF NOT EXISTS probes_component_at ON probes (component, at);
       CREATE TABLE IF NOT EXISTS api_tokens (id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, label TEXT NOT NULL, created_at TEXT NOT NULL, last_used TEXT);
@@ -392,23 +441,57 @@ export class RepositoryController extends DurableObject<Env> {
     await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: this.load().projectId, deliveryId: id });
     return true;
   }
-  /** Write the event to the outbox (durable) before anything is sent; the queue only carries a pointer. */
+  /**
+   * Transactional outbox. Delivery rows are written synchronously, in the same storage transaction as the state
+   * change that caused them (callers save() and emit() with no await in between), so an accepted landing can never
+   * exist without its event. Sending to the queue happens afterwards; anything not sent is picked up by alarm().
+   */
   private async emit(type: (typeof WEBHOOK_EVENTS)[number], data: Record<string, unknown>): Promise<void> {
+    const ids = this.stageEvent(type, data);
+    const s = this.load();
+    for (const deliveryId of ids) {
+      await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: s.projectId, deliveryId }).catch(() => undefined);
+    }
+  }
+
+  private stageEvent(type: (typeof WEBHOOK_EVENTS)[number], data: Record<string, unknown>): string[] {
     const hooks = this.ctx.storage.sql.exec("SELECT id, events FROM webhooks WHERE active = 1").toArray() as unknown as Array<{ id: string; events: string }>;
-    if (hooks.length === 0) return;
     const s = this.load();
     const eventId = `evt_${crypto.randomUUID().slice(0, 12)}`;
     const payload = JSON.stringify({ id: eventId, type, createdAt: new Date().toISOString(), project: { id: s.projectId, name: s.projectName }, data });
+    const ids: string[] = [];
     for (const h of hooks) {
       if (!h.events.split(",").includes(type)) continue;
       const deliveryId = `dlv_${crypto.randomUUID().slice(0, 10)}`;
       const now = new Date().toISOString();
-      const seq = (this.ctx.storage.sql.exec<{ n: number }>("SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM deliveries WHERE webhook_id = ?", h.id).toArray()[0]?.n ?? 1);
+      const seq = this.ctx.storage.sql.exec<{ n: number }>("SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM deliveries WHERE webhook_id = ?", h.id).toArray()[0]?.n ?? 1;
       this.ctx.storage.sql.exec("INSERT INTO deliveries (id, seq, webhook_id, event, status, attempts, payload, created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?)", deliveryId, seq, h.id, type, payload, now, now);
-      await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: s.projectId, deliveryId }).catch(() => undefined); // row stays 'pending' and is visible/redeliverable
+      ids.push(deliveryId);
     }
-    this.ctx.storage.sql.exec("DELETE FROM deliveries WHERE id IN (SELECT id FROM deliveries ORDER BY created_at DESC LIMIT -1 OFFSET 500)");
+    // Retention never touches undelivered events: only finished rows beyond the newest 500 are pruned.
+    this.ctx.storage.sql.exec("DELETE FROM deliveries WHERE status != 'pending' AND id IN (SELECT id FROM deliveries WHERE status != 'pending' ORDER BY created_at DESC LIMIT -1 OFFSET 500)");
+    if (ids.length > 0) void this.ctx.storage.setAlarm(Date.now() + 2 * 60_000);
+    return ids;
   }
+
+  /** Recovery sweep: re-send deliveries whose queue message was never sent or was lost, until none are pending. */
+  override async alarm(): Promise<void> {
+    const now = Date.now();
+    const stuck = this.ctx.storage.sql
+      .exec<{ id: string; attempts: number; updated_at: string; created_at: string }>("SELECT id, attempts, updated_at, created_at FROM deliveries WHERE status = 'pending' ORDER BY seq")
+      .toArray()
+      .filter((d) => (d.attempts === 0 ? now - Date.parse(d.created_at) > 2 * 60_000 : now - Date.parse(d.updated_at) > 70 * 60_000));
+    if (stuck.length > 0) {
+      const projectId = this.load().projectId;
+      for (const d of stuck) {
+        this.ctx.storage.sql.exec("UPDATE deliveries SET updated_at = ? WHERE id = ?", new Date().toISOString(), d.id);
+        await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId, deliveryId: d.id }).catch(() => undefined);
+      }
+    }
+    const pending = this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries WHERE status = 'pending'").toArray()[0]?.n ?? 0;
+    if (pending > 0) await this.ctx.storage.setAlarm(Date.now() + 5 * 60_000);
+  }
+
 
   // ---- personal API tokens (stored as SHA-256 hashes; the secret is shown once) ----
   private async sha256(value: string): Promise<string> {
@@ -486,8 +569,8 @@ export class RepositoryController extends DurableObject<Env> {
    * a blocked landing or stack) are "direct"; everything else is repository chatter kept apart from them.
    */
   private async notifyMembers(type: string, summary: string, exceptUser?: string): Promise<void> {
-    const DIRECT = new Set(["task.ready", "decision.needed", "integration.blocked", "integration.stale", "stack.rebase_blocked"]);
-    const CHATTER = new Set(["integration.accepted", "stack.rebased", "member.joined", "task.created"]);
+    const DIRECT = new Set(["review.requested", "task.ready", "decision.needed", "integration.blocked", "integration.stale", "stack.rebase_blocked"]);
+    const CHATTER = new Set(["issue.opened", "issue.closed", "comment.added", "review.approved", "review.rejected", "integration.accepted", "stack.rebased", "member.joined", "task.created"]);
     if (!DIRECT.has(type) && !CHATTER.has(type)) return;
     const s = this.state ?? (() => { try { return this.load(); } catch { return null; } })();
     if (!s) return;
@@ -500,6 +583,68 @@ export class RepositoryController extends DurableObject<Env> {
           await account.addInbox({ projectId: s.projectId, projectName: s.projectName, kind: DIRECT.has(type) ? "direct" : "activity", type, title: summary.slice(0, 200) }).catch(() => undefined);
         })
     );
+  }
+
+  // ---- issues and conversations (per project) ----
+  private issueRow(n: number): IssueRow | null {
+    const row = this.ctx.storage.sql
+      .exec("SELECT i.*, (SELECT COUNT(*) FROM comments c WHERE c.subject = 'issue:' || i.number) AS comments FROM issues i WHERE number = ?", n)
+      .toArray()[0];
+    return (row as unknown as IssueRow) ?? null;
+  }
+  async listIssues(state: "open" | "closed"): Promise<IssueRow[]> {
+    return this.ctx.storage.sql
+      .exec("SELECT i.*, (SELECT COUNT(*) FROM comments c WHERE c.subject = 'issue:' || i.number) AS comments FROM issues i WHERE state = ? ORDER BY number DESC LIMIT 200", state)
+      .toArray() as unknown as IssueRow[];
+  }
+  async getIssue(n: number): Promise<IssueRow | null> {
+    return this.issueRow(n);
+  }
+  async createIssue(i: { title: string; body: string; author: string }): Promise<IssueRow> {
+    const now = new Date().toISOString();
+    const n = this.ctx.storage.sql.exec<{ number: number }>("INSERT INTO issues (title, body, author, created_at, updated_at) VALUES (?, ?, ?, ?, ?) RETURNING number", i.title, i.body, i.author, now, now).toArray()[0]!.number;
+    await this.logActivity(i.author, "issue.opened", `#${n} opened: ${i.title}`);
+    return this.issueRow(n)!;
+  }
+  async setIssueState(n: number, state: "open" | "closed", by: string): Promise<IssueRow | null> {
+    if (!this.issueRow(n)) return null;
+    this.ctx.storage.sql.exec("UPDATE issues SET state = ?, updated_at = ?, closed_by = ? WHERE number = ?", state, new Date().toISOString(), state === "closed" ? by : null, n);
+    await this.logActivity(by, state === "closed" ? "issue.closed" : "issue.reopened", `#${n} ${state === "closed" ? "closed" : "reopened"} by ${by}`);
+    return this.issueRow(n);
+  }
+  async listComments(subject: string): Promise<CommentRow[]> {
+    return this.ctx.storage.sql.exec('SELECT id, subject, author, body, path, line, "commit", created_at FROM comments WHERE subject = ? ORDER BY id LIMIT 500', subject).toArray() as unknown as CommentRow[];
+  }
+  async addComment(c: { subject: string; author: string; body: string; path?: string; line?: number; commit?: string }): Promise<CommentRow> {
+    const id = this.ctx.storage.sql
+      .exec<{ id: number }>('INSERT INTO comments (subject, author, body, path, line, "commit", created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id', c.subject, c.author, c.body, c.path ?? null, c.line ?? null, c.commit ?? null, new Date().toISOString())
+      .toArray()[0]!.id;
+    if (c.subject.startsWith("issue:")) this.ctx.storage.sql.exec("UPDATE issues SET updated_at = ? WHERE number = ?", new Date().toISOString(), Number(c.subject.slice(6)));
+    await this.logActivity(c.author, "comment.added", `${c.author} commented on ${c.subject.replace(":", " ")}${c.path ? ` (${c.path}${c.line ? `:${c.line}` : ""})` : ""}`);
+    return this.ctx.storage.sql.exec('SELECT id, subject, author, body, path, line, "commit", created_at FROM comments WHERE id = ?', id).toArray()[0] as unknown as CommentRow;
+  }
+
+  // ---- identity (profile on the account instance; handle registry on the global instance) ----
+  async getProfile(): Promise<Profile> {
+    const row = this.ctx.storage.sql.exec<{ doc: string }>("SELECT doc FROM profile WHERE id = 1").toArray()[0];
+    return row ? (JSON.parse(row.doc) as Profile) : { handle: "", displayName: "", bio: "", joinedAt: new Date().toISOString() };
+  }
+  async setProfile(p: Profile): Promise<void> {
+    this.ctx.storage.sql.exec("INSERT INTO profile (id, doc) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET doc = excluded.doc", JSON.stringify(p));
+  }
+  /** First come, first served, one handle per account; changing handles releases the old one. */
+  async claimHandle(handle: string, accountKey: string): Promise<boolean> {
+    const owner = this.ctx.storage.sql.exec<{ account_key: string }>("SELECT account_key FROM handles WHERE handle = ?", handle).toArray()[0];
+    if (owner && owner.account_key !== accountKey) return false;
+    this.ctx.storage.sql.exec("DELETE FROM handles WHERE account_key = ?", accountKey);
+    this.ctx.storage.sql.exec("INSERT INTO handles (handle, account_key) VALUES (?, ?)", handle, accountKey);
+    return true;
+  }
+  async releaseHandle(handle: string, accountKey: string): Promise<void> {
+    this.ctx.storage.sql.exec("DELETE FROM handles WHERE handle = ? AND account_key = ?", handle, accountKey);
+  }
+  async accountForHandle(handle: string): Promise<string | null> {
+    return this.ctx.storage.sql.exec<{ account_key: string }>("SELECT account_key FROM handles WHERE handle = ?", handle).toArray()[0]?.account_key ?? null;
   }
 
   // ---- domain ownership (used on the global instance) ----
@@ -598,40 +743,53 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   /** Acquire the single landing lease and freeze a candidate against the current accepted head. */
-  async claimLanding(req: { holder: string; taskIds: [string, string] }): Promise<ClaimResult> {
+  async claimLanding(req: { holder: string; taskIds: string[] }): Promise<ClaimResult> {
     const s = this.load();
     const now = Date.now();
     const lease = this.ctx.storage.sql.exec<{ holder: string; expires_at: number }>("SELECT holder, expires_at FROM lease WHERE id = 1").toArray()[0];
     if (lease && lease.expires_at > now && lease.holder !== req.holder) return { reason: "Another landing holds the lease" };
+    if (req.taskIds.length < 1 || req.taskIds.length > 8 || new Set(req.taskIds).size !== req.taskIds.length) return { reason: "Integrate one to eight different changes" };
 
-    const tasks = req.taskIds.map((id) => s.tasks[id]);
-    if (tasks.some((t) => !t)) return { reason: "Unknown task" };
-    const [a, b] = tasks as [Task, Task];
-    for (const t of [a, b]) {
+    const found = req.taskIds.map((id) => s.tasks[id]);
+    if (found.some((t) => !t)) return { reason: "Unknown task" };
+    const tasks = found as Task[];
+    for (const t of tasks) {
       if (t.status === "accepted" || t.status === "cancelled") return { reason: `Task ${t.id} is ${t.status}` };
       if (t.status === "working" || t.status === "checkpointed" || t.status === "needs_decision") return { reason: `Task ${t.id} is not ready` };
+      const parent = t.dependsOn ? s.tasks[t.dependsOn] : undefined;
+      if (parent && parent.status !== "accepted" && !req.taskIds.includes(parent.id)) return { reason: `Task ${t.id} is stacked on ${parent.id}, which is not accepted` };
     }
-    for (const ra of a.requirements.filter((r) => r.status === "approved")) {
-      for (const rb of b.requirements.filter((r) => r.status === "approved")) {
-        if (!detectContradiction(ra, rb)) continue;
-        const decision = createProductDecision(ra, rb);
-        s.decisions[decision.id] = decision;
-        a.status = b.status = "needs_decision";
-        this.save();
-        await this.emit("decision.needed", { decision: decision.id, question: decision.question });
-        return { decision };
+    // Contradictions are a product decision: check every pair, and every change against what is already accepted.
+    const approved = (t: Task) => t.requirements.filter((r) => r.status === "approved");
+    for (let i = 0; i < tasks.length; i++) {
+      for (let j = i + 1; j < tasks.length; j++) {
+        const a = tasks[i]!;
+        const b = tasks[j]!;
+        for (const ra of approved(a)) {
+          for (const rb of approved(b)) {
+            if (!detectContradiction(ra, rb)) continue;
+            const decision = createProductDecision(ra, rb);
+            s.decisions[decision.id] = decision;
+            a.status = b.status = "needs_decision";
+            this.save();
+            await this.emit("decision.needed", { decision: decision.id, question: decision.question });
+            return { decision };
+          }
+        }
       }
     }
     const candidate = freezeCandidateGeneration({
-      tasks: [a, b],
+      tasks,
       acceptedBaseCommit: s.acceptedState.currentCommit,
       policyVersion: s.policyVersion,
       verificationPolicy: s.verificationPolicy,
-      approvedRequirements: [...s.acceptedState.activeRequirements, ...a.requirements, ...b.requirements].filter((r: Requirement) => r.status === "approved"),
+      approvedRequirements: [...s.acceptedState.activeRequirements, ...tasks.flatMap((t) => t.requirements)].filter((r: Requirement) => r.status === "approved"),
     });
     s.candidates[candidate.id] = candidate;
-    a.status = b.status = "integrating";
-    a.activeCandidateId = b.activeCandidateId = candidate.id;
+    for (const t of tasks) {
+      t.status = "integrating";
+      t.activeCandidateId = candidate.id;
+    }
     this.ctx.storage.sql.exec("INSERT INTO lease (id, holder, expires_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET holder = excluded.holder, expires_at = excluded.expires_at", req.holder, now + LEASE_MS);
     this.save();
     return { candidate };
@@ -658,6 +816,8 @@ export class RepositoryController extends DurableObject<Env> {
     const c = s.candidates[candidateId];
     const ev = c?.evidenceId ? s.evidence[c.evidenceId] : undefined;
     if (!c || !ev || !c.candidateCommit) return { ok: false, error: "No verified candidate" };
+    // Nothing becomes accepted history without a human approving this exact commit.
+    if (!c.review?.approved || c.review.commit !== c.candidateCommit) return { ok: false, error: "No human approval for this candidate commit" };
     if (ev.status !== "passed" || ev.candidateCommit !== c.candidateCommit) return { ok: false, error: "Evidence does not match candidate" };
     if (ev.expectedAcceptedBase !== c.expectedAcceptedBase || ev.requirementsVersion !== c.frozenPolicyVersion) return { ok: false, error: "Evidence was produced for different inputs" };
     const cancelled = c.participatingTaskIds.filter((id) => s.tasks[id]?.status === "cancelled");
@@ -705,7 +865,44 @@ export class RepositoryController extends DurableObject<Env> {
     this.releaseLease();
     this.save();
     await this.emit("change.accepted", { commit: j.newHead, changes: c.participatingTaskIds, tree: j.candidateTree ?? null });
+    // Issues resolved by accepted changes close with a pointer to the commit that is now in history.
+    for (const id of c.participatingTaskIds) {
+      const t = s.tasks[id]!;
+      if (t.status !== "accepted" || !t.issue) continue;
+      const issue = this.issueRow(t.issue);
+      if (!issue || issue.state === "closed") continue;
+      await this.addComment({ subject: `issue:${t.issue}`, author: "FlareGit", body: `Resolved by change ${t.id}, accepted as ${j.newHead.slice(0, 7)}.`, commit: j.newHead });
+      await this.setIssueState(t.issue, "closed", `change ${t.id}`);
+    }
     await this.logActivity("FlareGit", "integration.accepted", `Accepted ${j.newHead.slice(0, 7)} (${c.participatingTaskIds.join(" + ")})`);
+  }
+
+  /** Verified and waiting: a person must accept (or reject) this exact commit before it can land. */
+  async awaitReview(candidateId: string, commit: string, workflowInstanceId: string): Promise<void> {
+    const s = this.load();
+    const c = s.candidates[candidateId];
+    if (!c || c.candidateCommit !== commit) return;
+    c.status = "awaiting_review";
+    c.workflowInstanceId = workflowInstanceId;
+    c.updatedAt = new Date().toISOString();
+    this.save();
+    await this.logActivity("FlareGit", "review.requested", `Verified candidate ${commit.slice(0, 7)} (${c.participatingTaskIds.join(" + ")}) is waiting for review`);
+  }
+  async recordReview(candidateId: string, review: { approved: boolean; by: string; note?: string }): Promise<{ ok: boolean; instanceId?: string; error?: string }> {
+    const s = this.load();
+    const c = s.candidates[candidateId];
+    if (!c || !c.candidateCommit || !c.workflowInstanceId) return { ok: false, error: "This candidate is not waiting for review" };
+    // Idempotent: the same decision can be re-sent if notifying the integration run failed the first time.
+    if (c.review && c.review.commit === c.candidateCommit && (c.status === "verified" || c.status === "failed") && !s.journal.some((j) => j.candidateId === c.id)) {
+      return c.review.approved === review.approved ? { ok: true, instanceId: c.workflowInstanceId } : { ok: false, error: `Already ${c.review.approved ? "approved" : "rejected"} by ${c.review.by}` };
+    }
+    if (c.status !== "awaiting_review") return { ok: false, error: "This candidate is not waiting for review" };
+    c.review = { ...review, at: new Date().toISOString(), commit: c.candidateCommit };
+    c.status = review.approved ? "verified" : "failed";
+    c.updatedAt = new Date().toISOString();
+    this.save();
+    await this.logActivity(review.by, review.approved ? "review.approved" : "review.rejected", `${review.approved ? "Approved" : "Rejected"} ${c.candidateCommit.slice(0, 7)}${review.note ? `: ${review.note.slice(0, 160)}` : ""}`);
+    return { ok: true, instanceId: c.workflowInstanceId };
   }
 
   async abortPublish(candidateId: string, journalId: string | undefined, reason: string, outcome: "failed" | "stale"): Promise<void> {

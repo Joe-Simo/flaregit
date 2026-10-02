@@ -65,6 +65,8 @@ export interface Task {
   baseCommit: string;
   /** Stacked change: id of the change this one builds on. It cannot be marked ready until that change is accepted. */
   dependsOn?: string;
+  /** Issue this change resolves; it closes automatically when the change is accepted. */
+  issue?: number;
   allowedScope: string[];
   status: TaskStatus;
   requirements: Requirement[];
@@ -107,11 +109,16 @@ export interface CandidateGeneration {
     | "repairing"
     | "verifying"
     | "verified"
+    | "awaiting_review"
     | "failed"
     | "stale"
     | "accepted";
   failureBlocker?: string;
   evidenceId?: string;
+  /** The integration run waiting for a human decision on this exact candidate commit. */
+  workflowInstanceId?: string;
+  /** A human's decision. It is bound to the commit they saw; any other commit needs a new review. */
+  review?: { approved: boolean; by: string; note?: string; at: string; commit: string };
   createdAt: string;
   updatedAt: string;
 }

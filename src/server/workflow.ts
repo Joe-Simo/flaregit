@@ -1,4 +1,5 @@
 import { isSafeRef } from "../core/sanitize.js";
+import { buildPrefix } from "./preview-access.js";
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { WorkersAIClient } from "../ai/workers-ai.js";
 import { buildRepairPrompt, parseRepairResponse, MAX_REPAIR_ROUNDS } from "../core/pipeline/repair.js";
@@ -12,7 +13,8 @@ import { inAgentScope, isProtectedPath } from "../agents/prompt.js";
 
 export interface IntegrationParams {
   projectId: string;
-  taskIds: [string, string];
+  /** One to eight changes, merged in this order. */
+  taskIds: string[];
 }
 
 const WORK = "/workspace/integration";
@@ -22,6 +24,7 @@ type Stub = Ledger;
 export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, IntegrationParams> {
   override async run(event: WorkflowEvent<IntegrationParams>, step: WorkflowStep) {
     const stub = ledgerOf(this.env, event.payload.projectId) as Stub;
+    this.projectId = event.payload.projectId;
     const holder = event.instanceId;
 
     const claim = await step.do("claim-landing", async () => (await stub.claimLanding({ holder, taskIds: event.payload.taskIds })) as never) as ClaimResult;
@@ -37,6 +40,20 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     if (!integrated.ok) {
       await step.do("abort", async () => stub.abortPublish(candidate.id, undefined, integrated.error, "failed"));
       return { status: "blocked", error: integrated.error };
+    }
+
+    // Human control over history: the verified candidate waits until a person accepts this exact commit.
+    await step.do("await-review", async () => stub.awaitReview(candidate.id, integrated.commit, event.instanceId));
+    let review: { approved: boolean; by: string; note?: string };
+    try {
+      review = (await step.waitForEvent<{ approved: boolean; by: string; note?: string }>("human-review", { type: "review", timeout: "7 days" })).payload;
+    } catch {
+      await step.do("abort-unreviewed", async () => stub.abortPublish(candidate.id, undefined, "Nobody reviewed the candidate within 7 days; run the integration again", "stale"));
+      return { status: "stale", error: "review timed out" };
+    }
+    if (!review.approved) {
+      await step.do("abort-rejected", async () => stub.abortPublish(candidate.id, undefined, `Rejected in review by ${review.by}${review.note ? `: ${review.note}` : ""}`, "failed"));
+      return { status: "rejected", by: review.by };
     }
 
     const prepared = (await step.do("prepare-publish", async () => (await stub.preparePublish(candidate.id)) as never)) as PrepareResult;
@@ -121,8 +138,11 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     return { rebased, blocked };
   }
 
+  private projectId = "";
+
+  /** Containers are named per repository and candidate, so concurrent runs elsewhere can never share a workspace. */
   private sandbox(id: string) {
-    const sb = this.env.INTEGRATOR.getByName(id);
+    const sb = this.env.INTEGRATOR.getByName(`${this.projectId}-${id}`);
     return {
       exec: (cmd: string, env?: Record<string, string>) => sb.exec(["sh", "-c", cmd], { env }),
       readFile: async (p: string) => ({ content: await sb.readFile(p) }),
@@ -145,7 +165,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     const sb = this.sandbox(`integrate-${candidate.id}`);
     const run = async (cmd: string, env?: Record<string, string>) => sb.exec(cmd, env);
     const state = await stub.getState();
-    const tasks = candidate.participatingTaskIds.map((id) => state.tasks[id]!) as [Task, Task];
+    const tasks = candidate.participatingTaskIds.map((id) => state.tasks[id]!);
     const canonical = await this.canonicalRemote(stub);
 
     let r = await run(`rm -rf ${WORK} && git clone --quiet ${q(canonical.remote)} ${WORK}`, gitAuthEnv(canonical.token));
@@ -176,7 +196,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       const contents: Record<string, string> = {};
       for (const f of files) contents[f] = (await sb.readFile(`${WORK}/${f}`)).content;
       const prompt = buildRepairPrompt({
-        repoDir: WORK, candidate, taskA: tasks[0], taskB: tasks[1], round, conflictType: type,
+        repoDir: WORK, candidate, tasks, round, conflictType: type,
         editableFiles: files, fileContents: contents, failureEvidence: evidence, protectedPaths: settings.protectedPaths, model: ai.asModel(),
       });
       const proposed = parseRepairResponse(await ai.complete(prompt));
@@ -215,9 +235,12 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
         for (const f of files) {
           const rel = f.replace(/^\.\//, "");
           const type = rel.endsWith(".html") ? "text/html; charset=utf-8" : rel.endsWith(".js") ? "text/javascript" : rel.endsWith(".css") ? "text/css" : "application/octet-stream";
-          await this.env.EVIDENCE_BUCKET.put(`builds/${commit}/${rel}`, (await sb.readFile(`/tmp/build-out/${rel}`)).content, { httpMetadata: { contentType: type } });
+          await this.env.EVIDENCE_BUCKET.put(`${buildPrefix(params.projectId, commit)}/${rel}`, (await sb.readFile(`/tmp/build-out/${rel}`)).content, { httpMetadata: { contentType: type } });
         }
         await this.env.EVIDENCE_BUCKET.put(`evidence/${evidence.id}.json`, JSON.stringify(evidence), { httpMetadata: { contentType: "application/json" }, customMetadata: { commit, tree: evidence.candidateTree } });
+        // Publish the candidate under a private ref so reviewers can read exactly what would land, and it survives restarts.
+        const shared = await run(`git -C ${WORK} push --quiet ${q(canonical.remote)} ${q(`${commit}:refs/flaregit/candidates/${candidate.id}`)}`, gitAuthEnv(canonical.token));
+        if (!shared.success) return { ok: false, error: "Could not store the candidate for review" };
         return { ok: true, commit, evidenceId: evidence.id, branch };
       }
       const editable = (await run(`git -C ${WORK} ls-files`)).stdout
@@ -229,16 +252,30 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
   }
 
   /** Compare-and-swap: only moves main if it still equals the verified base. */
+  /**
+   * Compare-and-swap publication. It depends on nothing that lived through review: a fresh workspace fetches the
+   * stored candidate ref, proves it is the reviewed commit, and only moves the branch if it still equals the base.
+   */
   private async casPush(candidate: CandidateGeneration, commit: string, stub: Stub, branch: string): Promise<{ ok: true } | { ok: false; error: string; stale?: boolean }> {
-    const sb = this.sandbox(`integrate-${candidate.id}`);
+    const sb = this.sandbox(`publish-${candidate.id}`);
     const canonical = await this.canonicalRemote(stub);
-    const head = (await sb.exec(`git -C ${WORK} rev-parse HEAD`)).stdout.trim();
-    if (head !== commit) return { ok: false, error: "Workspace head differs from the verified commit" };
+    const dir = "/workspace/publish";
+    const fetched = await sb.exec(
+      `rm -rf ${dir} && git init --quiet ${dir} && git -C ${dir} fetch --quiet --filter=blob:none ${q(canonical.remote)} ${q(`refs/flaregit/candidates/${candidate.id}:refs/flaregit/candidate`)}`,
+      gitAuthEnv(canonical.token)
+    );
+    if (!fetched.success) return { ok: false, error: "The stored candidate could not be read back; nothing was published" };
+    const head = (await sb.exec(`git -C ${dir} rev-parse refs/flaregit/candidate`)).stdout.trim();
+    if (head !== commit) return { ok: false, error: "Stored candidate differs from the reviewed commit; nothing was published" };
     const res = await sb.exec(
-      `git -C ${WORK} push --quiet --force-with-lease=${q(`refs/heads/${branch}:${candidate.expectedAcceptedBase}`)} ${q(canonical.remote)} ${q(`${commit}:refs/heads/${branch}`)}`,
+      `git -C ${dir} push --quiet --force-with-lease=${q(`refs/heads/${branch}:${candidate.expectedAcceptedBase}`)} ${q(canonical.remote)} ${q(`${commit}:refs/heads/${branch}`)}`,
       gitAuthEnv(canonical.token)
     );
     if (res.success) return { ok: true };
-    return { ok: false, error: `Canonical ref update refused: ${res.stderr.replace(/Bearer [^\s"]+/g, "Bearer ***").slice(-300).trim()}`, stale: /stale info/i.test(res.stderr) };
+    // A retried step may find its own earlier push already landed: that is success, not a conflict.
+    const now = (await sb.exec(`git -C ${dir} ls-remote ${q(canonical.remote)} ${q(`refs/heads/${branch}`)}`, gitAuthEnv(canonical.token))).stdout.split("\t")[0]?.trim();
+    if (now === commit) return { ok: true };
+    return { ok: false, error: `Canonical ref update refused: ${res.stderr.replace(/Bearer [^\s"]+/g, "Bearer ***").slice(-300).trim()}`, stale: /stale info|rejected/i.test(res.stderr) };
   }
+
 }

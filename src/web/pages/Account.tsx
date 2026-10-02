@@ -18,11 +18,14 @@ export function Account() {
   const [created, setCreated] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState("");
+  const [profile, setProfile] = useState({ handle: "", displayName: "", bio: "" });
+  const [profileSaved, setProfileSaved] = useState<string | null>(null);
   const { user } = useUser();
 
   const load = () => {
     apiJson<Token[]>("/tokens").then(setTokens).catch((e: Error) => setError(e.message));
     apiJson<Billing>("/billing").then(setBilling).catch(() => undefined);
+    apiJson<{ handle: string; displayName: string; bio: string }>("/profile").then((p) => setProfile({ handle: p.handle, displayName: p.displayName, bio: p.bio })).catch(() => undefined);
   };
   useEffect(load, []);
 
@@ -30,6 +33,19 @@ export function Account() {
     <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8 space-y-4">
       <h1 className="text-xl font-bold">Account</h1>
       {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>}
+      <Card>
+        <CardHeader><CardTitle className="text-base">Profile</CardTitle></CardHeader>
+        <CardContent className="space-y-2">
+          <p className="text-sm text-muted-foreground">How you appear on changes, reviews, issues and comments.</p>
+          <label className="block text-xs text-muted-foreground">Handle<input className={field} value={profile.handle} maxLength={39} onChange={(e) => setProfile({ ...profile, handle: e.target.value })} placeholder="ada" /></label>
+          <label className="block text-xs text-muted-foreground">Display name<input className={field} value={profile.displayName} maxLength={60} onChange={(e) => setProfile({ ...profile, displayName: e.target.value })} placeholder="Ada Lovelace" /></label>
+          <label className="block text-xs text-muted-foreground">Bio<textarea className={field} rows={2} value={profile.bio} maxLength={300} onChange={(e) => setProfile({ ...profile, bio: e.target.value })} /></label>
+          {profileSaved && <p role="status" className="text-sm">{profileSaved}</p>}
+          <Button variant="orange" onClick={async () => {
+            try { await apiJson("/profile", { method: "PUT", json: profile }); setProfileSaved("Saved."); } catch (e) { setProfileSaved((e as Error).message); }
+          }}>Save profile</Button>
+        </CardContent>
+      </Card>
       {billing && (
         <Card>
           <CardContent className="py-4 flex items-center justify-between text-sm">

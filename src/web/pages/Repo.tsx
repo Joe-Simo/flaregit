@@ -11,6 +11,8 @@ import { ChangesTab } from "../tabs/Changes";
 import { IntegrationTab } from "../tabs/Integration";
 import { ActivityTab } from "../tabs/Activity";
 import { ReviewTab } from "../tabs/Review";
+import { IssuesTab } from "../tabs/Issues";
+import { PeopleTab } from "../tabs/People";
 import { SettingsTab } from "../tabs/Settings";
 import type { FlareGitProjectState } from "@/core/types";
 
@@ -20,8 +22,10 @@ type State = FlareGitProjectState & { role: string };
 const TABS = [
   ["code", "Code"],
   ["commits", "Commits"],
+  ["issues", "Issues"],
   ["changes", "Changes"],
   ["integration", "Integration"],
+  ["people", "People"],
   ["activity", "Activity"],
   ["settings", "Settings"],
 ] as const;
@@ -86,7 +90,9 @@ export function Repo({ projectId, tab, previewBase, params }: { projectId: strin
       {tab === "changes" && <ChangesTab projectId={projectId} state={state} reload={reload} />}
       {tab === "integration" && <IntegrationTab projectId={projectId} state={state} previewBase={previewBase} reload={reload} kind={meta.kind} />}
       {tab === "activity" && <ActivityTab projectId={projectId} />}
-      {tab === "review" && <ReviewTab projectId={projectId} task={params.get("task") ?? undefined} />}
+      {tab === "issues" && <IssuesTab projectId={projectId} issue={params.get("n") ? Number(params.get("n")) : undefined} />}
+      {tab === "people" && <PeopleTab projectId={projectId} />}
+      {tab === "review" && <ReviewTab projectId={projectId} task={params.get("task") ?? undefined} candidate={params.get("candidate") ? state.candidates[params.get("candidate")!] : undefined} evidence={state} reload={reload} />}
       {tab === "commit" && <ReviewTab projectId={projectId} commit={params.get("hash") ?? undefined} />}
       {tab === "settings" && <SettingsTab meta={meta} reload={reload} />}
 

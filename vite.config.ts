@@ -9,11 +9,11 @@ export default defineConfig({
       "@": path.resolve(import.meta.dirname, "./src"),
     },
   },
+  // The UI dev server talks to a real FlareGit Worker: `wrangler dev` (default) or your deployment via FLAREGIT_API.
   server: {
     port: 5173,
-    proxy: {
-      "/api": { target: "http://127.0.0.1:3000", changeOrigin: false },
-      "/preview": { target: "http://127.0.0.1:3000", changeOrigin: false },
-    },
+    proxy: Object.fromEntries(
+      ["/api", "/auth-config", "/status.json", "/webhooks"].map((p) => [p, { target: process.env.FLAREGIT_API ?? "http://127.0.0.1:8787", changeOrigin: true }])
+    ),
   },
 });

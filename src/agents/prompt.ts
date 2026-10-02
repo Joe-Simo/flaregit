@@ -12,15 +12,32 @@ export function isProtectedPath(file: string, protectedPaths: readonly string[])
 }
 
 /** Prompt shared by the local and cloud agents. `files` are the current in-scope source files. */
-export function buildAgentPrompt(task: Task, agentName: string, files: Record<string, string>, checkCommand?: string): string {
+/** Common credential shapes. Matches are replaced before any text reaches a model. */
+const SECRET_PATTERNS = [
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}\b/g,
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g,
+  /\bsk-(?:live|test|proj|ant)?[-_]?[A-Za-z0-9]{20,}\b/g,
+  /\bfgt_[0-9a-f]{12}_[A-Za-z0-9]{32,64}\b/g,
+  /\bwhsec_[A-Za-z0-9+/=]{16,}\b/g,
+  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
+  /((?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)\s*[:=]\s*)["']?[^\s"']{8,}["']?/gi,
+];
+export function redactSecrets(text: string): string {
+  return SECRET_PATTERNS.reduce((t, re) => t.replace(re, (m, prefix?: string) => (typeof prefix === "string" && m.startsWith(prefix) ? `${prefix}[REDACTED]` : "[REDACTED]")), text);
+}
+
+export function buildAgentPrompt(task: Task, agentName: string, files: Record<string, string>, checkCommand?: string, shared?: string): string {
   const requirements = task.requirements.map((r) => `- ${r.title}: ${r.description}`).join("\n");
   const context = Object.entries(files)
-    .map(([f, c]) => `<current path="${f}">\n${c}\n</current>`)
+    .map(([f, c]) => `<current path="${f}">\n${redactSecrets(c)}\n</current>`)
     .join("\n");
   return [
     `You are ${agentName}, a coding agent working in an isolated git workspace.`,
     `Task: ${task.goal}`,
     requirements ? `Requirements:\n${requirements}` : "",
+    shared ? `Shared context from the people on this change (issue, review comments, earlier progress):\n${redactSecrets(shared)}` : "",
     `You may only change: ${task.allowedScope.map((x) => (x === "*" ? "any source file" : x)).join(", ")}.`,
     checkCommand ? `Your change is only accepted if the project's protected check passes: ${checkCommand}` : "",
     "Implement the task by rewriting whole files. Keep every existing behavior that the task does not change.",

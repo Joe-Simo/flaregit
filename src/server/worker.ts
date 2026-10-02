@@ -6,6 +6,7 @@ import { handleQueueBatch } from "./queue.js";
 import { authenticate } from "./access.js";
 import { gitAuthEnv, q } from "./shell.js";
 import { ensureBuild } from "./build.js";
+import { buildPrefix, signPreview, verifyPreview } from "./preview-access.js";
 import { billingFromEvent, createCheckout, planLimits, reportUsage, verifyPolarWebhook } from "./polar.js";
 import { TICKET_BOOKING_POLICY } from "../fixtures/ticket-booking/policy.js";
 import { DEFAULT_PROTECTED_PATHS, isCommandPolicy, settingsFor, type CommandPolicy } from "../core/command-policy.js";
@@ -54,22 +55,32 @@ export default {
       return new Response(null, { status: 202 });
     }
 
-    const preview = /^\/preview\/([0-9a-f]{40})(\/.*)?$/.exec(url.pathname);
+    // Previews run contributor-built JavaScript, so they are served only from the separate preview origin,
+    // only with a member-minted capability (query once, then a path-scoped cookie for the page's own assets).
     if (url.pathname.startsWith("/preview/")) {
-      if (!preview) return text("Not found", 404);
-      const rel = (preview[2] ?? "/").replace(/^\/+/, "") || "index.html";
+      const previewHost = env.PREVIEW_ORIGIN ? new URL(env.PREVIEW_ORIGIN).hostname : null;
+      if (!previewHost || url.hostname !== previewHost) return text("Not found", 404);
+      const m = /^\/preview\/(p?[0-9a-f]{12})\/([0-9a-f]{40})(\/.*)?$/.exec(url.pathname);
+      if (!m) return text("Not found", 404);
+      const [, pid, sha] = m as unknown as [string, string, string];
+      const rel = (m[3] ?? "/").replace(/^\/+/, "") || "index.html";
       if (rel.split("/").includes("..")) return text("Not found", 404);
-      const object = await env.EVIDENCE_BUCKET.get(`builds/${preview[1]}/${rel}`);
+      const scope = `/preview/${pid}/${sha}/`;
+      const fromQuery = { exp: Number(url.searchParams.get("exp")), sig: url.searchParams.get("sig") ?? "" };
+      const cookie = /(?:^|;\s*)fgp=(\d+)\.([0-9a-f]{64})/.exec(request.headers.get("Cookie") ?? "");
+      const cred = fromQuery.sig ? fromQuery : cookie ? { exp: Number(cookie[1]), sig: cookie[2]! } : null;
+      if (!cred || !(await verifyPreview(env, pid, sha, cred.exp, cred.sig))) return text("This preview link has expired. Open it again from FlareGit.", 403);
+      const object = await env.EVIDENCE_BUCKET.get(`${buildPrefix(pid, sha)}/${rel}`);
       if (!object) return text("No verified build stored for this commit", 404);
-      return new Response(object.body, {
-        headers: {
-          "Content-Type": object.httpMetadata?.contentType ?? "application/octet-stream",
-          "Content-Security-Policy": "default-src 'none'; script-src * 'unsafe-inline'; style-src * 'unsafe-inline'; img-src data: *; connect-src 'none'",
-          "X-Content-Type-Options": "nosniff",
-          "Access-Control-Allow-Origin": "*",
-          "Cache-Control": "public, max-age=31536000, immutable",
-        },
+      const headers = new Headers({
+        "Content-Type": object.httpMetadata?.contentType ?? "application/octet-stream",
+        "Content-Security-Policy": "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'none'; frame-ancestors " + (env.CLERK_AUTHORIZED_PARTIES ?? "'none'").split(",").join(" "),
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+        "Cache-Control": "private, max-age=3600",
       });
+      if (fromQuery.sig) headers.append("Set-Cookie", `fgp=${cred.exp}.${cred.sig}; Path=${scope}; Max-Age=3600; Secure; HttpOnly; SameSite=Lax`);
+      return new Response(object.body, { headers });
     }
 
     if (!url.pathname.startsWith("/api/")) return env.ASSETS.fetch(request);
@@ -138,6 +149,21 @@ export default {
         }
         await account.destroy();
         return json({ deleted: true });
+      }
+
+      // ----- profile -----
+      if (path === "/profile" && method === "GET") return json(await account.getProfile());
+      if (path === "/profile" && method === "PUT") {
+        if (auth.viaToken) return text("Edit your profile from the web app", 403);
+        const b = await body<{ handle?: string; displayName?: string; bio?: string }>();
+        const handle = clean(b.handle, 39).toLowerCase();
+        if (!/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(handle)) return text("Handle: 1-39 characters, a-z, 0-9 and single hyphens", 400);
+        const displayName = clean(b.displayName, 60);
+        if (!displayName || /[<>\u0000-\u001f]/.test(displayName)) return text("Enter a display name (no control characters or angle brackets)", 400);
+        const current = await account.getProfile();
+        if (!(await globalOf(env).claimHandle(handle, accountKey))) return text("That handle is taken", 409);
+        await account.setProfile({ handle, displayName, bio: clean(b.bio, 300), joinedAt: current.handle ? current.joinedAt : new Date().toISOString() });
+        return json({ ok: true });
       }
 
       // ----- notification inbox -----
@@ -225,7 +251,10 @@ export default {
         const state = await project.getState().catch(() => null);
         if (!state) return text("Not found", 404);
         const settings = settingsFor(state.verificationPolicy);
-        const isOwner = role === "owner";
+        // Narrow (read/write) tokens may contribute but never administer: settings, members, webhooks, domains,
+        // deletion and approving what becomes history need a signed-in session or a full-access token.
+        const canAdminister = !auth.viaToken || auth.tokenScope === "full";
+        const isOwner = role === "owner" && canAdminister;
 
         if (sub === "" && method === "GET") return json({ id: projectId, role, kind: state.kind ?? "demo", name: state.projectName, source: state.source ?? null, verification: state.verificationPolicy, protectedPaths: settings.protectedPaths });
 
@@ -266,7 +295,13 @@ export default {
           let repoName = state.canonicalRepoName;
           let baseCommit: string | undefined;
           let headCommit: string | undefined;
-          if (taskParam) {
+          const candidateParam = url.searchParams.get("candidate");
+          if (candidateParam) {
+            const c = state.candidates[candidateParam];
+            if (!c?.candidateCommit) return text("Unknown candidate", 404);
+            baseCommit = c.expectedAcceptedBase;
+            headCommit = c.candidateCommit;
+          } else if (taskParam) {
             const task = state.tasks[taskParam];
             if (!task) return text("Unknown change", 404);
             repoName = task.workspace.repoName;
@@ -311,10 +346,11 @@ export default {
 
         // ----- changes (tasks) -----
         if (sub === "/tasks" && method === "POST") {
-          const b = await body<{ taskId?: string; goal?: string; name?: string; dependsOn?: string }>();
+          const b = await body<{ taskId?: string; goal?: string; name?: string; dependsOn?: string; issue?: number }>();
           const goal = clean(b.goal, 300);
           if (!b.taskId || !TASK_ID.test(b.taskId) || !goal) return text("taskId (3-41 chars: a-z, 0-9, -) and goal are required", 400);
           if (state.tasks[b.taskId]) return text("A change with that id already exists", 409);
+          if (b.issue !== undefined && !(await project.getIssue(Number(b.issue)))) return text("Unknown issue", 400);
           const parent = b.dependsOn ? state.tasks[b.dependsOn] : undefined;
           if (b.dependsOn && (!parent || parent.status === "cancelled")) return text("dependsOn must name an existing, uncancelled change", 400);
           const source = await env.ARTIFACTS.get(parent ? parent.workspace.repoName : state.canonicalRepoName);
@@ -326,9 +362,10 @@ export default {
           const task: Task = {
             id: b.taskId,
             goal,
-            contributor: { id: userId.slice(-12), name: clean(b.name, 60) || `member-${userId.slice(-6)}`, type: "human" },
+            contributor: { id: userId.slice(-12), name: (await account.getProfile()).displayName || clean(b.name, 60) || `member-${userId.slice(-6)}`, type: "human" },
             baseCommit: parent ? parent.currentCommit : state.acceptedState.currentCommit,
             ...(parent ? { dependsOn: parent.id } : {}),
+            ...(b.issue !== undefined ? { issue: Number(b.issue) } : {}),
             allowedScope: settings.allowedScope,
             status: "working",
             requirements: [],
@@ -392,20 +429,40 @@ export default {
 
         if (sub === "/integrations" && method === "POST") {
           const b = await body<{ taskIds?: string[] }>();
-          if (!Array.isArray(b.taskIds) || b.taskIds.length !== 2 || b.taskIds[0] === b.taskIds[1]) return text("taskIds must list exactly two different changes", 400);
+          if (!Array.isArray(b.taskIds) || b.taskIds.length < 1 || b.taskIds.length > 8 || new Set(b.taskIds).size !== b.taskIds.length || !b.taskIds.every((t) => typeof t === "string" && TASK_ID.test(t))) {
+            return text("taskIds must list one to eight different changes", 400);
+          }
           const { plan } = await account.getBilling();
           const denied = await admitRun(env, account, planLimits(env)[plan]);
           if (denied) return denied;
           const eventId = `integ-${projectId}-${Date.now().toString(36)}`;
-          await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds: b.taskIds as [string, string], eventId } satisfies QueueMessage);
+          await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds: b.taskIds as string[], eventId } satisfies QueueMessage);
           return json({ queued: eventId }, 202);
+        }
+
+        // ----- human review of a verified candidate -----
+        const reviewRoute = /^\/candidates\/([a-z0-9_-]+)\/review$/.exec(sub);
+        if (reviewRoute && method === "POST") {
+          if (!canAdminister) return text("Approving or rejecting needs a signed-in session or a full-access token", 403);
+          const b = await body<{ approved?: boolean; note?: string }>();
+          if (typeof b.approved !== "boolean") return text("approved (true or false) is required", 400);
+          const by = (await account.getProfile()).displayName || `member-${accountKey.slice(0, 6)}`;
+          const r = await project.recordReview(reviewRoute[1]!, { approved: b.approved, by, note: clean(b.note, 500) || undefined });
+          if (!r.ok || !r.instanceId) return text(r.error ?? "Review failed", 409);
+          try {
+            await (await env.INTEGRATION_WORKFLOW.get(r.instanceId)).sendEvent({ type: "review", payload: { approved: b.approved, by, note: clean(b.note, 500) || undefined } });
+          } catch (e) {
+            console.error("review notify failed", e instanceof Error ? e.message : String(e));
+            return text("Your decision is saved, but the integration run did not receive it yet. Press the same button again to resend.", 502);
+          }
+          return json({ recorded: true, approved: b.approved });
         }
 
         if (sub === "/decisions/resolve" && method === "POST") {
           const b = await body<{ decisionId?: string; selectedOptionId?: string }>();
           if (!b.decisionId || !b.selectedOptionId) return text("decisionId and selectedOptionId required", 400);
           const { taskIds } = await project.resolveDecision(b.decisionId, b.selectedOptionId);
-          if (taskIds.length === 2) await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds: taskIds as [string, string], eventId: `decision-${projectId}-${b.decisionId}` } satisfies QueueMessage);
+          if (taskIds.length > 0) await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds, eventId: `decision-${projectId}-${b.decisionId}` } satisfies QueueMessage);
           return json({ resolved: true });
         }
 
@@ -431,6 +488,88 @@ export default {
         }
 
         // ----- collaborators -----
+        // ----- previews: a member mints a short-lived link to the build of one commit of this repository -----
+        if (sub === "/preview" && method === "GET") {
+          const commit = url.searchParams.get("commit") ?? state.acceptedState.currentCommit;
+          if (!/^[0-9a-f]{40}$/.test(commit)) return text("Invalid commit", 400);
+          const ready = Boolean(await env.EVIDENCE_BUCKET.head(`${buildPrefix(projectId, commit)}/index.html`));
+          if (!ready && commit === state.acceptedState.currentCommit && settings.fixture === "ticket-booking") ctx.waitUntil(ensureBuild(env, projectId, commit, state.canonicalRepoName).catch((e) => console.error("preview build failed", String(e))));
+          if (!ready) return json({ ready: false });
+          const { exp, sig } = await signPreview(env, projectId, commit);
+          return json({ ready: true, url: `${env.PREVIEW_ORIGIN}/preview/${projectId}/${commit}/?exp=${exp}&sig=${sig}`, expiresAt: new Date(exp * 1000).toISOString() });
+        }
+
+        // ----- issues -----
+        const me = async () => (await account.getProfile()).displayName || `member-${userId.slice(-6)}`;
+        if (sub === "/issues" && method === "GET") return json(await project.listIssues(url.searchParams.get("state") === "closed" ? "closed" : "open"));
+        if (sub === "/issues" && method === "POST") {
+          const b = await body<{ title?: string; body?: string }>();
+          const title = clean(b.title, 200);
+          if (!title) return text("A title is required", 400);
+          return json(await project.createIssue({ title, body: clean(b.body, 20_000), author: await me() }), 201);
+        }
+        const issueRoute = /^\/issues\/(\d{1,7})$/.exec(sub);
+        if (issueRoute && method === "GET") {
+          const issue = await project.getIssue(Number(issueRoute[1]));
+          if (!issue) return text("Unknown issue", 404);
+          const linked = Object.values(state.tasks).filter((t) => t.issue === issue.number).map((t) => ({ id: t.id, goal: t.goal, status: t.status }));
+          return json({ ...issue, linked, comments: await project.listComments(`issue:${issue.number}`) });
+        }
+        if (issueRoute && method === "PATCH") {
+          const b = await body<{ state?: string }>();
+          if (b.state !== "open" && b.state !== "closed") return text("state must be open or closed", 400);
+          const issue = await project.setIssueState(Number(issueRoute[1]), b.state, await me());
+          return issue ? json(issue) : text("Unknown issue", 404);
+        }
+
+        // ----- conversations on issues, changes and candidates (optionally anchored to a file line) -----
+        const SUBJECT = /^(issue:\d{1,7}|change:[a-z0-9][a-z0-9-]{2,40}|candidate:[a-z0-9_-]{3,60})$/;
+        const subjectExists = async (subject: string) => {
+          const [kind, id] = subject.split(":") as [string, string];
+          if (kind === "issue") return (await project.getIssue(Number(id))) !== null;
+          if (kind === "change") return Boolean(state.tasks[id]);
+          return Boolean(state.candidates[id]);
+        };
+        if (sub === "/comments" && method === "GET") {
+          const subject = url.searchParams.get("subject") ?? "";
+          if (!SUBJECT.test(subject)) return text("Invalid subject", 400);
+          return json(await project.listComments(subject));
+        }
+        if (sub === "/comments" && method === "POST") {
+          const b = await body<{ subject?: string; body?: string; path?: string; line?: number; commit?: string }>();
+          const subject = b.subject ?? "";
+          const text_ = clean(b.body, 10_000);
+          if (!SUBJECT.test(subject) || !(await subjectExists(subject))) return text("Unknown subject", 404);
+          if (!text_) return text("Write something first", 400);
+          const path_ = b.path ? clean(b.path, 400) : undefined;
+          if (path_ && (path_.startsWith("/") || path_.split("/").includes(".."))) return text("Invalid path", 400);
+          const line = b.line === undefined ? undefined : Number(b.line);
+          if (line !== undefined && !(Number.isInteger(line) && line > 0 && line < 10_000_000)) return text("Invalid line", 400);
+          if (b.commit && !/^[0-9a-f]{40}$/.test(b.commit)) return text("Invalid commit", 400);
+          return json(await project.addComment({ subject, author: await me(), body: text_, path: path_, line, commit: b.commit }), 201);
+        }
+
+        // ----- people: who works here and what they contributed (humans and agents, attributed separately) -----
+        if (sub === "/people" && method === "GET") {
+          const tasks = Object.values(state.tasks);
+          const summarize = (mine: typeof tasks) => ({
+            changes: mine.length,
+            accepted: mine.filter((t) => t.status === "accepted").length,
+            open: mine.filter((t) => !["accepted", "cancelled"].includes(t.status)).length,
+            recent: mine.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 5).map((t) => ({ id: t.id, goal: t.goal, status: t.status, updatedAt: t.updatedAt })),
+          });
+          const members = await project.listMembers();
+          const humans = await Promise.all(
+            members.map(async (m) => {
+              const profile = await accountOf(env, await accountKeyFor(m.user_id)).getProfile().catch(() => null);
+              const suffix = m.user_id.slice(-12);
+              return { kind: "human" as const, role: m.role, joinedAt: m.added_at, handle: profile?.handle || null, name: profile?.displayName || m.label || `member-${m.user_id.slice(-6)}`, bio: profile?.bio || "", ...summarize(tasks.filter((t) => t.contributor.type === "human" && t.contributor.id === suffix)) };
+            })
+          );
+          const agentNames = [...new Set(tasks.filter((t) => t.contributor.type === "agent").map((t) => t.contributor.name))];
+          const agents = agentNames.map((name) => ({ kind: "agent" as const, name, ...summarize(tasks.filter((t) => t.contributor.type === "agent" && t.contributor.name === name)) }));
+          return json({ humans, agents });
+        }
         if (sub === "/members" && method === "GET") return json(await project.listMembers());
         if (sub === "/invites" && method === "POST") {
           if (!isOwner) return text("Only the owner can invite", 403);

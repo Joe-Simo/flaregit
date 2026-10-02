@@ -18,7 +18,8 @@ const MAX_FILE_BYTES = 60_000;
 export async function runAgentTask(env: Env, ledger: Ledger, task: Task): Promise<{ commit: string }> {
   const state = await ledger.getState();
   const settings = settingsFor(state.verificationPolicy);
-  const sb = env.AGENT.getByName(`agent-${task.id}`);
+  // Container identity is scoped to the repository: equal change ids in two repositories never share a workspace.
+  const sb = env.AGENT.getByName(`agent-${state.projectId}-${task.id}`);
   const repo = await env.ARTIFACTS.get(task.workspace.repoName);
   const remote = String((await repo.info()).remote);
   const token = (await repo.createToken("write", 1800)).plaintext;
@@ -27,7 +28,19 @@ export async function runAgentTask(env: Env, ledger: Ledger, task: Task): Promis
   try {
     let r = await run(`rm -rf ${WORK} && git clone --quiet ${q(remote)} ${WORK}`, gitAuthEnv(token));
     if (!r.success) throw new Error(`clone failed: ${r.stderr.slice(-300)}`);
-    await run(`git -C ${WORK} checkout --quiet -B ${q(task.workspace.branch)} ${q(task.baseCommit)}`);
+    // Resume rather than restart: if an earlier (interrupted) run or a human already pushed to this branch, build on it.
+    const resumed = (await run(`git -C ${WORK} rev-parse --verify --quiet ${q(`refs/remotes/origin/${task.workspace.branch}`)}`)).success;
+    await run(`git -C ${WORK} checkout --quiet -B ${q(task.workspace.branch)} ${q(resumed ? `origin/${task.workspace.branch}` : task.baseCommit)}`);
+
+    // Shared task context: the linked issue, the conversation on this change, and what was already done.
+    const notes: string[] = [];
+    if (task.issue) {
+      const issue = await ledger.getIssue(task.issue);
+      if (issue) notes.push(`Issue #${issue.number}: ${issue.title}\n${issue.body}`.slice(0, 4000));
+    }
+    const comments = await ledger.listComments(`change:${task.id}`);
+    for (const c of comments.slice(-20)) notes.push(`${c.author}${c.path ? ` on ${c.path}${c.line ? `:${c.line}` : ""}` : ""}: ${c.body}`.slice(0, 1500));
+    if (resumed) notes.push(`This branch already has work from an earlier run (${task.checkpoints.length} checkpoint(s)); continue from the current files instead of starting over.`);
 
     const listed = (await run(`git -C ${WORK} ls-files`)).stdout.split("\n").filter(Boolean);
     const files: Record<string, string> = {};
@@ -42,7 +55,7 @@ export async function runAgentTask(env: Env, ledger: Ledger, task: Task): Promis
     }
 
     const ai = new WorkersAIClient({ binding: env.AI, gatewayId: env.AI_GATEWAY_ID });
-    const proposed = parseRepairResponse(await ai.complete(buildAgentPrompt(task, task.contributor.name, files, settings.checkCommand)));
+    const proposed = parseRepairResponse(await ai.complete(buildAgentPrompt(task, task.contributor.name, files, settings.checkCommand, notes.join("\n\n"))));
     if (proposed.size === 0) throw new Error("model returned no file changes");
     assertAgentWrites(task, proposed.keys(), settings.protectedPaths);
     for (const [file, content] of proposed) {
