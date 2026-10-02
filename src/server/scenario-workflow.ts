@@ -30,11 +30,18 @@ export class FlareGitScenarioWorkflow extends WorkflowEntrypoint<Env, ScenarioPa
 
     const tasks = await Promise.all(specs.map((spec) => step.do(`create-task-${spec.taskId}`, async () => ({ id: (await this.createTask(spec, ledger, projectId)).id }))));
 
-    await Promise.all(
-      tasks.map((t) =>
-        step.do(`agent-${t.id}`, { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "10 minutes" }, async () => runAgentTask(this.env, ledger, (await ledger.getState()).tasks[t.id]!))
-      )
-    );
+    const stage = async (taskId: string, plan: boolean) => {
+      const agentRunId = `${event.instanceId}-${taskId}`;
+      try {
+        return await step.do(`${plan ? "plan-agent" : "apply-agent"}-${taskId}`, { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "10 minutes" }, async () => runAgentTask(this.env, ledger, (await ledger.getState()).tasks[taskId]!, agentRunId, { stopAfterProposal: plan }));
+      } catch (error) {
+        await step.do(`agent-failed-${taskId}`, async () => { await ledger.failAgentRun(agentRunId, taskId); await ledger.failAgentTask(taskId, agentRunId); });
+        throw error;
+      }
+    };
+    // Both real model plans run concurrently; proposals survive a pause before either apply stage.
+    const proposals = await Promise.all(tasks.map((task) => stage(task.id, true)));
+    await Promise.all(tasks.map((task, index) => proposals[index]?.commit ? proposals[index] : stage(task.id, false)));
 
     const instance = await step.do("start-integration", async () => {
       await ledger.registerWorkflow(`int-${projectId}-${runId}-${act}`, "integration");

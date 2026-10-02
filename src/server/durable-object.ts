@@ -10,6 +10,7 @@ import type { IntegrationCallback, IntegrationCapability } from "./integration-a
 import { externalCheckGate, type ExternalCheckPolicy, type ExternalCheckState } from "../core/external-checks.js";
 import type { ImportJob } from "./import-job.js";
 import type { PublicRepositoryGrant } from "./public-repositories.js";
+import { AgentRunLedger, type AgentRunInput, type AgentRunRecord, type AgentRunClaim } from "./agent-run-ledger.js";
 export type PublicGrantMetadata = PublicRepositoryGrant & { name: string; version: number; canonicalRepoName: string };
 import type {
   CandidateGeneration,
@@ -161,6 +162,13 @@ export interface ActivityRow {
 }
 
 export interface Ledger {
+  getAgentRun(runId: string): Promise<AgentRunRecord | null>;
+  claimAgentRun(input: AgentRunInput): Promise<AgentRunClaim>;
+  resumeAgentRun(runId: string, taskId: string, previousRunId: string): Promise<AgentRunClaim>;
+  saveAgentProposal(runId: string, taskId: string, files: Record<string, string>): Promise<boolean>;
+  markAgentPushed(runId: string, taskId: string, commit: string): Promise<boolean>;
+  checkpointAgentRun(runId: string, taskId: string, eventId: string, commit: string): Promise<boolean>;
+  failAgentRun(runId: string, taskId: string): Promise<boolean>;
   publicGrant(): Promise<PublicGrantMetadata | null>;
   repositoryVisibility(): Promise<"public" | "private">;
   setRepositoryVisibility(visibility: "public" | "private", confirmed: boolean, by: string): Promise<void>;
@@ -252,8 +260,8 @@ export interface Ledger {
   completePublish(journalId: string): Promise<void>;
   abortPublish(candidateId: string, journalId: string | undefined, reason: string, outcome: "failed" | "stale"): Promise<void>;
   cancelTask(taskId: string): Promise<void>;
-  failAgentTask(taskId: string): Promise<void>;
-  beginAgentTask(taskId: string): Promise<boolean>;
+  failAgentTask(taskId: string, runId?: string): Promise<void>;
+  beginAgentTask(taskId: string, runId?: string): Promise<boolean>;
   getBilling(): Promise<{ plan: "free" | "pro"; status: string; subscriptionId?: string; updatedAt: string }>;
   setBilling(b: { plan: "free" | "pro"; status: string; subscriptionId?: string; updatedAt: string }): Promise<void>;
   usageToday(): Promise<number>;
@@ -270,6 +278,67 @@ const LEASE_MS = 20 * 60_000;
  */
 export class RepositoryController extends DurableObject<Env> {
   private state: FlareGitProjectState | null = null;
+
+  private agentRuns() { return new AgentRunLedger(this.ctx.storage); }
+  private agentScope(task: Task, projectScope: string[]): string[] {
+    const scope = [...new Set((task.allowedScope ?? projectScope).flatMap((requested) => projectScope.flatMap((allowed) => requested === "*" ? [allowed] : allowed === "*" ? [requested] : requested.startsWith(allowed) ? [requested] : allowed.startsWith(requested) ? [allowed] : [])))];
+    if (!scope.length) throw new Error("Change has no permitted agent scope");
+    return scope;
+  }
+  async getAgentRun(runId: string): Promise<AgentRunRecord | null> { return this.agentRuns().get(runId); }
+  async claimAgentRun(input: AgentRunInput): Promise<AgentRunClaim> {
+    const state = this.load();
+    const task = state.tasks[input.taskId];
+    if (!task || ["accepted", "cancelled", "integrating", "verifying"].includes(task.status) || input.branch !== task.workspace.branch) throw new Error("Change cannot start this agent run");
+    const settings = settingsFor(state.verificationPolicy);
+    try {
+      return this.ctx.storage.transactionSync(() => {
+        const result = this.agentRuns().claim({ ...input, goal: task.goal, allowedScope: this.agentScope(task, settings.allowedScope), protectedPaths: settings.protectedPaths });
+        if (result.kind === "claimed") {
+          task.agentRunId = result.run.runId;
+          task.status = "working";
+          this.save();
+        }
+        return result;
+      });
+    } catch (error) { this.state = null; throw error; }
+  }
+  async resumeAgentRun(runId: string, taskId: string, previousRunId: string): Promise<AgentRunClaim> {
+    const state = this.load();
+    const task = state.tasks[taskId];
+    if (!task || task.agentRunId !== previousRunId || ["accepted", "cancelled", "integrating", "verifying"].includes(task.status)) throw new Error("Saved agent work is no longer selected for this change");
+    const settings = settingsFor(state.verificationPolicy);
+    try {
+      return this.ctx.storage.transactionSync(() => {
+        const result = this.agentRuns().resume(runId, taskId, previousRunId, this.agentScope(task, settings.allowedScope), settings.protectedPaths, task.goal);
+        if (result.kind === "claimed") { task.agentRunId = result.run.runId; task.status = "working"; this.save(); }
+        return result;
+      });
+    } catch (error) { this.state = null; throw error; }
+  }
+  async saveAgentProposal(runId: string, taskId: string, files: Record<string, string>): Promise<boolean> { return this.agentRuns().propose(runId, taskId, files); }
+  async markAgentPushed(runId: string, taskId: string, commit: string): Promise<boolean> { return this.agentRuns().markPushed(runId, taskId, commit); }
+  async checkpointAgentRun(runId: string, taskId: string, eventId: string, commit: string): Promise<boolean> {
+    const task = this.load().tasks[taskId];
+    if (!task || task.agentRunId !== runId || task.currentCommit !== commit || !["ready", "integrating", "verifying", "accepted"].includes(task.status)) return false;
+    return this.agentRuns().checkpoint(runId, taskId, eventId, commit);
+  }
+  async failAgentRun(runId: string, taskId: string): Promise<boolean> {
+    const state = this.load();
+    try {
+      return this.ctx.storage.transactionSync(() => {
+        const failed = this.agentRuns().fail(runId, taskId);
+        const task = state.tasks[taskId];
+        if (failed && task && (task.agentRunId === runId || task.agentWorkflowInstanceId === runId) && !["accepted", "cancelled", "integrating", "verifying", "ready"].includes(task.status)) {
+          task.status = "blocked";
+          task.blockedReason = "Agent run failed. Saved context, proposed files and pushed checkpoints remain recoverable.";
+          task.updatedAt = new Date().toISOString();
+          this.save();
+        }
+        return failed;
+      });
+    } catch (error) { this.state = null; throw error; }
+  }
 
   private visibilityTable(): void { this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS repository_visibility (id INTEGER PRIMARY KEY CHECK(id=1), visibility TEXT NOT NULL, version INTEGER NOT NULL, confirmed_by TEXT NOT NULL)"); }
   async repositoryVisibility(): Promise<"public" | "private"> {
@@ -699,10 +768,14 @@ export class RepositoryController extends DurableObject<Env> {
     const candidate = Object.values(this.load().candidates).find((value) => value.workflowInstanceId === instanceId);
     return candidate ? { instanceId, kind: "integration", actorId: null } : null;
   }
-  async beginAgentTask(taskId: string): Promise<boolean> {
+  async beginAgentTask(taskId: string, runId?: string): Promise<boolean> {
     const state = this.load();
     const task = state.tasks[taskId];
     if (!task || ["accepted", "cancelled", "integrating", "verifying"].includes(task.status)) return false;
+    if (task.status === "working" && task.agentWorkflowInstanceId && task.agentWorkflowInstanceId !== runId) return false;
+    const active = task.agentRunId ? this.agentRuns().get(task.agentRunId) : null;
+    if (active && !["checkpointed", "failed"].includes(active.phase) && active.runId !== runId) return false;
+    if (runId) task.agentWorkflowInstanceId = runId;
     task.initiatedBy ??= task.contributor;
     task.contributor = { id: `agent-${taskId}`, name: "FlareGit agent", type: "agent" };
     task.status = "working";
@@ -979,8 +1052,9 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   /** Model/container failures must not leave a change claiming an agent is still working. */
-  async failAgentTask(taskId: string): Promise<void> {
+  async failAgentTask(taskId: string, runId?: string): Promise<void> {
     const task = this.load().tasks[taskId];
+    if (runId && task?.agentWorkflowInstanceId !== runId && task?.agentRunId !== runId) return;
     if (!task || ["accepted", "cancelled", "integrating", "verifying", "ready"].includes(task.status)) return;
     task.status = "blocked";
     task.blockedReason = "Agent run failed. Pushed checkpoints are preserved; retry the agent or continue on the saved branch.";

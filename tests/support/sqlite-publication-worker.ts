@@ -1,5 +1,6 @@
 import { RepositoryController } from "../../src/server/durable-object.js";
 import { RepositoryConnections } from "../../src/server/connections";
+import type { AgentRunInput } from "../../src/server/agent-run-ledger";
 import type { ExternalCheckState, ExternalCheckPolicy } from "../../src/core/external-checks";
 import type { FlareGitProjectState } from "../../src/core/types.js";
 
@@ -47,6 +48,15 @@ export default {
       if (url.pathname === "/subscribe") await stub.addWebhook("https://example.com/hook", await request.json() as string[]);
       if (url.pathname === "/expire") await stub.expireLease();
       if (url.pathname === "/claim") await stub.claimLanding({ holder: "claim-holder", taskIds: (url.searchParams.get("tasks") ?? "task").split(",") });
+      if (url.pathname === "/agent-resume") { const input = await request.json() as { runId:string;taskId:string;previousRunId:string }; return Response.json(await stub.resumeAgentRun(input.runId,input.taskId,input.previousRunId)); }
+      if (url.pathname === "/verification-policy") await stub.setVerificationPolicy(await request.json() as Record<string,unknown>);
+      if (url.pathname === "/agent-claim") return Response.json(await stub.claimAgentRun(await request.json() as AgentRunInput));
+      if (url.pathname === "/agent-proposal") { const input = await request.json() as { runId: string; taskId: string; files: Record<string,string> }; return Response.json(await stub.saveAgentProposal(input.runId,input.taskId,input.files)); }
+      if (url.pathname === "/agent-push") { const input = await request.json() as { runId: string; taskId: string; commit: string }; return Response.json(await stub.markAgentPushed(input.runId,input.taskId,input.commit)); }
+      if (url.pathname === "/agent-checkpoint") { const input = await request.json() as { runId: string; taskId: string; commit: string; eventId: string }; await stub.ingestCheckpoint({ ...input, ready: true }); return Response.json(await stub.checkpointAgentRun(input.runId,input.taskId,input.eventId,input.commit)); }
+      if (url.pathname === "/agent-fail") { const input = await request.json() as { runId: string; taskId: string }; return Response.json(await stub.failAgentRun(input.runId,input.taskId)); }
+      if (url.pathname === "/agent-run") return Response.json(await stub.getAgentRun(url.searchParams.get("run") ?? "run-one"));
+      if (url.pathname === "/agent-state") return Response.json(await stub.getState());
       if (url.pathname === "/member") await stub.addMember(url.searchParams.get("user") ?? "owner", url.searchParams.get("role") === "owner" ? "owner" : "member");
       if (url.pathname === "/visibility") { const value = await request.json() as { visibility: "public" | "private"; confirmed: boolean; by: string }; await stub.setRepositoryVisibility(value.visibility, value.confirmed, value.by); }
       if (url.pathname === "/visibility-status") return Response.json(await stub.visibilitySnapshot());

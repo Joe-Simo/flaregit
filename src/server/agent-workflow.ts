@@ -7,6 +7,7 @@ import { globalOf } from "./projects.js";
 export interface AgentParams {
   projectId: string;
   taskId: string;
+  resumeFrom?: string;
 }
 
 /** Runs one AI coding agent on one task of a customer's repository. */
@@ -27,16 +28,22 @@ export class FlareGitAgentWorkflow extends WorkflowEntrypoint<Env, AgentParams> 
     }
   }
   private async execute(event: WorkflowEvent<AgentParams>, step: WorkflowStep) {
-    const { projectId, taskId } = event.payload;
+    const { projectId, taskId, resumeFrom } = event.payload;
     const ledger = ledgerOf(this.env, projectId);
     try {
-      return await step.do("agent", { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "10 minutes" }, async () => {
+      const proposal = await step.do("plan-agent-proposal", { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "10 minutes" }, async () => {
         const task = (await ledger.getState()).tasks[taskId];
         if (!task || ["accepted", "cancelled", "integrating", "verifying"].includes(task.status)) return { commit: "" };
-        return runAgentTask(this.env, ledger, task);
+        return runAgentTask(this.env, ledger, task, event.instanceId, { stopAfterProposal: true, ...(resumeFrom ? { resumeFrom } : {}) });
+      });
+      if (proposal.commit || !("proposalId" in proposal)) return proposal;
+      return await step.do("apply-saved-proposal", { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "10 minutes" }, async () => {
+        const task = (await ledger.getState()).tasks[taskId];
+        if (!task || ["accepted", "cancelled", "integrating", "verifying"].includes(task.status)) return { commit: "" };
+        return runAgentTask(this.env, ledger, task, event.instanceId, resumeFrom ? { resumeFrom } : undefined);
       });
     } catch {
-      await step.do("record-agent-failure", async () => ledger.failAgentTask(taskId));
+      await step.do("record-agent-failure", async () => { await ledger.failAgentRun(event.instanceId, taskId); await ledger.failAgentTask(taskId, event.instanceId); });
       throw new Error("Agent run failed; saved checkpoints remain available. Retry or continue on the saved branch.");
     }
   }

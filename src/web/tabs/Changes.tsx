@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { AgentRecoveryPanel } from "../components/AgentRecoveryPanel";
 import { apiFetch, apiJson } from "../api";
 import { navigate, timeAgo } from "../router";
 import type { FlareGitProjectState, Task, TaskStatus } from "@/core/types";
@@ -242,6 +243,7 @@ export function ChangesTab({ projectId, state, reload }: { projectId: string; st
                     <summary className="cursor-pointer rounded w-fit focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Files touched in saved checkpoints</summary>
                     <ul className="mt-2 space-y-1">{[...new Set(t.checkpoints.flatMap((checkpoint) => checkpoint.filesChanged))].map((file) => <li key={file}><code className="break-all">{file}</code>{(paths.get(file)?.length ?? 0) > 1 && <span className="ml-2 text-amber-200">shared with another active change</span>}</li>)}</ul>
                   </details>}
+                  {t.agentRunId && <AgentRecoveryPanel key={`${projectId}:${t.id}:${t.agentRunId}`} projectId={projectId} taskId={t.id} runId={t.agentRunId} canResume={["working", "checkpointed", "blocked", "needs_decision"].includes(t.status)} busy={busy !== null} onStarted={reload} />}
                   {t.agentWorkflowInstanceId && <AgentRunControls key={t.agentWorkflowInstanceId} projectId={projectId} instanceId={t.agentWorkflowInstanceId} canRetry={["working", "checkpointed", "blocked", "needs_decision"].includes(t.status)} retrying={busy !== null} onRetry={() => void act(t, "agent")} onChange={reload} />}
                   {t.status === "blocked" && (
                     <p className="mt-1.5 text-xs text-destructive">Blocked: {t.blockedReason ?? "no reason was recorded"}</p>

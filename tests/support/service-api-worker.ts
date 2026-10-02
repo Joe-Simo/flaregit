@@ -18,16 +18,24 @@ export class ServiceApiFixture extends DurableObject {
       ledger.registerRun("candidate-one", "check-one", "run-one");
       return Response.json(created);
     }
+    if (route === "/expensive-count") return Response.json(this.ctx.storage.sql.exec("SELECT COUNT(*) AS count FROM expensive_calls").toArray()[0]);
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS expensive_calls(id INTEGER)");
     if (route === "/revoke") { const value = await request.json() as { id: string }; ledger.revoke(value.id); return Response.json({ ok: true }); }
     const env = {
       REPOSITORY_CONTROLLER: {
         idFromName: (name: string) => name,
         get: (name: string) => ({
+          verifyApiToken: async (token: string) => token === `fgt_abcdef123456_${"x".repeat(32)}` ? { userId:"fixture-user",scope:"full",repo:null } : null,
+          roleOf: async () => "owner",
+          listProjects: async () => [],listImportJobs: async () => [],
+          getState: async () => ({ verificationPolicy:{},acceptedState:{currentCommit:"a".repeat(40)},tasks:{"task-one":{id:"task-one",status:"working"}} }),
           connectionSigningConfig: async (id: string) => name === `project:${repositoryId}` ? ledger.signingConfig(id) : null,
           acceptIntegrationCallback: async (callback: IntegrationCallback) => ledger.accept(callback),
           serviceCandidateSnapshot: async (id: string, candidate: string, commit: string, nonce: string) => { try { return ledger.serviceCandidateSnapshot(id, candidate, commit, nonce); } catch { return null; } },
         }),
       },
+      ARTIFACTS: {create:async()=>{this.ctx.storage.sql.exec("INSERT INTO expensive_calls VALUES(1)");throw new Error("Unexpected creation");}},
+      AGENT_WORKFLOW: {create:async()=>{this.ctx.storage.sql.exec("INSERT INTO expensive_calls VALUES(1)");throw new Error("Unexpected agent start");}},
       API_LIMITER: { limit: async () => ({ success: true }) },
     } as unknown as Env;
     return worker.fetch(request, env, this.ctx as unknown as ExecutionContext);

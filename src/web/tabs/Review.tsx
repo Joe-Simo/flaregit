@@ -3,6 +3,7 @@ import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DiffViewer, type BlobResult, type FileChange } from "../components/DiffViewer";
 import { apiJson } from "../api";
+import { AgentRecoveryPanel } from "../components/AgentRecoveryPanel";
 import { CandidateReview } from "../components/CandidateReview";
 import { Conversation, type Comment } from "../components/Conversation";
 import type { CandidateGeneration, FlareGitProjectState } from "@/core/types";
@@ -34,6 +35,7 @@ export function ReviewTab({ projectId, task, commit, candidate, evidence, reload
       <Button variant="ghost" size="sm" onClick={() => navigate(`/p/${projectId}/${candidate ? "integration" : task ? "changes" : "commits"}`)}>
         <ArrowLeft className="h-4 w-4 mr-1.5" /> Back
       </Button>
+      {task && evidence?.tasks[task]?.agentRunId && <AgentRecoveryPanel key={`${projectId}:${task}:${evidence.tasks[task]!.agentRunId}`} projectId={projectId} taskId={task} runId={evidence.tasks[task]!.agentRunId!} canResume={["working", "checkpointed", "blocked", "needs_decision"].includes(evidence.tasks[task]!.status)} onStarted={reload} />}
       {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>}
       {!diff && !error && <p className="text-sm text-muted-foreground">Loading changes…</p>}
       {diff && (

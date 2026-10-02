@@ -19,9 +19,10 @@ import { validateWebhookUrl } from "./webhooks.js";
 import { PROJECT_ID, accountKeyFor, accountOf, admitRun, adoptLegacyProject, canonicalNameFor, globalOf, newProjectId, projectOf, taskRepoName } from "./projects.js";
 import type { Env, QueueMessage } from "./env.js";
 import type { Task } from "../core/types.js";
-import { redactSecrets } from "../agents/prompt.js";
+import { assertAgentWrites, redactSecrets } from "../agents/prompt.js";
 import { assertWorkflowControlPermission, controlWorkflow, WorkflowControlError } from "./workflow-control.js";
 import { inspectImport, startImport, type ImportJob, type ImportReadiness } from "./import-job.js";
+import { readPublicPlanPrice } from "./plan-price.js";
 import type { Ledger } from "./durable-object.js";
 import { validateImportSource, validateRepositoryCommand } from "./import-source.js";
 import { integrationCapabilities, verifyIntegrationCallback } from "./integration-auth.js";
@@ -36,12 +37,18 @@ const TASK_ID = /^[a-z0-9][a-z0-9-]{2,40}$/;
 const json = (data: unknown, status = 200) => Response.json(data, { status });
 const text = (message: string, status: number) => new Response(message, { status });
 const clean = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+class RequestBodyError extends Error {}
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname === "/health") return json({ ok: true });
+    if (url.pathname === "/pricing" && request.method === "GET") {
+      const limited = await env.API_LIMITER.limit({ key: `pricing:${request.headers.get("CF-Connecting-IP") ?? "unknown"}` });
+      if (!limited.success) return text("Too many requests", 429);
+      return Response.json(await readPublicPlanPrice(env), { headers: { "Cache-Control": "no-store" } });
+    }
     if (url.pathname === "/status.json") {
       const [rows, incidents, reports, workflows] = await Promise.all([currentStatus(env), statusIncidents(env), globalOf(env).reportBacklog(), workflowHealth(env)]);
       return Response.json({ degraded: rows.filter((r) => r.degradedNow).map((r) => r.label), components: rows, incidents, reports, workflows }, { headers: { "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" } });
@@ -180,7 +187,28 @@ export default {
       if (pinned && !path.startsWith(`/p/${pinned}/`) && path !== `/p/${pinned}`) return text("This token is limited to one repository", 403);
       if (auth.tokenScope === "read" && method !== "GET" && !/^\/p\/[a-z0-9]+\/clone$/.test(path)) return text("This token is read-only", 403);
     }
-    const body = async <T>() => ((await request.json().catch(() => ({}))) as T) ?? ({} as T);
+    const body = async <T>() => {
+      const reader = request.body?.getReader();
+      if (!reader) return {} as T;
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        size += next.value.byteLength;
+        if (size > 131_072) { await reader.cancel(); throw new RequestBodyError("Request body is too large"); }
+        chunks.push(next.value);
+      }
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      const raw = new TextDecoder().decode(bytes);
+      if (!raw.trim()) return {} as T;
+      let value: unknown;
+      try { value = JSON.parse(raw); } catch { throw new RequestBodyError("Invalid JSON request body"); }
+      if (typeof value !== "object" || value === null || Array.isArray(value)) throw new RequestBodyError("Request body must be an object");
+      return value as T;
+    };
 
     try {
       // ---------- account level ----------
@@ -555,6 +583,13 @@ export default {
         }
 
         const tokenRoute = /^\/tasks\/([a-z0-9-]+)\/token$/.exec(sub);
+        const agentRecordRoute = /^\/tasks\/([a-z0-9-]+)\/agent-run$/.exec(sub);
+        if (agentRecordRoute && method === "GET") {
+          const task = state.tasks[agentRecordRoute[1]!];
+          if (!task) return text("Unknown change", 404);
+          const run = task.agentRunId ? await project.getAgentRun(task.agentRunId) : null;
+          return Response.json({ run }, { headers: { "Cache-Control": "no-store" } });
+        }
         if (tokenRoute && method === "POST") {
           const task = state.tasks[tokenRoute[1]!];
           if (!task || task.status === "accepted" || task.status === "cancelled") return text("Change is not open", 404);
@@ -586,17 +621,31 @@ export default {
           }
           // AI agent works on this change
           if (["accepted", "cancelled", "integrating", "verifying"].includes(task.status)) return text("This change cannot start an agent in its current state", 409);
+          const agentRequest = await body<{ resumeFrom?: unknown }>();
+          let resumeFrom: string | undefined;
+          if (agentRequest.resumeFrom !== undefined) {
+            if (typeof agentRequest.resumeFrom !== "string" || agentRequest.resumeFrom !== task.agentRunId) return text("Select this change's saved agent work", 400);
+            const previous = await project.getAgentRun(agentRequest.resumeFrom);
+            if (previous?.taskId !== task.id || previous.phase !== "failed" || !previous.proposal) return text("No failed saved proposal is available to resume", 409);
+            if (previous.goal !== redactSecrets(task.goal)) return text("This change's purpose changed; inspect the saved proposal before starting new work", 409);
+            try {
+              const files = Object.keys(previous.proposal.files);
+              assertAgentWrites({ allowedScope: task.allowedScope ?? settings.allowedScope }, files, settings.protectedPaths);
+              assertAgentWrites({ allowedScope: settings.allowedScope }, files, settings.protectedPaths);
+            } catch { return text("Current permissions no longer allow this saved proposal; its files remain available for review", 409); }
+            resumeFrom = previous.runId;
+          }
           const { plan } = await account.getBilling();
           const denied = await admitRun(env, account, planLimits(env)[plan]);
           if (denied) return denied;
-          if (!(await project.beginAgentTask(task.id))) return text("Change can no longer start an agent", 409);
-          let instance: WorkflowInstance;
           const instanceId = `agent-${projectId}-${task.id}-${crypto.randomUUID()}`;
+          if (!(await project.beginAgentTask(task.id, instanceId))) return text("This change already has active agent work or cannot start an agent", 409);
+          let instance: WorkflowInstance;
           try {
             await project.registerWorkflow(instanceId, "agent", task.id, userId);
-            instance = await env.AGENT_WORKFLOW.create({ id: instanceId, params: { projectId, taskId: task.id } });
+            instance = await env.AGENT_WORKFLOW.create({ id: instanceId, params: { projectId, taskId: task.id, ...(resumeFrom ? { resumeFrom } : {}) } });
           } catch {
-            await project.failAgentTask(task.id);
+            await project.failAgentTask(task.id, instanceId);
             return text("Change is saved, but the agent could not start. Retry or continue on its saved branch.", 503);
           }
           ctx.waitUntil(reportUsage(env, accountKey, "agent_run", instance.id, { plan }));
@@ -923,6 +972,7 @@ export default {
 
       return text("Not found", 404);
     } catch (err) {
+      if (err instanceof RequestBodyError) return text(err.message, 400);
       const message = redactSecrets(err instanceof Error ? err.message : "Internal error");
       console.error("api error", method, path, message);
       return text(message, 500);

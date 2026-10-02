@@ -11,6 +11,11 @@ test("production Worker service routes verify signatures before user login and e
   const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ name: "service-api-test", modules: true, script: await built.outputs[0]!.text(), compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], durableObjects: { TEST: { className: "ServiceApiFixture", useSQLite: true } } }] }));
   const request = async (path: string, init?: { method?: string; body?: string; headers?: Record<string, string> }) => (await mf.getWorker("service-api-test")).fetch(`http://test${path}`, init);
   try {
+    const humanHeaders={Authorization:`Bearer fgt_abcdef123456_${"x".repeat(32)}`};
+    for(const endpoint of ["/api/projects","/api/p/abcdef123456/tasks/task-one/agent"]){
+      for(const body of ["{invalid","[]","null","x".repeat(131073)])expect((await request(endpoint,{method:"POST",headers:humanHeaders,body})).status).toBe(400);
+    }
+    expect((await(await request("/expensive-count")).json() as {count:number}).count).toBe(0);
     const created = await (await request("/setup")).json() as { metadata: { id: string }; secret: string };
     const prefix = `/api/p/abcdef123456/connections/${created.metadata.id}`;
     const path = `${prefix}/candidates/candidate-one?commit=${"a".repeat(40)}`;
