@@ -144,7 +144,7 @@ export function DiffViewer({ files, loadBlob }: { files: FileChange[]; loadBlob:
           <span><kbd>g</kbd>/<kbd>G</kbd> top/bottom</span>
         </div>
       )}
-      <div ref={parentRef} className="h-[70vh] overflow-auto font-mono text-xs" tabIndex={0} aria-label="Diff">
+      <div ref={parentRef} className="h-[70vh] overflow-auto font-mono text-[11px] sm:text-xs touch-pan-x touch-pan-y" tabIndex={0} aria-label="Diff">
         <div style={{ height: virtualizer.getTotalSize(), width: "max-content", minWidth: "100%", position: "relative" }}>
           {virtualizer.getVirtualItems().map((v) => {
             const r = flat[v.index]!;
@@ -166,8 +166,8 @@ export function DiffViewer({ files, loadBlob }: { files: FileChange[]; loadBlob:
             const bg = row.t === "+" ? "bg-emerald-500/10" : row.t === "-" ? "bg-red-500/10" : row.t === "h" ? "bg-sky-500/10 text-sky-300" : "";
             return (
               <div key={v.key} style={style} className={`flex whitespace-pre ${bg}`}>
-                <span className="w-10 shrink-0 text-right pr-2 text-muted-foreground select-none">{row.a ?? ""}</span>
-                <span className="w-10 shrink-0 text-right pr-2 text-muted-foreground select-none">{row.b ?? ""}</span>
+                <span className="hidden sm:block w-10 shrink-0 text-right pr-2 text-muted-foreground select-none">{row.a ?? ""}</span>
+                <span className="sticky left-0 z-10 bg-background w-9 sm:w-10 shrink-0 text-right pr-2 text-muted-foreground select-none">{row.b ?? row.a ?? ""}</span>
                 <span className="w-4 shrink-0 select-none">{row.t === "h" ? "" : row.t}</span>
                 {row.html ? <span className="hljs-line" dangerouslySetInnerHTML={{ __html: row.html }} /> : <span>{row.text}</span>}
               </div>

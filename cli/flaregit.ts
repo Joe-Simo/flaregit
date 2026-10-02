@@ -65,6 +65,8 @@ async function api<T>(method: string, route: string, body?: unknown): Promise<T>
 interface Project { id: string; name: string; role: string; kind: string }
 async function resolveRepo(ref: string | undefined): Promise<string> {
   if (!ref) return fail("Specify a repository (name or id)");
+  // A repository id is used as-is (the server checks membership), so repo-pinned tokens work without listing the account.
+  if (/^p?[0-9a-f]{12}$/.test(ref)) return ref;
   if (/^[a-z0-9]{12,16}$/.test(ref) && !ref.includes("-")) {
     // could be an id or a short name: prefer an exact id match
     const { projects } = await api<{ projects: Project[] }>("GET", "/account");
@@ -95,6 +97,7 @@ const color = { red: (s: string) => `\x1b[31m${s}\x1b[0m`, green: (s: string) =>
 const HELP = `flaregit — JSON by default (--pretty for humans)
 
   auth login <token> | auth status | auth logout
+  auth token [--scope read|write] [--ttl 1h] [--repo R]   mint a short-lived, narrower token
   repos
   repo import <url> --name N --test "cmd" [--install "cmd"] [--build "cmd"] [--branch B]
   repo demo [--name N]
@@ -115,6 +118,16 @@ async function main() {
   const [cmd, sub, ...rest] = pos;
   if (!cmd || flags.has("help")) return console.log(HELP);
 
+  if (cmd === "auth" && sub === "token") {
+    const scope = flag("scope") ?? "read";
+    if (scope !== "read" && scope !== "write") fail("--scope must be read or write");
+    const ttl = flag("ttl") ?? "1h";
+    const m = /^(\d+)([mhd])$/.exec(ttl) ?? fail("--ttl looks like 30m, 1h or 1d (max 24h)");
+    const ttlSeconds = Number(m[1]) * { m: 60, h: 3600, d: 86400 }[m[2] as "m" | "h" | "d"];
+    const repoRef = flag("repo");
+    const t = await api<{ token: string; scope: string; expiresAt: string | null }>("POST", "/tokens", { label: `cli ${scope} ${ttl}`, scope, ttlSeconds, ...(repoRef ? { repo: await resolveRepo(repoRef) } : {}) });
+    return out({ token: t.token, scope: t.scope, expiresAt: t.expiresAt });
+  }
   if (cmd === "auth") {
     if (sub === "login") {
       const token = rest[0] ?? fail("Usage: flaregit auth login <token>");

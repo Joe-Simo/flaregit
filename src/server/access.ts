@@ -19,6 +19,9 @@ export interface Identity {
   email?: string;
   /** True when the request used a personal API token (such requests cannot create or manage tokens). */
   viaToken?: boolean;
+  /** Set for API tokens: what the token may do and which repository it is pinned to. */
+  tokenScope?: "full" | "read" | "write";
+  tokenRepo?: string | null;
 }
 
 /**
@@ -32,8 +35,8 @@ export async function authenticate(request: Request, env: Env): Promise<Identity
   if (raw?.startsWith("fgt_")) {
     const m = /^fgt_([0-9a-f]{12})_([A-Za-z0-9]{32,64})$/.exec(raw);
     if (!m) return new Response("Unauthorized", { status: 401 });
-    const userId = await accountOf(env, m[1]!).verifyApiToken(raw).catch(() => null);
-    return userId ? { id: userId, viaToken: true } : new Response("Unauthorized", { status: 401 });
+    const t = await accountOf(env, m[1]!).verifyApiToken(raw).catch(() => null);
+    return t ? { id: t.userId, viaToken: true, tokenScope: t.scope, tokenRepo: t.repo } : new Response("Unauthorized", { status: 401 });
   }
   if (!env.CLERK_ISSUER) return new Response("Authentication is not configured", { status: 503 });
   const header = request.headers.get("Authorization");

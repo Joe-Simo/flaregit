@@ -44,8 +44,8 @@ export function Repo({ projectId, tab, previewBase, params }: { projectId: strin
     return () => clearInterval(t);
   }, [projectId, reload]);
 
-  if (error) return <div className="max-w-3xl mx-auto px-6 py-10 text-sm text-destructive" role="alert">{error === "Not found" ? "Repository not found, or you don't have access." : error}</div>;
-  if (!meta || !state) return <div className="max-w-3xl mx-auto px-6 py-10 text-sm text-muted-foreground">Loading repository…</div>;
+  if (error) return <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10 text-sm text-destructive" role="alert">{error === "Not found" ? "Repository not found, or you don't have access." : error}</div>;
+  if (!meta || !state) return <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10 text-sm text-muted-foreground">Loading repository…</div>;
 
   const getClone = async () => {
     const r = await apiJson<{ command: string; remote: string }>(`/p/${projectId}/clone`, { method: "POST" });
@@ -53,7 +53,7 @@ export function Repo({ projectId, tab, previewBase, params }: { projectId: strin
   };
 
   return (
-    <div className="max-w-6xl mx-auto px-6 py-6">
+    <div className="max-w-6xl mx-auto px-4 sm:px-6 py-6">
       <div className="flex items-center justify-between gap-4 flex-wrap mb-4">
         <div className="flex items-center gap-3 min-w-0">
           <Lock className="h-4 w-4 text-muted-foreground" />

@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { freezeCandidateGeneration } from "../core/pipeline/freeze.js";
 import { createProductDecision, detectContradiction } from "../core/decision/contradiction.js";
 import type { Env } from "./env.js";
+import { accountKeyFor, accountOf } from "./projects.js";
 import type {
   CandidateGeneration,
   FlareGitProjectState,
@@ -60,7 +61,28 @@ export interface ComponentStatus {
 
 export const WEBHOOK_EVENTS = ["change.ready", "change.accepted", "change.blocked", "decision.needed"] as const;
 
+/** Limits on a token: `full` acts as the user; `read`/`write` are narrower; `repo` pins it to one repository; `expiresAt` (ms) makes it short-lived. */
+export interface TokenScope {
+  scope: "full" | "read" | "write";
+  repo?: string;
+  expiresAt?: number;
+}
+
+export interface InboxRow {
+  id: number;
+  project_id: string;
+  project_name: string;
+  kind: "direct" | "activity";
+  type: string;
+  title: string;
+  created_at: string;
+  state: "unread" | "archived" | "snoozed";
+}
+
 export interface ApiTokenRow {
+  scope: string;
+  repo: string | null;
+  expires_at: number | null;
   id: string;
   label: string;
   created_at: string;
@@ -85,11 +107,15 @@ export interface Ledger {
   listMembers(): Promise<Array<{ user_id: string; role: string; label: string | null; added_at: string }>>;
   createInvite(createdBy: string): Promise<string>;
   acceptInvite(token: string, userId: string, label?: string): Promise<boolean>;
-  logActivity(actor: string, type: string, summary: string): Promise<void>;
-  createApiToken(userId: string, label: string, secret: string): Promise<{ id: string }>;
+  logActivity(actor: string, type: string, summary: string, opts?: { exceptUser?: string }): Promise<void>;
+  addInbox(item: { projectId: string; projectName: string; kind: "direct" | "activity"; type: string; title: string }): Promise<void>;
+  listInbox(filter: "direct" | "activity" | "snoozed" | "archived"): Promise<InboxRow[]>;
+  setInboxState(id: number, state: "unread" | "archived" | "snoozed"): Promise<void>;
+  inboxUnread(): Promise<{ direct: number; activity: number }>;
+  createApiToken(userId: string, label: string, secret: string, opts?: TokenScope): Promise<{ id: string }>;
   listApiTokens(): Promise<ApiTokenRow[]>;
   revokeApiToken(id: string): Promise<void>;
-  verifyApiToken(secret: string): Promise<string | null>;
+  verifyApiToken(secret: string): Promise<{ userId: string; scope: TokenScope["scope"]; repo: string | null } | null>;
   recordProbe(component: string, ok: boolean, latencyMs?: number, detail?: string): Promise<void>;
   statusSummary(): Promise<ComponentStatus[]>;
   addWebhook(url: string, events: string[]): Promise<{ id: string; secret: string }>;
@@ -143,6 +169,7 @@ export class RepositoryController extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, type TEXT NOT NULL, summary TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS webhooks (id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL, events TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS deliveries (id TEXT PRIMARY KEY, seq INTEGER NOT NULL DEFAULT 0, queue_ms INTEGER, webhook_id TEXT NOT NULL, event TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_status INTEGER, last_error TEXT, latency_ms INTEGER, payload TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS inbox (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, project_name TEXT NOT NULL, kind TEXT NOT NULL, type TEXT NOT NULL, title TEXT NOT NULL, created_at TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'unread');
       CREATE TABLE IF NOT EXISTS probes (id INTEGER PRIMARY KEY AUTOINCREMENT, component TEXT NOT NULL, at INTEGER NOT NULL, ok INTEGER NOT NULL, latency_ms INTEGER, detail TEXT);
       CREATE INDEX IF NOT EXISTS probes_component_at ON probes (component, at);
       CREATE TABLE IF NOT EXISTS api_tokens (id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, label TEXT NOT NULL, created_at TEXT NOT NULL, last_used TEXT);
@@ -152,6 +179,9 @@ export class RepositoryController extends DurableObject<Env> {
     // Databases created before ordered delivery lack these columns.
     for (const col of ["seq INTEGER NOT NULL DEFAULT 0", "queue_ms INTEGER"]) {
       try { this.ctx.storage.sql.exec(`ALTER TABLE deliveries ADD COLUMN ${col}`); } catch { /* already present */ }
+    }
+    for (const col of ["scope TEXT NOT NULL DEFAULT 'full'", "repo TEXT", "expires_at INTEGER"]) {
+      try { this.ctx.storage.sql.exec(`ALTER TABLE api_tokens ADD COLUMN ${col}`); } catch { /* already present */ }
     }
   }
 
@@ -233,7 +263,7 @@ export class RepositoryController extends DurableObject<Env> {
     task.updatedAt = new Date().toISOString();
     this.save();
     if (ev.ready) await this.emit("change.ready", { change: task.id, commit: ev.commit, goal: task.goal });
-    await this.logActivity(task.contributor.name, ev.ready ? "task.ready" : "task.pushed", `${task.id} ${ev.ready ? "is ready for integration" : "pushed a checkpoint"} (${ev.commit.slice(0, 7)})`);
+    await this.logActivity(task.contributor.name, ev.ready ? "task.ready" : "task.pushed", `${task.id} ${ev.ready ? "is ready for integration" : "pushed a checkpoint"} (${ev.commit.slice(0, 7)})`, { exceptUser: task.contributor.id });
     return { applied: true };
   }
 
@@ -373,24 +403,32 @@ export class RepositoryController extends DurableObject<Env> {
     const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
     return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
   }
-  async createApiToken(userId: string, label: string, secret: string): Promise<{ id: string }> {
+  async createApiToken(userId: string, label: string, secret: string, opts: TokenScope = { scope: "full" }): Promise<{ id: string }> {
+    this.ctx.storage.sql.exec("DELETE FROM api_tokens WHERE expires_at IS NOT NULL AND expires_at < ?", Date.now());
     const count = this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM api_tokens").toArray()[0]?.n ?? 0;
-    if (count >= 20) throw new Error("Token limit reached (20). Revoke one first.");
+    if (count >= 50) throw new Error("Token limit reached (50). Revoke one first.");
     const id = `tok_${crypto.randomUUID().slice(0, 8)}`;
-    this.ctx.storage.sql.exec("INSERT INTO api_tokens (id, hash, user_id, label, created_at) VALUES (?, ?, ?, ?, ?)", id, await this.sha256(secret), userId, label.slice(0, 60), new Date().toISOString());
+    this.ctx.storage.sql.exec(
+      "INSERT INTO api_tokens (id, hash, user_id, label, created_at, scope, repo, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      id, await this.sha256(secret), userId, label.slice(0, 60), new Date().toISOString(), opts.scope, opts.repo ?? null, opts.expiresAt ?? null
+    );
     return { id };
   }
   async listApiTokens(): Promise<ApiTokenRow[]> {
-    return this.ctx.storage.sql.exec("SELECT id, label, created_at, last_used FROM api_tokens ORDER BY created_at DESC").toArray() as unknown as ApiTokenRow[];
+    return this.ctx.storage.sql
+      .exec("SELECT id, label, created_at, last_used, scope, repo, expires_at FROM api_tokens WHERE expires_at IS NULL OR expires_at > ? ORDER BY created_at DESC", Date.now())
+      .toArray() as unknown as ApiTokenRow[];
   }
   async revokeApiToken(id: string): Promise<void> {
     this.ctx.storage.sql.exec("DELETE FROM api_tokens WHERE id = ?", id);
   }
-  async verifyApiToken(secret: string): Promise<string | null> {
-    const row = this.ctx.storage.sql.exec<{ id: string; user_id: string }>("SELECT id, user_id FROM api_tokens WHERE hash = ?", await this.sha256(secret)).toArray()[0];
-    if (!row) return null;
+  async verifyApiToken(secret: string): Promise<{ userId: string; scope: TokenScope["scope"]; repo: string | null } | null> {
+    const row = this.ctx.storage.sql
+      .exec<{ id: string; user_id: string; scope: TokenScope["scope"]; repo: string | null; expires_at: number | null }>("SELECT id, user_id, scope, repo, expires_at FROM api_tokens WHERE hash = ?", await this.sha256(secret))
+      .toArray()[0];
+    if (!row || (row.expires_at !== null && row.expires_at < Date.now())) return null;
     this.ctx.storage.sql.exec("UPDATE api_tokens SET last_used = ? WHERE id = ?", new Date().toISOString(), row.id);
-    return row.user_id;
+    return { userId: row.user_id, scope: row.scope, repo: row.repo };
   }
 
   // ---- platform health (used on the global instance) ----
@@ -425,9 +463,52 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   // ---- activity feed ----
-  async logActivity(actor: string, type: string, summary: string): Promise<void> {
+  async logActivity(actor: string, type: string, summary: string, opts?: { exceptUser?: string }): Promise<void> {
     this.ctx.storage.sql.exec("INSERT INTO activity (at, actor, type, summary) VALUES (?, ?, ?, ?)", new Date().toISOString(), actor, type, summary.slice(0, 300));
     this.ctx.storage.sql.exec("DELETE FROM activity WHERE id <= (SELECT MAX(id) FROM activity) - 500");
+    await this.notifyMembers(type, summary, opts?.exceptUser);
+  }
+
+  /**
+   * Fans an activity out to every member's inbox. Things that need a person (a change to review, a decision,
+   * a blocked landing or stack) are "direct"; everything else is repository chatter kept apart from them.
+   */
+  private async notifyMembers(type: string, summary: string, exceptUser?: string): Promise<void> {
+    const DIRECT = new Set(["task.ready", "decision.needed", "integration.blocked", "integration.stale", "stack.rebase_blocked"]);
+    const CHATTER = new Set(["integration.accepted", "stack.rebased", "member.joined", "task.created"]);
+    if (!DIRECT.has(type) && !CHATTER.has(type)) return;
+    const s = this.state ?? (() => { try { return this.load(); } catch { return null; } })();
+    if (!s) return;
+    const members = this.ctx.storage.sql.exec<{ user_id: string }>("SELECT user_id FROM members").toArray();
+    await Promise.all(
+      members
+        .filter((m) => !exceptUser || !m.user_id.endsWith(exceptUser))
+        .map(async (m) => {
+          const account = accountOf(this.env, await accountKeyFor(m.user_id));
+          await account.addInbox({ projectId: s.projectId, projectName: s.projectName, kind: DIRECT.has(type) ? "direct" : "activity", type, title: summary.slice(0, 200) }).catch(() => undefined);
+        })
+    );
+  }
+
+  // ---- notification inbox (used on the account instance) ----
+  async addInbox(item: { projectId: string; projectName: string; kind: "direct" | "activity"; type: string; title: string }): Promise<void> {
+    // "Snooze until the next push" ends as soon as anything new happens in that repository.
+    this.ctx.storage.sql.exec("UPDATE inbox SET state = 'unread' WHERE project_id = ? AND state = 'snoozed'", item.projectId);
+    this.ctx.storage.sql.exec("INSERT INTO inbox (project_id, project_name, kind, type, title, created_at) VALUES (?, ?, ?, ?, ?, ?)", item.projectId, item.projectName, item.kind, item.type, item.title, new Date().toISOString());
+    this.ctx.storage.sql.exec("DELETE FROM inbox WHERE id <= (SELECT MAX(id) FROM inbox) - 300");
+  }
+  async listInbox(filter: "direct" | "activity" | "snoozed" | "archived"): Promise<InboxRow[]> {
+    const byState = filter === "snoozed" || filter === "archived";
+    return this.ctx.storage.sql
+      .exec(`SELECT * FROM inbox WHERE ${byState ? "state = ?" : "state = 'unread' AND kind = ?"} ORDER BY id DESC LIMIT 100`, filter)
+      .toArray() as unknown as InboxRow[];
+  }
+  async setInboxState(id: number, state: "unread" | "archived" | "snoozed"): Promise<void> {
+    this.ctx.storage.sql.exec("UPDATE inbox SET state = ? WHERE id = ?", state, id);
+  }
+  async inboxUnread(): Promise<{ direct: number; activity: number }> {
+    const rows = this.ctx.storage.sql.exec<{ kind: string; n: number }>("SELECT kind, COUNT(*) AS n FROM inbox WHERE state = 'unread' GROUP BY kind").toArray();
+    return { direct: rows.find((r) => r.kind === "direct")?.n ?? 0, activity: rows.find((r) => r.kind === "activity")?.n ?? 0 };
   }
   async listActivity(limit: number): Promise<ActivityRow[]> {
     return this.ctx.storage.sql.exec("SELECT id, at, actor, type, summary FROM activity ORDER BY id DESC LIMIT ?", Math.min(limit, 200)).toArray() as unknown as ActivityRow[];

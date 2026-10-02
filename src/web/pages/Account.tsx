@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiJson } from "../api";
 import { timeAgo } from "../router";
 
-interface Token { id: string; label: string; created_at: string; last_used: string | null }
+interface Token { id: string; label: string; created_at: string; last_used: string | null; scope: string; repo: string | null; expires_at: number | null }
 interface Billing { plan: "free" | "pro"; runsToday: number; runsPerDay: number }
 const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm";
 
@@ -27,7 +27,7 @@ export function Account() {
   useEffect(load, []);
 
   return (
-    <div className="max-w-3xl mx-auto px-6 py-8 space-y-4">
+    <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8 space-y-4">
       <h1 className="text-xl font-bold">Account</h1>
       {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>}
       {billing && (
@@ -58,6 +58,7 @@ export function Account() {
               <div key={t.id} className="px-3 py-2 flex items-center justify-between text-sm">
                 <div>
                   {t.label}
+                  {t.scope !== "full" && <Badge variant="outline" className="ml-2">{t.scope}{t.repo ? " · 1 repo" : ""}</Badge>}
                   <span className="text-xs text-muted-foreground ml-2">created {timeAgo(t.created_at)} · {t.last_used ? `used ${timeAgo(t.last_used)}` : "never used"}</span>
                 </div>
                 <Button size="sm" variant="ghost" aria-label={`Revoke ${t.label}`} onClick={async () => { await apiJson(`/tokens/${t.id}`, { method: "DELETE" }); load(); }}><Trash2 className="h-3.5 w-3.5" /></Button>

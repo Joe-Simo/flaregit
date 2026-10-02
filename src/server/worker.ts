@@ -82,6 +82,12 @@ export default {
     const account = accountOf(env, accountKey);
     const path = url.pathname.slice(4); // strip "/api"
     const method = request.method;
+    // Scoped tokens: read-only tokens may only read (and ask for a read-only clone credential); repo-pinned tokens see one repository.
+    if (auth.viaToken) {
+      const pinned = auth.tokenRepo;
+      if (pinned && !path.startsWith(`/p/${pinned}/`) && path !== `/p/${pinned}`) return text("This token is limited to one repository", 403);
+      if (auth.tokenScope === "read" && method !== "GET" && !/^\/p\/[a-z0-9]+\/clone$/.test(path)) return text("This token is read-only", 403);
+    }
     const body = async <T>() => ((await request.json().catch(() => ({}))) as T) ?? ({} as T);
 
     try {
@@ -133,6 +139,20 @@ export default {
         return json({ deleted: true });
       }
 
+      // ----- notification inbox -----
+      if (path === "/inbox" && method === "GET") {
+        const f = url.searchParams.get("filter");
+        const filter = f === "activity" || f === "snoozed" || f === "archived" ? f : "direct";
+        return json({ items: await account.listInbox(filter), unread: await account.inboxUnread() });
+      }
+      const inboxRoute = /^\/inbox\/(\d+)$/.exec(path);
+      if (inboxRoute && method === "POST") {
+        const b = await body<{ state?: string }>();
+        if (b.state !== "unread" && b.state !== "archived" && b.state !== "snoozed") return text("state must be unread, archived or snoozed", 400);
+        await account.setInboxState(Number(inboxRoute[1]), b.state);
+        return json({ ok: true });
+      }
+
       if (path === "/billing" && method === "GET") {
         const billing = await account.getBilling();
         return json({ ...billing, runsToday: await account.usageToday(), runsPerDay: planLimits(env)[billing.plan], checkoutConfigured: Boolean(env.POLAR_PRODUCT_ID && env.POLAR_ACCESS_TOKEN) });
@@ -143,14 +163,20 @@ export default {
 
       // ----- personal API tokens (Clerk session only: a token cannot mint or list tokens) -----
       if (path === "/tokens" || path.startsWith("/tokens/")) {
-        if (auth.viaToken) return text("Manage tokens from the web app", 403);
+        // A full-access token may only mint narrower, short-lived tokens; it cannot list or revoke.
+        if (auth.viaToken && !(auth.tokenScope === "full" && path === "/tokens" && method === "POST")) return text("Manage tokens from the web app", 403);
         if (path === "/tokens" && method === "GET") return json(await account.listApiTokens());
         if (path === "/tokens" && method === "POST") {
-          const b = await body<{ label?: string }>();
+          const b = await body<{ label?: string; scope?: string; repo?: string; ttlSeconds?: number }>();
+          const scope = b.scope === "read" || b.scope === "write" ? b.scope : "full";
+          const ttl = Number(b.ttlSeconds);
+          if (auth.viaToken && (scope === "full" || !(ttl > 0 && ttl <= 86_400))) return text("Tokens minted from a token must have scope read|write and a ttl of at most 24 hours", 400);
+          if (b.repo && !/^[a-z0-9]{12,16}$/.test(b.repo)) return text("Invalid repo", 400);
           const secret = [...crypto.getRandomValues(new Uint8Array(24))].map((x) => x.toString(16).padStart(2, "0")).join("");
           const token = `fgt_${accountKey}_${secret}`;
-          const created = await account.createApiToken(userId, clean(b.label, 60) || "CLI", token);
-          return json({ id: created.id, token, note: "Copy this token now; it is not shown again." }, 201);
+          const expiresAt = ttl > 0 ? Date.now() + Math.min(ttl, 365 * 86_400) * 1000 : undefined;
+          const created = await account.createApiToken(userId, clean(b.label, 60) || "CLI", token, { scope, ...(b.repo ? { repo: b.repo } : {}), ...(expiresAt ? { expiresAt } : {}) });
+          return json({ id: created.id, token, scope, repo: b.repo ?? null, expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null, note: "Copy this token now; it is not shown again." }, 201);
         }
         const tokRoute = /^\/tokens\/(tok_[a-z0-9-]+)$/.exec(path);
         if (tokRoute && method === "DELETE") {

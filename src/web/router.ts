@@ -4,6 +4,7 @@ export type Route =
   | { name: "home" }
   | { name: "new" }
   | { name: "account" }
+  | { name: "inbox" }
   | { name: "join"; projectId: string; token: string }
   | { name: "repo"; projectId: string; tab: string; params: URLSearchParams };
 
@@ -12,6 +13,7 @@ export function parseHash(hash: string): Route {
   const parts = (pathPart ?? "").split("/").filter(Boolean);
   if (parts[0] === "new") return { name: "new" };
   if (parts[0] === "account") return { name: "account" };
+  if (parts[0] === "inbox") return { name: "inbox" };
   if (parts[0] === "join" && parts[1] && parts[2]) return { name: "join", projectId: parts[1], token: parts[2] };
   if (parts[0] === "p" && parts[1]) return { name: "repo", projectId: parts[1], tab: parts[2] ?? "code", params: new URLSearchParams(query) };
   return { name: "home" };
