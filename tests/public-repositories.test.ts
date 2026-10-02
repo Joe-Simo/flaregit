@@ -48,3 +48,13 @@ test("hidden refs, traversal and unbounded pagination are rejected", async () =>
   await expect(readPublicRepository(repo, grant, { kind: "history", limit: 1000 })).rejects.toThrow("pagination");
   expect(accesses).toEqual([]);
 });
+
+test("public HTTP query parser rejects duplicate keys, credentials and mutable refs", async () => {
+  const { parsePublicBrowseRequest } = await import("../src/server/public-repositories.js");
+  expect(parsePublicBrowseRequest("tree", new URLSearchParams(`commit=${head}&path=src`))).toEqual({ kind: "directory", commit: head, path: "src" });
+  expect(() => parsePublicBrowseRequest("file", new URLSearchParams("path=a&path=b"))).toThrow();
+  expect(() => parsePublicBrowseRequest("meta", new URLSearchParams("token=secret"))).toThrow();
+  expect(() => parsePublicBrowseRequest("tree", new URLSearchParams("commit=HEAD"))).toThrow();
+  expect(() => parsePublicBrowseRequest("history", new URLSearchParams("offset=1e3"))).toThrow();
+  expect(() => parsePublicBrowseRequest("file", new URLSearchParams("path=%2e%2e%2ftoken"))).toThrow();
+});

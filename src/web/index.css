@@ -4,7 +4,8 @@
 
 @layer base {
   :root {
-    --font-sans: "FT Kunst Grotesk", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
     --background: 0 0% 98.039%;
     --foreground: 0 0% 10%;
     --card: 0 0% 100%;
@@ -55,6 +56,7 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: var(--font-sans);
     font-feature-settings: "rlig" 1, "calt" 1;
   }
 }
@@ -84,11 +86,11 @@
   animation: pulse-subtle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
-.hljs-comment, .hljs-quote { color: #8b949e; }
-.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-built_in { color: #ff7b72; }
-.hljs-string, .hljs-attr, .hljs-regexp { color: #a5d6ff; }
-.hljs-number, .hljs-title, .hljs-name, .hljs-type { color: #d2a8ff; }
-.hljs-variable, .hljs-property, .hljs-symbol { color: #ffa657; }
+.dark .hljs-comment, .dark .hljs-quote { color: #8b949e; }
+.dark .hljs-keyword, .dark .hljs-selector-tag, .dark .hljs-literal, .dark .hljs-built_in { color: #ff7b72; }
+.dark .hljs-string, .dark .hljs-attr, .dark .hljs-regexp { color: #a5d6ff; }
+.dark .hljs-number, .dark .hljs-title, .dark .hljs-name, .dark .hljs-type { color: #d2a8ff; }
+.dark .hljs-variable, .dark .hljs-property, .dark .hljs-symbol { color: #ffa657; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
@@ -128,3 +130,12 @@
 .dashboard-nav[aria-current="page"] { background: hsl(var(--accent)); color: hsl(var(--foreground)); box-shadow: inset 2px 0 hsl(var(--primary)); }
 .dashboard-shell { font-family: var(--font-sans); }
 .dashboard-shell button { -webkit-tap-highlight-color: transparent; }
+
+code, pre, kbd, samp { font-family: var(--font-mono); }
+
+.hljs-comment, .hljs-quote { color: #57606a; }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-built_in { color: #cf222e; }
+.hljs-string, .hljs-attr, .hljs-regexp { color: #0a3069; }
+.hljs-number { color: #0550ae; }
+.hljs-title, .hljs-name, .hljs-type { color: #8250df; }
+.hljs-variable, .hljs-property, .hljs-symbol { color: #953800; }

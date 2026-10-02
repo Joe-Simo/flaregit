@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button";
 import { setTokenGetter } from "./api";
 import { Landing } from "./pages/Landing";
 import { AppearanceDialog, useTheme } from "./ThemeProvider";
+import { PublicRepo } from "./pages/PublicRepo";
+import { navigate, useRoute } from "./router";
 
 function TokenBridge() {
   const { getToken } = useAuth();
@@ -56,6 +58,7 @@ function Entry({ children }: { children: React.ReactNode }) {
 
 /** Signed-out visitors see Clerk's sign-in; signed-in users get the app with their session token attached to API calls. */
 export function AuthGate({ children }: { children: React.ReactNode }) {
+  const route = useRoute();
   const [signingIn, setSigningIn] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
   const { resolvedTheme } = useTheme();
@@ -64,12 +67,15 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
+    if (route.name === "public") return;
     setError(null);
     fetch("/auth-config")
       .then((r) => (r.ok ? (r.json() as Promise<{ publishableKey?: string }>) : Promise.reject(new Error(String(r.status)))))
       .then((c) => (c.publishableKey ? setKey(c.publishableKey) : setError("Sign-in is not configured yet.")))
       .catch(() => setError("Could not load sign-in. Please retry."));
-  }, [attempt]);
+  }, [attempt, route.name]);
+
+  if (route.name === "public") return <PublicRepo key={route.projectId} projectId={route.projectId} params={route.params} onSignIn={() => { setSigningIn(true); navigate("/"); }} />;
 
   if (!key && !signingIn) return <Landing onSignIn={() => setSigningIn(true)} />;
   if (error) return <Entry><div className="rounded-xl border border-border bg-card p-6 sm:p-8">

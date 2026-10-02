@@ -10,6 +10,7 @@ export class PublicationFixture extends RepositoryController {
     this.ctx.storage.sql.exec("INSERT INTO lease (id, holder, expires_at) VALUES (1, ?, ?)", holder, Date.now() + 60_000);
     this.ctx.storage.sql.exec("INSERT INTO webhooks (id,url,secret,events,active,created_at) VALUES ('hook','https://example.com/hook','test-secret','change.accepted,change.ready,change.blocked,decision.needed',1,'now')");
   }
+  async visibilitySnapshot() { return { visibility: await this.repositoryVisibility(), grant: await this.publicGrant(), rows: this.ctx.storage.sql.exec("SELECT version FROM repository_visibility WHERE id=1").toArray() }; }
   fixtureConnection() { return new RepositoryConnections(this.ctx.storage, "test").create("External test provider", ["report-check"]); }
   fixturePolicy(policy: ExternalCheckPolicy) { new RepositoryConnections(this.ctx.storage, "test").setPolicy(policy); }
   injectExternal(state: ExternalCheckState) {
@@ -46,6 +47,9 @@ export default {
       if (url.pathname === "/subscribe") await stub.addWebhook("https://example.com/hook", await request.json() as string[]);
       if (url.pathname === "/expire") await stub.expireLease();
       if (url.pathname === "/claim") await stub.claimLanding({ holder: "claim-holder", taskIds: (url.searchParams.get("tasks") ?? "task").split(",") });
+      if (url.pathname === "/member") await stub.addMember(url.searchParams.get("user") ?? "owner", url.searchParams.get("role") === "owner" ? "owner" : "member");
+      if (url.pathname === "/visibility") { const value = await request.json() as { visibility: "public" | "private"; confirmed: boolean; by: string }; await stub.setRepositoryVisibility(value.visibility, value.confirmed, value.by); }
+      if (url.pathname === "/visibility-status") return Response.json(await stub.visibilitySnapshot());
       if (url.pathname === "/connection") return Response.json(await stub.fixtureConnection());
       if (url.pathname === "/external-policy") await stub.fixturePolicy(await request.json() as ExternalCheckPolicy);
       if (url.pathname === "/await-review") await stub.awaitReview("candidate", url.searchParams.get("commit") ?? "landed", "old-holder");

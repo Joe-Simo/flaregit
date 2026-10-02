@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { WebhooksCard } from "../components/WebhooksCard";
 import { DomainsCard } from "../components/DomainsCard";
 import { isCommandPolicy } from "@/core/command-policy";
+import { VisibilityCard } from "../components/VisibilityCard";
 import { ConnectionsCard } from "../components/ConnectionsCard";
 import { MirrorCard } from "../components/MirrorCard";
 import { apiJson } from "../api";
@@ -16,7 +17,7 @@ const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3
 const okCls = "rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200";
 const errText = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback);
 
-interface Meta { id: string; role: "owner" | "member"; kind: string; name: string; source: string | null; verification: Record<string, unknown>; protectedPaths: string[] }
+interface Meta { id: string; role: "owner" | "member"; kind: string; name: string; source: string | null; verification: Record<string, unknown>; protectedPaths: string[]; visibility?: "private" | "public" }
 interface Member { user_id: string; role: string; label: string | null; added_at: string }
 type Busy = null | "save" | "invite" | "delete" | `remove:${string}`;
 
@@ -153,6 +154,7 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
         </CardContent>
       </Card>
 
+      {isOwner && <VisibilityCard key={meta.id} projectId={meta.id} visibility={meta.visibility ?? "private"} reload={reload} />}
       {isOwner && <ConnectionsCard key={meta.id} projectId={meta.id} isOwner={isOwner} isCustom={meta.kind === "import" && isCommandPolicy(meta.verification)} />}
       <WebhooksCard projectId={meta.id} isOwner={isOwner} />
       <DomainsCard projectId={meta.id} isOwner={isOwner} />

@@ -27,6 +27,26 @@ test("local workerd SQLite executes production publication rollback and recovery
       evidence: { evidence: { id: "evidence", candidateCommit: "landed", candidateTree: "tree", status: "passed", verifierIdentity: "flaregit-ticket-booking-protected-verifier-v2", expectedAcceptedBase: "base", requirementsVersion: 1, builtOutputDigest: "build" } },
       candidates: { candidate: { ...state().candidates.candidate, candidateCommit: "landed", expectedAcceptedBase: "base", frozenVerificationPolicy: {}, review: { approved: true, commit: "landed", by: "reviewer" } } },
     };
+    await request("/seed?name=visibility", { state: publishable, holder: "old-holder" });
+    await request("/member?name=visibility&user=owner&role=owner");
+    await request("/member?name=visibility&user=contributor&role=member");
+    const visibilitySnapshot = async () => await (await request("/visibility-status?name=visibility")).json() as { visibility: string; grant: { version: number; acceptedCommit: string } | null; rows: Array<{ version: number }> };
+    expect((await visibilitySnapshot()).visibility).toBe("private");
+    expect((await visibilitySnapshot()).grant).toBeNull();
+    expect((await request("/visibility?name=visibility", { visibility: "public", confirmed: false, by: "owner" })).status).toBe(500);
+    expect((await request("/visibility?name=visibility", { visibility: "public", confirmed: true, by: "contributor" })).status).toBe(500);
+    expect((await visibilitySnapshot()).grant).toBeNull();
+    expect((await request("/visibility?name=visibility", { visibility: "public", confirmed: true, by: "owner" })).status).toBe(200);
+    const firstGrant = (await visibilitySnapshot()).grant!;
+    expect(firstGrant.version).toBe(1);
+    expect(firstGrant.acceptedCommit).toBe(publishable.acceptedState.currentCommit);
+    await request("/visibility?name=visibility", { visibility: "private", confirmed: false, by: "owner" });
+    const revokedGrant = await visibilitySnapshot();
+    expect(revokedGrant.visibility).toBe("private");
+    expect(revokedGrant.grant).toBeNull();
+    expect(revokedGrant.rows[0]?.version).toBe(2);
+    await request("/visibility?name=visibility", { visibility: "public", confirmed: true, by: "owner" });
+    expect((await visibilitySnapshot()).grant?.version).toBe(3);
     const policy = { version: 2, mode: "external", checks: [{ id: "required-check", providerId: "provider-one", required: true }] };
     const nativeCandidate = {
       ...publishable,

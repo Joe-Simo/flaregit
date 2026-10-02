@@ -60,3 +60,41 @@ export async function readPublicRepository(
   const second = commits.get(request.to)!;
   return { kind: "diff" as const, from: first.hash, to: second.hash, changes: await diffTrees(repo, first.treeHash, second.treeHash) };
 }
+
+/** Exact allowlist for unauthenticated HTTP requests; unknown and duplicate query keys fail closed. */
+export function parsePublicBrowseRequest(kind: string, query: URLSearchParams): PublicBrowseRequest | { kind: "meta" } {
+  const keys: Record<string, readonly string[]> = { meta: [], history: ["offset", "limit"], tree: ["commit", "path"], file: ["commit", "path"], diff: ["from", "to"] };
+  const allowed = keys[kind];
+  if (!allowed) throw new Error("Unsupported public route");
+  for (const key of query.keys()) if (!allowed.includes(key) || query.getAll(key).length !== 1) throw new Error("Invalid public query");
+  const commit = query.get("commit") ?? undefined;
+  if (commit !== undefined && !HASH.test(commit)) throw new Error("Invalid commit");
+  if (kind === "meta") return { kind: "meta" };
+  if (kind === "history") {
+    const integer = (key: string, fallback: number) => {
+      const raw = query.get(key);
+      if (raw === null) return fallback;
+      if (!/^(0|[1-9][0-9]*)$/.test(raw)) throw new Error("Invalid history pagination");
+      const value = Number(raw);
+      if (!Number.isSafeInteger(value)) throw new Error("Invalid history pagination");
+      return value;
+    };
+    const offset = integer("offset", 0);
+    const limit = integer("limit", 30);
+    if (limit < 1 || limit > 100 || offset > 1_000_000) throw new Error("Invalid history pagination");
+    return { kind: "history", offset, limit };
+  }
+  if (kind === "diff") {
+    const from = query.get("from") ?? "";
+    const to = query.get("to") ?? "";
+    if (!HASH.test(from) || !HASH.test(to)) throw new Error("Exact diff commits required");
+    return { kind: "diff", from, to };
+  }
+  const path = query.get("path") ?? "";
+  validatePath(path);
+  if (kind === "file") {
+    if (!path) throw new Error("File path required");
+    return { kind: "file", commit, path };
+  }
+  return { kind: "directory", commit, path };
+}

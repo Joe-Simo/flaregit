@@ -18,7 +18,7 @@ type FlatRow =
   | { kind: "note"; fileIndex: number; text: string };
 
 const ROW_HEIGHT = 20;
-const STATUS_COLOR: Record<FileChange["status"], string> = { added: "text-emerald-400", modified: "text-amber-400", deleted: "text-red-400" };
+const STATUS_COLOR: Record<FileChange["status"], string> = { added: "text-emerald-700 dark:text-emerald-400", modified: "text-amber-700 dark:text-amber-400", deleted: "text-red-700 dark:text-red-400" };
 
 /**
  * Virtualized review canvas: only the rows in view are in the DOM, diffs are computed in a Web Worker,
@@ -168,14 +168,14 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented }: {
                   {collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
                   <span className={STATUS_COLOR[r.file.status]}>{r.file.status[0]!.toUpperCase()}</span>
                   <span className="font-semibold">{r.file.path}</span>
-                  <span className="text-emerald-400">+{r.adds}</span>
-                  <span className="text-red-400">−{r.dels}</span>
+                  <span className="text-emerald-700 dark:text-emerald-400">+{r.adds}</span>
+                  <span className="text-red-700 dark:text-red-400">−{r.dels}</span>
                 </div>
               );
             }
             if (r.kind === "note") return <div key={v.key} style={style} className="px-3 text-muted-foreground">{r.text}</div>;
             const { row } = r;
-            const bg = row.t === "+" ? "bg-emerald-500/10" : row.t === "-" ? "bg-red-500/10" : row.t === "h" ? "bg-sky-500/10 text-sky-300" : "";
+            const bg = row.t === "+" ? "bg-emerald-500/10" : row.t === "-" ? "bg-red-500/10" : row.t === "h" ? "bg-sky-500/10 text-sky-700 dark:text-sky-300" : "";
             return (
               <div key={v.key} style={style} className={`flex whitespace-pre ${bg}`}>
                 <span className="hidden sm:block w-10 shrink-0 text-right pr-2 text-muted-foreground select-none">{row.a ?? ""}</span>
@@ -184,7 +184,7 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented }: {
                   const path = files[r.fileIndex]!.path;
                   const has = line !== undefined && commented?.has(`${path}:${line}`);
                   return onLineClick && line !== undefined ? (
-                    <button className={`sticky left-0 z-10 bg-background w-9 sm:w-10 shrink-0 text-right pr-2 select-none hover:text-orange-400 ${has ? "text-orange-400 font-bold" : "text-muted-foreground"}`} aria-label={`Comment on ${path} line ${line}`} onClick={() => onLineClick(path, line)}>{line}</button>
+                    <button className={`sticky left-0 z-10 bg-background w-9 sm:w-10 shrink-0 text-right pr-2 select-none hover:text-orange-700 dark:hover:text-orange-400 ${has ? "text-orange-700 dark:text-orange-400 font-bold" : "text-muted-foreground"}`} aria-label={`Comment on ${path} line ${line}`} onClick={() => onLineClick(path, line)}>{line}</button>
                   ) : (
                     <span className="sticky left-0 z-10 bg-background w-9 sm:w-10 shrink-0 text-right pr-2 text-muted-foreground select-none">{line ?? ""}</span>
                   );

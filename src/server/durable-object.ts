@@ -9,6 +9,8 @@ import { RepositoryConnections, type ConnectionMetadata, type CallbackReceipt } 
 import type { IntegrationCallback, IntegrationCapability } from "./integration-auth.js";
 import { externalCheckGate, type ExternalCheckPolicy, type ExternalCheckState } from "../core/external-checks.js";
 import type { ImportJob } from "./import-job.js";
+import type { PublicRepositoryGrant } from "./public-repositories.js";
+export type PublicGrantMetadata = PublicRepositoryGrant & { name: string; version: number; canonicalRepoName: string };
 import type {
   CandidateGeneration,
   FlareGitProjectState,
@@ -159,6 +161,9 @@ export interface ActivityRow {
 }
 
 export interface Ledger {
+  publicGrant(): Promise<PublicGrantMetadata | null>;
+  repositoryVisibility(): Promise<"public" | "private">;
+  setRepositoryVisibility(visibility: "public" | "private", confirmed: boolean, by: string): Promise<void>;
   saveImportJob(job: ImportJob): Promise<void>;
   getImportJob(id: string): Promise<ImportJob | null>;
   listImportJobs(): Promise<ImportJob[]>;
@@ -265,6 +270,27 @@ const LEASE_MS = 20 * 60_000;
  */
 export class RepositoryController extends DurableObject<Env> {
   private state: FlareGitProjectState | null = null;
+
+  private visibilityTable(): void { this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS repository_visibility (id INTEGER PRIMARY KEY CHECK(id=1), visibility TEXT NOT NULL, version INTEGER NOT NULL, confirmed_by TEXT NOT NULL)"); }
+  async repositoryVisibility(): Promise<"public" | "private"> {
+    this.visibilityTable();
+    const row = this.ctx.storage.sql.exec<{ visibility: string }>("SELECT visibility FROM repository_visibility WHERE id=1").toArray()[0];
+    return row?.visibility === "public" ? "public" : "private";
+  }
+  async publicGrant(): Promise<PublicGrantMetadata | null> {
+    this.visibilityTable();
+    const row = this.ctx.storage.sql.exec<{ visibility: string; version: number; confirmed_by: string }>("SELECT visibility,version,confirmed_by FROM repository_visibility WHERE id=1").toArray()[0];
+    if (row?.visibility !== "public" || !row.confirmed_by) return null;
+    const state = this.load();
+    return { visibility: "public", confirmedByOwner: true, acceptedCommit: state.acceptedState.currentCommit, name: state.projectName, canonicalRepoName: state.canonicalRepoName, version: row.version };
+  }
+  async setRepositoryVisibility(visibility: "public" | "private", confirmed: boolean, by: string): Promise<void> {
+    if (!by || !["public", "private"].includes(visibility) || (visibility === "public" && confirmed !== true)) throw new Error("Explicit owner confirmation is required");
+    if (await this.roleOf(by) !== "owner") throw new Error("Only the owner can change visibility");
+    this.visibilityTable();
+    this.ctx.storage.sql.exec("INSERT INTO repository_visibility VALUES (1,?,1,?) ON CONFLICT(id) DO UPDATE SET visibility=excluded.visibility,version=version+1,confirmed_by=excluded.confirmed_by", visibility, by);
+    await this.logActivity("Maintainer", "repository.visibility", `Repository is now ${visibility}`);
+  }
 
   private importTable(): void { this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS import_jobs (id TEXT PRIMARY KEY, doc TEXT NOT NULL)"); }
   async getImportJob(id: string): Promise<ImportJob | null> {
@@ -1015,6 +1041,7 @@ export class RepositoryController extends DurableObject<Env> {
     });
     try {
       this.ctx.storage.transactionSync(() => {
+        if (Object.hasOwn(s.candidates, candidate.id)) throw new Error("Candidate identity already exists; retry the integration claim");
         candidate.workflowInstanceId = req.holder;
         candidate.frozenExternalChecksPolicy = structuredClone(this.connections().policy());
         candidate.frozenContributorProofs = tasks.map((task) => ({ id: task.id, commit: task.currentCommit, baseCommit: task.baseCommit, ref: `refs/flaregit/tasks/${task.id}`, allowedScope: [...(task.allowedScope ?? settingsFor(s.verificationPolicy).allowedScope)] }));

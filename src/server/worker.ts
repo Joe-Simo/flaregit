@@ -27,6 +27,7 @@ import { validateImportSource, validateRepositoryCommand } from "./import-source
 import { integrationCapabilities, verifyIntegrationCallback } from "./integration-auth.js";
 import type { ExternalCheckPolicy } from "../core/external-checks.js";
 import { verifyServiceRead } from "./service-read-auth.js";
+import { parsePublicBrowseRequest, readPublicRepository } from "./public-repositories.js";
 
 export { RepositoryController, FlareGitIntegrationWorkflow, FlareGitScenarioWorkflow, FlareGitAgentWorkflow };
 export { IntegratorSandbox, AgentSandbox } from "./integrator.js";
@@ -96,6 +97,36 @@ export default {
     }
 
     if (!url.pathname.startsWith("/api/")) return env.ASSETS.fetch(request);
+
+    const publicRoute = /^\/api\/public\/(p?[0-9a-f]{12})\/(meta|history|tree|file|diff)$/.exec(url.pathname);
+    if (url.pathname.startsWith("/api/public/")) {
+      const publicResponse = (data: unknown, status = 200) => Response.json(data, { status, headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
+      if (!publicRoute || request.method !== "GET") return publicResponse({ error: "Not found" }, 404);
+      const projectId = publicRoute[1]!;
+      const ip = request.headers.get("CF-Connecting-IP");
+      if (!ip) return publicResponse({ error: "Public browsing unavailable" }, 503);
+      const limited = await env.API_LIMITER.limit({ key: `public:${projectId}:${ip}` });
+      if (!limited.success) return publicResponse({ error: "Too many requests" }, 429);
+      let browseRequest;
+      try { browseRequest = parsePublicBrowseRequest(publicRoute[2]!, url.searchParams); }
+      catch { return publicResponse({ error: "Invalid public browse request" }, 400); }
+      const project = projectOf(env, projectId);
+      const grant = await project.publicGrant();
+      if (!grant) return publicResponse({ error: "Repository not found" }, 404);
+      try {
+        let result: unknown;
+        if (browseRequest.kind === "meta") result = { id: projectId, name: grant.name, acceptedCommit: grant.acceptedCommit, visibility: "public", version: grant.version };
+        else {
+          using repo = await env.ARTIFACTS.get(grant.canonicalRepoName);
+          result = await readPublicRepository(repo, grant, browseRequest);
+        }
+        const current = await project.publicGrant();
+        if (!current || current.version !== grant.version || current.acceptedCommit !== grant.acceptedCommit || current.canonicalRepoName !== grant.canonicalRepoName) {
+          return publicResponse({ error: "Repository visibility or accepted history changed; reload" }, 409);
+        }
+        return publicResponse(result);
+      } catch { return publicResponse({ error: "Repository content unavailable; retry" }, 404); }
+    }
 
     const serviceReadRoute = /^\/api\/p\/([a-z0-9]{12,16})\/connections\/(svc_[a-f0-9-]{36})\/candidates\/([a-z0-9_-]+)$/.exec(url.pathname);
     if (serviceReadRoute && request.method === "GET") {
@@ -348,7 +379,15 @@ export default {
         const canAdminister = !auth.viaToken || auth.tokenScope === "full";
         const isOwner = role === "owner" && canAdminister;
 
-        if (sub === "" && method === "GET") return json({ id: projectId, role, kind: state.kind ?? "demo", name: state.projectName, source: state.source ?? null, verification: state.verificationPolicy, protectedPaths: settings.protectedPaths });
+        if (sub === "" && method === "GET") return json({ id: projectId, role, kind: state.kind ?? "demo", name: state.projectName, source: state.source ?? null, verification: state.verificationPolicy, protectedPaths: settings.protectedPaths, visibility: await project.repositoryVisibility() });
+        if (sub === "/visibility" && method === "POST") {
+          if (!isOwner) return text("Only the owner can change visibility", 403);
+          const value = await body<{ visibility?: string; confirmed?: boolean }>();
+          if (value.visibility !== "public" && value.visibility !== "private") return text("Invalid visibility", 400);
+          if (value.visibility === "public" && value.confirmed !== true) return text("Confirm that all accepted source and history will become public", 400);
+          await project.setRepositoryVisibility(value.visibility, value.confirmed === true, userId);
+          return json({ visibility: await project.repositoryVisibility() });
+        }
 
         if (sub === "/state" && method === "GET") {
           if (settings.fixture === "ticket-booking") {

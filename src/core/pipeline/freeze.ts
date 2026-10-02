@@ -25,7 +25,7 @@ export function freezeCandidateGeneration(
     JSON.stringify(opts.approvedRequirements)
   );
 
-  const candidateId = `cand_${crypto.randomUUID().slice(0, 10)}`;
+  const candidateId = `cand_${crypto.randomUUID()}`;
 
   const candidate: CandidateGeneration = {
     id: candidateId,
