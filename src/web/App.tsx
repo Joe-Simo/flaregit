@@ -48,6 +48,8 @@ export function App() {
         .then((data) => {
           setState(data);
           setLoadError(null);
+          setStatusMessage("All systems operational");
+          setStatusDetail("Parallel contributors can checkpoint and push changes freely.");
           const pending = Object.values(data.decisions || {}).find((d) => d.status === "pending");
           if (pending) {
             setActiveDecision(pending);

@@ -4,6 +4,7 @@ import { handleQueueBatch } from "./queue.js";
 import { authenticate } from "./access.js";
 import { FlareGitScenarioWorkflow, ledgerOf } from "./scenario-workflow.js";
 import { PROTECTED_PATHS, gitAuthEnv, projectIdFor, q } from "./shell.js";
+import { ensureBuild } from "./build.js";
 import { billingFromEvent, createCheckout, planLimits, reportUsage, verifyPolarWebhook } from "./polar.js";
 import { TICKET_BOOKING_POLICY } from "../fixtures/ticket-booking/policy.js";
 import type { Env, QueueMessage } from "./env.js";
@@ -166,7 +167,10 @@ export default {
 
       if (url.pathname === "/api/state" && request.method === "GET") {
         try {
-          return Response.json(await ledger.getState());
+          const state = await ledger.getState();
+          // Make sure the accepted commit has a stored preview build (seed commits have none until built once).
+          ctx.waitUntil(ensureBuild(env, projectId, state.acceptedState.currentCommit, state.canonicalRepoName).catch((e) => console.error("preview build failed", String(e))));
+          return Response.json(state);
         } catch {
           return Response.json({ error: "not_initialized" }, { status: 404 });
         }

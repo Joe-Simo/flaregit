@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Monitor, ShieldCheck } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -11,6 +11,32 @@ interface LivePreviewProps {
 
 /** Renders the real application built from the accepted commit (never a re-implementation). */
 export function LivePreview({ currentCommit, previewBase }: LivePreviewProps) {
+  const src = `${previewBase}/preview/${currentCommit}/`;
+  const [ready, setReady] = useState(false);
+
+  // The build for a commit is created on demand; poll until it exists instead of showing a blank pane.
+  useEffect(() => {
+    let cancelled = false;
+    let attempts = 0;
+    setReady(false);
+    const check = async () => {
+      try {
+        const res = await fetch(src, { method: "GET" });
+        if (res.ok) {
+          if (!cancelled) setReady(true);
+          return;
+        }
+      } catch {
+        /* retry */
+      }
+      if (!cancelled && ++attempts < 90) setTimeout(check, 4000);
+    };
+    void check();
+    return () => {
+      cancelled = true;
+    };
+  }, [src]);
+
   return (
     <Card className="h-full flex flex-col border-border/80 bg-card/70 backdrop-blur-sm overflow-hidden">
       <CardHeader className="py-3 px-5 border-b border-border/60 bg-muted/20">
@@ -27,13 +53,19 @@ export function LivePreview({ currentCommit, previewBase }: LivePreviewProps) {
         </div>
       </CardHeader>
       <CardContent className="p-0 flex-1 bg-background/30">
-        <iframe
-          key={currentCommit}
-          title={`Accepted build ${currentCommit.slice(0, 7)}`}
-          src={`${previewBase}/preview/${currentCommit}/`}
-          sandbox="allow-scripts allow-same-origin"
-          className="w-full h-full min-h-[560px] border-0 bg-white"
-        />
+        {ready ? (
+          <iframe
+            key={currentCommit}
+            title={`Accepted build ${currentCommit.slice(0, 7)}`}
+            src={src}
+            sandbox="allow-scripts allow-same-origin"
+            className="w-full h-full min-h-[560px] border-0 bg-white"
+          />
+        ) : (
+          <div className="flex h-full min-h-[560px] items-center justify-center text-sm text-muted-foreground">
+            Building your preview… this takes about a minute the first time.
+          </div>
+        )}
       </CardContent>
     </Card>
   );
