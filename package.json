@@ -1,7 +1,7 @@
 {
   "name": "flaregit",
   "version": "0.1.0",
-  "description": "FlareGit - A standalone Git-compatible platform where humans and AI agents work in parallel and integration happens automatically.",
+  "description": "FlareGit - Independent Git contributions from humans and coding agents, coordinated and accepted through human review.",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",
@@ -13,7 +13,8 @@
     "lint": "eslint src/",
     "test": "bun test",
     "demo": "bun run src/cli/demo.ts",
-    "server": "bun run src/server/local.ts"
+    "server": "bun run src/server/local.ts",
+    "demo:proof": "bun run src/cli/proof.ts"
   },
   "dependencies": {
     "@clerk/clerk-react": "^5.61.3",

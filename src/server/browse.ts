@@ -106,8 +106,9 @@ export async function diffTrees(
   prefix = "",
   out: FileChange[] = []
 ): Promise<FileChange[]> {
-  if (out.length >= MAX_CHANGED_FILES) return out;
+  if (out.length > MAX_CHANGED_FILES) throw new Error("Diff exceeds the supported 5,000-file inspection limit; no complete diff was recorded");
   const [a, b] = await Promise.all([treeA ? repo.readTree(treeA) : Promise.resolve([]), treeB ? repo.readTree(treeB) : Promise.resolve([])]);
+  if ((treeA && !a) || (treeB && !b)) throw new Error("Could not read a repository tree; retry the diff");
   const aMap = new Map((a ?? []).map((e) => [e.name, e as TreeEntry]));
   const bMap = new Map((b ?? []).map((e) => [e.name, e as TreeEntry]));
   const names = [...new Set([...aMap.keys(), ...bMap.keys()])].sort();
@@ -125,8 +126,9 @@ export async function diffTrees(
       continue;
     }
     out.push({ path, status: !ea ? "added" : !eb ? "deleted" : "modified", aHash: ea?.hash, bHash: eb?.hash, mode: (eb ?? ea)?.mode });
-    if (out.length >= MAX_CHANGED_FILES) break;
+    if (out.length > MAX_CHANGED_FILES) throw new Error("Diff exceeds the supported 5,000-file inspection limit; no complete diff was recorded");
   }
+  if (out.length > MAX_CHANGED_FILES) throw new Error("Diff exceeds the supported 5,000-file inspection limit; no complete diff was recorded");
   return out;
 }
 

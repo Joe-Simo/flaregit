@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Bot, Check, Copy, GitPullRequestArrow, Layers, Plus, User, X } from "lucide-react";
+import { Bot, Check, Copy, GitPullRequestArrow, Layers, Plus, User, X, GitBranch, AlertTriangle, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -33,6 +33,17 @@ export function ChangesTab({ projectId, state, reload }: { projectId: string; st
   const [copied, setCopied] = useState(false);
 
   const tasks = Object.values(state.tasks).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const active = tasks.filter((task) => task.status !== "accepted" && task.status !== "cancelled");
+  const integrationSelection = selected.filter((id) => { const task = state.tasks[id]; return task?.status === "ready" || task?.status === "blocked"; });
+  const paths = new Map<string, Task[]>();
+  for (const task of active) {
+    for (const file of new Set(task.checkpoints.flatMap((checkpoint) => checkpoint.filesChanged))) {
+      paths.set(file, [...(paths.get(file) ?? []), task]);
+    }
+  }
+  const overlaps = [...paths.entries()].filter(([, contributors]) => contributors.length > 1);
+  const stale = active.filter((task) => task.baseCommit !== state.acceptedState.currentCommit && !task.dependsOn);
+
 
   const run = async (label: string, fn: () => Promise<void>) => {
     setBusy(label);
@@ -53,8 +64,13 @@ export function ChangesTab({ projectId, state, reload }: { projectId: string; st
       const taskId = `${slug(goal)}-${Math.random().toString(36).slice(2, 6)}`;
       const created = await apiJson<{ commands: string[] }>(`/p/${projectId}/tasks`, { method: "POST", json: { taskId, goal } });
       if (useAgent) {
-        await apiJson(`/p/${projectId}/tasks/${taskId}/agent`, { method: "POST" });
-        setNotice("An AI agent is working on it in its own isolated workspace. It will mark the change ready when it's done.");
+        try {
+          await apiJson(`/p/${projectId}/tasks/${taskId}/agent`, { method: "POST" });
+          setNotice("Agent run started. Its checkpoints and progress will appear on the change.");
+        } catch (cause) {
+          setInstructions({ commands: created.commands, task: taskId });
+          setError(`Change saved, but the agent could not start: ${cause instanceof Error ? cause.message : "Unknown error"}. Resume from the change below or use its Git commands.`);
+        }
       } else {
         setInstructions({ commands: created.commands, task: taskId });
       }
@@ -69,15 +85,34 @@ export function ChangesTab({ projectId, state, reload }: { projectId: string; st
 
   const integrate = () =>
     run("integrate", async () => {
-      await apiJson(`/p/${projectId}/integrations`, { method: "POST", json: { taskIds: selected } });
+      await apiJson(`/p/${projectId}/integrations`, { method: "POST", json: { taskIds: integrationSelection } });
       setSelected([]);
-      setNotice("Combining the selected changes, repairing conflicts and verifying. Watch progress in the Integration tab.");
+      setNotice("Integration requested. Review the candidate, checks, and any conflict decisions in Integration before accepting repository history.");
     });
 
-  const toggle = (id: string) => setSelected((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : cur.length >= 8 ? cur : [...cur, id]));
+  const toggle = (id: string) => setSelected(() => (integrationSelection.includes(id) ? integrationSelection.filter((value) => value !== id) : integrationSelection.length >= 8 ? integrationSelection : [...integrationSelection, id]));
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
+      <section aria-labelledby="coordination-heading" className="rounded-xl border border-border bg-gradient-to-br from-orange-500/10 via-card to-card p-4 sm:p-5">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <p className="text-[11px] uppercase tracking-[0.18em] text-primary font-semibold">Concurrent work</p>
+            <h2 id="coordination-heading" className="mt-1 text-xl font-semibold tracking-tight">One repository. Independent contributions.</h2>
+            <p className="mt-2 text-sm text-muted-foreground max-w-2xl">Follow each purpose and saved checkpoint, then review how the work comes together.</p>
+          </div>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground"><ShieldCheck className="h-4 w-4 text-emerald-400" aria-hidden="true" /><span>Accepted <code>{state.acceptedState.currentCommit.slice(0, 8)}</code></span></div>
+        </div>
+        <dl className="mt-5 grid grid-cols-3 gap-3 border-t border-border pt-4">
+          {[["Active changes", active.length], ["Shared files", overlaps.length], ["Older bases", stale.length]].map(([label, count]) => <div key={label}><dt className="text-xs text-muted-foreground">{label}</dt><dd className="mt-1 text-2xl font-semibold tabular-nums">{count}</dd></div>)}
+        </dl>
+        {overlaps.length > 0 && <div className="mt-4 border-t border-border pt-4">
+          <h3 className="text-sm font-medium flex items-center gap-2"><AlertTriangle className="h-4 w-4 text-amber-400" aria-hidden="true" />Overlapping saved changes</h3>
+          <p className="mt-1 text-xs text-muted-foreground">Shared files need attention; an overlap alone does not establish a Git conflict.</p>
+          <ul className="mt-3 space-y-2">{overlaps.slice(0, 6).map(([file, contributors]) => <li key={file} className="text-xs"><code className="break-all text-amber-200">{file}</code><span className="block mt-0.5 text-muted-foreground">{contributors.map((task) => task.goal).join(" · ")}</span></li>)}</ul>
+          {overlaps.length > 6 && <p className="mt-2 text-xs text-muted-foreground">{overlaps.length - 6} more shared files in saved checkpoints.</p>}
+        </div>}
+      </section>
       <Card>
         <CardContent className="py-4 space-y-3">
           <h2 className="text-sm font-semibold"><label htmlFor="new-change-goal">Start a change</label></h2>
@@ -99,7 +134,7 @@ export function ChangesTab({ projectId, state, reload }: { projectId: string; st
               <Plus className="h-4 w-4 mr-1.5" aria-hidden="true" /> {busy === "create" ? "Creating…" : useAgent ? "Start with an agent" : "Create and get git commands"}
             </Button>
           </div>
-          <p className="text-xs text-muted-foreground">Each change gets its own isolated copy of the repository. Anyone can also push with plain Git; nothing is merged until it passes your checks.</p>
+          <p className="text-xs text-muted-foreground">Each change gets its own isolated copy of the repository. Anyone can also push with plain Git; saved commits stay separate until a candidate passes checks and receives human acceptance.</p>
         </CardContent>
       </Card>
 
@@ -109,10 +144,10 @@ export function ChangesTab({ projectId, state, reload }: { projectId: string; st
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div>
           <h2 className="text-sm font-semibold">Changes ({tasks.length})</h2>
-          <p className="text-xs text-muted-foreground">Select ready changes (up to 8) to combine and verify them together.</p>
+          <p className="text-xs text-muted-foreground">Select up to 8 ready or blocked changes to prepare a review candidate.</p>
         </div>
-        <Button variant="outline" size="sm" disabled={selected.length < 1 || selected.length > 8 || busy !== null} onClick={integrate}>
-          <GitPullRequestArrow className="h-4 w-4 mr-1.5" aria-hidden="true" /> {busy === "integrate" ? "Starting…" : selected.length <= 1 ? "Integrate" : `Integrate ${selected.length} together`}
+        <Button variant="outline" size="sm" disabled={integrationSelection.length < 1 || integrationSelection.length > 8 || busy !== null} onClick={integrate}>
+          <GitPullRequestArrow className="h-4 w-4 mr-1.5" aria-hidden="true" /> {busy === "integrate" ? "Starting…" : integrationSelection.length <= 1 ? "Integrate" : `Integrate ${integrationSelection.length} together`}
         </Button>
       </div>
 
@@ -121,10 +156,11 @@ export function ChangesTab({ projectId, state, reload }: { projectId: string; st
           {tasks.length === 0 && <p className="p-4 text-sm text-muted-foreground">No changes yet. Start one above.</p>}
           {tasks.map((t) => {
             const st = STATUS[t.status];
+            const latestCheckpoint = t.checkpoints.at(-1);
             const canSelect = t.status === "ready" || t.status === "blocked";
             return (
-              <div key={t.id} className="px-4 py-3 flex items-start gap-3">
-                <input type="checkbox" className="mt-1.5" disabled={!canSelect} checked={selected.includes(t.id)} onChange={() => toggle(t.id)} aria-label={canSelect ? `Select “${t.goal}” for integration` : `“${t.goal}” is not ready to integrate`} />
+              <div key={t.id} className="px-4 py-4 flex items-start gap-3 flex-wrap sm:flex-nowrap">
+                <input type="checkbox" className="mt-1.5" disabled={!canSelect} checked={integrationSelection.includes(t.id)} onChange={() => toggle(t.id)} aria-label={canSelect ? `Select “${t.goal}” for integration` : `“${t.goal}” is not ready to integrate`} />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
                     <h3 className="text-sm font-medium break-words min-w-0">{t.goal}</h3>
@@ -132,10 +168,11 @@ export function ChangesTab({ projectId, state, reload }: { projectId: string; st
                   </div>
                   <div className="text-xs text-muted-foreground mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
                     {t.contributor.type === "agent" ? (
-                      <Badge variant="purple" className="gap-1"><Bot className="h-3 w-3" aria-hidden="true" />Agent</Badge>
+                      <Badge variant="purple" className="gap-1"><Bot className="h-3 w-3" aria-hidden="true" />{t.contributor.name} · AI</Badge>
                     ) : (
                       <Badge variant="outline" className="gap-1"><User className="h-3 w-3" aria-hidden="true" />{t.contributor.name}</Badge>
                     )}
+                    {t.initiatedBy?.type === "human" && t.initiatedBy.id !== t.contributor.id && <span>Requested by {t.initiatedBy.name}</span>}
                     {t.dependsOn && (
                       <span className="inline-flex items-center gap-1 min-w-0">
                         <Layers className="h-3 w-3 shrink-0" aria-hidden="true" />Stacked on <span className="break-all">{state.tasks[t.dependsOn]?.goal ?? t.dependsOn}</span>
@@ -148,17 +185,27 @@ export function ChangesTab({ projectId, state, reload }: { projectId: string; st
                     <code className="break-all">{t.id}</code>
                     <span>{timeAgo(t.createdAt)}</span>
                   </div>
+                  <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                    <span className="inline-flex items-center gap-1"><GitBranch className="h-3 w-3" aria-hidden="true" />Base <code>{t.baseCommit.slice(0, 8)}</code></span>
+                    {t.checkpoints.length > 0 ? <span>Saved <code>{t.currentCommit.slice(0, 8)}</code> · {t.checkpoints.length} checkpoint{t.checkpoints.length === 1 ? "" : "s"}</span> : <span>No pushed checkpoint yet</span>}
+                    {stale.some((task) => task.id === t.id) && <span className="text-amber-200">Accepted history advanced · candidate must use the latest base</span>}
+                  </div>
+                  {latestCheckpoint && <p className="mt-1 text-xs text-muted-foreground break-words">Latest checkpoint: {latestCheckpoint.message} · {timeAgo(latestCheckpoint.timestamp)}</p>}
+                  {t.checkpoints.some((checkpoint) => checkpoint.filesChanged.length > 0) && <details className="mt-2 text-xs text-muted-foreground">
+                    <summary className="cursor-pointer rounded w-fit focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Files touched in saved checkpoints</summary>
+                    <ul className="mt-2 space-y-1">{[...new Set(t.checkpoints.flatMap((checkpoint) => checkpoint.filesChanged))].map((file) => <li key={file}><code className="break-all">{file}</code>{(paths.get(file)?.length ?? 0) > 1 && <span className="ml-2 text-amber-200">shared with another active change</span>}</li>)}</ul>
+                  </details>}
                   {t.status === "blocked" && (
                     <p className="mt-1.5 text-xs text-destructive">Blocked: {t.blockedReason ?? "no reason was recorded"}</p>
                   )}
                 </div>
-                <div className="flex gap-1.5 shrink-0 flex-wrap justify-end">
-                  {t.checkpoints.length > 0 && t.status !== "accepted" && t.status !== "cancelled" && (
+                <div className="flex gap-1.5 shrink-0 flex-wrap justify-end ml-auto">
+                  {t.checkpoints.length > 0 && (
                     <Button size="sm" variant="outline" onClick={() => navigate(`/p/${projectId}/review?task=${t.id}`)} aria-label={`View diff of “${t.goal}”`}>Diff</Button>
                   )}
                   {(t.status === "working" || t.status === "checkpointed") && (
                     <>
-                      <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => act(t, "ready")}><Check className="h-3.5 w-3.5 mr-1" aria-hidden="true" />{busy === `ready-${t.id}` ? "Marking…" : "Ready"}</Button>
+                      <Button size="sm" variant="outline" disabled={busy !== null} title="Verify the pushed Git branch and mark this change ready" onClick={() => act(t, "ready")}><Check className="h-3.5 w-3.5 mr-1" aria-hidden="true" />{busy === `ready-${t.id}` ? "Verifying…" : "Mark ready"}</Button>
                       <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => act(t, "agent")}><Bot className="h-3.5 w-3.5 mr-1" aria-hidden="true" />{busy === `agent-${t.id}` ? "Starting…" : "Hand to agent"}</Button>
                     </>
                   )}

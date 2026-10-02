@@ -61,6 +61,16 @@ describe("buildAgentPrompt / assertAgentWrites", () => {
     expect(() => assertAgentWrites(t, ["lib/a.ts"], [])).toThrow(/outside/);
     expect(() => assertAgentWrites(t, ["src/tests/a.ts"], ["src/tests/"])).toThrow(/protected/);
     expect(() => assertAgentWrites(t, ["src/a.ts"], ["src/tests/"])).not.toThrow();
+    for (const file of [".git/config", "src/.git/config", "src/a\u0000.ts", "src/./a.ts", "src//a.ts", "src\\a.ts"]) {
+      expect(() => assertAgentWrites({ allowedScope: ["*"] }, [file], [])).toThrow(/escapes/);
+    }
+  });
+  test("redacts task, contributor, requirements and verification instructions", () => {
+    const secret = "ghp_" + "a".repeat(36);
+    const t = task("t1", "Ada", secret);
+    t.requirements = [{ title: secret, description: secret }] as Requirement[];
+    const p = buildAgentPrompt(t, secret, {}, secret, secret);
+    expect(p).not.toContain(secret);
   });
 });
 
@@ -82,6 +92,12 @@ describe("buildRepairPrompt", () => {
     expect(p).toContain("Contributor A (Ada): gA");
     expect(p).toContain("Contributor B (Bob): gB");
     expect(p).toContain("Contributor C (Cy): gC");
+  });
+  test("redacts repair source, side versions and contributor context", () => {
+    const secret = "ghp_" + "a".repeat(36);
+    const p = buildRepairPrompt({ ...opts([task("a", "Ada", secret)]), editableFiles: ["src/a.ts"], fileContents: { "src/a.ts": secret }, contextFiles: { "src/b.ts": secret }, sideVersions: { "src/a.ts": { base: secret, a: secret, b: secret } } });
+    expect(p).not.toContain(secret);
+    expect(p).toContain("[REDACTED]");
   });
 });
 

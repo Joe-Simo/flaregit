@@ -12,6 +12,6 @@ export const PROTECTED_PATHS = [".flaregit/", ".github/", "tests/", "verifier/",
 
 /** Stable, non-reversible project id for an authenticated identity (tenant isolation key). */
 export async function projectIdFor(identity: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(identity.trim().toLowerCase()));
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(identity));
   return [...new Uint8Array(digest)].slice(0, 6).map((b) => b.toString(16).padStart(2, "0")).join("");
 }

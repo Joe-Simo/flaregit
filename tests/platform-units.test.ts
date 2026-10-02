@@ -15,6 +15,9 @@ describe("validateWebhookUrl", () => {
     "https://user:pw@example.com/x",
     "https://intranet/x",
     "https://svc.internal/x",
+    "https://svc.internal./x",
+    "https://localhost./x",
+    "https://svc.local./x",
     "not a url",
   ])("rejects %s", (url) => {
     expect(() => validateWebhookUrl(url)).toThrow();
@@ -59,5 +62,14 @@ describe("diffTrees", () => {
   test("a missing side makes everything added", async () => {
     const out = await diffTrees(repo, undefined, "dB");
     expect(out.every((c) => c.status === "added")).toBe(true);
+  });
+  test("an unavailable referenced tree is a failure, not an empty diff", async () => {
+    const missing = { readTree: async () => null } as unknown as Parameters<typeof diffTrees>[0];
+    await expect(diffTrees(missing, "existing-reference", undefined)).rejects.toThrow(/Could not read a repository tree/);
+    await expect(diffTrees(missing, undefined, "existing-reference")).rejects.toThrow(/Could not read a repository tree/);
+  });
+  test("5,001 changed files fail rather than silently recording partial coordination evidence", async () => {
+    const large = fakeRepo({ tip: Array.from({ length: 5001 }, (_, index) => blob(`file-${index}`, `hash-${index}`)) });
+    await expect(diffTrees(large, undefined, "tip")).rejects.toThrow(/5,000-file inspection limit/);
   });
 });

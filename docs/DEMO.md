@@ -1,6 +1,6 @@
 # FlareGit demo script (target 8–9 min, hard cap 10)
 
-Every step uses a feature that exists in this repo. Steps marked **[PREP]** need setup before recording. Steps marked **[PRE-RUN]** should be started before the camera rolls, because agent and integration runs take real time.
+This is a recording plan, not evidence that a hosted rehearsal or recording has completed. Local Git tests exercise the protocol; they do not establish hosted Artifacts or live agent recovery. Steps marked **[PREP]** need setup before recording. Steps marked **[PRE-RUN]** should be started before the camera rolls, because agent and integration runs take real time.
 
 Placeholders: `<repo>` = repository name, `<CHG>` = change id, `<CAND>` = candidate id, `<host>` = your deployment.
 
@@ -9,6 +9,7 @@ Placeholders: `<repo>` = repository name, `<CHG>` = change id, `<CAND>` = candid
 ## Preparation checklist
 
 - **Accounts.** One FlareGit account signed in through Clerk in the browser (reviewer/owner). A second account (or a second browser profile) is optional for the People tab; the human and agent attribution alone is enough.
+- **Deployment.** Set `FLAREGIT_API=https://<host>` before any CLI command, and verify the origin with `auth status`. Follow the README deployment steps first; the CLI otherwise defaults to `https://flaregit.com`.
 - **CLI.** `bun cli/flaregit.ts auth login <token>` in a terminal (create the token in the UI; do not show it on screen). Check with `bun cli/flaregit.ts auth status`. Use `--pretty` on every command for readable output.
 - **Repos to pre-create.**
   - `demo-main`: `bun cli/flaregit.ts repo demo --name demo-main` (ticket-booking demo repo with platform checks).
@@ -16,7 +17,7 @@ Placeholders: `<repo>` = repository name, `<CHG>` = change id, `<CAND>` = candid
 - **Issue.** In `demo-main` open an issue, e.g. `bun cli/flaregit.ts issue new demo-main "Change refund window" --body "..."`. Note its number `N`.
 - **Webhook.** Settings → Add webhook with a receiver you control (e.g. a request-bin you own). For the retry beat, have a second webhook URL that returns 5xx, or temporarily make the receiver fail.
 - **Status page.** `/status` only has incidents if probes have failed. If there are none, say so on camera; do not fabricate one.
-- **Quota.** Each integration and each agent run consumes one run. Free plan: `FREE_RUNS_PER_DAY = 10` (`wrangler.jsonc`). This script uses about 6–8 runs (agent x1–2, integrations x3–4, Contradiction act x1). Do a full dry run on a different day, or use a Pro account or raise the cap on your own deployment.
+- **Quota.** Each integration and each agent run consumes one run. Free plan: `FREE_RUNS_PER_DAY = 10` (`wrangler.jsonc`). This script uses about 6–8 runs (agent x2, integrations x3–4, Contradiction act x1). Do a full dry run on a different day, or use a Pro account or raise the cap on your own deployment.
 - **Screen.** Browser at ~1440 px wide, terminal beside it, font size up. Close notifications.
 
 ---
@@ -24,14 +25,14 @@ Placeholders: `<repo>` = repository name, `<CHG>` = change id, `<CAND>` = candid
 ## Beat 1. Parallel contributions, human and agent (≈1:30)
 
 **Do**
-1. Terminal: `bun cli/flaregit.ts work demo-main "Refund window 48h" --issue N --dir human-change`
-2. In the same moment, in the browser on Issues → issue `N` → **Ask an agent**. (Alternative: Changes → **Start a change**, then **Agent** on its row.)
+1. Terminal: `bun cli/flaregit.ts work demo-main "Refund window 48h" --issue N --dir human-change`. Run subsequent edit, commit, and `push` commands inside `human-change`.
+2. Start two real agent changes before either completes: `bun cli/flaregit.ts change new demo-main "Extend the refund window to 72 hours; preserve checkout behavior" --agent --pretty` and `bun cli/flaregit.ts change new demo-main "Add a clear refund eligibility message and preserve checkout behavior" --agent --pretty`. Record their change IDs and workflow IDs. Use the browser to show both active at once; if they did not overlap in time, repeat the run rather than claim concurrency.
 3. Terminal: edit the refund rule in `human-change`, `git commit -am "48h refund window"`, `bun cli/flaregit.ts push`, then `bun cli/flaregit.ts ready demo-main <CHG>`.
 4. Browser: Changes tab shows both changes; open **People**.
 
-**Viewer sees:** two changes created at the same time, each on its own Artifacts fork and branch; the agent change flagged as an AI agent; People lists the human and the agent separately.
+**Viewer sees:** a human change and two real agent workflows overlapping in time, each on its own Artifacts fork and branch; the agent change flagged as an AI agent; People lists the human and the agent separately.
 
-**Narrate:** "A person and an AI agent start on the same issue at the same moment, each in its own isolated Artifacts fork, pushed with plain git."
+**Narrate:** "A person and two coding agents work concurrently, each in an isolated Artifacts fork. Their goals, branch commits, and attribution remain visible."
 
 **[PRE-RUN]** Agent runs take minutes. Start the agent before recording and cut to it once it has pushed; say so honestly ("sped up").
 
@@ -65,19 +66,17 @@ Placeholders: `<repo>` = repository name, `<CHG>` = change id, `<CAND>` = candid
 
 ---
 
-## Beat 4. Stale base: compare-and-swap refusal (≈1:00) [PREP]
+## Beat 4. Stale base: refusal without work loss (≈0:50)
 
-**Do**
-1. Leave the Beat 2 candidate waiting for review (do not accept yet).
-2. Land a different small change first: `work`, push, `ready`, `integrate`, then `bun cli/flaregit.ts accept demo-main <OTHER_CAND>`.
-3. Now try to accept the Beat 2 candidate: `bun cli/flaregit.ts accept demo-main <CAND>`.
-4. Show the candidate marked stale (`bun cli/flaregit.ts candidates demo-main --all --pretty`), then re-run `integrate` for the two changes.
+The hosted merge queue holds a landing lease while a candidate awaits review. Starting another normal integration behind it does **not** reliably move the accepted head: it queues. Do not stage that sequence as a stale-base demonstration.
 
-**Viewer sees:** the push is refused because the branch moved since the candidate was frozen; the candidate is stale; the head contains the other change, nothing overwritten; re-run produces a new candidate on the new head.
+Show the executable local Git check instead:
 
-**Narrate:** "The branch moved, so the compare-and-swap push is refused, the candidate goes stale and is re-run; nothing is overwritten."
+```bash
+bun test tests/platform.test.ts --test-name-pattern "stale base is refused"
+```
 
-**Prep note:** costs two extra runs. Rehearse the timing: the second integration must finish before the first candidate is accepted.
+Open the corresponding test: it moves the real canonical ref after candidate creation, attempts publication, and asserts that the newer ref is preserved. Say: "This is a local real-Git fault-injection check, with a scripted model. It proves the stale publication guard, not hosted failure recovery." A hosted equivalent remains a recording gate until rehearsed with an authorized independent canonical-ref update and a recovered ledger.
 
 ---
 
@@ -111,16 +110,19 @@ Optional: `bun cli/flaregit.ts review demo-main --change <CHG>` shows the termin
 
 ---
 
-## Beat 7. Recovery after interruption (≈0:45)
+## Beat 7. Recovery after interruption (≈0:55)
 
-**Do (pick what you can show)**
-- Changes → cancel a running agent change (the **X** on its row, or `bun cli/flaregit.ts cancel demo-main <CHG>`). Show it marked Cancelled and that the accepted head is untouched.
-- Or show an agent change that resumed from its already pushed branch (its branch commits in the change view).
+Cancellation is not recovery: cancellation deletes the task fork. Do not cancel the change whose work you intend to recover.
 
-**Narrate (code reference, not a live crash):** "Delivery rows are written in the same transaction as the event, and a Durable Object alarm re-sends anything not yet queued; publication rehydrates from the stored candidate ref, so a crashed step needs no original workspace."
-Reference on screen briefly: `src/server/durable-object.ts` (transactional outbox, `alarm()`), and `tests/platform.test.ts` (crash recovery cases).
+For reproducible protocol evidence, run:
 
-**Honesty:** do not stage a fake crash. Killing a container mid-run is not reliably reproducible on camera; narrate with the code reference instead.
+```bash
+bun test tests/platform.test.ts --test-name-pattern "crash recovery settles"
+```
+
+Show the test: a real Git landing exists; the persisted journal is deliberately restored to PREPARED, then a fresh controller restores from disk and reconciles against the actual Git ref. It checks both accepted and aborted outcomes. Narrate precisely: "This local test reconstructs an interrupted publication journal and recovers from the real repository ref. Its model is scripted; this is not a live Cloudflare crash."
+
+**Hosted recording gate:** capture a real workflow interruption and restart against the same pushed change branch, its pre-interruption SHA, the resumed SHA (verify the former is an ancestor), preserved task comments, and final accepted SHA. The current CLI has no workflow interrupt/resume command. Use an authorized Cloudflare workflow control only after a rehearsal, and record the exact operation. Do not replace this gate with cancellation, code narration, or an unverified promise. Until captured, the competition's live interruption-recovery demonstration remains incomplete.
 
 ---
 
@@ -149,3 +151,34 @@ Reference on screen briefly: `src/server/durable-object.ts` (transactional outbo
 - Do not claim ongoing sync from GitHub: imports are one-time clones (depth 200). You may show the optional one-way mirror to GitHub only if you configured it and it shows an ok run.
 - Do not claim contradiction detection works on free-form text; it needs structured assertions on requirements.
 - If a step was sped up or pre-run, say so.
+
+## Reproducible local Git recording insert (≈1:00)
+
+```bash
+bun run demo:proof
+```
+
+This standalone protocol demonstrator requires only Bun and Git. It creates two isolated clones and commits/pushes concurrently with `Promise.all`, exposes a native text conflict, records an explicit predetermined resolution, rejects a stale compare-and-swap push, and preserves an independent maintainer commit. It then deletes the integration workspace after publication while its journal is PREPARED, fresh-clones the repository, reconciles that journal, and verifies both contributions' files. The printed directory retains `canonical.git`, `journal.json`, and `receipt.json` with actual commit SHAs.
+
+For the recording, run it, open the emitted receipt, and show `git --git-dir <printed-directory>/canonical.git log --all --graph --oneline`. Label this insert **local real Git, deterministic contributors**. It is a standalone Git protocol illustration; it does not run the FlareGit controller, Cloudflare workflows, AI agents, human review, or a process-kill experiment. Pair it with the platform tests above, and retain the hosted recovery/concurrency gates. It is not a substitute for the required real-agent demonstration.
+
+## Evidence to retain before submission
+
+Save the final 5–10 minute recording and repository URL, plus the deployed source commit; real overlapping agent workflow IDs and timestamps; each contribution base/head; conflict evidence and reviewer decision; accepted commit SHA verified by a fresh clone; webhook event ID, attempts and replay; and interruption/recovery receipts. Record what was pre-run or edited for time. None of these receipts are supplied by this script itself.
+
+The human entrant must separately confirm eligibility and complete the required entry process before October 14, 2026 at 11:59 p.m. Pacific. This repository does not submit an entry or establish eligibility.
+
+## Official competition checklist (verified October 2, 2026)
+
+Cloudflare's [official rules](https://www.cloudflare.com/documents/build-next-gen-git-platform-competition-terms.pdf), sections 2–4 and 6, specify:
+
+- Deadline: October 14, 2026, 11:59 p.m. PDT.
+- Build with Workers and Artifacts and enable multiple agents to work concurrently.
+- Provide a 5–10 minute video, source repository, running instructions, and an approved open-source LICENSE. The Apache-2.0 LICENSE in this repository satisfies the license choice.
+- Judging: originality/prototype quality 50%; concurrency, coordination, context preservation, review, and conflict handling 25%; product experience 25%.
+- The entrant must confirm eligibility separately: legal US/Canada residence, age 18 or older at the start, and the exclusions in section 3. Eligibility is not established by this repository.
+- Entry must be performed by a human: the rules prohibit automated entry.
+
+The [human submission form](https://www.cloudflare.com/git-competition/submit/) requires the project vision, Cloudflare usage, repository URL, run instructions, team/contact details, and video upload (MP4, WebM, or MOV, maximum 2 GiB). No entry has been submitted by these instructions.
+
+A live read of GitHub metadata on October 2 returned [Joe-Simo/flaregit](https://github.com/Joe-Simo/flaregit) as **PRIVATE**, with Apache-2.0 detected. Public open-source access remains a delivery gate; recheck visibility before using that URL in the submission. A private repository with a LICENSE is not evidence of public publication.

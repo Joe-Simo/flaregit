@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { redactSecrets } from "../../agents/prompt.js";
 import { git, gitOrThrow, PLATFORM_IDENTITY } from "./git.js";
 import type { CandidateGeneration, RepairAttempt, Task, VerificationEvidence } from "../types.js";
 
@@ -62,7 +63,7 @@ export function buildRepairPrompt(opts: RepairOptions): string {
     )
     .join("\n");
 
-  return [
+  return redactSecrets([
     opts.tasks.length > 1
       ? `You are the FlareGit integration repair engine. ${opts.tasks.length} contributors changed the same codebase in parallel.`
       : "You are the FlareGit integration repair engine. A contributor's change was written against an older version and newer work has been accepted since.",
@@ -84,7 +85,7 @@ export function buildRepairPrompt(opts: RepairOptions): string {
     "",
     'Reply with the COMPLETE new content of every file you change, each as: <file path="PATH">\\nCONTENT\\n</file>.',
     "Reply with nothing else you want applied. No conflict markers may remain. Keep every public type and export compatible with the read-only context; do not invent types, and import every type you use from ./types.js. Totals must reconcile (any itemized receipt must sum to the total).",
-  ].join("\n");
+  ].join("\n"));
 }
 
 export function parseRepairResponse(output: string): Map<string, string> {
@@ -100,6 +101,7 @@ function isProtected(file: string, protectedPaths: readonly string[]): boolean {
 }
 
 function fail(round: number, prompt: string, started: number, message: string, files: string[]): RepairResult {
+  message = redactSecrets(message);
   return {
     success: false,
     candidateCommit: null,
@@ -125,6 +127,10 @@ export async function repairCandidate(opts: RepairOptions): Promise<RepairResult
     return fail(round, prompt, started, `Exceeded maximum repair rounds (${MAX_REPAIR_ROUNDS}).`, opts.editableFiles);
   }
 
+  if (Object.values(opts.fileContents).some((content) => redactSecrets(content) !== content)) {
+    return fail(round, prompt, started, "Automatic repair refused: an editable file contains credentials; a contributor must resolve it", opts.editableFiles);
+  }
+
   let output: string;
   try {
     output = await opts.model(prompt);
@@ -142,6 +148,11 @@ export async function repairCandidate(opts: RepairOptions): Promise<RepairResult
     const target = path.resolve(root, file);
     if (!target.startsWith(root + path.sep)) return fail(round, prompt, started, `Repair path escapes workspace: ${file}`, [file]);
     if (!opts.editableFiles.includes(file)) return fail(round, prompt, started, `Repair touched out-of-scope file: ${file}`, [file]);
+    let cursor = target;
+    while (cursor !== root) {
+      if (fs.lstatSync(cursor, { throwIfNoEntry: false })?.isSymbolicLink()) return fail(round, prompt, started, "Repair through a symbolic link refused", [file]);
+      cursor = path.dirname(cursor);
+    }
     if (isProtected(file, opts.protectedPaths)) return fail(round, prompt, started, `Repair touched protected path: ${file}`, [file]);
     if (/^(<<<<<<<|=======|>>>>>>>)/m.test(content)) return fail(round, prompt, started, `Conflict markers remain in ${file}`, [file]);
     if (Buffer.byteLength(content) > MAX_FILE_BYTES) return fail(round, prompt, started, `Repair output too large for ${file}`, [file]);

@@ -10,7 +10,7 @@ import { buildPrefix, signPreview, verifyPreview } from "./preview-access.js";
 import { billingFromEvent, createCheckout, planLimits, reportUsage, verifyPolarWebhook } from "./polar.js";
 import { TICKET_BOOKING_POLICY } from "../fixtures/ticket-booking/policy.js";
 import { DEFAULT_PROTECTED_PATHS, isCommandPolicy, settingsFor, type CommandPolicy } from "../core/command-policy.js";
-import { currentStatus, runProbes, statusIncidents, statusPage } from "./status.js";
+import { currentStatus, runProbes, statusIncidents, statusPage, workflowHealth } from "./status.js";
 import { isPlausibleGithubToken, pushMirror, validateMirrorTarget } from "./mirror.js";
 import { lookupTxt, normalizeDomain, txtHost, txtValue } from "./dns.js";
 import { isSafeRef } from "../core/sanitize.js";
@@ -19,6 +19,7 @@ import { validateWebhookUrl } from "./webhooks.js";
 import { PROJECT_ID, accountKeyFor, accountOf, admitRun, canonicalNameFor, globalOf, newProjectId, projectOf, taskRepoName } from "./projects.js";
 import type { Env, QueueMessage } from "./env.js";
 import type { Task } from "../core/types.js";
+import { redactSecrets } from "../agents/prompt.js";
 
 export { RepositoryController, FlareGitIntegrationWorkflow, FlareGitScenarioWorkflow, FlareGitAgentWorkflow };
 export { IntegratorSandbox, AgentSandbox } from "./integrator.js";
@@ -34,12 +35,12 @@ export default {
 
     if (url.pathname === "/health") return json({ ok: true });
     if (url.pathname === "/status.json") {
-      const [rows, incidents, reports] = await Promise.all([currentStatus(env), statusIncidents(env), globalOf(env).reportBacklog()]);
-      return Response.json({ degraded: rows.filter((r) => r.degradedNow).map((r) => r.label), components: rows, incidents, reports }, { headers: { "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" } });
+      const [rows, incidents, reports, workflows] = await Promise.all([currentStatus(env), statusIncidents(env), globalOf(env).reportBacklog(), workflowHealth(env)]);
+      return Response.json({ degraded: rows.filter((r) => r.degradedNow).map((r) => r.label), components: rows, incidents, reports, workflows }, { headers: { "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" } });
     }
     if (url.pathname === "/status") {
-      const [rows, incidents, reports] = await Promise.all([currentStatus(env), statusIncidents(env), globalOf(env).reportBacklog()]);
-      return new Response(statusPage(rows, incidents, Date.now(), reports), { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+      const [rows, incidents, reports, workflows] = await Promise.all([currentStatus(env), statusIncidents(env), globalOf(env).reportBacklog(), workflowHealth(env)]);
+      return new Response(statusPage(rows, incidents, Date.now(), reports, workflows), { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
     }
 
     // The publishable key is public by design; the SPA needs it before the user can sign in.
@@ -438,7 +439,7 @@ export default {
           const action = taskRoute[2];
           if (action === "cancel") {
             await project.cancelTask(task.id);
-            ctx.waitUntil(env.ARTIFACTS.delete(task.workspace.repoName).catch(() => false));
+            // Cancellation stops integration, but the contributor's pushed branch remains recoverable.
             return json({ cancelled: task.id });
           }
           if (action === "ready") {
@@ -447,14 +448,25 @@ export default {
             const repo = await env.ARTIFACTS.get(task.workspace.repoName);
             const head = (await repo.log({ ref: `refs/heads/${task.workspace.branch}`, limit: 1 }))[0]?.hash ?? (await repo.log({ ref: task.workspace.branch, limit: 1 }))[0]?.hash;
             if (!head) return text(`Nothing pushed to ${task.workspace.branch} yet`, 409);
-            const { applied } = await project.ingestCheckpoint({ eventId: `ready-${task.id}-${head}`, taskId: task.id, commit: head, ready: true });
+            const [base, tip] = await Promise.all([resolveCommit(repo, task.baseCommit), resolveCommit(repo, head)]);
+            if (!base || !tip) return text("Could not read the saved change and base; retry without marking ready", 503);
+            const filesChanged = (await diffTrees(repo, base.treeHash, tip.treeHash)).map((file) => file.path);
+            const { applied } = await project.ingestCheckpoint({ eventId: `ready-${task.id}-${head}`, taskId: task.id, commit: head, ready: true, filesChanged });
             return json({ task: task.id, commit: head, applied });
           }
           // AI agent works on this change
+          if (["accepted", "cancelled", "integrating", "verifying"].includes(task.status)) return text("This change cannot start an agent in its current state", 409);
           const { plan } = await account.getBilling();
           const denied = await admitRun(env, account, planLimits(env)[plan]);
           if (denied) return denied;
-          const instance = await env.AGENT_WORKFLOW.create({ id: `agent-${projectId}-${task.id}-${Date.now().toString(36)}`, params: { projectId, taskId: task.id } });
+          if (!(await project.beginAgentTask(task.id))) return text("Change can no longer start an agent", 409);
+          let instance: WorkflowInstance;
+          try {
+            instance = await env.AGENT_WORKFLOW.create({ id: `agent-${projectId}-${task.id}-${crypto.randomUUID()}`, params: { projectId, taskId: task.id } });
+          } catch {
+            await project.failAgentTask(task.id);
+            return text("Change is saved, but the agent could not start. Retry or continue on its saved branch.", 503);
+          }
           ctx.waitUntil(reportUsage(env, accountKey, "agent_run", instance.id, { plan }));
           return json({ instanceId: instance.id }, 202);
         }
@@ -467,7 +479,7 @@ export default {
           const { plan } = await account.getBilling();
           const denied = await admitRun(env, account, planLimits(env)[plan]);
           if (denied) return denied;
-          const eventId = `integ-${projectId}-${Date.now().toString(36)}`;
+          const eventId = `integ-${projectId}-${crypto.randomUUID()}`;
           await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds: b.taskIds as string[], eventId } satisfies QueueMessage);
           return json({ queued: eventId }, 202);
         }
@@ -505,7 +517,7 @@ export default {
           const { plan } = await account.getBilling();
           const denied = await admitRun(env, account, planLimits(env)[plan]);
           if (denied) return denied;
-          const runId = Date.now().toString(36);
+          const runId = crypto.randomUUID();
           const instance = await env.SCENARIO_WORKFLOW.create({ id: `scn-${projectId}-${runId}`, params: { projectId, act: b.act, runId } });
           ctx.waitUntil(reportUsage(env, accountKey, "scenario_run", `${projectId}-${runId}`, { act: b.act, plan }));
           return json({ instanceId: instance.id }, 202);
@@ -748,8 +760,9 @@ export default {
 
       return text("Not found", 404);
     } catch (err) {
-      console.error("api error", method, path, err instanceof Error ? err.message : String(err));
-      return text(err instanceof Error ? err.message : "Internal error", 500);
+      const message = redactSecrets(err instanceof Error ? err.message : "Internal error");
+      console.error("api error", method, path, message);
+      return text(message, 500);
     }
   },
 
@@ -767,8 +780,10 @@ async function adoptLegacyProject(env: Env, account: Ledger, accountKey: string,
   try {
     const legacy = projectOf(env, accountKey);
     const state = await legacy.getState();
-    if (!(await legacy.roleOf(userId))) await legacy.addMember(userId, "owner");
-    await account.addProject({ id: accountKey, name: state.projectName || "demo", role: "owner", kind: state.kind ?? "demo" });
+    // An old namespace is not permission to restore ownership or revoked membership.
+    const role = await legacy.roleOf(userId);
+    if (!role) return [];
+    await account.addProject({ id: accountKey, name: state.projectName || "demo", role, kind: state.kind ?? "demo" });
     return account.listProjects();
   } catch {
     return [];

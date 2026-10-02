@@ -33,7 +33,7 @@ export function buildAgentPrompt(task: Task, agentName: string, files: Record<st
   const context = Object.entries(files)
     .map(([f, c]) => `<current path="${f}">\n${redactSecrets(c)}\n</current>`)
     .join("\n");
-  return [
+  return redactSecrets([
     `You are ${agentName}, a coding agent working in an isolated git workspace.`,
     `Task: ${task.goal}`,
     requirements ? `Requirements:\n${requirements}` : "",
@@ -46,13 +46,13 @@ export function buildAgentPrompt(task: Task, agentName: string, files: Record<st
     context,
     "",
     'Reply with the COMPLETE new content of every file you change, each as: <file path="PATH">\\nCONTENT\\n</file>.',
-  ].join("\n");
+  ].join("\n"));
 }
 
 /** Throws if the model proposed a write outside the task's scope or onto protected paths. */
 export function assertAgentWrites(task: Pick<Task, "allowedScope">, files: Iterable<string>, protectedPaths: readonly string[]): void {
   for (const file of files) {
-    if (file.startsWith("/") || file.split("/").includes("..")) throw new Error(`Path escapes workspace: ${file}`);
+    if (!file || /[\x00-\x1f\\]/.test(file) || file.startsWith("/") || file.split("/").some((part) => part === ".." || part === ".git" || part === "" || part === ".")) throw new Error(`Path escapes workspace: ${file}`);
     if (!inAgentScope(task, file)) throw new Error(`${file} is outside the task scope`);
     if (isProtectedPath(file, protectedPaths)) throw new Error(`${file} is protected`);
   }

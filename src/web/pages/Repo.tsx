@@ -41,11 +41,15 @@ export function Repo({ projectId, tab, params }: { projectId: string; tab: strin
   const [cloning, setCloning] = useState(false);
 
   const reload = useCallback(() => {
-    apiJson<Meta>(`/p/${projectId}`).then(setMeta).catch((e: Error) => setError(e.message));
+    apiJson<Meta>(`/p/${projectId}`).then((next) => { setMeta(next); setError(null); }).catch((e: Error) => setError(e.message));
     apiJson<State>(`/p/${projectId}/state`).then((s) => { setState(s); setStateError(null); }).catch((e: Error) => setStateError(e.message));
   }, [projectId]);
 
   useEffect(() => {
+    setMeta(null);
+    setState(null);
+    setError(null);
+    setStateError(null);
     reload();
     const t = setInterval(() => apiJson<State>(`/p/${projectId}/state`).then((s) => { setState(s); setStateError(null); }).catch((e: Error) => setStateError(e.message)), 6000);
     return () => clearInterval(t);
@@ -88,12 +92,11 @@ export function Repo({ projectId, tab, params }: { projectId: string; tab: strin
       {stateError && <div role="status" className="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">Live updates paused: {stateError}. Showing the last loaded state.</div>}
 
       <nav aria-label="Repository sections" className="-mx-4 sm:mx-0 mb-2">
-      <div className="flex gap-1 border-b border-border overflow-x-auto px-4 sm:px-0" role="tablist">
+      <div className="flex gap-1 border-b border-border overflow-x-auto px-4 sm:px-0" >
         {TABS.map(([key, label]) => (
           <button
             key={key}
-            role="tab"
-            aria-selected={tab === key}
+            aria-current={tab === key ? "page" : undefined}
             id={`tab-${key}`}
             aria-controls="repo-tabpanel"
             onClick={() => navigate(`/p/${projectId}/${key}`)}
@@ -106,7 +109,7 @@ export function Repo({ projectId, tab, params }: { projectId: string; tab: strin
       </nav>
       {current && <p className="text-xs text-muted-foreground mb-5">{current[2]}</p>}
 
-      <div id="repo-tabpanel" role="tabpanel" aria-labelledby={current ? `tab-${current[0]}` : undefined} className="min-w-0">
+      <div id="repo-tabpanel" aria-labelledby={current ? `tab-${current[0]}` : undefined} className="min-w-0">
       {tab === "code" && <CodeTab projectId={projectId} />}
       {tab === "commits" && <CommitsTab projectId={projectId} />}
       {tab === "changes" && <ChangesTab projectId={projectId} state={state} reload={reload} />}

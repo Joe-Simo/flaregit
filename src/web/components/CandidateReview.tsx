@@ -49,8 +49,17 @@ export function CandidateReview({ projectId, candidate, evidence, onDone, showOp
       <p className="text-sm text-muted-foreground">
         Combines {candidate.participatingTaskIds.join(" and ")}{candidate.compositionMethod ? ` (${candidate.compositionMethod.replace(/_/g, " ")})` : ""}
         {candidate.repairAttempts.length > 0 ? `, with ${candidate.repairAttempts.length} AI repair round${candidate.repairAttempts.length === 1 ? "" : "s"} you should read` : ""}.{" "}
-        {total > 0 ? `${passed} of ${total} checks passed.` : "Your verification command passed."} Accepting moves the branch to exactly this commit.
+        {total > 0 ? `${passed} of ${total} checks passed.` : "No check totals were recorded; read the verification evidence."} Accepting moves the branch to exactly this commit.
       </p>
+      {candidate.repairAttempts.length > 0 && <div className="space-y-2">
+        <h4 className="text-sm font-medium text-amber-200">Conflict repairs are part of this candidate</h4>
+        {candidate.repairAttempts.map((repair, index) => <details key={`${repair.round}-${index}`} className="rounded-md border border-border bg-background/60 p-3">
+          <summary className="cursor-pointer text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Read repair round {repair.round}</summary>
+          <p className="mt-3 text-xs text-muted-foreground whitespace-pre-wrap break-words">{repair.diagnosticError || "Repair proposed during integration."}</p>
+          {repair.affectedContracts.length > 0 && <p className="mt-2 text-xs text-muted-foreground">Affected requirements: {repair.affectedContracts.join(", ")}</p>}
+          <pre className="mt-3 max-h-72 overflow-auto rounded bg-muted/40 p-3 text-xs" aria-label={`Repair patch for round ${repair.round}`}>{repair.patch || "No patch was recorded for this attempt."}</pre>
+        </details>)}
+      </div>}
       <textarea className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm" rows={2} maxLength={500} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Review note (optional; required context if you reject)" aria-label="Review note" />
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       <div className="flex flex-wrap gap-2">

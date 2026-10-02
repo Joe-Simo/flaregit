@@ -29,7 +29,7 @@ function summarize(state: FlareGitProjectState): { stage: PipelineStage; message
   const blocked = tasks.find((t) => t.status === "blocked");
   if (blocked) return { stage: "blocked", message: "Blocked", detail: `${blocked.blockedReason ?? "Integration failed"} — the accepted version is unchanged.` };
   if (tasks.some((t) => t.status === "working" || t.status === "checkpointed")) return { stage: "working", message: "Contributors are working", detail: "Changes are being prepared in isolated workspaces." };
-  return { stage: "accepted", message: "All accepted work is live", detail: "Contributors can start changes at any time; nothing lands unless it passes your checks." };
+  return { stage: "accepted", message: "Accepted repository state is preserved", detail: "Prepare independent contributions, verify a candidate, then choose which commits enter repository history." };
 }
 
 export function IntegrationTab({

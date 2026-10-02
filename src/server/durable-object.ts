@@ -9,6 +9,7 @@ import type {
   ProductDecision,
   PublicationJournalEntry,
   Requirement,
+  RepairAttempt,
   Task,
   VerificationEvidence,
 } from "../core/types.js";
@@ -58,6 +59,9 @@ export interface ComponentStatus {
   lastFailureDetail: string | null;
   degradedMinutes24h: number;
 }
+export type WorkflowKind = "agent" | "integration";
+export type WorkflowOutcome = "started" | "completed" | "skipped" | "accepted" | "needs_decision" | "not_started" | "blocked" | "stale" | "rejected" | "failed";
+export interface WorkflowCount { kind: WorkflowKind; status: WorkflowOutcome; count: number }
 
 export const WEBHOOK_EVENTS = ["change.ready", "change.accepted", "change.blocked", "decision.needed"] as const;
 
@@ -184,6 +188,8 @@ export interface Ledger {
   verifyApiToken(secret: string): Promise<{ userId: string; scope: TokenScope["scope"]; repo: string | null } | null>;
   recordProbe(component: string, ok: boolean, latencyMs?: number, detail?: string): Promise<void>;
   statusSummary(): Promise<ComponentStatus[]>;
+  recordWorkflowOutcome(kind: WorkflowKind, instanceId: string, status: WorkflowOutcome): Promise<void>;
+  workflowCounts(sinceMs: number): Promise<WorkflowCount[]>;
   getMirror(): Promise<{ target: string | null; enabled: boolean; hasToken: boolean; runs: Array<{ id: string; commit: string; status: string; detail: string; at: string }> }>;
   /** Server-side only (workflow and mirror route); never returned to clients. */
   mirrorSecret(): Promise<{ target: string; token: string } | null>;
@@ -213,17 +219,20 @@ export interface Ledger {
   getState(): Promise<FlareGitProjectState>;
   claimLanding(req: { holder: string; taskIds: string[] }): Promise<ClaimResult>;
   recordVerification(candidateId: string, commit: string, evidence: VerificationEvidence): Promise<void>;
+  recordComposition(candidateId: string, attempts: RepairAttempt[]): Promise<void>;
   awaitReview(candidateId: string, commit: string, workflowInstanceId: string): Promise<void>;
   recordReview(candidateId: string, review: { approved: boolean; by: string; note?: string }): Promise<{ ok: boolean; instanceId?: string; error?: string }>;
   preparePublish(candidateId: string): Promise<PrepareResult>;
   completePublish(journalId: string): Promise<void>;
   abortPublish(candidateId: string, journalId: string | undefined, reason: string, outcome: "failed" | "stale"): Promise<void>;
   cancelTask(taskId: string): Promise<void>;
+  failAgentTask(taskId: string): Promise<void>;
+  beginAgentTask(taskId: string): Promise<boolean>;
   getBilling(): Promise<{ plan: "free" | "pro"; status: string; subscriptionId?: string; updatedAt: string }>;
   setBilling(b: { plan: "free" | "pro"; status: string; subscriptionId?: string; updatedAt: string }): Promise<void>;
   usageToday(): Promise<number>;
   consumeRun(limit: number): Promise<{ allowed: boolean; used: number }>;
-  ingestCheckpoint(ev: { eventId: string; taskId: string; commit: string; ready: boolean }): Promise<{ applied: boolean }>;
+  ingestCheckpoint(ev: { eventId: string; taskId: string; commit: string; ready: boolean; filesChanged?: string[] }): Promise<{ applied: boolean }>;
 }
 
 const LEASE_MS = 20 * 60_000;
@@ -260,6 +269,7 @@ export class RepositoryController extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, at TEXT NOT NULL, reporter TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, details TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', resolution TEXT, resolved_by TEXT, resolved_at TEXT);
       CREATE TABLE IF NOT EXISTS probes (id INTEGER PRIMARY KEY AUTOINCREMENT, component TEXT NOT NULL, at INTEGER NOT NULL, ok INTEGER NOT NULL, latency_ms INTEGER, detail TEXT);
       CREATE INDEX IF NOT EXISTS probes_component_at ON probes (component, at);
+      CREATE TABLE IF NOT EXISTS workflow_runs (kind TEXT NOT NULL, instance_id TEXT NOT NULL, status TEXT NOT NULL, started_at INTEGER NOT NULL, finished_at INTEGER, PRIMARY KEY (kind, instance_id));
       CREATE TABLE IF NOT EXISTS api_tokens (id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, label TEXT NOT NULL, created_at TEXT NOT NULL, last_used TEXT);
       CREATE TABLE IF NOT EXISTS runs (day TEXT PRIMARY KEY, n INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS lease (id INTEGER PRIMARY KEY CHECK (id = 1), holder TEXT NOT NULL, expires_at INTEGER NOT NULL);
@@ -425,7 +435,10 @@ export class RepositoryController extends DurableObject<Env> {
   }
   /** Records an attempt. Returns the attempt count so the consumer can decide whether to back off or give up. */
   async markDelivery(id: string, r: { ok: boolean; status?: number; error?: string; latencyMs?: number; final?: boolean }): Promise<number> {
-    const row = this.ctx.storage.sql.exec<{ attempts: number }>("SELECT attempts FROM deliveries WHERE id = ?", id).toArray()[0];
+    const row = this.ctx.storage.sql.exec<{ attempts: number; status: string }>("SELECT attempts, status FROM deliveries WHERE id = ?", id).toArray()[0];
+    if (!row) throw new Error("Unknown delivery");
+    // Concurrent queue deliveries can complete out of order. A confirmed success is terminal.
+    if (row.status === "success") return row.attempts;
     const attempts = (row?.attempts ?? 0) + 1;
     if (attempts === 1) {
       this.ctx.storage.sql.exec("UPDATE deliveries SET queue_ms = MAX(0, CAST((julianday(?) - julianday(created_at)) * 86400000 AS INTEGER)) WHERE id = ?", new Date().toISOString(), id);
@@ -556,7 +569,30 @@ export class RepositoryController extends DurableObject<Env> {
   // ---- platform health (used on the global instance) ----
   async recordProbe(component: string, ok: boolean, latencyMs?: number, detail?: string): Promise<void> {
     this.ctx.storage.sql.exec("INSERT INTO probes (component, at, ok, latency_ms, detail) VALUES (?, ?, ?, ?, ?)", component, Date.now(), ok ? 1 : 0, latencyMs ?? null, detail ? detail.slice(0, 200) : null);
-    this.ctx.storage.sql.exec("DELETE FROM probes WHERE at < ?", Date.now() - 3 * 86_400_000);
+    this.ctx.storage.sql.exec("DELETE FROM probes WHERE at < ?", Date.now() - 7 * 86_400_000);
+  }
+  /** One lifecycle row per workflow instance; replayed starts cannot erase terminal evidence. */
+  async recordWorkflowOutcome(kind: WorkflowKind, instanceId: string, status: WorkflowOutcome): Promise<void> {
+    if (!["agent", "integration"].includes(kind) || !instanceId || instanceId.length > 256 || !["started", "completed", "skipped", "accepted", "needs_decision", "not_started", "blocked", "stale", "rejected", "failed"].includes(status)) throw new Error("Invalid workflow outcome");
+    const now = Date.now();
+    this.ctx.storage.sql.exec("INSERT INTO workflow_runs (kind, instance_id, status, started_at, finished_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(kind, instance_id) DO UPDATE SET status = excluded.status, finished_at = excluded.finished_at WHERE workflow_runs.status = 'started'", kind, instanceId, status, now, status === "started" ? null : now);
+    // Keep outstanding starts: an interrupted run remains visible rather than aging into success.
+    this.ctx.storage.sql.exec("DELETE FROM workflow_runs WHERE finished_at < ?", now - 7 * 86_400_000);
+  }
+  async workflowCounts(sinceMs: number): Promise<WorkflowCount[]> {
+    return this.ctx.storage.sql.exec("SELECT kind, status, COUNT(*) AS count FROM workflow_runs WHERE finished_at >= ? OR finished_at IS NULL GROUP BY kind, status", sinceMs).toArray() as unknown as WorkflowCount[];
+  }
+  async beginAgentTask(taskId: string): Promise<boolean> {
+    const state = this.load();
+    const task = state.tasks[taskId];
+    if (!task || ["accepted", "cancelled", "integrating", "verifying"].includes(task.status)) return false;
+    task.initiatedBy ??= task.contributor;
+    task.contributor = { id: `agent-${taskId}`, name: "FlareGit agent", type: "agent" };
+    task.status = "working";
+    delete task.blockedReason;
+    task.updatedAt = new Date().toISOString();
+    this.save();
+    return true;
   }
   /** Raw facts per component: was it degraded, how many checks failed, for how long. No averaged uptime percentage. */
   /** Raw probe rows (newest last) so incidents can be derived from evidence rather than written by hand. */
@@ -825,6 +861,17 @@ export class RepositoryController extends DurableObject<Env> {
     this.save();
   }
 
+  /** Model/container failures must not leave a change claiming an agent is still working. */
+  async failAgentTask(taskId: string): Promise<void> {
+    const task = this.load().tasks[taskId];
+    if (!task || ["accepted", "cancelled", "integrating", "verifying", "ready"].includes(task.status)) return;
+    task.status = "blocked";
+    task.blockedReason = "Agent run failed. Pushed checkpoints are preserved; retry the agent or continue on the saved branch.";
+    task.updatedAt = new Date().toISOString();
+    this.save();
+    await this.logActivity("FlareGit", "agent.failed", `Agent on ${task.id} stopped. Saved checkpoints are preserved.`);
+  }
+
   /** Acquire the single landing lease and freeze a candidate against the current accepted head. */
   async claimLanding(req: { holder: string; taskIds: string[] }): Promise<ClaimResult> {
     const s = this.load();
@@ -880,6 +927,14 @@ export class RepositoryController extends DurableObject<Env> {
 
   private releaseLease(): void {
     this.ctx.storage.sql.exec("DELETE FROM lease WHERE id = 1");
+  }
+
+  async recordComposition(candidateId: string, attempts: RepairAttempt[]): Promise<void> {
+    const candidate = this.load().candidates[candidateId];
+    if (!candidate) throw new Error("Unknown candidate");
+    candidate.repairAttempts = attempts;
+    candidate.compositionMethod = attempts.length ? "repaired_merge" : "clean_git_merge";
+    this.save();
   }
 
   async recordVerification(candidateId: string, commit: string, evidence: VerificationEvidence): Promise<void> {

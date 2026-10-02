@@ -44,3 +44,56 @@ test("probes older than 7 days are ignored", () => {
   expect(deriveIncidents([row(0, false), row(5, true)], T0 + 8 * 1440 * M)).toEqual([]);
   expect(deriveIncidents([], T0)).toEqual([]);
 });
+
+test("missing probe evidence is unverified, not operational", async () => {
+  const { currentStatus, statusPage } = await import("../src/server/status");
+  const env = { REPOSITORY_CONTROLLER: { idFromName: (s: string) => s, get: () => ({ statusSummary: async () => [] }) } } as unknown as import("../src/server/env").Env;
+  const rows = await currentStatus(env);
+  expect(rows.length).toBe(8);
+  expect(rows.every((r) => r.degradedNow && r.lastCheckAt === null)).toBe(true);
+  const html = statusPage(rows);
+  expect(html).toContain("Unverified");
+  expect(html).toContain("not successful customer workflows");
+  expect(html).not.toContain("Every subsystem passed");
+});
+
+test("storage probes require recovery and web probes require an actual response", async () => {
+  const { runProbes } = await import("../src/server/status");
+  const results: Array<{ component: string; ok: boolean }> = [];
+  let deleted = 0;
+  const env = {
+    REPOSITORY_CONTROLLER: { idFromName: (s: string) => s, get: () => ({ usageToday: async () => ({}), recordProbe: async (component: string, ok: boolean) => { results.push({ component, ok }); } }) },
+    ASSETS: { fetch: async () => new Response("", { status: 503 }) },
+    ARTIFACTS: { list: async () => [] },
+    EVIDENCE_BUCKET: { put: async () => {}, get: async () => null, delete: async () => { deleted++; } },
+    INTEGRATION_WORKFLOW: { get: async () => { throw new Error("not found"); } },
+    AI: { run: async () => ({ data: [[1]] }) },
+    INTEGRATION_QUEUE: { send: async () => {} },
+  } as unknown as import("../src/server/env").Env;
+  await runProbes(env);
+  expect(results.find((r) => r.component === "api")?.ok).toBe(false);
+  expect(results.find((r) => r.component === "storage")?.ok).toBe(false);
+  expect(deleted).toBe(1);
+});
+
+test("workflow outcomes include refusals in the denominator and retain missing outcomes separately", async () => {
+  const { summarizeWorkflowCounts, statusPage } = await import("../src/server/status");
+  const summary = summarizeWorkflowCounts([
+    { kind: "agent", status: "completed", count: 3 },
+    { kind: "agent", status: "failed", count: 1 },
+    { kind: "integration", status: "accepted", count: 2 },
+    { kind: "integration", status: "stale", count: 1 },
+    { kind: "integration", status: "started", count: 4 },
+  ]);
+  expect(summary.completedRuns24h).toBe(7);
+  expect(summary.outstandingRuns).toBe(4);
+  expect(summary.verified).toBe(true);
+  expect(statusPage([], [], Date.now(), undefined, summary)).toContain("not establish all launched runs were recorded");
+  expect(summarizeWorkflowCounts([]).verified).toBe(false);
+});
+
+test("unavailable workflow telemetry remains unverified", async () => {
+  const { workflowHealth } = await import("../src/server/status");
+  const env = { REPOSITORY_CONTROLLER: { idFromName: (s: string) => s, get: () => ({ workflowCounts: async () => { throw new Error("unavailable"); } }) } } as unknown as import("../src/server/env").Env;
+  expect((await workflowHealth(env)).verified).toBe(false);
+});

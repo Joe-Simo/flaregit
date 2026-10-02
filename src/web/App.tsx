@@ -41,7 +41,7 @@ export function App() {
           <span className="h-8 w-8 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center text-white" aria-hidden="true"><GitBranch className="h-5 w-5" /></span>
           FlareGit
         </button>
-        <span className="hidden md:block text-xs text-muted-foreground">Work in parallel. Integration happens automatically.</span>
+        <span className="hidden md:block text-xs text-muted-foreground">Work in parallel. Review what comes together.</span>
         <nav aria-label="Account" className="flex items-center gap-4 sm:mr-14">
           <button className="text-sm text-muted-foreground hover:text-foreground rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => navigate("/inbox")} aria-label={unread > 0 ? `Inbox, ${unread} need you` : "Inbox"}>
             Inbox{unread > 0 && <span className="ml-1 rounded-full bg-orange-500 px-1.5 text-xs text-white" aria-hidden="true">{unread}</span>}

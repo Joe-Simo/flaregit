@@ -62,6 +62,8 @@ export interface Task {
   id: string;
   goal: string;
   contributor: Contributor;
+  /** Person who asked an agent to contribute; preserved separately from the agent's authorship. */
+  initiatedBy?: Contributor;
   baseCommit: string;
   /** Stacked change: id of the change this one builds on. It cannot be marked ready until that change is accepted. */
   dependsOn?: string;
@@ -225,4 +227,3 @@ export interface FlareGitProjectState {
   ownerId?: string;
   source?: string;
 }
-

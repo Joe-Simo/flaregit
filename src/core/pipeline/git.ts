@@ -11,7 +11,7 @@ export function git(repoDir: string, args: string[], opts?: { gitDir?: boolean }
   const base = opts?.gitDir ? ["--git-dir", repoDir] : ["-C", repoDir];
   const res = spawnSync("git", [...base, ...args], {
     encoding: "utf-8",
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1" },
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
     maxBuffer: 64 * 1024 * 1024,
   });
   return { ok: res.status === 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
@@ -39,6 +39,7 @@ export const PLATFORM_IDENTITY = [
 ];
 
 export function changedFiles(repoDir: string, from: string, to: string): string[] {
-  const res = git(repoDir, ["diff", "--name-only", `${from}..${to}`]);
-  return res.stdout.split("\n").filter(Boolean);
+  const result = git(repoDir, ["diff", "--name-only", "-z", `${from}..${to}`]);
+  if (!result.ok) throw new Error(`Could not inspect changed files: ${result.stderr.trim()}`);
+  return result.stdout.split("\0").filter(Boolean);
 }

@@ -10,7 +10,9 @@ import type { ClaimResult, Ledger, PrepareResult } from "./durable-object.js";
 import { gitAuthEnv, q } from "./shell.js";
 import { ledgerOf } from "./scenario-workflow.js";
 import { settingsFor } from "../core/command-policy.js";
-import { inAgentScope, isProtectedPath } from "../agents/prompt.js";
+import { inAgentScope, isProtectedPath, redactSecrets } from "../agents/prompt.js";
+import { globalOf } from "./projects.js";
+import type { WorkflowOutcome } from "./durable-object.js";
 
 export interface IntegrationParams {
   projectId: string;
@@ -24,6 +26,21 @@ type Stub = Ledger;
 
 export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, IntegrationParams> {
   override async run(event: WorkflowEvent<IntegrationParams>, step: WorkflowStep) {
+    const record = async (status: WorkflowOutcome) => {
+      try { await step.do(`outcome-${status}`, async () => globalOf(this.env).recordWorkflowOutcome("integration", event.instanceId, status)); }
+      catch { console.error("Workflow outcome recording unavailable"); }
+    };
+    await record("started");
+    try {
+      const result = await this.execute(event, step);
+      await record(result.status);
+      return result;
+    } catch (error) {
+      await record("failed");
+      throw error;
+    }
+  }
+  private async execute(event: WorkflowEvent<IntegrationParams>, step: WorkflowStep) {
     const stub = ledgerOf(this.env, event.payload.projectId) as Stub;
     this.projectId = event.payload.projectId;
     const holder = event.instanceId;
@@ -38,7 +55,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     }
     if (!claim.candidate) {
       if (!claim.decision) await step.do("report-not-started", async () => stub.logActivity("FlareGit", "integration.not_started", `Integration of ${event.payload.taskIds.join(" + ")} did not start: ${claim.reason}`));
-      return { status: claim.decision ? "needs_decision" : "not_started", reason: claim.reason, decision: claim.decision };
+      return { status: claim.decision ? "needs_decision" as const : "not_started" as const, reason: claim.reason, decision: claim.decision };
     }
     const candidate = claim.candidate;
 
@@ -50,7 +67,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
 
     if (!integrated.ok) {
       await step.do("abort", async () => stub.abortPublish(candidate.id, undefined, integrated.error, "failed"));
-      return { status: "blocked", error: integrated.error };
+      return { status: "blocked" as const, error: integrated.error };
     }
 
     // Human control over history: the verified candidate waits until a person accepts this exact commit.
@@ -60,23 +77,23 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       review = (await step.waitForEvent<{ approved: boolean; by: string; note?: string }>("human-review", { type: "review", timeout: "7 days" })).payload;
     } catch {
       await step.do("abort-unreviewed", async () => stub.abortPublish(candidate.id, undefined, "Nobody reviewed the candidate within 7 days; run the integration again", "stale"));
-      return { status: "stale", error: "review timed out" };
+      return { status: "stale" as const, error: "review timed out" };
     }
     if (!review.approved) {
       await step.do("abort-rejected", async () => stub.abortPublish(candidate.id, undefined, `Rejected in review by ${review.by}${review.note ? `: ${review.note}` : ""}`, "failed"));
-      return { status: "rejected", by: review.by };
+      return { status: "rejected" as const, by: review.by };
     }
 
     const prepared = (await step.do("prepare-publish", async () => (await stub.preparePublish(candidate.id)) as never)) as PrepareResult;
     if (!prepared.ok || !prepared.journal) {
       await step.do("abort-prepare", async () => stub.abortPublish(candidate.id, undefined, prepared.error ?? "refused", prepared.stale ? "stale" : "failed"));
-      return { status: prepared.stale ? "stale" : "blocked", error: prepared.error };
+      return { status: prepared.stale ? "stale" as const : "blocked" as const, error: prepared.error };
     }
 
     const pushed = await step.do("cas-push-to-artifacts", { retries: { limit: 2, delay: "5 seconds", backoff: "exponential" } }, async () => this.casPush(candidate, integrated.commit, stub, integrated.branch));
     if (!pushed.ok) {
       await step.do("abort-push", async () => stub.abortPublish(candidate.id, prepared.journal!.id, pushed.error, pushed.stale ? "stale" : "failed"));
-      return { status: pushed.stale ? "stale" : "blocked", error: pushed.error };
+      return { status: pushed.stale ? "stale" as const : "blocked" as const, error: pushed.error };
     }
     await step.do("complete-publish", async () => stub.completePublish(prepared.journal!.id));
     // Stacked changes: re-base every dependent change onto what just landed, so the stack keeps tracking upstream.
@@ -105,7 +122,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
         return { status: "error" };
       }
     });
-    return { status: "accepted", commit: integrated.commit, evidenceId: integrated.evidenceId };
+    return { status: "accepted" as const, commit: integrated.commit, evidenceId: integrated.evidenceId };
   }
 
   /**
@@ -209,18 +226,36 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       r = await run(`git -C ${WORK} fetch --quiet ${q(remote)} ${q(`+refs/heads/${t.workspace.branch}:refs/flaregit/tasks/${t.id}`)}`, gitAuthEnv(token));
       const head = (await run(`git -C ${WORK} rev-parse refs/flaregit/tasks/${t.id}`)).stdout.trim();
       if (!r.success || head !== candidate.participatingCommits[t.id]) return { ok: false, error: `Task ${t.id} head does not match the frozen checkpoint` };
-      const touched = (await run(`git -C ${WORK} diff --name-only ${q(candidate.expectedAcceptedBase)} ${head}`)).stdout.split("\n").filter(Boolean);
-      const bad = touched.filter((f) => isProtectedPath(f, settings.protectedPaths) || !inAgentScope({ allowedScope: settings.allowedScope }, f));
+      const changed = await run(`git -C ${WORK} diff --name-only -z ${q(t.baseCommit)} ${q(head)}`);
+      if (!changed.success) return { ok: false, error: `Could not inspect contributor changes for ${t.id}` };
+      const touched = changed.stdout.split("\0").filter(Boolean);
+      const bad = touched.filter((f) => isProtectedPath(f, settings.protectedPaths) || !inAgentScope(t, f) || !inAgentScope({ allowedScope: settings.allowedScope }, f));
       if (bad.length) return { ok: false, error: `Contributor change rejected: ${bad.join(", ")}` };
     }
 
     const ai = new WorkersAIClient({ binding: this.env.AI, gatewayId: this.env.AI_GATEWAY_ID });
     let round = 0;
+    candidate.repairAttempts = [];
+    await stub.recordComposition(candidate.id, []);
     const repair = async (type: "text_conflict" | "behavior_failure", files: string[], evidence?: VerificationEvidence): Promise<boolean> => {
+      const started = Date.now();
       round += 1;
       if (round > MAX_REPAIR_ROUNDS) return false;
       const contents: Record<string, string> = {};
-      for (const f of files) contents[f] = (await sb.readFile(`${WORK}/${f}`)).content;
+      for (const f of files) {
+        const parts = f.split("/");
+        if (f.startsWith("/") || parts.some((part) => !part || part === "." || part === "..")) return false;
+        const ancestors = parts.map((_, i) => `${WORK}/${parts.slice(0, i + 1).join("/")}`);
+        if (!(await run(ancestors.map((ancestor) => `test ! -L ${q(ancestor)}`).join(" && "))).success) return false;
+        contents[f] = (await sb.readFile(`${WORK}/${f}`)).content;
+      }
+      // Whole-file model responses cannot preserve values the model is forbidden to see.
+      // Leave credential-bearing files untouched for an explicit contributor correction.
+      if (Object.values(contents).some((content) => redactSecrets(content) !== content)) {
+        candidate.repairAttempts.push({ round, prompt: `Resolve ${type}`, patch: "", affectedContracts: [], diagnosticError: "Automatic repair refused: an editable file contains credentials; a contributor must resolve it", durationMs: Date.now() - started, timestamp: new Date().toISOString() });
+        await stub.recordComposition(candidate.id, candidate.repairAttempts);
+        return false;
+      }
       const prompt = buildRepairPrompt({
         repoDir: WORK, candidate, tasks, round, conflictType: type,
         editableFiles: files, fileContents: contents, failureEvidence: evidence, protectedPaths: settings.protectedPaths, model: ai.asModel(),
@@ -231,7 +266,11 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
         if (!files.includes(file) || /^(<<<<<<<|=======|>>>>>>>)/m.test(content)) return false;
         await sb.writeFile(`${WORK}/${file}`, content.endsWith("\n") ? content : `${content}\n`);
       }
-      return (await run(`git -C ${WORK} add -A && git -C ${WORK} commit --quiet --allow-empty -m ${q(`FlareGit repair round ${round}`)}`)).success;
+      const committed = await run(`git -C ${WORK} add -A && git -C ${WORK} commit --quiet --allow-empty -m ${q(`FlareGit repair round ${round}`)}`);
+      const patch = committed.success ? (await run(`git -C ${WORK} diff HEAD^ HEAD -- ${files.map(q).join(" ")}`)).stdout : "";
+      candidate.repairAttempts.push({ round, prompt: redactSecrets(`Resolve ${type} in ${files.join(", ")}`), patch: redactSecrets(patch), affectedContracts: [], diagnosticError: committed.success ? "" : "Repair commit failed", durationMs: Date.now() - started, timestamp: new Date().toISOString() });
+      await stub.recordComposition(candidate.id, candidate.repairAttempts);
+      return committed.success;
     };
 
     for (const t of tasks) {

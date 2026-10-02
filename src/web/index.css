@@ -67,3 +67,32 @@
 .hljs-string, .hljs-attr, .hljs-regexp { color: #a5d6ff; }
 .hljs-number, .hljs-title, .hljs-name, .hljs-type { color: #d2a8ff; }
 .hljs-variable, .hljs-property, .hljs-symbol { color: #ffa657; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+.entry-shell {
+  background: radial-gradient(ellipse at 12% 12%, hsl(28 95% 54% / 0.075), transparent 48%), hsl(var(--background));
+}
+.entry-serif {
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 400;
+  font-style: italic;
+  letter-spacing: -0.065em;
+}
+.entry-workflow li:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 18px;
+  left: 36px;
+  right: -8px;
+  height: 1px;
+  background: linear-gradient(to right, hsl(var(--primary) / 0.55), hsl(var(--border)));
+}
+.entry-auth .cl-rootBox, .entry-auth .cl-cardBox { max-width: 100%; }

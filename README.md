@@ -11,7 +11,7 @@ A Git collaboration platform on Cloudflare Workers and Artifacts for humans and 
 5. **Durable landing.** On accept, the Durable Object validates the candidate (evidence, commit, tree, base, policy) and journals PREPARED; a fresh workspace fetches the stored candidate ref and pushes it with `--force-with-lease` against the expected base; the ledger is completed.
 6. **Webhooks.** Events are emitted only after the ref update commits.
 
-**Conflicts.** Text conflicts are found by `git merge-tree` and repaired. Clean merges that break behavior are caught by verification and repaired or blocked; nothing failing is published. Requirements that contradict each other pause integration with one product question; the accepted head does not move until it is answered.
+**Conflicts.** Native Git detects text conflicts; model repair attempts and resulting changes are included in candidate review. Clean merges that break behavior are caught by verification and repaired or blocked; nothing failing is published. Requirements that contradict each other pause integration with one product question; the accepted head does not move until it is answered.
 
 **Stale bases.** If the branch moved since the candidate was frozen, the CAS push is refused; the candidate is marked stale and the integration must be re-run.
 
@@ -29,6 +29,7 @@ A Git collaboration platform on Cloudflare Workers and Artifacts for humans and 
 - Signed private previews: builds of accepted commits in R2, opened through HMAC-signed, expiring links on a separate origin.
 - Webhooks: Standard Webhooks signature, ordered per project, retried with backoff, manual replay, `webhook-sequence` and a stable `webhook-id` for de-duplication.
 - Status page: `/status` and `/status.json`, probed by a 5-minute cron.
+- Workflow outcomes are counted by unique agent and integration instance, with terminal results and unresolved starts separated. Availability checks state their scope; a repository-list probe is not evidence of a successful clone, merge or agent run.
 - Custom domain verification through a DNS TXT record at `_flaregit.<domain>`; a verified claim displaces unverified ones.
 - Diff viewer (virtualized, keyboard driven) and a terminal reviewer (`flaregit review`).
 - CLI (`bun run build:cli` produces `dist-cli/flaregit`; JSON output, token auth). `bun cli/flaregit.ts --help` lists every command.
@@ -86,6 +87,10 @@ bun run typecheck && bun run lint && bun test
 UI: `bun run dev` starts Vite on :5173 and proxies `/api`, `/auth-config`, `/status.json` and `/webhooks` to a real Worker at `FLAREGIT_API` (default `http://127.0.0.1:8787`, i.e. `bunx wrangler dev`; see `vite.config.ts`).
 
 Core engine without the cloud: `bun test` runs the integration engine with real Git, verification and CAS, with a scripted stand-in for the model only. `bun run demo` runs the three ticket-booking scenarios (text conflict, clean-but-broken merge, contradiction) against a local runtime with Workers AI as the model; it requires `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (optional `CLOUDFLARE_AI_GATEWAY`, `FLAREGIT_AI_MODEL`) and refuses to run without them.
+
+`bun run demo:proof` runs a standalone real-Git protocol illustration with deterministic scripted contributors, no model or cloud credentials, and retained commit/journal receipts. It demonstrates parallel isolated clones, conflict, stale push refusal, and reconstruction after workspace deletion; it does not exercise the hosted product or represent real AI agents.
+
+The local demo is a scenario harness, not the hosted multi-repository product. Its agents make real concurrent model calls and Git commits, but it does not demonstrate the hosted human approval flow or competition interruption-recovery requirement. See [docs/DEMO.md](docs/DEMO.md) for the recording plan and outstanding evidence gates.
 
 `bun run server` (`src/server/local.ts`) is a separate single-project scenario server on port 3000; it does not serve the multi-repository API the UI uses.
 

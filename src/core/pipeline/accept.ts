@@ -150,7 +150,7 @@ export function publishAcceptedCandidate(opts: PublishOptions): PublishResult {
 /**
  * Crash recovery: a journal entry stuck in PREPARED/REF_UPDATED is settled against the real ref.
  */
-export function reconcileJournalEntry(head: string, stuck: PublicationJournalEntry): PublicationJournalEntry {
-  if (head === stuck.newHead) return { ...stuck, state: "ACCEPTED", timestamp: new Date().toISOString() };
+export function reconcileJournalEntry(head: string, stuck: PublicationJournalEntry, landedInHistory = false): PublicationJournalEntry {
+  if (head === stuck.newHead || landedInHistory) return { ...stuck, state: "ACCEPTED", timestamp: new Date().toISOString() };
   return { ...stuck, state: "ABORTED", error: "Recovered: ref was never updated.", timestamp: new Date().toISOString() };
 }
