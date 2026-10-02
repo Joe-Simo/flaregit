@@ -3,6 +3,8 @@ import { projectOf } from "./projects.js";
 
 const MAX_ATTEMPTS = 6;
 const TIMEOUT_MS = 10_000;
+/** Seconds to wait before re-checking when an earlier event for the same webhook has not been delivered yet. */
+export const BLOCKED = 5;
 
 /** Webhook targets must be public https hostnames: no IP literals, no localhost, no internal suffixes. */
 export function validateWebhookUrl(raw: string): URL {
@@ -40,6 +42,9 @@ export async function deliverWebhook(env: Env, projectId: string, deliveryId: st
     return null;
   }
 
+  // Deliver in order: wait while an earlier event for this webhook is still being retried (no attempt is consumed).
+  if (await ledger.isBlocked(deliveryId)) return BLOCKED;
+
   const timestamp = Math.floor(Date.now() / 1000);
   const started = Date.now();
   try {
@@ -51,6 +56,7 @@ export async function deliverWebhook(env: Env, projectId: string, deliveryId: st
       headers: {
         "Content-Type": "application/json",
         "User-Agent": "FlareGit-Webhooks/1",
+        "webhook-sequence": String(delivery.seq),
         "webhook-id": deliveryId, // stable across retries: receivers de-duplicate on it
         "webhook-timestamp": String(timestamp),
         "webhook-signature": `v1,${await sign(webhook.secret, deliveryId, timestamp, delivery.payload)}`,

@@ -10,6 +10,7 @@ import { billingFromEvent, createCheckout, planLimits, reportUsage, verifyPolarW
 import { TICKET_BOOKING_POLICY } from "../fixtures/ticket-booking/policy.js";
 import { DEFAULT_PROTECTED_PATHS, isCommandPolicy, settingsFor, type CommandPolicy } from "../core/command-policy.js";
 import { currentStatus, runProbes, statusPage } from "./status.js";
+import { isSafeRef } from "../core/sanitize.js";
 import { diffTrees, listCommits, listDirectory, readBlobByHash, readFileText, resolveCommit } from "./browse.js";
 import { validateWebhookUrl } from "./webhooks.js";
 import { PROJECT_ID, accountKeyFor, accountOf, admitRun, canonicalNameFor, newProjectId, projectOf, taskRepoName } from "./projects.js";
@@ -166,7 +167,7 @@ export default {
         if (!/^[A-Za-z0-9._ -]{1,60}$/.test(name)) return text("Use letters, numbers, spaces, '.', '_' and '-' in the name.", 400);
         const projectId = newProjectId();
         if (b.kind === "import") {
-          const created = await importRepository(env, { projectId, name, userId, url: clean(b.url, 300), branch: clean(b.branch, 80), install: clean(b.install, 300), build: clean(b.build, 300), test: clean(b.test, 300) });
+          const created = await importRepository(env, { projectId, name, userId, url: clean(b.url, 300), branch: isSafeRef(clean(b.branch, 80)) ? clean(b.branch, 80) : "", install: clean(b.install, 300), build: clean(b.build, 300), test: clean(b.test, 300) });
           await account.addProject({ id: projectId, name, role: "owner", kind: "import" });
           return json({ id: projectId, ...created }, 201);
         }
@@ -213,11 +214,15 @@ export default {
         // ----- code browser -----
         if (sub === "/commits" && method === "GET") {
           const repo = await env.ARTIFACTS.get(state.canonicalRepoName);
-          return json(await listCommits(repo, url.searchParams.get("ref") ?? undefined, Number(url.searchParams.get("limit") ?? 30), Number(url.searchParams.get("offset") ?? 0)));
+          const ref = url.searchParams.get("ref") ?? undefined;
+          if (ref !== undefined && !isSafeRef(ref)) return text("Invalid ref", 400);
+          return json(await listCommits(repo, ref, Number(url.searchParams.get("limit") ?? 30), Number(url.searchParams.get("offset") ?? 0)));
         }
         if ((sub === "/tree" || sub === "/blob") && method === "GET") {
           const repo = await env.ARTIFACTS.get(state.canonicalRepoName);
-          const commit = await resolveCommit(repo, url.searchParams.get("ref") ?? undefined);
+          const refParam = url.searchParams.get("ref") ?? undefined;
+          if (refParam !== undefined && !isSafeRef(refParam)) return text("Invalid ref", 400);
+          const commit = await resolveCommit(repo, refParam);
           if (!commit) return text("Nothing here yet", 404);
           const p = url.searchParams.get("path") ?? "";
           try {

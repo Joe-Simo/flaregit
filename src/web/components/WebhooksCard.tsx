@@ -7,7 +7,7 @@ import { apiJson } from "../api";
 import { timeAgo } from "../router";
 
 interface Hook { id: string; url: string; events: string; active: number }
-interface Delivery { id: string; webhook_id: string; event: string; status: "pending" | "success" | "failed"; attempts: number; last_status: number | null; last_error: string | null; latency_ms: number | null; updated_at: string }
+interface Delivery { id: string; seq: number; queue_ms: number | null; webhook_id: string; event: string; status: "pending" | "success" | "failed"; attempts: number; last_status: number | null; last_error: string | null; latency_ms: number | null; updated_at: string }
 
 const EVENTS: Array<[string, string]> = [
   ["change.ready", "A change is ready"],
@@ -105,7 +105,7 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
                 <div key={d.id} className="px-3 py-2 flex items-center justify-between gap-3">
                   <div className="min-w-0">
                     <span className="font-medium">{d.event}</span>
-                    <span className="text-muted-foreground"> · {timeAgo(d.updated_at)} · {d.attempts} attempt{d.attempts === 1 ? "" : "s"}{d.latency_ms !== null ? ` · ${d.latency_ms} ms` : ""}{d.last_status ? ` · HTTP ${d.last_status}` : ""}</span>
+                    <span className="text-muted-foreground"> · #{d.seq} · {timeAgo(d.updated_at)} · {d.attempts} attempt{d.attempts === 1 ? "" : "s"}{d.queue_ms !== null ? ` · queued ${d.queue_ms} ms` : ""}{d.latency_ms !== null ? ` · ${d.latency_ms} ms` : ""}{d.last_status ? ` · HTTP ${d.last_status}` : ""}</span>
                     {d.last_error && d.status !== "success" && <div className="text-destructive truncate">{d.last_error}</div>}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">

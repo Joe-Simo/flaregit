@@ -16,8 +16,8 @@ export async function handleQueueBatch(batch: MessageBatch<QueueMessage>, env: E
       } else if (body.type === "webhook.deliver") {
         const retryAfter = await deliverWebhook(env, body.projectId, body.deliveryId);
         if (retryAfter !== null) {
-          msg.retry({ delaySeconds: retryAfter });
-          continue;
+          // Re-enqueue rather than msg.retry(): waiting for an earlier event must not consume the queue's retry budget.
+          await env.INTEGRATION_QUEUE.send(body, { delaySeconds: retryAfter });
         }
       } else {
         const params: IntegrationParams = { projectId: body.projectId, taskIds: body.taskIds };

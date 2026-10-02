@@ -3,6 +3,7 @@
  * flaregit — scriptable CLI. Output is JSON by default (add --pretty for humans); errors go to stderr as
  * JSON with a non-zero exit code. No interactive prompts anywhere.
  */
+import { isSafePushOption } from "../src/core/sanitize.js";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -183,7 +184,8 @@ async function main() {
     const id = git(["config", "flaregit.repo"]) || fail("Not inside a flaregit change checkout");
     const change = git(["config", "flaregit.change"]);
     const t = await api<{ remote: string; branch: string; token: string }>("POST", `/p/${id}/tasks/${change}/token`);
-    git(["push", "--quiet", t.remote, `HEAD:refs/heads/${t.branch}`], t.token);
+    const opts = (flags.get("option") === undefined ? [] : [String(flags.get("option"))]).map((o) => (isSafePushOption(o) ? o : fail(`Rejected push option "${o}": only letters, digits and . _ = : / - are allowed`)));
+    git(["push", "--quiet", ...opts.flatMap((o) => ["-o", o]), t.remote, `HEAD:refs/heads/${t.branch}`], t.token);
     return out({ pushed: t.branch, change, next: `flaregit ready ${id} ${change}` });
   }
   if (cmd === "ready" || cmd === "cancel") return out(await api("POST", `/p/${await repo(sub)}/tasks/${rest[0] ?? fail("Specify a change id")}/${cmd}`));

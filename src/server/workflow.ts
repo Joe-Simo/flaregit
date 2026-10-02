@@ -1,3 +1,4 @@
+import { isSafeRef } from "../core/sanitize.js";
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { WorkersAIClient } from "../ai/workers-ai.js";
 import { buildRepairPrompt, parseRepairResponse, MAX_REPAIR_ROUNDS } from "../core/pipeline/repair.js";
@@ -50,6 +51,8 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       return { status: pushed.stale ? "stale" : "blocked", error: pushed.error };
     }
     await step.do("complete-publish", async () => stub.completePublish(prepared.journal!.id));
+    // Stacked changes: re-base every dependent change onto what just landed, so the stack keeps tracking upstream.
+    await step.do("rebase-dependents", { retries: { limit: 1, delay: "5 seconds" } }, async () => this.rebaseDependents(candidate, integrated.commit, integrated.branch, stub));
     // The accepted commits now live in the canonical repository; the task forks are no longer needed.
     await step.do("cleanup-forks", async () => {
       const st = await stub.getState();
@@ -60,6 +63,62 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       return { cleaned: true };
     });
     return { status: "accepted", commit: integrated.commit, evidenceId: integrated.evidenceId };
+  }
+
+  /**
+   * After a landing, replay each dependent change on top of its parent's new tip (`git rebase --onto new old`),
+   * walking the stack downwards. A conflict stops that branch of the stack and flags the change for its author.
+   */
+  private async rebaseDependents(candidate: CandidateGeneration, landed: string, branch: string, stub: Stub): Promise<{ rebased: string[]; blocked: string[] }> {
+    const state = await stub.getState();
+    const accepted = new Set(candidate.participatingTaskIds);
+    const tasks = Object.values(state.tasks);
+    if (!tasks.some((t) => t.dependsOn && accepted.has(t.dependsOn))) return { rebased: [], blocked: [] };
+    const sb = this.sandbox(`rebase-${candidate.id}`);
+    const canonical = await this.canonicalRemote(stub);
+    const cloned = await sb.exec(`rm -rf ${WORK} && git clone --quiet ${q(canonical.remote)} ${WORK} && git -C ${WORK} config user.name FlareGit && git -C ${WORK} config user.email integrator@flaregit.com`, gitAuthEnv(canonical.token));
+    if (!cloned.success) throw new Error("Could not clone canonical repository for stack rebase");
+
+    const tip = new Map<string, string>(); // task id -> new tip (accepted tasks resolve to the landed commit)
+    const oldTip = new Map<string, string>(); // task id -> tip before the rebase
+    for (const id of accepted) { tip.set(id, landed); oldTip.set(id, state.tasks[id]!.currentCommit); }
+    const rebased: string[] = [];
+    const blocked: string[] = [];
+    const queue = tasks.filter((t) => t.dependsOn && accepted.has(t.dependsOn));
+    while (queue.length > 0) {
+      const child = queue.shift()!;
+      if (child.status === "cancelled" || child.status === "accepted") continue;
+      const parentId = child.dependsOn!;
+      const newParent = tip.get(parentId);
+      const oldParent = oldTip.get(parentId);
+      if (!newParent || !oldParent) continue; // parent was itself blocked: leave this subtree alone
+      const repo = await this.env.ARTIFACTS.get(child.workspace.repoName);
+      const remote = String((await repo.info()).remote);
+      const token = (await repo.createToken("write", 1800)).plaintext;
+      const ref = `refs/flaregit/rb/${child.id}`;
+      const fetch = await sb.exec(`git -C ${WORK} fetch --quiet ${q(remote)} ${q(`+refs/heads/${child.workspace.branch}:${ref}`)}`, gitAuthEnv(token));
+      const before = (await sb.exec(`git -C ${WORK} rev-parse ${q(ref)}`)).stdout.trim();
+      const reb = fetch.success ? await sb.exec(`git -C ${WORK} checkout --quiet -B rb-work ${q(ref)} && git -C ${WORK} rebase --onto ${q(newParent)} ${q(oldParent)} rb-work`) : fetch;
+      if (!reb.success) {
+        await sb.exec(`git -C ${WORK} rebase --abort`);
+        blocked.push(child.id);
+        await stub.applyRebase(child.id, { failed: `Could not rebase onto ${parentId}: resolve the conflict locally and push again` });
+        continue;
+      }
+      const head = (await sb.exec(`git -C ${WORK} rev-parse HEAD`)).stdout.trim();
+      const push = await sb.exec(`git -C ${WORK} push --quiet --force-with-lease=${q(`refs/heads/${child.workspace.branch}:${before}`)} ${q(remote)} ${q(`HEAD:refs/heads/${child.workspace.branch}`)}`, gitAuthEnv(token));
+      if (!push.success) {
+        blocked.push(child.id);
+        await stub.applyRebase(child.id, { failed: "Rebased locally but the push was refused (the branch moved); push again to retry" });
+        continue;
+      }
+      oldTip.set(child.id, child.currentCommit);
+      tip.set(child.id, head);
+      rebased.push(child.id);
+      await stub.applyRebase(child.id, { commit: head, base: newParent, parentAccepted: accepted.has(parentId) });
+      queue.push(...tasks.filter((t) => t.dependsOn === child.id));
+    }
+    return { rebased, blocked };
   }
 
   private sandbox(id: string) {
@@ -93,6 +152,8 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     if (!r.success) return { ok: false, error: "Could not clone canonical repository" };
     // The clone's HEAD names the remote's real default branch (Artifacts metadata can differ for imported repos).
     const branch = (await run(`git -C ${WORK} symbolic-ref --short HEAD`)).stdout.trim() || state.defaultBranch || "main";
+    // The default branch name comes from the (possibly imported) repository: whitelist it before it reaches any command.
+    if (!isSafeRef(branch)) throw new Error("Default branch name contains characters FlareGit does not accept");
     await run(`git -C ${WORK} config user.name FlareGit && git -C ${WORK} config user.email integrator@flaregit.com && git -C ${WORK} checkout --quiet --detach ${q(candidate.expectedAcceptedBase)}`);
 
     for (const t of tasks) {
@@ -174,7 +235,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     const head = (await sb.exec(`git -C ${WORK} rev-parse HEAD`)).stdout.trim();
     if (head !== commit) return { ok: false, error: "Workspace head differs from the verified commit" };
     const res = await sb.exec(
-      `git -C ${WORK} push --quiet --force-with-lease=refs/heads/${branch}:${q(candidate.expectedAcceptedBase)} ${q(canonical.remote)} ${commit}:refs/heads/${branch}`,
+      `git -C ${WORK} push --quiet --force-with-lease=${q(`refs/heads/${branch}:${candidate.expectedAcceptedBase}`)} ${q(canonical.remote)} ${q(`${commit}:refs/heads/${branch}`)}`,
       gitAuthEnv(canonical.token)
     );
     if (res.success) return { ok: true };

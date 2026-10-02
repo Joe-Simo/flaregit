@@ -32,6 +32,10 @@ export interface WebhookRow {
 }
 export interface DeliveryRow {
   id: string;
+  /** Per-webhook sequence number; deliveries are sent strictly in this order. */
+  seq: number;
+  /** Milliseconds from enqueue to the first attempt. */
+  queue_ms: number | null;
   webhook_id: string;
   event: string;
   status: "pending" | "success" | "failed";
@@ -95,6 +99,8 @@ export interface Ledger {
   getDelivery(id: string): Promise<{ delivery: DeliveryRow & { payload: string }; webhook: { url: string; secret: string; active: number } } | null>;
   markDelivery(id: string, result: { ok: boolean; status?: number; error?: string; latencyMs?: number; final?: boolean }): Promise<number>;
   redeliver(id: string): Promise<boolean>;
+  isBlocked(id: string): Promise<boolean>;
+  applyRebase(taskId: string, r: { commit?: string; base?: string; parentAccepted?: boolean; failed?: string }): Promise<void>;
   listActivity(limit: number): Promise<ActivityRow[]>;
   setVerificationPolicy(policy: Record<string, unknown>): Promise<void>;
   destroy(): Promise<void>;
@@ -136,13 +142,17 @@ export class RepositoryController extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS invites (token TEXT PRIMARY KEY, created_by TEXT NOT NULL, expires_at INTEGER NOT NULL, used_by TEXT);
       CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, type TEXT NOT NULL, summary TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS webhooks (id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL, events TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS deliveries (id TEXT PRIMARY KEY, webhook_id TEXT NOT NULL, event TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_status INTEGER, last_error TEXT, latency_ms INTEGER, payload TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS deliveries (id TEXT PRIMARY KEY, seq INTEGER NOT NULL DEFAULT 0, queue_ms INTEGER, webhook_id TEXT NOT NULL, event TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_status INTEGER, last_error TEXT, latency_ms INTEGER, payload TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS probes (id INTEGER PRIMARY KEY AUTOINCREMENT, component TEXT NOT NULL, at INTEGER NOT NULL, ok INTEGER NOT NULL, latency_ms INTEGER, detail TEXT);
       CREATE INDEX IF NOT EXISTS probes_component_at ON probes (component, at);
       CREATE TABLE IF NOT EXISTS api_tokens (id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, label TEXT NOT NULL, created_at TEXT NOT NULL, last_used TEXT);
       CREATE TABLE IF NOT EXISTS runs (day TEXT PRIMARY KEY, n INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS lease (id INTEGER PRIMARY KEY CHECK (id = 1), holder TEXT NOT NULL, expires_at INTEGER NOT NULL);
     `);
+    // Databases created before ordered delivery lack these columns.
+    for (const col of ["seq INTEGER NOT NULL DEFAULT 0", "queue_ms INTEGER"]) {
+      try { this.ctx.storage.sql.exec(`ALTER TABLE deliveries ADD COLUMN ${col}`); } catch { /* already present */ }
+    }
   }
 
   private load(): FlareGitProjectState {
@@ -286,7 +296,7 @@ export class RepositoryController extends DurableObject<Env> {
   }
   async listDeliveries(limit: number): Promise<DeliveryRow[]> {
     return this.ctx.storage.sql
-      .exec("SELECT id, webhook_id, event, status, attempts, last_status, last_error, latency_ms, created_at, updated_at FROM deliveries ORDER BY created_at DESC LIMIT ?", Math.min(limit, 100))
+      .exec("SELECT id, seq, queue_ms, webhook_id, event, status, attempts, last_status, last_error, latency_ms, created_at, updated_at FROM deliveries ORDER BY created_at DESC LIMIT ?", Math.min(limit, 100))
       .toArray() as unknown as DeliveryRow[];
   }
   async getDelivery(id: string) {
@@ -299,12 +309,39 @@ export class RepositoryController extends DurableObject<Env> {
   async markDelivery(id: string, r: { ok: boolean; status?: number; error?: string; latencyMs?: number; final?: boolean }): Promise<number> {
     const row = this.ctx.storage.sql.exec<{ attempts: number }>("SELECT attempts FROM deliveries WHERE id = ?", id).toArray()[0];
     const attempts = (row?.attempts ?? 0) + 1;
+    if (attempts === 1) {
+      this.ctx.storage.sql.exec("UPDATE deliveries SET queue_ms = MAX(0, CAST((julianday(?) - julianday(created_at)) * 86400000 AS INTEGER)) WHERE id = ?", new Date().toISOString(), id);
+    }
     const status = r.ok ? "success" : r.final ? "failed" : "pending";
     this.ctx.storage.sql.exec(
       "UPDATE deliveries SET status = ?, attempts = ?, last_status = ?, last_error = ?, latency_ms = ?, updated_at = ? WHERE id = ?",
       status, attempts, r.status ?? null, r.error ? r.error.slice(0, 300) : null, r.latencyMs ?? null, new Date().toISOString(), id
     );
     return attempts;
+  }
+  /** Records the result of re-basing a stacked change onto its parent's new tip. */
+  async applyRebase(taskId: string, r: { commit?: string; base?: string; parentAccepted?: boolean; failed?: string }): Promise<void> {
+    const s = this.load();
+    const task = s.tasks[taskId];
+    if (!task) return;
+    if (r.failed) {
+      task.status = "blocked";
+      task.blockedReason = r.failed;
+    } else if (r.commit && r.base) {
+      task.currentCommit = r.commit;
+      task.baseCommit = r.base;
+      if (r.parentAccepted) delete task.dependsOn;
+      if (task.status === "blocked") { task.status = "working"; delete task.blockedReason; }
+    }
+    task.updatedAt = new Date().toISOString();
+    this.save();
+    await this.logActivity("FlareGit", r.failed ? "stack.rebase_blocked" : "stack.rebased", r.failed ? `${taskId}: ${r.failed}` : `${taskId} was rebased onto its updated parent (${r.commit?.slice(0, 7)})`);
+  }
+  /** True while an earlier event for the same webhook is still pending, so receivers see events in order. */
+  async isBlocked(id: string): Promise<boolean> {
+    const d = this.ctx.storage.sql.exec<{ webhook_id: string; seq: number }>("SELECT webhook_id, seq FROM deliveries WHERE id = ?", id).toArray()[0];
+    if (!d || d.seq === 0) return false;
+    return this.ctx.storage.sql.exec("SELECT 1 FROM deliveries WHERE webhook_id = ? AND seq < ? AND status = 'pending' LIMIT 1", d.webhook_id, d.seq).toArray().length > 0;
   }
   async redeliver(id: string): Promise<boolean> {
     const d = this.ctx.storage.sql.exec<{ id: string }>("SELECT id FROM deliveries WHERE id = ?", id).toArray()[0];
@@ -324,7 +361,8 @@ export class RepositoryController extends DurableObject<Env> {
       if (!h.events.split(",").includes(type)) continue;
       const deliveryId = `dlv_${crypto.randomUUID().slice(0, 10)}`;
       const now = new Date().toISOString();
-      this.ctx.storage.sql.exec("INSERT INTO deliveries (id, webhook_id, event, status, attempts, payload, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)", deliveryId, h.id, type, payload, now, now);
+      const seq = (this.ctx.storage.sql.exec<{ n: number }>("SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM deliveries WHERE webhook_id = ?", h.id).toArray()[0]?.n ?? 1);
+      this.ctx.storage.sql.exec("INSERT INTO deliveries (id, seq, webhook_id, event, status, attempts, payload, created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?)", deliveryId, seq, h.id, type, payload, now, now);
       await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: s.projectId, deliveryId }).catch(() => undefined); // row stays 'pending' and is visible/redeliverable
     }
     this.ctx.storage.sql.exec("DELETE FROM deliveries WHERE id IN (SELECT id FROM deliveries ORDER BY created_at DESC LIMIT -1 OFFSET 500)");
