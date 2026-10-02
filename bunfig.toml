@@ -1,0 +1,3 @@
+[serve.static]
+plugins = ["./src/tooling/tailwind.ts"]
+env = "disable"

@@ -16,9 +16,32 @@ export const newProjectId = () => `p${[...crypto.getRandomValues(new Uint8Array(
 export const canonicalNameFor = (projectId: string) => `flaregit-${projectId}`;
 export const taskRepoName = (projectId: string, taskId: string) => `t-${projectId}-${taskId}`;
 
+/** Recover only repository references from the former normalized identity key.
+ * Membership is checked against the original, case-sensitive subject before any
+ * metadata is copied. Billing, credentials and personal profile data never migrate.
+ */
+export async function adoptLegacyProject(env: Env, account: Ledger, accountKey: string, userId: string) {
+  const formerKey = await projectIdFor(userId.trim().toLowerCase());
+  const references = formerKey !== accountKey ? await accountOf(env, formerKey).listProjects().catch(() => []) : [];
+  const candidates = new Set([accountKey, formerKey, ...references.map((row) => row.id)]);
+  for (const id of candidates) {
+    if (!PROJECT_ID.test(id)) continue;
+    try {
+      const repository = projectOf(env, id);
+      const role = await repository.roleOf(userId);
+      if (!role) continue;
+      const state = await repository.getState();
+      await account.addProject({ id, name: state.projectName || "demo", role, kind: state.kind ?? "demo" });
+    } catch {
+      // Unavailable repositories remain recoverable on the next account read.
+    }
+  }
+  return account.listProjects();
+}
+
 /** Spend control shared by every model-backed action: kill switch, per-account plan quota, platform-wide ceiling. */
 export async function admitRun(env: Env, account: Ledger, planLimit: number): Promise<Response | null> {
-  if (env.RUNS_ENABLED === "false") return new Response("AI runs are temporarily paused. Please try again later.", { status: 503 });
+  if (env.RUNS_ENABLED === "false") return new Response("Managed runs are temporarily paused. Please try again later.", { status: 503 });
   const mine = await account.consumeRun(planLimit);
   if (!mine.allowed) return new Response(`Daily run limit reached (${mine.used}/${planLimit}). Upgrade for more.`, { status: 429 });
   const global = await globalOf(env).consumeRun(Number(env.GLOBAL_RUNS_PER_DAY ?? "300"));

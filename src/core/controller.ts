@@ -123,12 +123,27 @@ export class FlareGitRepositoryController {
   async recoverInterruptedWork(): Promise<void> {
     const canonical = await this.canonicalDir();
     const ref = `refs/heads/${this.defaultBranch}`;
-    const head = /^https:\/\//.test(canonical)
-      ? git(this.deps.storageDir, [...authArgs(canonical, await this.canonicalToken(canonical)), "ls-remote", canonical, ref]).stdout.split("\t")[0]?.trim() ?? ""
-      : git(canonical, ["rev-parse", "--verify", ref], { gitDir: true }).stdout.trim();
-    this.state.journal = this.state.journal.map((e): PublicationJournalEntry =>
-      e.state === "PREPARED" || e.state === "REF_UPDATED" ? reconcileJournalEntry(head, e) : e
-    );
+    const remote = /^https:\/\//.test(canonical);
+    const token = remote ? await this.canonicalToken(canonical) : undefined;
+    const head = remote
+      ? gitOrThrow(this.deps.storageDir, [...authArgs(canonical, token), "ls-remote", canonical, ref]).split("\t")[0]?.trim() ?? ""
+      : gitOrThrow(canonical, ["rev-parse", "--verify", ref], { gitDir: true });
+    if (!head) throw new Error("Could not read canonical head; interrupted publication remains pending.");
+    const unfinished = this.state.journal.some((e) => e.state === "PREPARED" || e.state === "REF_UPDATED");
+    const recoveryRepo = remote && unfinished ? fs.mkdtempSync(path.join(this.deps.storageDir, "recovery-")) : canonical;
+    try {
+      if (remote && unfinished) {
+        gitOrThrow(recoveryRepo, ["init", "--bare", "--quiet"]);
+        gitOrThrow(recoveryRepo, [...authArgs(canonical, token), "fetch", "--quiet", canonical, ref], { gitDir: true });
+      }
+      this.state.journal = this.state.journal.map((e): PublicationJournalEntry =>
+        e.state === "PREPARED" || e.state === "REF_UPDATED"
+          ? reconcileJournalEntry(head, e, git(recoveryRepo, ["merge-base", "--is-ancestor", e.newHead, head], { gitDir: true }).ok)
+          : e
+      );
+    } finally {
+      if (remote && unfinished) fs.rmSync(recoveryRepo, { recursive: true, force: true });
+    }
     const settled = this.state.journal.find((e) => e.state === "ACCEPTED" && e.newHead === head);
     if (head && head !== this.state.acceptedState.currentCommit && settled) {
       const candidate = this.state.candidates[settled.candidateId];

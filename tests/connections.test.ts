@@ -1,0 +1,55 @@
+import { workerdChild } from "./support/workerd-child";
+import { expect, test } from "bun:test";
+import { Miniflare, convertV4MiniflareOptions } from "miniflare";
+
+test("actual workerd SQL connection ledger masks credentials and atomically deduplicates bound reports and bot comments", async () => {
+  if (await workerdChild("tests/connections.test.ts")) return;
+  const built = await Bun.build({ entrypoints: ["tests/support/connections-worker.ts"], target: "browser", external: ["cloudflare:workers"] });
+  if (!built.success) throw new Error(built.logs.join("\n"));
+  const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ name: "connections-test", modules: true, script: await built.outputs[0]!.text(), compatibilityDate: "2026-10-02", durableObjects: { TEST: { className: "ConnectionFixture", useSQLite: true } } }] }));
+  const request = async (route: string, body?: unknown) => (await mf.getWorker("connections-test")).fetch(`http://test${route}`, body ? { method: "POST", body: JSON.stringify(body) } : undefined);
+  try {
+    const created = await (await request("/create")).json() as { metadata: { id: string }; secret: string };
+    const listing = await (await request("/list")).text();
+    expect(listing).not.toContain(created.secret);
+    const policy = { version: 2, mode: "augment", checks: [{ id: "check-one", providerId: created.metadata.id, required: true }] };
+    expect((await request("/policy", policy)).status).toBe(200);
+    const frozen = { repositoryId: "repo-one", candidateId: "candidate-one", commit: "a".repeat(40), tree: "b".repeat(40), policy };
+    expect((await request("/freeze", frozen)).status).toBe(200);
+    expect((await request("/freeze", { ...frozen, tree: "c".repeat(40) })).status).toBe(409);
+    const report = { type: "check", candidateId: frozen.candidateId, commit: frozen.commit, tree: frozen.tree, checkId: "check-one", runId: "run-one", policyVersion: 2, sequence: 0, status: "passed", summary: "Actual unit check reason", detailsUrl: "https://checks.example.com/run-one" };
+    const callback = { serviceId: created.metadata.id, repositoryId: "repo-one", eventId: "stable-event", timestamp: 1, report };
+    expect((await (await request("/callback", callback)).json() as { kind: string }).kind).toBe("rejected");
+    await request("/run", { candidate: "candidate-one", check: "check-one", run: "run-one" });
+    expect((await (await request("/callback", callback)).json() as { kind: string }).kind).toBe("applied");
+    expect((await (await request("/callback", { ...callback, timestamp: 2 })).json() as { kind: string }).kind).toBe("duplicate");
+    expect((await (await request("/callback", { ...callback, report: { ...report, summary: "changed contents" } })).json() as { kind: string }).kind).toBe("rejected");
+    expect(await (await request("/reports")).text()).toContain("Actual unit check reason");
+    const comment = { ...callback, eventId: "comment-event", report: { type: "comment", candidateId: frozen.candidateId, commit: frozen.commit, body: "Automated review", path: "src/file.ts", line: 2 } };
+    await request("/callback", comment); await request("/callback", comment);
+    expect((await (await request("/comments")).json() as unknown[]).length).toBe(1);
+    expect((await (await request("/callback", { ...comment, repositoryId: "other-repository", eventId: "cross-repository" })).json() as { kind: string }).kind).toBe("rejected");
+    expect((await (await request("/callback", { ...comment, eventId: "wrong-commit", report: { ...comment.report, commit: "c".repeat(40) } })).json() as { kind: string }).kind).toBe("rejected");
+    await request("/run", { candidate: "candidate-one", check: "check-one", run: "replacement-run" });
+    expect((await (await request("/callback", { ...callback, eventId: "late-old-run", report: { ...report, sequence: 1 } })).json() as { kind: string }).kind).toBe("rejected");
+    const otherService = await (await request("/create")).json() as { metadata: { id: string } };
+    const sameEventOtherService = { ...comment, serviceId: otherService.metadata.id };
+    expect((await (await request("/callback", sameEventOtherService)).json() as { kind: string }).kind).toBe("applied");
+    const read = { service: created.metadata.id, candidate: frozen.candidateId, commit: frozen.commit, nonce: "unique_read_nonce_12345" };
+    const snapshot = await (await request("/read", read)).json() as { checks: unknown[] };
+    expect(snapshot.checks.length).toBe(1);
+    expect(JSON.stringify(snapshot)).not.toContain(created.secret);
+    expect((await request("/read", read)).status).toBe(409);
+    expect((await request("/read", { ...read, nonce: "fresh_read_nonce_12345" })).status).toBe(200);
+    expect((await request("/read", { ...read, commit: "c".repeat(40), nonce: "wrong_commit_nonce_12345" })).status).toBe(409);
+    const reviewOnly = await (await request("/read", { ...read, service: otherService.metadata.id, nonce: "review_only_nonce_12345" })).json() as { checks: unknown[] };
+    expect(reviewOnly.checks).toEqual([]);
+    await request("/revoke", { id: created.metadata.id });
+    expect((await request("/read", { ...read, nonce: "after_revoke_nonce_12345" })).status).toBe(409);
+    expect((await (await request("/callback", { ...comment, eventId: "after-revocation" })).json() as { kind: string }).kind).toBe("rejected");
+    expect((await (await request("/comments")).json() as unknown[]).length).toBe(2);
+    for (let index = 2; index < 100; index++) expect((await request("/create")).status).toBe(200);
+    expect((await request("/create")).status).toBe(409);
+    expect((await (await request("/list")).json() as unknown[]).length).toBe(100);
+  } finally { await mf.dispose(); }
+}, 30_000);

@@ -50,8 +50,8 @@ export function PeopleTab({ projectId }: { projectId: string }) {
       {p.recent.length > 0 && (
         <ul className="text-sm space-y-1">
           {p.recent.map((r) => (
-            <li key={r.id} className="flex items-center gap-2 min-w-0">
-              <button className="truncate hover:underline text-left" onClick={() => navigate(`/p/${projectId}/review?task=${r.id}`)}>{r.goal}</button>
+            <li key={r.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-1 min-w-0">
+              <button className="break-words min-w-0 hover:underline text-left rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => navigate(`/p/${projectId}/review?task=${r.id}`)}>{r.goal}</button>
               <span className="text-xs text-muted-foreground shrink-0">{r.status} · {timeAgo(r.updatedAt)}</span>
             </li>
           ))}

@@ -4,7 +4,7 @@
   "main": "src/server/worker.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
-  "assets": { "directory": "./dist", "binding": "ASSETS", "run_worker_first": ["/api/*", "/preview/*", "/webhooks/*", "/auth-config", "/status", "/status.json", "/health"], "not_found_handling": "single-page-application" },
+  "assets": { "directory": "./dist", "binding": "ASSETS", "run_worker_first": ["/api/*", "/preview/*", "/webhooks/*", "/auth-config", "/pricing", "/status", "/status.json", "/health"], "not_found_handling": "single-page-application" },
   "vars": {
     "CANONICAL_REPO": "flaregit-canonical",
     "AI_GATEWAY_ID": "default",

@@ -37,6 +37,6 @@ test("a different domain repo: two real agents conflict in rates.ts, repair merg
   const r = await h.controller.runIntegrationPipeline([ta.id, tb.id]);
   expect(r.success).toBe(true);
   expect(r.evidence!.testResults[0]!.items.every((i) => i.passed)).toBe(true);
-  expect(r.evidence!.verifierIdentity).toBe(shippingVerifier.identity);
+  expect(r.evidence!.verifierIdentity).toMatch(/^flaregit-shipping-protected-verifier-v2(?:-local-unprivileged-boundary-unverified)?$/);
   expect(gitOrThrow(h.canonicalDir, ["show", `${h.head()}:src/rates.ts`], { gitDir: true })).toBe(MERGED.trim());
 }, 120_000);

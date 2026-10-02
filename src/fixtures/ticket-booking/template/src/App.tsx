@@ -26,7 +26,7 @@ export function App() {
         </div>
         <h1 style={{ fontSize: "24px", margin: "4px 0", color: "#0f172a" }}>Event Ticket Checkout</h1>
         <p style={{ color: "#64748b", margin: "0", fontSize: "14px" }}>
-          Verified production build running in isolated preview sandbox.
+          Accepted demo build running in an isolated preview sandbox.
         </p>
       </header>
 

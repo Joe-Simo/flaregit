@@ -1,9 +1,9 @@
-import type { ComponentStatus } from "./durable-object.js";
+import type { ComponentStatus, WorkflowCount } from "./durable-object.js";
 import type { Env } from "./env.js";
 import { globalOf } from "./projects.js";
 
 const LABELS: Record<string, string> = {
-  api: "API and web app",
+  api: "Web asset availability",
   ledger: "State and ledger (Durable Objects)",
   git: "Git hosting (Artifacts)",
   storage: "Build and evidence storage (R2)",
@@ -12,14 +12,27 @@ const LABELS: Record<string, string> = {
   auth: "Sign-in (Clerk)",
   ai: "AI models (Workers AI)",
 };
+const SCOPES: Record<string, string> = {
+  api: "Web entry response only; authenticated API flows are not measured",
+  ledger: "Controller storage read only",
+  git: "Repository listing only; clone and push are not measured",
+  storage: "Unique object write, read and deletion",
+  queue: "Probe message arrival only; webhook receiver success is not measured",
+  workflows: "Workflow service lookup only; agent completion and accepted integration are not measured",
+  auth: "Signing-key endpoint only; successful sign-in is not measured",
+  ai: "Embedding response only; coding-agent completion is not measured",
+};
 
 async function timed(fn: () => Promise<unknown>): Promise<{ ok: boolean; ms: number; detail?: string }> {
   const t0 = Date.now();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    await Promise.race([fn(), new Promise((_, rej) => setTimeout(() => rej(new Error("timed out after 8s")), 8000))]);
+    await Promise.race([fn(), new Promise((_, rej) => { timeout = setTimeout(() => rej(new Error("timed out after 8s")), 8000); })]);
     return { ok: true, ms: Date.now() - t0 };
   } catch (e) {
     return { ok: false, ms: Date.now() - t0, detail: e instanceof Error ? e.message : String(e) };
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
   }
 }
 
@@ -27,10 +40,24 @@ async function timed(fn: () => Promise<unknown>): Promise<{ ok: boolean; ms: num
 export async function runProbes(env: Env): Promise<void> {
   const g = globalOf(env);
   const checks: Record<string, () => Promise<unknown>> = {
-    api: async () => undefined,
+    api: async () => {
+      const response = await env.ASSETS.fetch(new Request("https://availability.invalid/"));
+      if (!response.ok) throw new Error(`Web entry answered ${response.status}`);
+      if (!(await response.text()).trim()) throw new Error("Web entry returned an empty response");
+    },
     ledger: () => g.usageToday(),
     git: () => env.ARTIFACTS.list({ limit: 1 }),
-    storage: () => env.EVIDENCE_BUCKET.head("builds/.probe"),
+    storage: async () => {
+      const key = `availability/${crypto.randomUUID()}`;
+      const value = crypto.randomUUID();
+      try {
+        await env.EVIDENCE_BUCKET.put(key, value);
+        const object = await env.EVIDENCE_BUCKET.get(key);
+        if (!object || await object.text() !== value) throw new Error("Probe object could not be recovered");
+      } finally {
+        await env.EVIDENCE_BUCKET.delete(key);
+      }
+    },
     workflows: async () => {
       try {
         await env.INTEGRATION_WORKFLOW.get("health-probe");
@@ -58,12 +85,14 @@ export async function runProbes(env: Env): Promise<void> {
   if (!sent.ok) await g.recordProbe("queue", false, sent.ms, `send failed: ${sent.detail}`);
 }
 
-export async function currentStatus(env: Env): Promise<Array<ComponentStatus & { label: string }>> {
+export async function currentStatus(env: Env): Promise<Array<ComponentStatus & { label: string; scope: string }>> {
   const rows = await globalOf(env).statusSummary();
-  return rows.map((r) => {
+  const by = new Map(rows.map((row) => [row.component, row]));
+  return Object.keys(LABELS).map((component) => {
+    const r = by.get(component) ?? { component, degradedNow: true, lastCheckAt: null, checks24h: 0, failed24h: 0, lastFailureAt: null, lastFailureDetail: null, degradedMinutes24h: 0 };
     // A component that has not reported for 15 minutes is treated as degraded (a silent consumer is a failure).
     const stale = r.lastCheckAt !== null && Date.now() - r.lastCheckAt > 15 * 60_000;
-    return { ...r, degradedNow: r.degradedNow || stale, label: LABELS[r.component] ?? r.component };
+    return { ...r, degradedNow: r.degradedNow || stale || r.lastCheckAt === null, label: LABELS[r.component] ?? r.component, scope: SCOPES[r.component] ?? "Availability only" };
   });
 }
 
@@ -138,8 +167,16 @@ const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 const ago = (t: number | null) => (t === null ? "never" : `${Math.max(0, Math.round((Date.now() - t) / 60_000))} min ago`);
 
 const when = (t: number) => new Date(t).toISOString().replace("T", " ").slice(0, 16) + " UTC";
+export interface WorkflowHealth { verified: boolean; completedRuns24h: number; outstandingRuns: number; counts: WorkflowCount[] }
+export function summarizeWorkflowCounts(counts: WorkflowCount[]): WorkflowHealth {
+  return { verified: counts.some((r) => r.status !== "started"), completedRuns24h: counts.filter((r) => r.status !== "started").reduce((sum, r) => sum + r.count, 0), outstandingRuns: counts.filter((r) => r.status === "started").reduce((sum, r) => sum + r.count, 0), counts };
+}
+export async function workflowHealth(env: Env): Promise<WorkflowHealth> {
+  try { return summarizeWorkflowCounts(await globalOf(env).workflowCounts(Date.now() - 86_400_000)); }
+  catch { return { verified: false, completedRuns24h: 0, outstandingRuns: 0, counts: [] }; }
+}
 
-export function statusPage(rows: Awaited<ReturnType<typeof currentStatus>>, incidents: readonly Incident[] = [], now = Date.now(), reports?: { open: number; oldestOpenHours: number | null }): string {
+export function statusPage(rows: Awaited<ReturnType<typeof currentStatus>>, incidents: readonly Incident[] = [], now = Date.now(), reports?: { open: number; oldestOpenHours: number | null }, workflows?: WorkflowHealth): string {
   const degraded = rows.filter((r) => r.degradedNow);
   const incBody = incidents
     .map(
@@ -149,20 +186,21 @@ export function statusPage(rows: Awaited<ReturnType<typeof currentStatus>>, inci
     .join("");
   const body = rows
     .map(
-      (r) => `<tr><td>${esc(r.label)}</td><td class="${r.degradedNow ? "bad" : "ok"}">${r.degradedNow ? "Degraded" : "Operational"}</td>
+      (r) => `<tr><td>${esc(r.label)}<br><small>${esc(r.scope)}</small></td><td class="${r.degradedNow ? "bad" : "ok"}">${r.lastCheckAt === null ? "Unverified" : r.degradedNow ? "Degraded" : "Probe passed"}</td>
 <td>${r.failed24h} of ${r.checks24h}</td><td>${r.degradedMinutes24h} min</td><td>${r.lastFailureAt ? `${ago(r.lastFailureAt)}${r.lastFailureDetail ? ` — ${esc(r.lastFailureDetail)}` : ""}` : "none in 24 h"}</td></tr>`
     )
     .join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Status · FlareGit</title>
 <style>:root{color-scheme:light dark}body{font:15px/1.5 system-ui,sans-serif;max-width:60rem;margin:0 auto;padding:2rem 1rem}table{width:100%;border-collapse:collapse}td,th{padding:.5rem;border-bottom:1px solid #8884;text-align:left;vertical-align:top}.ok{color:#16a34a}.bad{color:#dc2626;font-weight:700}small{opacity:.7}.scroll{overflow-x:auto}caption{text-align:left;font-size:13px;opacity:.7}@media(max-width:40rem){td,th{padding:.35rem;font-size:14px}}</style></head><body>
-<p><a href="/">&larr; FlareGit</a></p><h1>${degraded.length ? "Degraded" : "Operational"}</h1>
-<p>${degraded.length ? `Degraded now: ${degraded.map((r) => esc(r.label)).join(", ")}.` : "Every subsystem passed its latest check."}</p>
-<p><small>Each subsystem is checked on its own every 5 minutes. We report raw counts: a subsystem is “degraded” if its latest check failed, and the table shows how many checks failed in the last 24 hours and for how long. We do not average these into a single uptime percentage.</small></p>
+<p><a href="/">&larr; FlareGit</a></p><h1>${rows.length === 0 ? "Availability unverified" : degraded.length ? "Availability needs attention" : "Availability probes passing"}</h1>
+<p>${rows.length === 0 ? "No availability evidence has been recorded." : degraded.length ? `Failed, missing or stale checks: ${degraded.map((r) => esc(r.label)).join(", ")}.` : "The latest availability checks passed within their stated scope."}</p>
+<p><small>Scheduled availability probes report service responses, not successful customer workflows. They do not establish agent completion, accepted-history durability, CI success, or delivery to webhook receivers. Counts below cover recorded checks; silence beyond 15 minutes is degraded. These measurements are not an uptime percentage.</small></p>
 <h2>Subsystems now</h2><div class="scroll"><table><thead><tr><th scope="col">Subsystem</th><th scope="col">Now</th><th scope="col">Failed checks (24 h)</th><th scope="col">Degraded for (24 h)</th><th scope="col">Last failure</th></tr></thead><tbody>${body || "<tr><td colspan=5>No checks recorded yet</td></tr>"}</tbody></table></div>
-${reports ? `<h2>Abuse and impersonation reports</h2><p>${reports.open} open${reports.oldestOpenHours !== null ? `; the oldest has waited ${reports.oldestOpenHours} h` : ""}. Every report is read by a person. Use "Report abuse" in the app footer (flaregit.com/#/report) or email support@flaregit.com.</p>` : ""}
+${workflows ? `<h2>Recorded workflow outcomes</h2><p>${workflows.verified ? `${workflows.completedRuns24h} terminal runs recorded in the last 24 hours; ${workflows.outstandingRuns} recorded starts without a terminal outcome.` : "Unverified: no terminal outcome evidence is available for the last 24 hours."}</p><p><small>The denominator is recorded terminal runs, including refusals, conflicts, stale reviews and failures. Agent completion means a saved branch checkpoint, not an accepted merge. Outstanding starts may be running, waiting for review, interrupted, or missing telemetry. These counts do not establish all launched runs were recorded.</small></p><table><thead><tr><th scope="col">Workflow</th><th scope="col">Outcome</th><th scope="col">Count</th></tr></thead><tbody>${workflows.counts.map((r) => `<tr><td>${esc(r.kind)}</td><td>${esc(r.status)}</td><td>${r.count}</td></tr>`).join("") || '<tr><td colspan="3">No recorded outcomes</td></tr>'}</tbody></table>` : ""}
+${reports ? `<h2>Abuse and impersonation reports</h2><p>${reports.open} open${reports.oldestOpenHours !== null ? `; the oldest has waited ${reports.oldestOpenHours} h` : ""}. Reports awaiting operator review remain visible in this count. Use "Report abuse" in the app footer.</p>` : ""}
 <h2>Incidents (last 7 days)</h2>${
     incBody
       ? `<p><small>An incident is a run of failed checks for one subsystem; it ends at the first successful check. A subsystem silent for 15 minutes counts as an ongoing incident.</small></p><div class="scroll"><table><caption>Incidents, newest first</caption><thead><tr><th scope="col">Subsystem</th><th scope="col">Started</th><th scope="col">Ended</th><th scope="col">Duration</th><th scope="col">Failed checks</th><th scope="col">Last error</th></tr></thead><tbody>${incBody}</tbody></table></div>`
-      : "<p>No failed checks in the last 7 days.</p>"
+      : "<p>No incidents derived from the available probe records. Missing evidence does not establish incident-free operation.</p>"
   }</body></html>`;
 }

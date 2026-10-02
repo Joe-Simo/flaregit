@@ -39,14 +39,15 @@ export async function authenticate(request: Request, env: Env): Promise<Identity
     return t ? { id: t.userId, viaToken: true, tokenScope: t.scope, tokenRepo: t.repo } : new Response("Unauthorized", { status: 401 });
   }
   if (!env.CLERK_ISSUER) return new Response("Authentication is not configured", { status: 503 });
+  const allowed = (env.CLERK_AUTHORIZED_PARTIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (allowed.length === 0) return new Response("Authentication authorized parties are not configured", { status: 503 });
   const header = request.headers.get("Authorization");
   const token = header?.startsWith("Bearer ") ? header.slice(7) : undefined;
   if (!token) return new Response("Unauthorized", { status: 401 });
   try {
     const { payload } = await jwtVerify(token, keysFor(`${env.CLERK_ISSUER}/.well-known/jwks.json`), { issuer: env.CLERK_ISSUER });
     // `azp` is the origin that requested the session; reject tokens minted for any other site.
-    const allowed = (env.CLERK_AUTHORIZED_PARTIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-    if (allowed.length > 0 && !(typeof payload.azp === "string" && allowed.includes(payload.azp))) {
+    if (!(typeof payload.azp === "string" && allowed.includes(payload.azp))) {
       return new Response("Unauthorized", { status: 401 });
     }
     if (!payload.sub) return new Response("Unauthorized", { status: 401 });

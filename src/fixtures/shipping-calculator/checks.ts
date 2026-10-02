@@ -1,7 +1,6 @@
-import * as path from "node:path";
 import type { TestResultItem } from "../../core/types.js";
 
-type Quote = {
+export type Quote = {
   baseRate: number;
   speedSurcharge: number;
   hazardousFee: number;
@@ -9,7 +8,8 @@ type Quote = {
   total: number;
   receiptItems?: Array<{ description: string; amount: number }>;
 };
-type Params = { weightKg: number; speed: "standard" | "express" | "overnight"; isHazardous?: boolean; insuranceValueUsd?: number };
+export type Params = { weightKg: number; speed: "standard" | "express" | "overnight"; isHazardous?: boolean; insuranceValueUsd?: number };
+export function quoteKey(params: Params): string { return `${params.weightKg}:${params.speed}:${params.isHazardous === true}`; }
 
 async function check(items: TestResultItem[], testId: string, description: string, fn: () => void) {
   const started = performance.now();
@@ -33,11 +33,9 @@ function near(actual: number, expected: number, label: string) {
   }
 }
 
-export async function runChecks(dir: string): Promise<TestResultItem[]> {
+export async function runChecks(_dir: string, _policy: unknown, observations: Record<string, Quote>): Promise<TestResultItem[]> {
   const items: TestResultItem[] = [];
-  const { calculateShipping } = (await import(path.join(dir, "src", "rates.ts"))) as {
-    calculateShipping: (p: Params) => Quote;
-  };
+  const calculateShipping = (params: Params) => observations[quoteKey(params)]!;
 
   await check(items, "CHECK-SHIPPING-BASE-MINIMUM", "2kg parcel charges the $15.00 minimum", () => {
     const q = calculateShipping({ weightKg: 2, speed: "standard" });

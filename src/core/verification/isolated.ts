@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { TestResultItem, VerificationEvidence } from "../types.js";
 import type { VerifierContext } from "../verifier.js";
+import { createExecutionBoundary, executionEnv, type ExecutionBoundary } from "./execution.js";
 
 const PLATFORM_ROOT = path.resolve(import.meta.dirname, "..", "..", "..");
 const RUNNER = path.join(import.meta.dirname, "runner.ts");
@@ -16,6 +17,7 @@ export interface IsolatedVerificationSpec {
   suite: string;
   /** Absolute path of the platform-owned checks module (exports runChecks). */
   checksModule: string;
+  observationModule: string;
   toolchainDigest?: string;
 }
 
@@ -24,16 +26,9 @@ function git(cwd: string, args: string[]) {
 }
 
 /** Environment passed to anything that executes contributor code: no secrets, nothing inherited. */
-export function scrubbedEnv(home: string): NodeJS.ProcessEnv {
-  return {
-    PATH: process.env.PATH ?? "/usr/bin:/bin",
-    HOME: home,
-    TMPDIR: home,
-    NODE_ENV: "test",
-  };
-}
+export const scrubbedEnv = executionEnv;
 
-function typecheckCandidate(dir: string, env: NodeJS.ProcessEnv): TestResultItem {
+function typecheckCandidate(dir: string, env: NodeJS.ProcessEnv, boundary: ExecutionBoundary): TestResultItem {
   const started = performance.now();
   const tsconfig = path.join(dir, ".flaregit-tsconfig.json");
   fs.writeFileSync(
@@ -54,7 +49,8 @@ function typecheckCandidate(dir: string, env: NodeJS.ProcessEnv): TestResultItem
     })
   );
   const tsc = path.join(PLATFORM_ROOT, "node_modules", "typescript", "bin", "tsc");
-  const res = spawnSync(process.execPath, [tsc, "-p", tsconfig], {
+  const invocation = boundary.command(process.execPath, [tsc, "-p", tsconfig]);
+  const res = spawnSync(invocation.executable, invocation.args, {
     cwd: dir,
     env,
     encoding: "utf-8",
@@ -82,6 +78,7 @@ export async function verifyInIsolation(
   const dir = path.join(work, "candidate");
   const home = path.join(work, "home");
   fs.mkdirSync(home);
+  let boundary: ExecutionBoundary | undefined;
   try {
     const clone = spawnSync("git", ["clone", "--quiet", "--no-hardlinks", ctx.repoDir, dir], { encoding: "utf-8" });
     if (clone.status !== 0) throw new Error(`Verification clone failed: ${clone.stderr}`);
@@ -97,9 +94,17 @@ export async function verifyInIsolation(
     // never supplies its own node_modules (it is not tracked in the repo).
     fs.symlinkSync(path.join(PLATFORM_ROOT, "node_modules"), path.join(dir, "node_modules"), "dir");
 
+    boundary = createExecutionBoundary(work, [dir, home], ctx.repoDir);
     const env = scrubbedEnv(home);
-    const items: TestResultItem[] = [typecheckCandidate(dir, env)];
-    items.push(...(await runChecksChild(spec.checksModule, dir, ctx.policy, env)));
+    const items: TestResultItem[] = [typecheckCandidate(dir, env, boundary)];
+    const child = await runChecksChild(spec.observationModule, dir, ctx.policy, env, boundary);
+    if ("failure" in child) items.push(...child.failure);
+    else {
+      try {
+        const checks = await import(spec.checksModule) as { runChecks(dir: string, policy: Record<string, unknown>, observations: unknown): Promise<TestResultItem[]> };
+        items.push(...await checks.runChecks(dir, ctx.policy, child.observations));
+      } catch { items.push({ testId: "PLATFORM-CHECK-HARNESS", description: "Protected parent checks completed", passed: false, message: "Candidate observations could not be checked", durationMs: 0 }); }
+    }
 
     const passedCount = items.filter((i) => i.passed).length;
     const failedCount = items.length - passedCount;
@@ -111,19 +116,20 @@ export async function verifyInIsolation(
       candidateTree: tree,
       expectedAcceptedBase: ctx.expectedBase,
       requirementsVersion: ctx.requirementsVersion,
-      testBundleDigest: crypto.createHash("sha256").update(checksBytes).digest("hex"),
+      testBundleDigest: crypto.createHash("sha256").update(checksBytes).update(fs.readFileSync(spec.observationModule)).digest("hex"),
       toolchainDigest: spec.toolchainDigest ?? `bun-${Bun.version}`,
       builtOutputDigest: crypto
         .createHash("sha256")
         .update(`tree:${tree}:policy:${JSON.stringify(ctx.policy)}`)
         .digest("hex"),
-      verifierIdentity: spec.identity,
+      verifierIdentity: boundary.isolated ? spec.identity : `${spec.identity}-local-unprivileged-boundary-unverified`,
       policy: ctx.policy,
       testResults: [{ suite: spec.suite, passed: failedCount === 0, passedCount, failedCount, items }],
       timestamp: new Date().toISOString(),
       status: failedCount === 0 ? "passed" : "failed",
     };
   } finally {
+    boundary?.dispose();
     fs.rmSync(work, { recursive: true, force: true });
   }
 }
@@ -132,14 +138,16 @@ function runChecksChild(
   checksModule: string,
   dir: string,
   policy: Record<string, unknown>,
-  env: NodeJS.ProcessEnv
-): Promise<TestResultItem[]> {
+  env: NodeJS.ProcessEnv,
+  boundary: ExecutionBoundary
+): Promise<{ observations: unknown } | { failure: TestResultItem[] }> {
   const nonce = crypto.randomUUID().replaceAll("-", "");
   return new Promise((resolve) => {
-    const failure = (message: string): TestResultItem[] => [
+    const failure = (message: string): { failure: TestResultItem[] } => ({ failure: [
       { testId: "PLATFORM-CHECK-HARNESS", description: "Protected checks completed", passed: false, message, durationMs: 0 },
-    ];
-    const child = spawn(process.execPath, [RUNNER, checksModule, dir], { cwd: dir, env, stdio: ["pipe", "pipe", "pipe"] });
+    ] });
+    const invocation = boundary.command(process.execPath, [RUNNER, checksModule, dir]);
+    const child = spawn(invocation.executable, invocation.args, { ...boundary.options(env), cwd: dir, env, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let overflow = false;
@@ -161,7 +169,7 @@ function runChecksChild(
       const line = stdout.split("\n").find((l) => l.startsWith(`${nonce}:`));
       if (code !== 0 || !line) return resolve(failure(`Checks crashed (exit ${code}): ${stderr.trim().slice(-800)}`));
       try {
-        resolve(JSON.parse(line.slice(nonce.length + 1)) as TestResultItem[]);
+        resolve({ observations: JSON.parse(line.slice(nonce.length + 1)) as unknown });
       } catch {
         resolve(failure("Checks produced unparseable result"));
       }

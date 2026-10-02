@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Copy, Lock } from "lucide-react";
+import { Copy, Lock, Globe } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
@@ -16,7 +16,7 @@ import { PeopleTab } from "../tabs/People";
 import { SettingsTab } from "../tabs/Settings";
 import type { FlareGitProjectState } from "@/core/types";
 
-interface Meta { id: string; role: "owner" | "member"; kind: string; name: string; source: string | null; verification: Record<string, unknown>; protectedPaths: string[] }
+interface Meta { id: string; role: "owner" | "member"; kind: string; name: string; source: string | null; verification: Record<string, unknown>; protectedPaths: string[]; visibility?: "private" | "public" }
 type State = FlareGitProjectState & { role: string };
 
 const TABS = [
@@ -41,11 +41,15 @@ export function Repo({ projectId, tab, params }: { projectId: string; tab: strin
   const [cloning, setCloning] = useState(false);
 
   const reload = useCallback(() => {
-    apiJson<Meta>(`/p/${projectId}`).then(setMeta).catch((e: Error) => setError(e.message));
+    apiJson<Meta>(`/p/${projectId}`).then((next) => { setMeta(next); setError(null); }).catch((e: Error) => setError(e.message));
     apiJson<State>(`/p/${projectId}/state`).then((s) => { setState(s); setStateError(null); }).catch((e: Error) => setStateError(e.message));
   }, [projectId]);
 
   useEffect(() => {
+    setMeta(null);
+    setState(null);
+    setError(null);
+    setStateError(null);
     reload();
     const t = setInterval(() => apiJson<State>(`/p/${projectId}/state`).then((s) => { setState(s); setStateError(null); }).catch((e: Error) => setStateError(e.message)), 6000);
     return () => clearInterval(t);
@@ -74,9 +78,9 @@ export function Repo({ projectId, tab, params }: { projectId: string; tab: strin
     <div className="max-w-6xl mx-auto px-4 sm:px-6 py-6">
       <div className="flex items-center justify-between gap-4 flex-wrap mb-4">
         <div className="flex items-center gap-3 min-w-0">
-          <Lock className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          {meta.visibility === "public" ? <Globe className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" /> : <Lock className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />}
           <h1 className="text-lg font-bold truncate min-w-0">{meta.name}</h1>
-          <Badge variant="outline">private</Badge>
+          <Badge variant="outline">{meta.visibility ?? "private"}</Badge>
           {meta.role === "member" && <Badge variant="secondary">collaborator</Badge>}
         </div>
         <div className="flex items-center gap-2">
@@ -88,12 +92,11 @@ export function Repo({ projectId, tab, params }: { projectId: string; tab: strin
       {stateError && <div role="status" className="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">Live updates paused: {stateError}. Showing the last loaded state.</div>}
 
       <nav aria-label="Repository sections" className="-mx-4 sm:mx-0 mb-2">
-      <div className="flex gap-1 border-b border-border overflow-x-auto px-4 sm:px-0" role="tablist">
+      <div className="flex gap-1 border-b border-border overflow-x-auto px-4 sm:px-0" >
         {TABS.map(([key, label]) => (
           <button
             key={key}
-            role="tab"
-            aria-selected={tab === key}
+            aria-current={tab === key ? "page" : undefined}
             id={`tab-${key}`}
             aria-controls="repo-tabpanel"
             onClick={() => navigate(`/p/${projectId}/${key}`)}
@@ -106,16 +109,16 @@ export function Repo({ projectId, tab, params }: { projectId: string; tab: strin
       </nav>
       {current && <p className="text-xs text-muted-foreground mb-5">{current[2]}</p>}
 
-      <div id="repo-tabpanel" role="tabpanel" aria-labelledby={current ? `tab-${current[0]}` : undefined} className="min-w-0">
+      <div id="repo-tabpanel" aria-labelledby={current ? `tab-${current[0]}` : undefined} className="min-w-0">
       {tab === "code" && <CodeTab projectId={projectId} />}
       {tab === "commits" && <CommitsTab projectId={projectId} />}
       {tab === "changes" && <ChangesTab projectId={projectId} state={state} reload={reload} />}
-      {tab === "integration" && <IntegrationTab projectId={projectId} state={state} reload={reload} kind={meta.kind} />}
+      {tab === "integration" && <IntegrationTab isOwner={meta.role === "owner"} projectId={projectId} state={state} reload={reload} kind={meta.kind} />}
       {tab === "activity" && <ActivityTab projectId={projectId} />}
       {tab === "issues" && <IssuesTab projectId={projectId} issue={params.get("n") ? Number(params.get("n")) : undefined} />}
       {tab === "people" && <PeopleTab projectId={projectId} />}
-      {tab === "review" && <ReviewTab projectId={projectId} task={params.get("task") ?? undefined} candidate={params.get("candidate") ? state.candidates[params.get("candidate")!] : undefined} evidence={state} reload={reload} />}
-      {tab === "commit" && <ReviewTab projectId={projectId} commit={params.get("hash") ?? undefined} />}
+      {tab === "review" && <ReviewTab isOwner={meta.role === "owner"} projectId={projectId} task={params.get("task") ?? undefined} candidate={params.get("candidate") ? state.candidates[params.get("candidate")!] : undefined} evidence={state} reload={reload} />}
+      {tab === "commit" && <ReviewTab isOwner={meta.role === "owner"} projectId={projectId} commit={params.get("hash") ?? undefined} />}
       {tab === "settings" && <SettingsTab meta={meta} reload={reload} />}
       </div>
 

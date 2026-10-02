@@ -3,6 +3,7 @@ import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DiffViewer, type BlobResult, type FileChange } from "../components/DiffViewer";
 import { apiJson } from "../api";
+import { AgentRecoveryPanel } from "../components/AgentRecoveryPanel";
 import { CandidateReview } from "../components/CandidateReview";
 import { Conversation, type Comment } from "../components/Conversation";
 import type { CandidateGeneration, FlareGitProjectState } from "@/core/types";
@@ -11,7 +12,7 @@ import { navigate } from "../router";
 interface DiffResponse { repo: string; base: string | null; head: { hash: string; message: string; author: { name: string } }; files: FileChange[] }
 
 /** Review of one commit (against its parent) or one change (against the commit it started from). */
-export function ReviewTab({ projectId, task, commit, candidate, evidence, reload }: { projectId: string; task?: string; commit?: string; candidate?: CandidateGeneration; evidence?: FlareGitProjectState; reload?: () => void }) {
+export function ReviewTab({ projectId, task, commit, candidate, evidence, reload, isOwner = false }: { projectId: string; task?: string; commit?: string; candidate?: CandidateGeneration; evidence?: FlareGitProjectState; reload?: () => void; isOwner?: boolean }) {
   const [diff, setDiff] = useState<DiffResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [anchor, setAnchor] = useState<{ path: string; line: number } | null>(null);
@@ -34,6 +35,7 @@ export function ReviewTab({ projectId, task, commit, candidate, evidence, reload
       <Button variant="ghost" size="sm" onClick={() => navigate(`/p/${projectId}/${candidate ? "integration" : task ? "changes" : "commits"}`)}>
         <ArrowLeft className="h-4 w-4 mr-1.5" /> Back
       </Button>
+      {task && evidence?.tasks[task]?.agentRunId && <AgentRecoveryPanel key={`${projectId}:${task}:${evidence.tasks[task]!.agentRunId}`} projectId={projectId} taskId={task} runId={evidence.tasks[task]!.agentRunId!} canResume={["working", "checkpointed", "blocked", "needs_decision"].includes(evidence.tasks[task]!.status)} onStarted={reload} />}
       {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>}
       {!diff && !error && <p className="text-sm text-muted-foreground">Loading changes…</p>}
       {diff && (
@@ -43,7 +45,7 @@ export function ReviewTab({ projectId, task, commit, candidate, evidence, reload
             <span className="text-xs text-muted-foreground ml-2">{diff.head.author.name} · <code>{diff.head.hash.slice(0, 7)}</code></span>
           </div>
           {candidate?.status === "awaiting_review" && (
-            <CandidateReview projectId={projectId} candidate={candidate} evidence={candidate.evidenceId ? evidence?.evidence[candidate.evidenceId] : undefined} showOpen={false} onDone={() => { reload?.(); navigate(`/p/${projectId}/integration`); }} />
+            <CandidateReview projectId={projectId} isOwner={isOwner} candidate={candidate} evidence={candidate.evidenceId ? evidence?.evidence[candidate.evidenceId] : undefined} showOpen={false} onDone={() => { reload?.(); navigate(`/p/${projectId}/integration`); }} />
           )}
           <DiffViewer files={diff.files} loadBlob={loadBlob} commented={commented} onLineClick={subject ? (path, line) => { setAnchor({ path, line }); document.getElementById("review-conversation")?.scrollIntoView({ behavior: "smooth" }); } : undefined} />
           {subject && (

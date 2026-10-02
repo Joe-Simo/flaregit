@@ -1,3 +1,5 @@
+import type { ExternalCheckPolicy } from "./external-checks.js";
+import type { FrozenContributorProof } from "./verification/integrity.js";
 export type ContributorType = "human" | "agent";
 
 export interface Contributor {
@@ -62,6 +64,12 @@ export interface Task {
   id: string;
   goal: string;
   contributor: Contributor;
+  /** Person who asked an agent to contribute; preserved separately from the agent's authorship. */
+  initiatedBy?: Contributor;
+  /** Latest real coding-agent Workflow; its durable state can be inspected and paused/resumed. */
+  agentWorkflowInstanceId?: string;
+  /** Durable execution record, including scenario-owned agent runs. */
+  agentRunId?: string;
   baseCommit: string;
   /** Stacked change: id of the change this one builds on. It cannot be marked ready until that change is accepted. */
   dependsOn?: string;
@@ -100,6 +108,9 @@ export interface CandidateGeneration {
   expectedAcceptedBase: string;
   frozenPolicyVersion: number;
   frozenVerificationPolicy: Record<string, unknown>;
+  /** Owner policy and contributor inputs captured before composition; absent on legacy candidates. */
+  frozenExternalChecksPolicy?: ExternalCheckPolicy;
+  frozenContributorProofs?: FrozenContributorProof[];
   frozenRequirements: Requirement[];
   compositionMethod?: CompositionMethod;
   candidateCommit?: string;
@@ -225,4 +236,3 @@ export interface FlareGitProjectState {
   ownerId?: string;
   source?: string;
 }
-

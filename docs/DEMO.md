@@ -1,151 +1,131 @@
-# FlareGit demo script (target 8–9 min, hard cap 10)
+# FlareGit recording runbook — seven minutes
 
-Every step uses a feature that exists in this repo. Steps marked **[PREP]** need setup before recording. Steps marked **[PRE-RUN]** should be started before the camera rolls, because agent and integration runs take real time.
+This is a filming plan, not a completed video or submission. Show real work and retained receipts. Speed up actual waiting if needed, label the edit, and keep the final recording between five and ten minutes. Screenshots can support visual review; they do not establish a movie or a successful workflow.
 
-Placeholders: `<repo>` = repository name, `<CHG>` = change id, `<CAND>` = candidate id, `<host>` = your deployment.
+## Before recording
 
----
+Use the current deployed release and note its exact source SHA. The interface uses Inter with JetBrains Mono for code, a restrained orange accent, a compact landing page, and a repository-first dashboard. Record the rendered browser at about 1440 px and check the same flow on a narrow screen. Keep the product visible rather than spending the demo reading implementation files.
 
-## Preparation checklist
+Last recorded hosted exercise: repository `pbd425298ee02`, accepted baseline beginning `69c59c2`, candidate beginning `2bb6`, awaiting human review. These are historical pointers, not a fresh state read or evidence of acceptance. Open the authenticated repository and recheck the full SHA, candidate ID/status, checks, branch checkpoints, and comments before filming. Do not approve an abbreviated SHA or create a receipt by guessing missing IDs. Browser sign-in is available; a CLI account token is needed separately for the commands below.
 
-- **Accounts.** One FlareGit account signed in through Clerk in the browser (reviewer/owner). A second account (or a second browser profile) is optional for the People tab; the human and agent attribution alone is enough.
-- **CLI.** `bun cli/flaregit.ts auth login <token>` in a terminal (create the token in the UI; do not show it on screen). Check with `bun cli/flaregit.ts auth status`. Use `--pretty` on every command for readable output.
-- **Repos to pre-create.**
-  - `demo-main`: `bun cli/flaregit.ts repo demo --name demo-main` (ticket-booking demo repo with platform checks).
-  - `demo-acts`: a second demo repo for the scripted Contradiction act, so it does not interfere with beats 1–2.
-- **Issue.** In `demo-main` open an issue, e.g. `bun cli/flaregit.ts issue new demo-main "Change refund window" --body "..."`. Note its number `N`.
-- **Webhook.** Settings → Add webhook with a receiver you control (e.g. a request-bin you own). For the retry beat, have a second webhook URL that returns 5xx, or temporarily make the receiver fail.
-- **Status page.** `/status` only has incidents if probes have failed. If there are none, say so on camera; do not fabricate one.
-- **Quota.** Each integration and each agent run consumes one run. Free plan: `FREE_RUNS_PER_DAY = 10` (`wrangler.jsonc`). This script uses about 6–8 runs (agent x1–2, integrations x3–4, Contradiction act x1). Do a full dry run on a different day, or use a Pro account or raise the cap on your own deployment.
-- **Screen.** Browser at ~1440 px wide, terminal beside it, font size up. Close notifications.
+Start new concurrency exercises in a new owned test repository, with its fixture purpose stated on camera. Do not mix an older diagnostic receipt with a newer functional run. New hosted-runner receipts request real discount and refundable-ticket features in `src/pricing.ts`; older unlabeled receipts used comment-only diagnostics and must retain that label.
 
----
+Load credentials before recording, without arguments or echoed values. In zsh:
 
-## Beat 1. Parallel contributions, human and agent (≈1:30)
+```zsh
+read -s 'FLAREGIT_TOKEN?FlareGit account token: '
+export FLAREGIT_TOKEN
+export FLAREGIT_ORIGIN=https://flaregit.com
+export FLAREGIT_API="$FLAREGIT_ORIGIN"
+```
 
-**Do**
-1. Terminal: `bun cli/flaregit.ts work demo-main "Refund window 48h" --issue N --dir human-change`
-2. In the same moment, in the browser on Issues → issue `N` → **Ask an agent**. (Alternative: Changes → **Start a change**, then **Agent** on its row.)
-3. Terminal: edit the refund rule in `human-change`, `git commit -am "48h refund window"`, `bun cli/flaregit.ts push`, then `bun cli/flaregit.ts ready demo-main <CHG>`.
-4. Browser: Changes tab shows both changes; open **People**.
+Keep shell tracing disabled. Use your own account token and receiver. Recordings must not show tokens, newly issued connection secrets, sensitive repository contents, or personal account details.
 
-**Viewer sees:** two changes created at the same time, each on its own Artifacts fork and branch; the agent change flagged as an AI agent; People lists the human and the agent separately.
+```bash
+bun cli/flaregit.ts auth status --pretty
+bun run demo:hosted prepare /tmp/flaregit-hosted-receipt.json
+bun run demo:hosted status /tmp/flaregit-hosted-receipt.json
+```
 
-**Narrate:** "A person and an AI agent start on the same issue at the same moment, each in its own isolated Artifacts fork, pushed with plain git."
+`prepare` creates an owned test repository, issue, two task comments carrying shared policy, and concurrently requests two actual agent workflows. Requested timestamps alone do not prove simultaneous execution: retain provider observations demonstrating overlap, separate forks, and native branch commits. If either run fails, show its honest status and recover it; do not substitute a simulated agent.
 
-**[PRE-RUN]** Agent runs take minutes. Start the agent before recording and cut to it once it has pushed; say so honestly ("sped up").
+Each agent run and integration consumes managed-run allowance. Core collaboration and basic private repositories do not require Pro, but integrations still use FlareGit compute. Record current limits and any pre-run costs from the account rather than promise unlimited free execution. Contributor checks/previews require the deployed Linux isolation boundary. Same-user `NODE_ENV=test` fixtures are not production isolation proof; the local live-model demo fails closed outside the secure boundary.
 
----
+## Seven-minute sequence
 
-## Beat 2. Overlapping change: text conflict and AI repair (≈1:30)
+| Time | Show | Evidence and narration |
+|---|---|---|
+| 0:00–0:35 | Landing, sign-in, repository | “Parallel Git work, with purpose and human control over what lands.” Label the owned exercise as a test repository. Show the deployed source SHA. |
+| 0:35–1:45 | Issue, two live agent changes, People | Read each functional goal: 15% discount from four tickets, and $5 refundable fee. Show both real runs overlapping, distinct forks/commits, and saved shared comments. Four refundable $40 tickets should total $156 under the approved fixture policy. |
+| 1:45–2:40 | Compose the two changes; conflict/evidence | Show an observed overlap and actual native conflict, or state that this run merged cleanly. For a genuine conflict, inspect repair/resolution evidence. External-only CI mode stops for explicit conflict resolution and does not silently run AI repair. |
+| 2:40–3:40 | Exact candidate diff, line comment, checks | Review full commit/tree/base identifiers and relevant changed lines. Explain whether checks are platform application checks, external CI, or native Git integrity only. A human explicitly accepts or rejects the exact candidate after inspecting it. |
+| 3:40–4:25 | Accepted history and fresh clone | Show the persisted human review and accepted SHA, then run hosted verify. Successful output must match the accepted SHA from a fresh native clone and Git integrity check. |
+| 4:25–5:15 | Pause/resume and preserved context | Show actual provider states before/after a permitted pause and resume, the same branch/context, and subsequent commits. Explain that pause may finish the current step; it is not a process-kill crash. |
+| 5:15–6:20 | Connected check/comment and delivery replay | Show a scoped service reporting on the exact candidate, plus an owned webhook receiver's failure/retry/replay receipts and stable event ID. A report cannot approve history. Do not claim success from an unreceived callback. |
+| 6:20–7:00 | Stale-base safety, health, source | Show hosted stale refusal if actually captured; otherwise label the real-Git local fault-injection test. Show workflow health with its scope, Apache-2.0 source, reproducible instructions, and the remaining alpha limits. |
 
-**Do**
-1. Make sure both changes touched the same lines (the issue wording pushes both to the refund rule; check with `bun cli/flaregit.ts diff demo-main --change <CHG>`).
-2. Changes → select both → **Integrate 2 together** (CLI: `bun cli/flaregit.ts integrate demo-main <CHG1> <CHG2>`).
-3. Integration tab: watch the stages; open the evidence drawer.
+The timings are editorial targets. Waiting can occur before filming or be sped up with disclosure. The final film must include actual parallel contributions, an overlap/conflict, stale-base handling, human review, durable integration, and interruption recovery. A table or local unit check does not close a missing hosted evidence gate.
 
-**Viewer sees:** candidate composed on the current accepted head, a text conflict found by `git merge-tree`, an **AI Repair** round confined to the change scope, then **Verification** passing. The repair is listed in the evidence the reviewer sees.
+## Integration, human review, and verification
 
-**Narrate:** "Both edited the same lines, so FlareGit composes them on the accepted head, repairs the conflict, and shows the repair to the reviewer instead of hiding it."
+After both actual changes are ready:
 
-**Backup:** if the live agent did not overlap, use the scripted **Text conflict** button on the Integration tab of `demo-acts`.
+```bash
+bun run demo:hosted integrate /tmp/flaregit-hosted-receipt.json
+bun run demo:hosted status /tmp/flaregit-hosted-receipt.json
+```
 
----
+The runner never accepts review. A human opens the exact candidate in the app, reads its diff, repairs and checks, adds a line comment, and explicitly accepts or rejects. Only after human acceptance:
 
-## Beat 3. Contradiction pauses for one product decision (≈1:00)
+```bash
+bun run demo:hosted verify /tmp/flaregit-hosted-receipt.json
+```
 
-**Do**
-1. `demo-acts` → Integration → **Contradiction**.
-2. When **Product Decision Required** appears, read the question; pick an option; **Apply Choice & Auto-Integrate**.
-3. Before choosing, cut to Commits / Code to show the head has not moved.
+`verify` requires approval bound to the current accepted commit, fresh-clones with a short-lived credential, verifies the commit and Git integrity, and rechecks that accepted state has not advanced. It records success only when these agree. It does not prove interruption recovery, external CI delivery, or webhook replay.
 
-**Viewer sees:** integration paused with one question; the last accepted version unchanged; after the choice, integration continues.
+Unknown mutations are retained as `pendingAction`/`pendingAgents`. The runner refuses duplicate dispatch. Inspect the authenticated app and reconcile the exact resource/run before retrying; never clear pending fields blindly. Status observations include persisted task workflow IDs to help reconcile a lost dispatch response.
 
-**Narrate:** "When two requirements contradict each other, FlareGit stops and asks one product question; the accepted version stays live until a person answers."
+## Workflow interruption
 
----
+Use exact IDs from the receipt:
 
-## Beat 4. Stale base: compare-and-swap refusal (≈1:00) [PREP]
+```bash
+bun cli/flaregit.ts workflow status <project-id> <workflow-id> --pretty
+bun cli/flaregit.ts workflow pause <project-id> <workflow-id> --pretty
+bun cli/flaregit.ts workflow status <project-id> <workflow-id> --pretty
+# Resume only after the provider reports paused:
+bun cli/flaregit.ts workflow resume <project-id> <workflow-id> --pretty
+bun run demo:hosted status /tmp/flaregit-hosted-receipt.json
+```
 
-**Do**
-1. Leave the Beat 2 candidate waiting for review (do not accept yet).
-2. Land a different small change first: `work`, push, `ready`, `integrate`, then `bun cli/flaregit.ts accept demo-main <OTHER_CAND>`.
-3. Now try to accept the Beat 2 candidate: `bun cli/flaregit.ts accept demo-main <CAND>`.
-4. Show the candidate marked stale (`bun cli/flaregit.ts candidates demo-main --all --pretty`), then re-run `integrate` for the two changes.
+Repository owners control registered runs; an agent run's recorded initiator can control that agent run. Older unregistered agent runs cannot be controlled by guessing an ID. A persisted candidate-to-workflow association provides an exact integration fallback. `waitingForPause` means the transition is incomplete; show it honestly. Cancellation preserves pushed forks, but cancellation alone is not recovery.
 
-**Viewer sees:** the push is refused because the branch moved since the candidate was frozen; the candidate is stale; the head contains the other change, nothing overwritten; re-run produces a new candidate on the new head.
+Retain pre-interruption and resumed SHAs, prove the earlier saved work remains an ancestor where applicable, preserve conversation IDs, and verify the final accepted SHA. A killed-container recovery claim requires its own real fault and receipts.
 
-**Narrate:** "The branch moved, so the compare-and-swap push is refused, the candidate goes stale and is re-run; nothing is overwritten."
+## External CI and service reports
 
-**Prep note:** costs two extra runs. Rehearse the timing: the second integration must finish before the first candidate is accepted.
+Use a custom imported repository for external-only CI, with a maintainer-selected required check, a policy captured before integration, and a registered run. Native integrity proves Git objects, frozen refs, scopes, and ancestry; it does not claim application tests passed. External-only composition runs no customer install/build/test or previews and blocks automatic conflict repair. Demonstrate a real service run, signed callback, passed required gate, and subsequent human review before describing external CI replacement as hosted-verified.
 
----
+Read the one-time connection secret privately into the local service environment:
 
-## Beat 5. Human review on the exact commit (≈1:15)
+```zsh
+read -s 'FLAREGIT_CONNECTION_SECRET?Connection signing secret: '
+export FLAREGIT_CONNECTION_SECRET
+```
 
-**Do**
-1. Changes → **Review** on the change (or the candidate in Integration, **Waiting for your review**).
-2. In the diff press `j`/`k` (next/previous file), `n`/`p` (next/previous hunk), `?` for the help.
-3. Add a line comment (CLI equivalent: `bun cli/flaregit.ts comment demo-main "Why 48h?" --candidate <CAND> --path <file> --line <n>`).
-4. **Accept into history** (CLI: `bun cli/flaregit.ts accept demo-main <CAND> --note "ok"`).
+```bash
+bun cli/flaregit.ts service-candidate <project-id> <candidate-id> --service <connection-id> --commit <exact-40-character-SHA> --pretty
+bun cli/flaregit.ts report <project-id> --service <connection-id> --file <report.json> --event <stable-event-id> --pretty
+```
 
-**Viewer sees:** keyboard-driven diff, a line comment in the conversation, the "N of M checks passed. Accepting moves the branch to exactly this commit." text, then accept.
+The snapshot exposes metadata and that service's assigned checks, not source or a clone token. A check report must include `type`, `candidateId`, `commit`, `tree`, `checkId`, `runId`, `policyVersion`, `sequence`, `status`, and `summary`; an automated comment includes `type`, `candidateId`, `commit`, and `body`, with an optional path/line. The CLI uses HMAC and no human bearer token. Reuse an event ID only with unchanged report contents; use a fresh event for a new status. Fresh timestamp/signature on a retry does not change durable event identity. Revoke the connection and show a denied request if recording capability enforcement.
 
-**Narrate:** "The approval is bound to this exact candidate commit; what I review is byte-for-byte what lands."
+Configure a webhook receiver you control in Settings. Record its receipt alongside FlareGit delivery status, sequence, attempts, and stable event ID. Intentionally fail only that owned receiver, restore it, and have the human select Redeliver. Replay must be observable at the receiver and safely deduplicated. Connected service callbacks and outbound webhooks are separate paths; show both if claiming both.
 
-Optional: `bun cli/flaregit.ts review demo-main --change <CHG>` shows the terminal reviewer with the same keys.
+## Local evidence inserts and limitations
 
----
+```bash
+bun run demo:proof
+bun test tests/platform.test.ts --test-name-pattern "stale base is refused|crash recovery settles"
+bun test tests/native-integrity.test.ts
+```
 
-## Beat 6. Durable integration: commit, webhooks, issue (≈1:00)
+`demo:proof` uses deterministic scripted contributors and real concurrent Git clones/commits. It exposes a conflict, records a predetermined decision, refuses stale publication, and reconstructs a PREPARED journal after deleting a workspace. It is neither AI-agent evidence nor a hosted process crash. It prints a retained repository/receipt directory.
 
-**Do**
-1. **Commits** tab: the new landed commit at the top (or `bun cli/flaregit.ts log demo-main --limit 3 --pretty`).
-2. **Settings** → webhooks → **Delivery log**: point at the event, `#<seq>`, attempts, HTTP status. Mention the `webhook-signature` header (show it in your receiver).
-3. For the failing webhook: entry shows "retrying" with attempts increasing; click **Redeliver** (manual replay).
-4. **Issues** → issue `N`: closed, with the FlareGit comment "Resolved by change … accepted as <sha>".
+The platform stale test supplies an outdated expected base against an advanced canonical ref. The local recovery test reconstructs a publication journal and restores from real Git. Native-integrity tests execute actual Git and verify that customer source is not evaluated. These are protocol/fixture evidence; they do not establish customer-scale throughput, hosted reliability, or observed external service delivery.
 
-**Narrate:** "Events are emitted only after the ref update commits, in order, signed, retried, and replayable; the issue closes itself with the commit reference."
+Historical local Workers AI run on October 2 used `@cf/openai/gpt-oss-120b` and real parallel workspaces. Its retained `.flaregit-storage/demo-run-0mcEuC/controller/flaregit-local.state.json` recorded six agent tasks, five verification records, and two ACCEPTED entries: `4baf67b933b84299be1cb638c40fbd7d2ddfaa0f` and `7dc4e11e4d36c99403bbdedc658ad090a5ed5cea`. This is a historical local-controller receipt with automatic local acceptance; it proves neither hosted human review nor the newer execution security boundary. That ignored workstation directory is not distributed with the source.
 
-**[PREP]** Receiver set up before recording.
+Retain the final video, deployed source SHA, full contribution/candidate/accepted SHAs, overlapping workflow observations, conflict and stale refusal evidence, explicit human review, fresh-clone proof, interruption context, and receiver receipts. Current gaps must remain visible until those artifacts exist: hosted native external CI, callback/replay, interruption, stale-base handling, and the complete recording. Last-known candidate review is not completed acceptance.
 
----
+```bash
+unset FLAREGIT_TOKEN FLAREGIT_CONNECTION_SECRET
+```
 
-## Beat 7. Recovery after interruption (≈0:45)
+## Human competition entry
 
-**Do (pick what you can show)**
-- Changes → cancel a running agent change (the **X** on its row, or `bun cli/flaregit.ts cancel demo-main <CHG>`). Show it marked Cancelled and that the accepted head is untouched.
-- Or show an agent change that resumed from its already pushed branch (its branch commits in the change view).
+The [official rules](https://www.cloudflare.com/documents/build-next-gen-git-platform-competition-terms.pdf) require Workers and Artifacts, multiple concurrent agents, an approved LICENSE, run instructions, and a 5–10 minute video. Deadline: October 14, 2026 at 11:59 p.m. PDT. Judging weights prototype originality/quality 50%, concurrency/coordination/context/review/conflicts 25%, and product experience 25%.
 
-**Narrate (code reference, not a live crash):** "Delivery rows are written in the same transaction as the event, and a Durable Object alarm re-sends anything not yet queued; publication rehydrates from the stored candidate ref, so a crashed step needs no original workspace."
-Reference on screen briefly: `src/server/durable-object.ts` (transactional outbox, `alarm()`), and `tests/platform.test.ts` (crash recovery cases).
+The human entrant must separately confirm eligibility, including legal US/Canada residence, age 18 or older at the start, and the exclusions in section 3. The rules prohibit automated entry. The [human form](https://www.cloudflare.com/git-competition/submit/) requires team/contact information, project vision, Cloudflare usage, source URL, running instructions, and MP4/WebM/MOV upload up to 2 GiB. No submission or eligibility confirmation is established by this runbook.
 
-**Honesty:** do not stage a fake crash. Killing a container mid-run is not reliably reproducible on camera; narrate with the code reference instead.
-
----
-
-## Beat 8. Status page with raw evidence (≈0:30)
-
-**Do:** open `https://<host>/status` (and `/status.json`).
-
-**Viewer sees:** each subsystem with its latest check, failed checks in the last 24 h, and an incidents table (subsystem, started, ended, duration, failed checks, last error). No uptime percentage.
-
-**Narrate:** "Every subsystem is probed every 5 minutes, and we publish raw failure counts and incidents, not an averaged uptime number."
-
----
-
-## Closing (≈0:20)
-
-"FlareGit is open source under Apache-2.0: <repo link>. Self-host it on your own Cloudflare account with the steps in the README."
-
----
-
-## Things not to claim
-
-- No throughput, user, or "N agents at once" scale numbers. Limits that exist: one landing at a time per project, at most 8 changes per integration, 7-day review window, 20-minute landing lease.
-- Only cite measured numbers that appear in the README: diff time-to-interactive about 0.8–1 s in Safari; 60 fps scrolling at 3,000–8,000 px/s with at most about 100 DOM rows for a 12k-line diff; the landing-race test runs 20 branches by default and can be run with 500 (`RACE_BRANCHES=500`). Say "a test you can run", not a production benchmark.
-- No uptime percentage.
-- Do not claim the AI repairs every conflict: failing repairs are blocked, not published.
-- Do not claim ongoing sync from GitHub: imports are one-time clones (depth 200). You may show the optional one-way mirror to GitHub only if you configured it and it shows an ok run.
-- Do not claim contradiction detection works on free-form text; it needs structured assertions on requirements.
-- If a step was sped up or pre-run, say so.
+Use the [Apache-2.0 repository](https://github.com/Joe-Simo/flaregit); recheck public access and the exact release SHA before entry. Preserve original contributions and keep the narration about product behavior, without personal attacks or unsupported comparisons.

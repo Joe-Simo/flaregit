@@ -45,7 +45,7 @@ test("customer repo: two contributors land when the customer's own tests pass", 
   h = await createHarness({ model: async () => "no", verifier, template });
   const r = await twoTasks(h, [{ "src/a.ts": "export const a = 1;\n" }, { "src/b.ts": "export const b = 2;\n" }]);
   expect(r.success).toBe(true);
-  expect(r.evidence!.verifierIdentity).toBe("flaregit-command-verifier-v1");
+  expect(r.evidence!.verifierIdentity).toMatch(/^flaregit-command-verifier-v2(?:-local-unprivileged-boundary-unverified)?$/);
   expect(r.evidence!.testResults[0]!.items.map((i) => i.testId)).toEqual(["STEP-TEST"]);
   expect(h.head()).toBe(r.evidence!.candidateCommit);
 }, 120_000);

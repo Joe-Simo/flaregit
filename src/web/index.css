@@ -4,26 +4,49 @@
 
 @layer base {
   :root {
-    --background: 224 71% 4%;
-    --foreground: 213 31% 96%;
-    --card: 224 71% 6%;
-    --card-foreground: 213 31% 96%;
-    --popover: 224 71% 6%;
-    --popover-foreground: 213 31% 96%;
-    --primary: 28 95% 54%; /* Cloudflare Orange accent */
+    --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+    --background: 0 0% 98.039%;
+    --foreground: 0 0% 10%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 10%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 10%;
+    --primary: 25 95% 48%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 222 47% 14%;
-    --secondary-foreground: 213 31% 96%;
-    --muted: 223 47% 11%;
-    --muted-foreground: 215 20% 65%;
-    --accent: 216 34% 17%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 72% 51%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 216 34% 17%;
-    --input: 216 34% 17%;
-    --ring: 28 95% 54%;
-    --radius: 0.5rem;
+    --secondary: 0 0% 96%;
+    --secondary-foreground: 0 0% 20%;
+    --muted: 0 0% 97%;
+    --muted-foreground: 0 0% 43%;
+    --accent: 0 0% 95%;
+    --accent-foreground: 0 0% 10%;
+    --destructive: 0 72% 43%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 0 0% 89%;
+    --input: 0 0% 84%;
+    --ring: 25 95% 48%;
+    --radius: 0.375rem;
+  }
+  .dark {
+    --background: 0 0% 3.137%;
+    --foreground: 0 0% 94%;
+    --card: 0 0% 5%;
+    --card-foreground: 0 0% 94%;
+    --popover: 0 0% 5%;
+    --popover-foreground: 0 0% 94%;
+    --primary: 25 95% 57%;
+    --primary-foreground: 0 0% 3.137%;
+    --secondary: 0 0% 13%;
+    --secondary-foreground: 0 0% 94%;
+    --muted: 0 0% 7%;
+    --muted-foreground: 0 0% 65%;
+    --accent: 0 0% 11%;
+    --accent-foreground: 0 0% 94%;
+    --destructive: 0 75% 62%;
+    --destructive-foreground: 0 0% 3.137%;
+    --border: 0 0% 18%;
+    --input: 0 0% 25%;
+    --ring: 25 95% 57%;
   }
 }
 
@@ -33,6 +56,7 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: var(--font-sans);
     font-feature-settings: "rlig" 1, "calt" 1;
   }
 }
@@ -62,8 +86,56 @@
   animation: pulse-subtle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
-.hljs-comment, .hljs-quote { color: #8b949e; }
-.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-built_in { color: #ff7b72; }
-.hljs-string, .hljs-attr, .hljs-regexp { color: #a5d6ff; }
-.hljs-number, .hljs-title, .hljs-name, .hljs-type { color: #d2a8ff; }
-.hljs-variable, .hljs-property, .hljs-symbol { color: #ffa657; }
+.dark .hljs-comment, .dark .hljs-quote { color: #8b949e; }
+.dark .hljs-keyword, .dark .hljs-selector-tag, .dark .hljs-literal, .dark .hljs-built_in { color: #ff7b72; }
+.dark .hljs-string, .dark .hljs-attr, .dark .hljs-regexp { color: #a5d6ff; }
+.dark .hljs-number, .dark .hljs-title, .dark .hljs-name, .dark .hljs-type { color: #d2a8ff; }
+.dark .hljs-variable, .dark .hljs-property, .dark .hljs-symbol { color: #ffa657; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+.entry-shell {
+  background: radial-gradient(ellipse at 12% 12%, hsl(28 95% 54% / 0.075), transparent 48%), hsl(var(--background));
+}
+.entry-serif {
+  font-family: var(--font-sans);
+  font-weight: 400;
+  font-style: normal;
+  letter-spacing: -0.065em;
+}
+.entry-workflow li:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 18px;
+  left: 36px;
+  right: -8px;
+  height: 1px;
+  background: linear-gradient(to right, hsl(var(--primary) / 0.55), hsl(var(--border)));
+}
+.entry-auth .cl-rootBox, .entry-auth .cl-cardBox { max-width: 100%; }
+
+.entry-shell .entry-auth :is(button, a, input):focus-visible {
+  outline: 2px solid hsl(var(--foreground));
+  outline-offset: 3px;
+}
+
+.dashboard-sidebar { background: hsl(var(--muted) / 0.55); }
+.dashboard-nav[aria-current="page"] { background: hsl(var(--accent)); color: hsl(var(--foreground)); box-shadow: inset 2px 0 hsl(var(--primary)); }
+.dashboard-shell { font-family: var(--font-sans); }
+.dashboard-shell button { -webkit-tap-highlight-color: transparent; }
+
+code, pre, kbd, samp { font-family: var(--font-mono); }
+
+.hljs-comment, .hljs-quote { color: #57606a; }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-built_in { color: #cf222e; }
+.hljs-string, .hljs-attr, .hljs-regexp { color: #0a3069; }
+.hljs-number { color: #0550ae; }
+.hljs-title, .hljs-name, .hljs-type { color: #8250df; }
+.hljs-variable, .hljs-property, .hljs-symbol { color: #953800; }

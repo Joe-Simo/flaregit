@@ -20,9 +20,15 @@ const SECRET_PATTERNS = [
   /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g,
   /\bsk-(?:live|test|proj|ant)?[-_]?[A-Za-z0-9]{20,}\b/g,
   /\bfgt_[0-9a-f]{12}_[A-Za-z0-9]{32,64}\b/g,
+  /\bart_v1_[A-Za-z0-9_-]{16,}(?:\?expires=\d+)?/g,
+  /(\bBearer\s+)[A-Za-z0-9._~+\/-]{16,}=*/gi,
   /\bwhsec_[A-Za-z0-9+/=]{16,}\b/g,
   /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
-  /((?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)\s*[:=]\s*)["']?[^\s"']{8,}["']?/gi,
+  // Literal credential values only: expressions such as password: input.password
+  // are ordinary code and must not be mistaken for embedded credentials.
+  /((?:["']?(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)["']?)\s*[:=]\s*)["'][^\r\n"']{8,}["']/gi,
+  /(^[ \t]*(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)\s*=\s*)[A-Za-z0-9_./+?=&-]{8,}[ \t]*$/gim,
+  /(^[ \t]*(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)\s*:\s*)[A-Za-z0-9_+\/?=&-]{8,}[ \t]*$/gim,
 ];
 export function redactSecrets(text: string): string {
   return SECRET_PATTERNS.reduce((t, re) => t.replace(re, (m, prefix?: string) => (typeof prefix === "string" && m.startsWith(prefix) ? `${prefix}[REDACTED]` : "[REDACTED]")), text);
@@ -33,7 +39,7 @@ export function buildAgentPrompt(task: Task, agentName: string, files: Record<st
   const context = Object.entries(files)
     .map(([f, c]) => `<current path="${f}">\n${redactSecrets(c)}\n</current>`)
     .join("\n");
-  return [
+  return redactSecrets([
     `You are ${agentName}, a coding agent working in an isolated git workspace.`,
     `Task: ${task.goal}`,
     requirements ? `Requirements:\n${requirements}` : "",
@@ -46,13 +52,13 @@ export function buildAgentPrompt(task: Task, agentName: string, files: Record<st
     context,
     "",
     'Reply with the COMPLETE new content of every file you change, each as: <file path="PATH">\\nCONTENT\\n</file>.',
-  ].join("\n");
+  ].join("\n"));
 }
 
 /** Throws if the model proposed a write outside the task's scope or onto protected paths. */
 export function assertAgentWrites(task: Pick<Task, "allowedScope">, files: Iterable<string>, protectedPaths: readonly string[]): void {
   for (const file of files) {
-    if (file.startsWith("/") || file.split("/").includes("..")) throw new Error(`Path escapes workspace: ${file}`);
+    if (!file || /[\x00-\x1f\\]/.test(file) || file.startsWith("/") || file.split("/").some((part) => part === ".." || part === ".git" || part === "" || part === ".")) throw new Error(`Path escapes workspace: ${file}`);
     if (!inAgentScope(task, file)) throw new Error(`${file} is outside the task scope`);
     if (isProtectedPath(file, protectedPaths)) throw new Error(`${file} is protected`);
   }

@@ -1,4 +1,4 @@
-import { RepositoryController, type Ledger } from "./durable-object.js";
+import { RepositoryController, WEBHOOK_EVENTS } from "./durable-object.js";
 import { FlareGitIntegrationWorkflow } from "./workflow.js";
 import { FlareGitScenarioWorkflow } from "./scenario-workflow.js";
 import { FlareGitAgentWorkflow } from "./agent-workflow.js";
@@ -10,15 +10,25 @@ import { buildPrefix, signPreview, verifyPreview } from "./preview-access.js";
 import { billingFromEvent, createCheckout, planLimits, reportUsage, verifyPolarWebhook } from "./polar.js";
 import { TICKET_BOOKING_POLICY } from "../fixtures/ticket-booking/policy.js";
 import { DEFAULT_PROTECTED_PATHS, isCommandPolicy, settingsFor, type CommandPolicy } from "../core/command-policy.js";
-import { currentStatus, runProbes, statusIncidents, statusPage } from "./status.js";
+import { currentStatus, runProbes, statusIncidents, statusPage, workflowHealth } from "./status.js";
 import { isPlausibleGithubToken, pushMirror, validateMirrorTarget } from "./mirror.js";
 import { lookupTxt, normalizeDomain, txtHost, txtValue } from "./dns.js";
 import { isSafeRef } from "../core/sanitize.js";
 import { diffTrees, listCommits, listDirectory, readBlobByHash, readFileText, resolveCommit } from "./browse.js";
 import { validateWebhookUrl } from "./webhooks.js";
-import { PROJECT_ID, accountKeyFor, accountOf, admitRun, canonicalNameFor, globalOf, newProjectId, projectOf, taskRepoName } from "./projects.js";
+import { PROJECT_ID, accountKeyFor, accountOf, admitRun, adoptLegacyProject, canonicalNameFor, globalOf, newProjectId, projectOf, taskRepoName } from "./projects.js";
 import type { Env, QueueMessage } from "./env.js";
 import type { Task } from "../core/types.js";
+import { assertAgentWrites, redactSecrets } from "../agents/prompt.js";
+import { assertWorkflowControlPermission, controlWorkflow, WorkflowControlError } from "./workflow-control.js";
+import { inspectImport, startImport, type ImportJob, type ImportReadiness } from "./import-job.js";
+import { readPublicPlanPrice } from "./plan-price.js";
+import type { Ledger } from "./durable-object.js";
+import { validateImportSource, validateRepositoryCommand } from "./import-source.js";
+import { integrationCapabilities, verifyIntegrationCallback } from "./integration-auth.js";
+import type { ExternalCheckPolicy } from "../core/external-checks.js";
+import { verifyServiceRead } from "./service-read-auth.js";
+import { parsePublicBrowseRequest, readPublicRepository } from "./public-repositories.js";
 
 export { RepositoryController, FlareGitIntegrationWorkflow, FlareGitScenarioWorkflow, FlareGitAgentWorkflow };
 export { IntegratorSandbox, AgentSandbox } from "./integrator.js";
@@ -27,19 +37,25 @@ const TASK_ID = /^[a-z0-9][a-z0-9-]{2,40}$/;
 const json = (data: unknown, status = 200) => Response.json(data, { status });
 const text = (message: string, status: number) => new Response(message, { status });
 const clean = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+class RequestBodyError extends Error {}
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname === "/health") return json({ ok: true });
+    if (url.pathname === "/pricing" && request.method === "GET") {
+      const limited = await env.API_LIMITER.limit({ key: `pricing:${request.headers.get("CF-Connecting-IP") ?? "unknown"}` });
+      if (!limited.success) return text("Too many requests", 429);
+      return Response.json(await readPublicPlanPrice(env), { headers: { "Cache-Control": "no-store" } });
+    }
     if (url.pathname === "/status.json") {
-      const [rows, incidents, reports] = await Promise.all([currentStatus(env), statusIncidents(env), globalOf(env).reportBacklog()]);
-      return Response.json({ degraded: rows.filter((r) => r.degradedNow).map((r) => r.label), components: rows, incidents, reports }, { headers: { "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" } });
+      const [rows, incidents, reports, workflows] = await Promise.all([currentStatus(env), statusIncidents(env), globalOf(env).reportBacklog(), workflowHealth(env)]);
+      return Response.json({ degraded: rows.filter((r) => r.degradedNow).map((r) => r.label), components: rows, incidents, reports, workflows }, { headers: { "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" } });
     }
     if (url.pathname === "/status") {
-      const [rows, incidents, reports] = await Promise.all([currentStatus(env), statusIncidents(env), globalOf(env).reportBacklog()]);
-      return new Response(statusPage(rows, incidents, Date.now(), reports), { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+      const [rows, incidents, reports, workflows] = await Promise.all([currentStatus(env), statusIncidents(env), globalOf(env).reportBacklog(), workflowHealth(env)]);
+      return new Response(statusPage(rows, incidents, Date.now(), reports, workflows), { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
     }
 
     // The publishable key is public by design; the SPA needs it before the user can sign in.
@@ -89,6 +105,73 @@ export default {
 
     if (!url.pathname.startsWith("/api/")) return env.ASSETS.fetch(request);
 
+    const publicRoute = /^\/api\/public\/(p?[0-9a-f]{12})\/(meta|history|tree|file|diff)$/.exec(url.pathname);
+    if (url.pathname.startsWith("/api/public/")) {
+      const publicResponse = (data: unknown, status = 200) => Response.json(data, { status, headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
+      if (!publicRoute || request.method !== "GET") return publicResponse({ error: "Not found" }, 404);
+      const projectId = publicRoute[1]!;
+      const ip = request.headers.get("CF-Connecting-IP");
+      if (!ip) return publicResponse({ error: "Public browsing unavailable" }, 503);
+      const limited = await env.API_LIMITER.limit({ key: `public:${projectId}:${ip}` });
+      if (!limited.success) return publicResponse({ error: "Too many requests" }, 429);
+      let browseRequest;
+      try { browseRequest = parsePublicBrowseRequest(publicRoute[2]!, url.searchParams); }
+      catch { return publicResponse({ error: "Invalid public browse request" }, 400); }
+      const project = projectOf(env, projectId);
+      const grant = await project.publicGrant();
+      if (!grant) return publicResponse({ error: "Repository not found" }, 404);
+      try {
+        let result: unknown;
+        if (browseRequest.kind === "meta") result = { id: projectId, name: grant.name, acceptedCommit: grant.acceptedCommit, visibility: "public", version: grant.version };
+        else {
+          using repo = await env.ARTIFACTS.get(grant.canonicalRepoName);
+          result = await readPublicRepository(repo, grant, browseRequest);
+        }
+        const current = await project.publicGrant();
+        if (!current || current.version !== grant.version || current.acceptedCommit !== grant.acceptedCommit || current.canonicalRepoName !== grant.canonicalRepoName) {
+          return publicResponse({ error: "Repository visibility or accepted history changed; reload" }, 409);
+        }
+        return publicResponse(result);
+      } catch { return publicResponse({ error: "Repository content unavailable; retry" }, 404); }
+    }
+
+    const serviceReadRoute = /^\/api\/p\/([a-z0-9]{12,16})\/connections\/(svc_[a-f0-9-]{36})\/candidates\/([a-z0-9_-]+)$/.exec(url.pathname);
+    if (serviceReadRoute && request.method === "GET") {
+      const project = projectOf(env, serviceReadRoute[1]!);
+      const config = await project.connectionSigningConfig(serviceReadRoute[2]!).catch(() => null);
+      if (!config) return text("Unauthorized", 401);
+      const limited = await env.API_LIMITER.limit({ key: `service:${serviceReadRoute[1]}:${serviceReadRoute[2]}` });
+      if (!limited.success) return text("Too many requests", 429);
+      const nonce = request.headers.get("X-Flaregit-Nonce") ?? "";
+      const timestamp = Number(request.headers.get("X-Flaregit-Timestamp"));
+      const verified = await verifyServiceRead({ ...config, method: request.method, path: url.pathname + url.search, timestamp, nonce, signature: request.headers.get("X-Flaregit-Signature") ?? "" });
+      if (!verified) return text("Invalid signed request", 401);
+      const commit = url.searchParams.get("commit") ?? "";
+      if (!/^[a-f0-9]{40}$/.test(commit)) return text("Exact candidate commit required", 400);
+      const snapshot = await project.serviceCandidateSnapshot(serviceReadRoute[2]!, serviceReadRoute[3]!, commit, nonce);
+      if (!snapshot) return text("Candidate unavailable or request already used", 404);
+      return Response.json(snapshot, { headers: { "Cache-Control": "no-store" } });
+    }
+
+    const callbackRoute = /^\/api\/p\/([a-z0-9]{12,16})\/connections\/(svc_[a-f0-9-]{36})\/events$/.exec(url.pathname);
+    if (callbackRoute && request.method === "POST") {
+      const project = projectOf(env, callbackRoute[1]!);
+      const config = await project.connectionSigningConfig(callbackRoute[2]!).catch(() => null);
+      if (!config) return text("Unauthorized", 401);
+      const limited = await env.API_LIMITER.limit({ key: `service:${callbackRoute[1]}:${callbackRoute[2]}` });
+      if (!limited.success) return text("Too many requests", 429);
+      const reader = request.body?.getReader();
+      if (!reader) return text("Body required", 400);
+      const chunks: Uint8Array[] = []; let size = 0;
+      for (;;) { const next = await reader.read(); if (next.done) break; size += next.value.byteLength; if (size > 65_536) { await reader.cancel(); return text("Report too large", 413); } chunks.push(next.value); }
+      const bytes = new Uint8Array(size); let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+      const callback = await verifyIntegrationCallback({ ...config, raw: new TextDecoder().decode(bytes), signature: request.headers.get("X-Flaregit-Signature") ?? "", serviceId: callbackRoute[2]!, repositoryId: callbackRoute[1]! });
+      if (!callback) return text("Invalid signed report", 401);
+      const result = await project.acceptIntegrationCallback(callback);
+      return json(result, result.kind === "rejected" ? 409 : 200);
+    }
+
     const auth = await authenticate(request, env);
     if (auth instanceof Response) return auth;
     const userId = auth.id;
@@ -104,7 +187,28 @@ export default {
       if (pinned && !path.startsWith(`/p/${pinned}/`) && path !== `/p/${pinned}`) return text("This token is limited to one repository", 403);
       if (auth.tokenScope === "read" && method !== "GET" && !/^\/p\/[a-z0-9]+\/clone$/.test(path)) return text("This token is read-only", 403);
     }
-    const body = async <T>() => ((await request.json().catch(() => ({}))) as T) ?? ({} as T);
+    const body = async <T>() => {
+      const reader = request.body?.getReader();
+      if (!reader) return {} as T;
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        size += next.value.byteLength;
+        if (size > 131_072) { await reader.cancel(); throw new RequestBodyError("Request body is too large"); }
+        chunks.push(next.value);
+      }
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      const raw = new TextDecoder().decode(bytes);
+      if (!raw.trim()) return {} as T;
+      let value: unknown;
+      try { value = JSON.parse(raw); } catch { throw new RequestBodyError("Invalid JSON request body"); }
+      if (typeof value !== "object" || value === null || Array.isArray(value)) throw new RequestBodyError("Request body must be an object");
+      return value as T;
+    };
 
     try {
       // ---------- account level ----------
@@ -164,7 +268,7 @@ export default {
         const details = clean(b.details, 5000);
         if (!target || details.length < 10) return text("Say what you are reporting (a repository, handle or domain) and describe what happened", 400);
         const report = await globalOf(env).fileReport({ reporter: accountKey, kind: b.kind, target, details });
-        return json({ id: report.id, status: report.status, note: "A person reviews every report. You can follow it under Account → Reports. The number of open reports and the age of the oldest one are public on /status." }, 201);
+        return json({ id: report.id, status: report.status, note: "Your report is saved for operator review. You can track its status under Account → Reports. The number of open reports and the age of the oldest one are public on /status." }, 201);
       }
       if (path === "/reports" && method === "GET") return json(await globalOf(env).listReports({ reporter: accountKey }));
       const operators = (env.OPERATOR_ACCOUNTS ?? "").split(",").map((x) => x.trim()).filter(Boolean);
@@ -244,17 +348,32 @@ export default {
         }
       }
 
+      if (path === "/imports" && method === "GET") return json({ imports: (await account.listImportJobs()).filter((job) => job.ownerId === userId) });
+      const resumeImport = /^\/imports\/([a-z0-9]{12,16})\/resume$/.exec(path);
+      if (resumeImport && method === "POST") {
+        const job = await account.getImportJob(resumeImport[1]!);
+        if (!job || job.ownerId !== userId) return text("Import not found", 404);
+        const result = await finishImport(env, account, job, job.status === "failed" ? { status: "failed", detail: job.detail } : await inspectImport(env.ARTIFACTS, job.canonicalRepoName));
+        return json(result, result.status === "ready" ? 201 : result.status === "failed" ? 409 : 202);
+      }
+
       if (path === "/projects" && method === "POST") {
         const b = await body<{ kind?: string; name?: string; url?: string; branch?: string; install?: string; build?: string; test?: string }>();
         const existing = await account.listProjects();
-        if (existing.length >= 10) return text("Repository limit reached (10).", 409);
+        const pendingImports = (await account.listImportJobs()).filter((job) => job.status !== "ready");
+        if (existing.length + pendingImports.length >= 10) return text("Repository limit reached (10).", 409);
         const name = clean(b.name, 60) || "my-repo";
         if (!/^[A-Za-z0-9._ -]{1,60}$/.test(name)) return text("Use letters, numbers, spaces, '.', '_' and '-' in the name.", 400);
         const projectId = newProjectId();
         if (b.kind === "import") {
-          const created = await importRepository(env, { projectId, name, userId, url: clean(b.url, 300), branch: isSafeRef(clean(b.branch, 80)) ? clean(b.branch, 80) : "", install: clean(b.install, 300), build: clean(b.build, 300), test: clean(b.test, 300) });
-          await account.addProject({ id: projectId, name, role: "owner", kind: "import" });
-          return json({ id: projectId, ...created }, 201);
+          let source: URL;
+          try { source = validateImportSource(b.url); }
+          catch (error) { return text(error instanceof Error ? error.message : "Invalid import URL", 400); }
+          if (b.branch !== undefined && (typeof b.branch !== "string" || (b.branch !== "" && !isSafeRef(b.branch)))) return text("Enter a valid Git branch name", 400);
+          try { for (const command of [b.install, b.build, b.test]) validateRepositoryCommand(command); }
+          catch (error) { return text(error instanceof Error ? error.message : "Invalid repository command", 400); }
+          const created = await importRepository(env, account, { projectId, name, userId, url: source.toString(), branch: b.branch ?? "", install: clean(b.install, 300), build: clean(b.build, 300), test: clean(b.test, 300) });
+          return json(created, created.status === "ready" ? 201 : created.status === "failed" ? 409 : 202);
         }
         const created = await createDemoRepository(env, projectId, name, userId);
         await account.addProject({ id: projectId, name, role: "owner", kind: "demo" });
@@ -288,7 +407,15 @@ export default {
         const canAdminister = !auth.viaToken || auth.tokenScope === "full";
         const isOwner = role === "owner" && canAdminister;
 
-        if (sub === "" && method === "GET") return json({ id: projectId, role, kind: state.kind ?? "demo", name: state.projectName, source: state.source ?? null, verification: state.verificationPolicy, protectedPaths: settings.protectedPaths });
+        if (sub === "" && method === "GET") return json({ id: projectId, role, kind: state.kind ?? "demo", name: state.projectName, source: state.source ?? null, verification: state.verificationPolicy, protectedPaths: settings.protectedPaths, visibility: await project.repositoryVisibility() });
+        if (sub === "/visibility" && method === "POST") {
+          if (!isOwner) return text("Only the owner can change visibility", 403);
+          const value = await body<{ visibility?: string; confirmed?: boolean }>();
+          if (value.visibility !== "public" && value.visibility !== "private") return text("Invalid visibility", 400);
+          if (value.visibility === "public" && value.confirmed !== true) return text("Confirm that all accepted source and history will become public", 400);
+          await project.setRepositoryVisibility(value.visibility, value.confirmed === true, userId);
+          return json({ visibility: await project.repositoryVisibility() });
+        }
 
         if (sub === "/state" && method === "GET") {
           if (settings.fixture === "ticket-booking") {
@@ -298,6 +425,37 @@ export default {
         }
 
         if (sub === "/activity" && method === "GET") return json(await project.listActivity(60));
+
+        if (sub === "/connections" && method === "GET") {
+          if (!isOwner) return text("Only the owner can configure connections", 403);
+          return json(await project.listConnections());
+        }
+        if (sub === "/connections" && method === "POST") {
+          if (!isOwner) return text("Only the owner can configure connections", 403);
+          const value = await body<{ name: string; capabilities: Array<typeof integrationCapabilities[number]> }>();
+          try { return json(await project.createConnection(value.name, value.capabilities), 201); } catch { return text("Invalid connection", 400); }
+        }
+        if (sub === "/connections/policy" && method === "PUT") {
+          if (!isOwner) return text("Only the owner can configure checks", 403);
+          const policy = await body<ExternalCheckPolicy>();
+          if (policy.mode === "external" && !isCommandPolicy(state.verificationPolicy)) return text("External CI is available for imported custom repositories; this demo retains its protected checks", 409);
+          try { return json({ policy: await project.setConnectionPolicy(policy) }); } catch { return text("Invalid or stale check policy", 409); }
+        }
+        const connectionRoute = /^\/connections\/(svc_[a-f0-9-]{36})$/.exec(sub);
+        if (connectionRoute && method === "DELETE") {
+          if (!isOwner) return text("Only the owner can revoke connections", 403);
+          await project.revokeConnection(connectionRoute[1]!); return json({ revoked: true });
+        }
+        const checksRoute = /^\/candidates\/([a-z0-9_-]+)\/checks$/.exec(sub);
+        if (checksRoute && method === "GET") {
+          const [checks, reports] = await Promise.all([project.externalChecks(checksRoute[1]!), project.externalCheckReports(checksRoute[1]!)]);
+          return json({ checks, reports });
+        }
+        if (checksRoute && method === "POST") {
+          if (!isOwner) return text("Only the owner can retry checks", 403);
+          const value = await body<{ checkId: string }>();
+          try { return json({ checks: await project.registerExternalRun(checksRoute[1]!, value.checkId, `run_${crypto.randomUUID()}`) }, 201); } catch { return text("Unknown candidate or check", 404); }
+        }
 
         // ----- code browser -----
         if (sub === "/commits" && method === "GET") {
@@ -354,6 +512,7 @@ export default {
           const head = await resolveCommit(repo, headCommit);
           if (!head) return text("Commit not found", 404);
           const base = baseCommit ? await resolveCommit(repo, baseCommit) : head.parents[0] ? await resolveCommit(repo, head.parents[0]) : null;
+          if ((baseCommit || head.parents[0]) && !base) return text("The comparison base could not be read; no complete diff is available. Retry.", 503);
           const files = await diffTrees(repo, base?.treeHash, head.treeHash);
           return json({ repo: taskParam ? `task:${taskParam}` : "canonical", base: base?.hash ?? null, head, files });
         }
@@ -424,6 +583,13 @@ export default {
         }
 
         const tokenRoute = /^\/tasks\/([a-z0-9-]+)\/token$/.exec(sub);
+        const agentRecordRoute = /^\/tasks\/([a-z0-9-]+)\/agent-run$/.exec(sub);
+        if (agentRecordRoute && method === "GET") {
+          const task = state.tasks[agentRecordRoute[1]!];
+          if (!task) return text("Unknown change", 404);
+          const run = task.agentRunId ? await project.getAgentRun(task.agentRunId) : null;
+          return Response.json({ run }, { headers: { "Cache-Control": "no-store" } });
+        }
         if (tokenRoute && method === "POST") {
           const task = state.tasks[tokenRoute[1]!];
           if (!task || task.status === "accepted" || task.status === "cancelled") return text("Change is not open", 404);
@@ -438,7 +604,7 @@ export default {
           const action = taskRoute[2];
           if (action === "cancel") {
             await project.cancelTask(task.id);
-            ctx.waitUntil(env.ARTIFACTS.delete(task.workspace.repoName).catch(() => false));
+            // Cancellation stops integration, but the contributor's pushed branch remains recoverable.
             return json({ cancelled: task.id });
           }
           if (action === "ready") {
@@ -447,14 +613,41 @@ export default {
             const repo = await env.ARTIFACTS.get(task.workspace.repoName);
             const head = (await repo.log({ ref: `refs/heads/${task.workspace.branch}`, limit: 1 }))[0]?.hash ?? (await repo.log({ ref: task.workspace.branch, limit: 1 }))[0]?.hash;
             if (!head) return text(`Nothing pushed to ${task.workspace.branch} yet`, 409);
-            const { applied } = await project.ingestCheckpoint({ eventId: `ready-${task.id}-${head}`, taskId: task.id, commit: head, ready: true });
+            const [base, tip] = await Promise.all([resolveCommit(repo, task.baseCommit), resolveCommit(repo, head)]);
+            if (!base || !tip) return text("Could not read the saved change and base; retry without marking ready", 503);
+            const filesChanged = (await diffTrees(repo, base.treeHash, tip.treeHash)).map((file) => file.path);
+            const { applied } = await project.ingestCheckpoint({ eventId: `ready-${task.id}-${head}`, taskId: task.id, commit: head, ready: true, filesChanged });
             return json({ task: task.id, commit: head, applied });
           }
           // AI agent works on this change
+          if (["accepted", "cancelled", "integrating", "verifying"].includes(task.status)) return text("This change cannot start an agent in its current state", 409);
+          const agentRequest = await body<{ resumeFrom?: unknown }>();
+          let resumeFrom: string | undefined;
+          if (agentRequest.resumeFrom !== undefined) {
+            if (typeof agentRequest.resumeFrom !== "string" || agentRequest.resumeFrom !== task.agentRunId) return text("Select this change's saved agent work", 400);
+            const previous = await project.getAgentRun(agentRequest.resumeFrom);
+            if (previous?.taskId !== task.id || previous.phase !== "failed" || !previous.proposal) return text("No failed saved proposal is available to resume", 409);
+            if (previous.goal !== redactSecrets(task.goal)) return text("This change's purpose changed; inspect the saved proposal before starting new work", 409);
+            try {
+              const files = Object.keys(previous.proposal.files);
+              assertAgentWrites({ allowedScope: task.allowedScope ?? settings.allowedScope }, files, settings.protectedPaths);
+              assertAgentWrites({ allowedScope: settings.allowedScope }, files, settings.protectedPaths);
+            } catch { return text("Current permissions no longer allow this saved proposal; its files remain available for review", 409); }
+            resumeFrom = previous.runId;
+          }
           const { plan } = await account.getBilling();
           const denied = await admitRun(env, account, planLimits(env)[plan]);
           if (denied) return denied;
-          const instance = await env.AGENT_WORKFLOW.create({ id: `agent-${projectId}-${task.id}-${Date.now().toString(36)}`, params: { projectId, taskId: task.id } });
+          const instanceId = `agent-${projectId}-${task.id}-${crypto.randomUUID()}`;
+          if (!(await project.beginAgentTask(task.id, instanceId))) return text("This change already has active agent work or cannot start an agent", 409);
+          let instance: WorkflowInstance;
+          try {
+            await project.registerWorkflow(instanceId, "agent", task.id, userId);
+            instance = await env.AGENT_WORKFLOW.create({ id: instanceId, params: { projectId, taskId: task.id, ...(resumeFrom ? { resumeFrom } : {}) } });
+          } catch {
+            await project.failAgentTask(task.id, instanceId);
+            return text("Change is saved, but the agent could not start. Retry or continue on its saved branch.", 503);
+          }
           ctx.waitUntil(reportUsage(env, accountKey, "agent_run", instance.id, { plan }));
           return json({ instanceId: instance.id }, 202);
         }
@@ -467,7 +660,8 @@ export default {
           const { plan } = await account.getBilling();
           const denied = await admitRun(env, account, planLimits(env)[plan]);
           if (denied) return denied;
-          const eventId = `integ-${projectId}-${Date.now().toString(36)}`;
+          const eventId = `integ-${projectId}-${crypto.randomUUID()}`;
+          await project.registerWorkflow(eventId, "integration", undefined, userId);
           await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds: b.taskIds as string[], eventId } satisfies QueueMessage);
           return json({ queued: eventId }, 202);
         }
@@ -494,7 +688,11 @@ export default {
           const b = await body<{ decisionId?: string; selectedOptionId?: string }>();
           if (!b.decisionId || !b.selectedOptionId) return text("decisionId and selectedOptionId required", 400);
           const { taskIds } = await project.resolveDecision(b.decisionId, b.selectedOptionId);
-          if (taskIds.length > 0) await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds, eventId: `decision-${projectId}-${b.decisionId}` } satisfies QueueMessage);
+          if (taskIds.length > 0) {
+            const eventId = `decision-${projectId}-${b.decisionId}`;
+            await project.registerWorkflow(eventId, "integration", undefined, userId);
+            await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds, eventId } satisfies QueueMessage);
+          }
           return json({ resolved: true });
         }
 
@@ -505,18 +703,28 @@ export default {
           const { plan } = await account.getBilling();
           const denied = await admitRun(env, account, planLimits(env)[plan]);
           if (denied) return denied;
-          const runId = Date.now().toString(36);
-          const instance = await env.SCENARIO_WORKFLOW.create({ id: `scn-${projectId}-${runId}`, params: { projectId, act: b.act, runId } });
+          const runId = crypto.randomUUID();
+          const instanceId = `scn-${projectId}-${runId}`;
+          await project.registerWorkflow(instanceId, "scenario", undefined, userId);
+          const instance = await env.SCENARIO_WORKFLOW.create({ id: instanceId, params: { projectId, act: b.act, runId } });
           ctx.waitUntil(reportUsage(env, accountKey, "scenario_run", `${projectId}-${runId}`, { act: b.act, plan }));
           return json({ instanceId: instance.id }, 202);
         }
 
-        const wf = /^\/workflows\/([\w-]+)$/.exec(sub);
-        if (wf && method === "GET") {
+        const wf = /^\/workflows\/([\w-]+)(?:\/(pause|resume))?$/.exec(sub);
+        if (wf && ((method === "GET" && !wf[2]) || (method === "POST" && wf[2]))) {
           const id = wf[1]!;
-          if (!id.includes(projectId)) return text("Not found", 404);
-          const flow = id.startsWith("scn-") ? env.SCENARIO_WORKFLOW : id.startsWith("agent-") ? env.AGENT_WORKFLOW : env.INTEGRATION_WORKFLOW;
-          return json(await (await flow.get(id)).status());
+          try {
+            const run = await project.getWorkflowRun(id);
+            if (!run) return text("Workflow not found in this repository", 404);
+            if (method === "POST") assertWorkflowControlPermission(run, userId, isOwner);
+            const result = await controlWorkflow(env, project, id, wf[2] === "pause" ? "pause" : wf[2] === "resume" ? "resume" : "status");
+            if (method === "POST") await project.logActivity(userId, `workflow.${wf[2]}`, `${result.kind} run ${id}: ${result.status}`);
+            return json(result);
+          } catch (error) {
+            if (error instanceof WorkflowControlError) return text(error.message, error.statusCode);
+            throw error;
+          }
         }
 
         // ----- collaborators -----
@@ -682,17 +890,30 @@ export default {
           const canonicalToken = (await repo.createToken("read", 900)).plaintext;
           const sb = env.INTEGRATOR.getByName(`${projectId}-mirror-retry`);
           const exec = (cmd: string, e?: Record<string, string>) => sb.exec(["sh", "-c", cmd], { env: e });
-          const branch = (await exec(`git ls-remote --symref ${q(remote)} HEAD`, gitAuthEnv(canonicalToken))).stdout.match(/ref: refs\/heads\/(\S+)\s+HEAD/)?.[1] ?? state.defaultBranch ?? "main";
+          const cleanup = async () => {
+            try { await sb.destroy(); }
+            catch { await project.logActivity("FlareGit", "container.cleanup_failed", "Mirror retry container did not confirm shutdown; accepted history is preserved").catch(() => console.warn("Container cleanup evidence unavailable")); }
+          };
+          let branch: string;
+          try { branch = (await exec(`git ls-remote --symref ${q(remote)} HEAD`, gitAuthEnv(canonicalToken))).stdout.match(/ref: refs\/heads\/(\S+)\s+HEAD/)?.[1] ?? state.defaultBranch ?? "main"; } catch (error) {
+            await cleanup();
+            throw error;
+          }
           const commit = state.acceptedState.currentCommit;
           ctx.waitUntil(
             pushMirror({ exec }, { canonicalRemote: remote, canonicalToken, target: cfg.target, githubToken: cfg.token, branch, commit })
               .then((r) => project.recordMirrorRun(commit, r.status, r.detail))
               .catch(() => project.recordMirrorRun(commit, "error", "Mirror run failed to start"))
+              .finally(cleanup)
           );
           return json({ queued: true }, 202);
         }
 
-        if (sub === "/webhooks" && method === "GET") return json(await project.listWebhooks());
+        if (sub === "/webhooks" && method === "GET") {
+          // Receiver URLs can themselves contain private routing credentials.
+          if (!isOwner) return text("Only the owner can view webhook settings; delivery history remains available", 403);
+          return json(await project.listWebhooks());
+        }
         if (sub === "/webhooks" && method === "POST") {
           if (!isOwner) return text("Only the owner can add webhooks", 403);
           const b = await body<{ url?: string; events?: string[] }>();
@@ -703,7 +924,8 @@ export default {
             return text(e instanceof Error ? e.message : "Invalid URL", 400);
           }
           if ((await project.listWebhooks()).length >= 10) return text("Webhook limit reached (10).", 409);
-          const created = await project.addWebhook(target.toString(), Array.isArray(b.events) && b.events.length > 0 ? b.events : ["change.accepted", "change.blocked"]);
+          if (b.events !== undefined && (!Array.isArray(b.events) || b.events.length === 0 || b.events.some((event) => !(WEBHOOK_EVENTS as readonly string[]).includes(event)))) return text("Choose supported webhook events", 400);
+          const created = await project.addWebhook(target.toString(), b.events ?? ["change.accepted", "change.blocked"]);
           return json({ ...created, note: "Store this signing secret now; it is not shown again." }, 201);
         }
         const hookRoute = /^\/webhooks\/(wh_[a-z0-9-]+)$/.exec(sub);
@@ -724,6 +946,8 @@ export default {
           if (!isOwner) return text("Only the owner can change settings", 403);
           if (!isCommandPolicy(state.verificationPolicy)) return text("The demo repository's checks are fixed", 400);
           const b = await body<Partial<CommandPolicy>>();
+          try { for (const command of [b.install, b.build, b.test]) validateRepositoryCommand(command); }
+          catch (error) { return text(error instanceof Error ? error.message : "Invalid repository command", 400); }
           const next: CommandPolicy = {
             ...state.verificationPolicy,
             install: clean(b.install ?? state.verificationPolicy.install, 300) || undefined,
@@ -748,8 +972,10 @@ export default {
 
       return text("Not found", 404);
     } catch (err) {
-      console.error("api error", method, path, err instanceof Error ? err.message : String(err));
-      return text(err instanceof Error ? err.message : "Internal error", 500);
+      if (err instanceof RequestBodyError) return text(err.message, 400);
+      const message = redactSecrets(err instanceof Error ? err.message : "Internal error");
+      console.error("api error", method, path, message);
+      return text(message, 500);
     }
   },
 
@@ -761,19 +987,6 @@ export default {
     await handleQueueBatch(batch, env);
   },
 };
-
-/** Existing customers had a single hash-keyed project before multi-repo support; keep it as their first repository. */
-async function adoptLegacyProject(env: Env, account: Ledger, accountKey: string, userId: string) {
-  try {
-    const legacy = projectOf(env, accountKey);
-    const state = await legacy.getState();
-    if (!(await legacy.roleOf(userId))) await legacy.addMember(userId, "owner");
-    await account.addProject({ id: accountKey, name: state.projectName || "demo", role: "owner", kind: state.kind ?? "demo" });
-    return account.listProjects();
-  } catch {
-    return [];
-  }
-}
 
 async function createDemoRepository(env: Env, projectId: string, name: string, userId: string) {
   const ledger = projectOf(env, projectId);
@@ -799,50 +1012,37 @@ async function createDemoRepository(env: Env, projectId: string, name: string, u
   }
 }
 
+async function finishImport(env: Env, account: Ledger, job: ImportJob, readiness: ImportReadiness) {
+  if (readiness.status === "ready") {
+    try {
+      await projectOf(env, job.id).initialize({ projectId: job.id, projectName: job.name, canonicalRepoName: job.canonicalRepoName, head: readiness.head, verificationPolicy: job.verificationPolicy as unknown as Record<string, unknown>, kind: "import", defaultBranch: readiness.defaultBranch, ownerId: job.ownerId, source: job.source });
+      await account.addProject({ id: job.id, name: job.name, role: "owner", kind: "import" });
+      await account.saveImportJob({ ...job, status: "ready", updatedAt: new Date().toISOString(), detail: "Repository is available. No shallow depth was requested; completeness of imported history is not verified." });
+      return { id: job.id, status: "ready" as const, head: readiness.head, kind: "import", remote: readiness.remote };
+    } catch {
+      // Repository data survives an account/controller failure and can be retried.
+      readiness = { status: "pending", detail: "Repository is preserved, but account setup did not finish; retry this saved import" };
+    }
+  }
+  const pending: ImportJob = { ...job, status: readiness.status, updatedAt: new Date().toISOString(), detail: readiness.detail };
+  await account.saveImportJob(pending);
+  return { id: job.id, status: readiness.status, import: pending };
+}
+
 async function importRepository(
   env: Env,
+  account: Ledger,
   o: { projectId: string; name: string; userId: string; url: string; branch: string; install: string; build: string; test: string }
 ) {
-  let source: URL;
-  try {
-    source = new URL(o.url);
-  } catch {
-    throw new Error("Enter a valid repository URL, for example https://github.com/owner/repo");
-  }
-  if (source.protocol !== "https:" || source.username || source.password) throw new Error("Only public https:// repository URLs are supported (no embedded credentials).");
+  const source = validateImportSource(o.url);
   if (!o.test) throw new Error("A test command is required: it is the protected check every change must pass.");
-  const canonicalName = canonicalNameFor(o.projectId);
-  const imported = await env.ARTIFACTS.import({
-    source: { url: source.toString(), ...(o.branch ? { branch: o.branch } : {}), depth: 200 },
-    target: { name: canonicalName, opts: { description: `Imported from ${source.host}${source.pathname}` } },
-  });
-  try {
-    const repo = await env.ARTIFACTS.get(canonicalName);
-    const head = (await repo.log({ limit: 1 }))[0]?.hash;
-    if (!head) throw new Error("The imported repository has no commits.");
-    const defaultBranch = String((await repo.info()).defaultBranch ?? "main");
-    const policy: CommandPolicy = {
-      kind: "command",
-      ...(o.install ? { install: o.install } : {}),
-      ...(o.build ? { build: o.build } : {}),
-      test: o.test,
-      allowedScope: ["*"],
-      protectedPaths: DEFAULT_PROTECTED_PATHS,
-    };
-    await projectOf(env, o.projectId).initialize({
-      projectId: o.projectId,
-      projectName: o.name,
-      canonicalRepoName: canonicalName,
-      head,
-      verificationPolicy: policy as unknown as Record<string, unknown>,
-      kind: "import",
-      defaultBranch,
-      ownerId: o.userId,
-      source: source.toString(),
-    });
-    return { head, kind: "import", remote: imported.remote };
-  } catch (e) {
-    await env.ARTIFACTS.delete(canonicalName).catch(() => false);
-    throw e;
-  }
+  const now = new Date().toISOString();
+  const job: ImportJob = {
+    id: o.projectId, ownerId: o.userId, name: o.name, canonicalRepoName: canonicalNameFor(o.projectId), source: source.toString(), branch: o.branch,
+    verificationPolicy: { kind: "command", ...(o.install ? { install: o.install } : {}), ...(o.build ? { build: o.build } : {}), test: o.test, allowedScope: ["*"], protectedPaths: DEFAULT_PROTECTED_PATHS },
+    status: "requested", historyIntent: "provider-default-no-depth-requested", createdAt: now, updatedAt: now, detail: "Import request is saved; provider readiness has not been observed",
+  };
+  // Persist ownership and recovery identity BEFORE contacting the provider.
+  await account.saveImportJob(job);
+  return finishImport(env, account, job, await startImport(env.ARTIFACTS, job));
 }

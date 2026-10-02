@@ -2,6 +2,15 @@
 
 A Git collaboration platform on Cloudflare Workers and Artifacts for humans and AI agents working at the same time. Each change lives in its own Artifacts fork and is pushed with ordinary `git`. FlareGit composes ready changes onto the accepted head, repairs what it safely can, verifies the exact candidate commit, waits for a human to accept that commit, and lands only that commit with a compare-and-swap ref update.
 
+The deployed prototype improvements are on [`codex/concurrent-collaboration-integrity`](https://github.com/Joe-Simo/flaregit/tree/codex/concurrent-collaboration-integrity), under review in [PR #1](https://github.com/Joe-Simo/flaregit/pull/1). To reproduce that version before the PR is merged:
+
+```bash
+git clone --branch codex/concurrent-collaboration-integrity https://github.com/Joe-Simo/flaregit.git
+cd flaregit
+```
+
+Cloudflare deployment messages record the exact source commit; check out that SHA to reproduce a particular deployment.
+
 ## Workflow
 
 1. **Changes.** `flaregit work <repo> "<goal>"` (or the web app) creates a change: a fork of the canonical repo with its own branch. Humans push to it; agents (`change new --agent`) run in an agent container and push to the same kind of fork.
@@ -11,13 +20,15 @@ A Git collaboration platform on Cloudflare Workers and Artifacts for humans and 
 5. **Durable landing.** On accept, the Durable Object validates the candidate (evidence, commit, tree, base, policy) and journals PREPARED; a fresh workspace fetches the stored candidate ref and pushes it with `--force-with-lease` against the expected base; the ledger is completed.
 6. **Webhooks.** Events are emitted only after the ref update commits.
 
-**Conflicts.** Text conflicts are found by `git merge-tree` and repaired. Clean merges that break behavior are caught by verification and repaired or blocked; nothing failing is published. Requirements that contradict each other pause integration with one product question; the accepted head does not move until it is answered.
+**Conflicts.** Native Git detects text conflicts; model repair attempts and resulting changes are included in candidate review. Clean merges that break behavior are caught by verification and repaired or blocked; nothing failing is published. Requirements that contradict each other pause integration with one product question; the accepted head does not move until it is answered.
 
 **Stale bases.** If the branch moved since the candidate was frozen, the CAS push is refused; the candidate is marked stale and the integration must be re-run.
 
 **Stacks.** A change can be stacked on another (`work ... --on <change>`). It cannot be marked ready until its parent is accepted; after a landing, downstream changes are rebased automatically.
 
 **Recovery.** Agents resume from their already pushed branch. Publication rehydrates from the stored candidate ref, so a crashed step does not need the original workspace. Webhook deliveries are written in the same transaction as the event (transactional outbox) and a Durable Object alarm re-sends anything not yet queued.
+
+Original contributor forks remain available after acceptance and cancellation, including squash landings, so the original work can still be reviewed and recovered.
 
 ## Platform features
 
@@ -29,6 +40,7 @@ A Git collaboration platform on Cloudflare Workers and Artifacts for humans and 
 - Signed private previews: builds of accepted commits in R2, opened through HMAC-signed, expiring links on a separate origin.
 - Webhooks: Standard Webhooks signature, ordered per project, retried with backoff, manual replay, `webhook-sequence` and a stable `webhook-id` for de-duplication.
 - Status page: `/status` and `/status.json`, probed by a 5-minute cron.
+- Workflow outcomes are counted by unique agent and integration instance, with terminal results and unresolved starts separated. Availability checks state their scope; a repository-list probe is not evidence of a successful clone, merge or agent run.
 - Custom domain verification through a DNS TXT record at `_flaregit.<domain>`; a verified claim displaces unverified ones.
 - Diff viewer (virtualized, keyboard driven) and a terminal reviewer (`flaregit review`).
 - CLI (`bun run build:cli` produces `dist-cli/flaregit`; JSON output, token auth). `bun cli/flaregit.ts --help` lists every command.
@@ -78,14 +90,20 @@ bun run build && bunx wrangler deploy
 
 ## Develop locally
 
+Clone the [public Apache-2.0 repository](https://github.com/Joe-Simo/flaregit), then run these commands from its root. Git and Bun are required for the local controller and proof runner. Cloudflare credentials are needed only for the live model demo or hosted deployment.
+
 ```bash
 bun install
 bun run typecheck && bun run lint && bun test
 ```
 
-UI: `bun run dev` starts Vite on :5173 and proxies `/api`, `/auth-config`, `/status.json` and `/webhooks` to a real Worker at `FLAREGIT_API` (default `http://127.0.0.1:8787`, i.e. `bunx wrangler dev`; see `vite.config.ts`).
+UI: `bun run dev` uses Bun HTML imports and `Bun.serve` on loopback port 5173. It proxies the API, auth configuration, status and webhook requests to a real Worker at `FLAREGIT_API` (default `http://127.0.0.1:8787`, i.e. `bunx wrangler dev`; see `src/tooling/dev-web.ts`). `bun run build` emits the production HTML, styles, JavaScript, legal pages, and a separate compiled diff worker into `dist`. Tailwind 3 styling is preserved through PostCSS; client environment inlining is disabled.
 
-Core engine without the cloud: `bun test` runs the integration engine with real Git, verification and CAS, with a scripted stand-in for the model only. `bun run demo` runs the three ticket-booking scenarios (text conflict, clean-but-broken merge, contradiction) against a local runtime with Workers AI as the model; it requires `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (optional `CLOUDFLARE_AI_GATEWAY`, `FLAREGIT_AI_MODEL`) and refuses to run without them.
+Core engine without the cloud: `bun test` runs the integration engine with real Git, verification and CAS, with a scripted stand-in for the model only. `bun run demo` runs the three ticket-booking scenarios (text conflict, clean-but-broken merge, contradiction) against a local runtime with Workers AI as the model; it requires `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (optional `CLOUDFLARE_AI_GATEWAY`, `FLAREGIT_AI_MODEL`) and refuses to run without them. Contributor verification and preview builds additionally require secure Linux UID isolation (the supplied cloud container); the local live-model demo fails closed on an ordinary macOS process. Do not use the trusted test-harness mode for real model output or imported repositories.
+
+`bun run demo:proof` runs a standalone real-Git protocol illustration with deterministic scripted contributors, no model or cloud credentials, and retained commit/journal receipts. It demonstrates parallel isolated clones, conflict, stale push refusal, and reconstruction after workspace deletion; it does not exercise the hosted product or represent real AI agents.
+
+The local demo is a scenario harness, not the hosted multi-repository product. Its agents make real concurrent model calls and Git commits, but it does not demonstrate the hosted human approval flow or competition interruption-recovery requirement. See [docs/DEMO.md](docs/DEMO.md) for the recording plan and outstanding evidence gates.
 
 `bun run server` (`src/server/local.ts`) is a separate single-project scenario server on port 3000; it does not serve the multi-repository API the UI uses.
 
@@ -102,7 +120,7 @@ Core engine without the cloud: `bun test` runs the integration engine with real 
 | `tests/dns.test.ts` | Domain normalization, TXT record construction and parsing, resolver failures. |
 | `tests/artifacts.test.ts` | Local Artifacts client: repo creation, tokens, forks. |
 
-The race test runs 20 contending branches by default (4 workers). The 500-branch run passed on an Apple-silicon laptop in about 14 minutes (local bare repository, real `git push --force-with-lease`; it tests the landing protocol, not Artifacts throughput). Full run:
+The race test runs 20 contending branches by default (4 workers), using a local bare repository and real `git push --force-with-lease`. It tests the landing protocol, not Artifacts throughput. An optional larger run is available; this release does not claim a measured production throughput or timing result:
 
 ```bash
 RACE_BRANCHES=500 RACE_TIMEOUT_MS=7200000 bun test tests/landing-race.test.ts
@@ -114,12 +132,24 @@ RACE_BRANCHES=500 RACE_TIMEOUT_MS=7200000 bun test tests/landing-race.test.ts
 - One landing at a time per project; the landing lease is 20 minutes.
 - A candidate waits up to 7 days for review, then goes stale and must be re-run.
 - At most 8 changes per integration.
-- Diff time-to-interactive is network and auth bound: about 0.8 to 1 s measured in Safari; scrolling holds 60 fps at 3,000 to 8,000 px/s, with at most about 100 DOM rows rendered for a 12k-line diff.
+- Tree diffs currently support at most 5,000 changed files. Larger diffs fail explicitly rather than presenting incomplete coordination evidence as complete.
+- Individual preview assets are limited to 16 MiB. Binary images and fonts are preserved as bytes; oversized or linked output assets fail explicitly.
+- The diff renderer virtualizes visible rows and computes diffs in a separate browser worker. Current release verification covers worker execution and responsive signed-out layouts; authenticated large-repository latency and frame-rate measurements remain an acceptance gate.
 - Syntax highlighting is per line, so multi-line constructs can be colored incorrectly.
 - Contradiction detection needs structured assertions on requirements.
+
+`bun run demo:hosted prepare|status|integrate|verify <receipt.json>` captures real hosted test-repository observations using an environment-only account token. The runner requires explicit human review before fresh-clone verification. Registered workflows can be inspected, paused, and resumed with `flaregit workflow status|pause|resume`; see [docs/DEMO.md](docs/DEMO.md) for exact secure setup, recovery limits, and recording gates.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for trust boundaries and the landing protocol.
 
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+Hosted checks and previews execute contributor code under a separate Linux UID. `NODE_ENV=test` permits same-user execution only for explicitly trusted fixtures; those receipts are not production isolation evidence. Earlier recorded local AI results describe that historical run and do not prove the newer isolation boundary. An authenticated browser can exercise owned repositories without a CLI token; command-line acceptance still requires its own account token.
+
+Bring-your-own tools can already work through ordinary Git in a FlareGit change workspace created by `flaregit work`; review and integration remain in FlareGit. External provider names are attribution metadata, not evidence that a vendor account was connected or an agent ran. Registered external check/review reporting has an authenticated callback API and CLI; hosted service delivery still requires verification against the deployed API. The built-in `--agent` option runs FlareGit's own agent workflow; it does not log in to an external vendor.
+
+A registered external service can submit a strictly validated check or automated comment using `bun cli/flaregit.ts report <repository-id> --service <connection-id> --file <report.json> --event <stable-event-id>`. Load the owner-issued signing secret as `FLAREGIT_CONNECTION_SECRET` in the local service environment; never pass it as an argument, commit it, or put it in client code. The CLI signs exact request bytes and sends no human bearer token. Retain the printed event ID and unchanged report contents for retries; a new status update uses a new event ID. Check reports bind candidate/commit/tree/policy and a maintainer-registered run. Automated comments cannot approve review or merge. `bun cli/flaregit.ts service-candidate <repository-id> <candidate-id> --service <connection-id> --commit <exact-40-character-SHA>` separately reads an HMAC-signed metadata snapshot using the same environment secret. It returns candidate commit/tree, policy version and only that service's assigned checks; it grants no repository clone token or source-file access. Each read uses a fresh nonce, and an inactive/revoked connection is denied.
+
+The [seven-minute recording runbook](docs/DEMO.md) separates real hosted observations from local fixtures and lists the remaining recording evidence gates. Reconfirm the exercise candidate and full accepted SHA before filming; an awaiting-review candidate is not an accepted landing.

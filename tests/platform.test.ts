@@ -6,7 +6,7 @@ import { scriptedModel, mergedPricing } from "./support/scripted-model.js";
 import { ACT1, ACT2, ACT3, runScenario } from "../src/scenarios/ticket-booking.js";
 import { ticketBookingVerifier } from "../src/fixtures/ticket-booking/verifier.js";
 import { publishAcceptedCandidate, reconcileJournalEntry } from "../src/core/pipeline/accept.js";
-import { gitOrThrow } from "../src/core/pipeline/git.js";
+import { changedFiles, gitOrThrow } from "../src/core/pipeline/git.js";
 import { FlareGitRepositoryController } from "../src/core/controller.js";
 
 let h: Harness | undefined;
@@ -239,6 +239,7 @@ describe("Publication safety", () => {
     const interrupted = { ...accepted, state: "PREPARED" as const };
     expect(reconcileJournalEntry(h!.head(), interrupted).state).toBe("ACCEPTED");
     expect(reconcileJournalEntry(h!.seedHead, interrupted).state).toBe("ABORTED");
+    expect(reconcileJournalEntry("later-head", interrupted, true).state).toBe("ACCEPTED");
     // Restore from disk with a stuck task and journal entry.
     state.journal = [interrupted];
     state.acceptedState.currentCommit = h!.seedHead;
@@ -254,4 +255,11 @@ describe("Publication safety", () => {
     expect(Object.values(s.tasks).every((t) => t.status === "accepted")).toBe(true);
     void o;
   }, T);
+});
+
+describe("Git change inspection", () => {
+  test("refuses unavailable revisions rather than reporting no protected changes", async () => {
+    h = await createHarness({ model: scriptedModel() });
+    expect(() => changedFiles(h!.canonicalDir, "missing-base", "missing-head")).toThrow();
+  });
 });

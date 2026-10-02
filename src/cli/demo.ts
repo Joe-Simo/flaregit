@@ -10,8 +10,11 @@ import { WorkersAINotConfiguredError } from "../ai/workers-ai.js";
  * everything printed is measured from the real controller state — there is no scripted output.
  */
 async function main(): Promise<void> {
-  const dir = path.resolve(process.cwd(), ".flaregit-storage", "demo-run");
-  fs.rmSync(dir, { recursive: true, force: true });
+  if (process.platform !== "linux" || process.getuid?.() !== 0) throw new Error("Live model scenarios require the secure Linux container runtime. Use the hosted demo; trusted test-fixture mode is not a live execution bypass.");
+  const storage = path.resolve(process.cwd(), ".flaregit-storage");
+  fs.mkdirSync(storage, { recursive: true });
+  const dir = fs.mkdtempSync(path.join(storage, "demo-run-"));
+  console.log(`Run receipts and recoverable repositories: ${dir}`);
   const { controller, ai } = await createLocalRuntime(dir);
   if (!ai.isConfigured) throw new WorkersAINotConfiguredError();
   const model = ai.asModel();

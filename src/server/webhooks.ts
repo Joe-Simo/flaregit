@@ -14,7 +14,7 @@ export function validateWebhookUrl(raw: string): URL {
   } catch {
     throw new Error("Enter a valid https:// URL");
   }
-  const host = u.hostname.toLowerCase();
+  const host = u.hostname.toLowerCase().replace(/\.$/, "");
   if (u.protocol !== "https:") throw new Error("Webhook URLs must use https");
   if (u.username || u.password) throw new Error("Do not put credentials in the URL");
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal") || !host.includes(".")) throw new Error("Webhook URLs must be public hostnames");
@@ -36,7 +36,9 @@ export async function deliverWebhook(env: Env, projectId: string, deliveryId: st
   const found = await ledger.getDelivery(deliveryId);
   if (!found) return null;
   const { delivery, webhook } = found;
-  if (delivery.status === "success") return null; // duplicate queue delivery: already done
+  // A duplicate queue message cannot restart an exhausted delivery. Explicit replay
+  // resets the durable row to pending before enqueueing it again.
+  if (delivery.status !== "pending") return null;
   if (!webhook.active) {
     await ledger.markDelivery(deliveryId, { ok: false, error: "Webhook disabled", final: true });
     return null;
@@ -70,8 +72,9 @@ export async function deliverWebhook(env: Env, projectId: string, deliveryId: st
     }
     const attempts = await ledger.markDelivery(deliveryId, { ok: false, status: res.status, error: `Receiver answered ${res.status}`, latencyMs, final: delivery.attempts + 1 >= MAX_ATTEMPTS });
     return attempts >= MAX_ATTEMPTS ? null : Math.min(30 * 2 ** (attempts - 1), 3600);
-  } catch (err) {
-    const attempts = await ledger.markDelivery(deliveryId, { ok: false, error: err instanceof Error ? err.message : "Delivery failed", latencyMs: Date.now() - started, final: delivery.attempts + 1 >= MAX_ATTEMPTS });
+  } catch {
+    // Fetch exception text can contain the receiver URL, including query credentials.
+    const attempts = await ledger.markDelivery(deliveryId, { ok: false, error: "Delivery failed or timed out", latencyMs: Date.now() - started, final: delivery.attempts + 1 >= MAX_ATTEMPTS });
     return attempts >= MAX_ATTEMPTS ? null : Math.min(30 * 2 ** (attempts - 1), 3600);
   }
 }
