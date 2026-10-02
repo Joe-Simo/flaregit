@@ -1,3 +1,4 @@
+import { workerdChild } from "./support/workerd-child";
 import { expect, test } from "bun:test";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 
@@ -12,11 +13,67 @@ function state(newer = false) {
 }
 
 test("local workerd SQLite executes production publication rollback and recovery", async () => {
-  const built = await Bun.build({ entrypoints: ["tests/support/sqlite-publication-worker.ts"], target: "browser", external: ["cloudflare:workers", "node:crypto"] });
-  if (!built.success) throw new Error(built.logs.join("\n"));
-  const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ name: "publication-test", modules: true, script: await built.outputs[0]!.text(), compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], durableObjects: { TEST: { className: "PublicationFixture", useSQLite: true } }, queueProducers: ["INTEGRATION_QUEUE"] }] }));
+  if (await workerdChild("tests/sqlite-publication.test.ts")) return;
+  const bundlePath = `/tmp/flaregit-publication-${crypto.randomUUID()}.js`;
+  const built = Bun.spawn([process.execPath, "build", "tests/support/sqlite-publication-worker.ts", "--target=browser", "--external=cloudflare:workers", "--external=node:crypto", `--outfile=${bundlePath}`], { stdout: "ignore", stderr: "pipe" });
+  if (await built.exited !== 0) throw new Error(await new Response(built.stderr).text());
+  const script = await Bun.file(bundlePath).text();
+  await Bun.file(bundlePath).delete();
+  const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ name: "publication-test", modules: true, script, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], durableObjects: { TEST: { className: "PublicationFixture", useSQLite: true } }, queueProducers: ["INTEGRATION_QUEUE"] }] }));
   const request = async (route: string, body?: unknown) => (await mf.getWorker("publication-test")).fetch(`http://test${route}`, body ? { method: "POST", body: JSON.stringify(body) } : undefined);
   try {
+    const publishable = {
+      ...state(),
+      evidence: { evidence: { id: "evidence", candidateCommit: "landed", candidateTree: "tree", status: "passed", verifierIdentity: "flaregit-ticket-booking-protected-verifier-v2", expectedAcceptedBase: "base", requirementsVersion: 1, builtOutputDigest: "build" } },
+      candidates: { candidate: { ...state().candidates.candidate, candidateCommit: "landed", expectedAcceptedBase: "base", frozenVerificationPolicy: {}, review: { approved: true, commit: "landed", by: "reviewer" } } },
+    };
+    const policy = { version: 2, mode: "external", checks: [{ id: "required-check", providerId: "provider-one", required: true }] };
+    const nativeCandidate = {
+      ...publishable,
+      evidence: { evidence: { ...publishable.evidence.evidence, verifierIdentity: "flaregit-native-integrity-v1" } },
+      candidates: { candidate: { ...publishable.candidates.candidate, frozenVerificationPolicy: { kind: "command", test: "bun test" }, frozenExternalChecksPolicy: policy, frozenContributorProofs: [{ id: "task", commit: "task-tip", baseCommit: "base", ref: "refs/flaregit/tasks/task", allowedScope: ["src/"] }] } },
+    };
+    const externalPassed = { frozen: { repositoryId: "test", candidateId: "candidate", commit: "landed", tree: "tree", policy }, runs: { run: { id: "run", checkId: "required-check", sequence: 1, status: "passed" } }, selectedRuns: { "required-check": "run" }, receipts: {} };
+    await request("/seed?name=native-alone", { state: nativeCandidate, holder: "old-holder" });
+    expect((await (await request("/prepare?name=native-alone")).json() as { ok: boolean }).ok).toBe(false);
+    for (const [label, external] of [["commit", { ...externalPassed, frozen: { ...externalPassed.frozen, commit: "wrong" } }], ["tree", { ...externalPassed, frozen: { ...externalPassed.frozen, tree: "wrong" } }], ["policy", { ...externalPassed, frozen: { ...externalPassed.frozen, policy: { ...policy, version: 3 } } }]] as const) {
+      await request(`/seed?name=wrong-${label}`, { state: nativeCandidate, holder: "old-holder" });
+      await request(`/external?name=wrong-${label}`, external);
+      expect((await (await request(`/prepare?name=wrong-${label}`)).json() as { ok: boolean }).ok).toBe(false);
+    }
+    await request("/seed?name=native-external-good", { state: nativeCandidate, holder: "old-holder" });
+    await request("/external?name=native-external-good", externalPassed);
+    expect((await (await request("/prepare?name=native-external-good")).json() as { ok: boolean }).ok).toBe(true);
+    await request("/seed?name=native-augment", { state: { ...nativeCandidate, candidates: { candidate: { ...nativeCandidate.candidates.candidate, frozenExternalChecksPolicy: { ...policy, mode: "augment" } } } }, holder: "old-holder" });
+    await request("/external?name=native-augment", { ...externalPassed, frozen: { ...externalPassed.frozen, policy: { ...policy, mode: "augment" } } });
+    expect((await (await request("/prepare?name=native-augment")).json() as { ok: boolean }).ok).toBe(false);
+    const provider = await (await request("/connection?name=frozen-policy")).json() as { metadata: { id: string } };
+    const capturedPolicy = { version: 2, mode: "external", checks: [{ id: "required-check", providerId: provider.metadata.id, required: true }] };
+    const commit = "a".repeat(40), tree = "b".repeat(40);
+    await request("/seed?name=frozen-policy", { state: { ...nativeCandidate, evidence: { evidence: { ...nativeCandidate.evidence.evidence, candidateCommit: commit, candidateTree: tree } }, candidates: { candidate: { ...nativeCandidate.candidates.candidate, candidateCommit: commit, review: undefined, frozenExternalChecksPolicy: capturedPolicy } } }, holder: "old-holder" });
+    await request("/external-policy?name=frozen-policy", capturedPolicy);
+    await request("/external-policy?name=frozen-policy", { ...capturedPolicy, version: 3, checks: [] });
+    expect((await request(`/await-review?name=frozen-policy&commit=${commit}`)).status).toBe(200);
+    const beforeReplay = await (await request("/checks?name=frozen-policy")).json() as { frozen: { policy: typeof capturedPolicy }; selectedRuns: Record<string, string> };
+    expect(beforeReplay.frozen.policy).toEqual(capturedPolicy);
+    await request(`/await-review?name=frozen-policy&commit=${commit}`);
+    const afterReplay = await (await request("/checks?name=frozen-policy")).json() as typeof beforeReplay;
+    expect(afterReplay).toEqual(beforeReplay);
+    const mismatched = { frozen: { repositoryId: "test", candidateId: "candidate", commit: "different-commit", tree: "tree", policy: { version: 1, mode: "augment", checks: [] } }, runs: {}, selectedRuns: {}, receipts: {} };
+    await request("/seed?name=mismatched-review", { state: { ...publishable, candidates: { candidate: { ...publishable.candidates.candidate, status: "awaiting_review", review: undefined } } }, holder: "old-holder" });
+    await request("/external?name=mismatched-review", mismatched);
+    expect((await (await request("/review?name=mismatched-review")).json() as { ok: boolean }).ok).toBe(false);
+    const unreviewed = await (await request("/snapshot?name=mismatched-review")).json() as { state: { candidates: { candidate: { review?: unknown } } } };
+    expect(unreviewed.state.candidates.candidate.review).toBeUndefined();
+    await request("/seed?name=mismatched-prepare", { state: publishable, holder: "old-holder" });
+    await request("/external?name=mismatched-prepare", mismatched);
+    expect((await (await request("/prepare?name=mismatched-prepare")).json() as { ok: boolean }).ok).toBe(false);
+    await request("/seed?name=prepare", { state: publishable, holder: "old-holder" });
+    const prepared = await (await request("/prepare?name=prepare")).json() as { ok: boolean; journal: { id: string } };
+    expect(prepared.ok).toBe(true);
+    expect(prepared.journal.id).toMatch(/^jrnl_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    await request("/seed?name=obsolete", { state: { ...publishable, evidence: { evidence: { ...publishable.evidence.evidence, verifierIdentity: "flaregit-ticket-booking-protected-verifier-v1" } } }, holder: "old-holder" });
+    expect((await (await request("/prepare?name=obsolete")).json() as { ok: boolean }).ok).toBe(false);
     await request("/seed", { state: state(), holder: "old-holder" });
     await request("/fail?enabled=true");
     expect((await request("/complete")).status).toBe(500);

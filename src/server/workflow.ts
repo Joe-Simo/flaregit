@@ -107,14 +107,17 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     await step.do("mirror-to-github", async () => {
       const cfg = await stub.mirrorSecret();
       if (!cfg) return { skipped: true };
+      const mirror = this.sandbox(`mirror-${candidate.id}`);
       try {
         const canonical = await this.canonicalRemote(stub);
-        const r = await pushMirror({ exec: this.sandbox(`mirror-${candidate.id}`).exec }, { target: cfg.target, githubToken: cfg.token, canonicalRemote: canonical.remote, canonicalToken: canonical.token, branch: integrated.branch, commit: integrated.commit });
+        const r = await pushMirror({ exec: mirror.exec }, { target: cfg.target, githubToken: cfg.token, canonicalRemote: canonical.remote, canonicalToken: canonical.token, branch: integrated.branch, commit: integrated.commit });
         await stub.recordMirrorRun(integrated.commit, r.status, r.detail);
         return { status: r.status };
       } catch {
         await stub.recordMirrorRun(integrated.commit, "error", "Mirror workspace unavailable; use Retry now");
         return { status: "error" };
+      } finally {
+        await mirror.destroy();
       }
     });
     return { status: "accepted" as const, commit: integrated.commit, evidenceId: integrated.evidenceId };
@@ -130,6 +133,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     const tasks = Object.values(state.tasks);
     if (!tasks.some((t) => t.dependsOn && accepted.has(t.dependsOn))) return { rebased: [], blocked: [] };
     const sb = this.sandbox(`rebase-${candidate.id}`);
+    try {
     const canonical = await this.canonicalRemote(stub);
     const cloned = await sb.exec(`rm -rf ${WORK} && git clone --quiet ${q(canonical.remote)} ${WORK} && git -C ${WORK} config user.name FlareGit && git -C ${WORK} config user.email integrator@flaregit.com`, gitAuthEnv(canonical.token));
     if (!cloned.success) throw new Error("Could not clone canonical repository for stack rebase");
@@ -174,6 +178,9 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       queue.push(...tasks.filter((t) => t.dependsOn === child.id));
     }
     return { rebased, blocked };
+    } finally {
+      await sb.destroy();
+    }
   }
 
   private projectId = "";
@@ -186,6 +193,13 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       readFile: async (p: string) => ({ content: await sb.readFile(p) }),
       readFileBytes: (p: string) => sb.readFileBytes(p),
       writeFile: (p: string, c: string) => sb.writeFile(p, c),
+      destroy: async () => {
+        try { await sb.destroy(); }
+        catch {
+          console.warn("Container cleanup failed");
+          await ledgerOf(this.env, this.projectId).logActivity("FlareGit", "container.cleanup_failed", `Container ${id} did not confirm shutdown; durable Git refs are preserved`).catch(() => console.warn("Container cleanup evidence unavailable"));
+        }
+      },
     };
   }
 
@@ -201,10 +215,14 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     stub: Stub
   ): Promise<{ ok: true; commit: string; evidenceId: string; branch: string } | { ok: false; error: string }> {
     const settings = settingsFor(candidate.frozenVerificationPolicy);
+    const externalOnly = candidate.frozenExternalChecksPolicy?.mode === "external";
+    if (externalOnly && (settings.fixture !== "custom" || !candidate.frozenExternalChecksPolicy?.checks.some((check) => check.required) || !candidate.frozenContributorProofs?.length)) return { ok: false, error: "External CI requires a custom repository, frozen contributor proofs and at least one required check" };
     const sb = this.sandbox(`integrate-${candidate.id}`);
+    try {
     const run = async (cmd: string, env?: Record<string, string>) => sb.exec(cmd, env);
     const state = await stub.getState();
     const tasks = candidate.participatingTaskIds.map((id) => state.tasks[id]!);
+    if (externalOnly && (candidate.frozenContributorProofs!.length !== tasks.length || !candidate.participatingTaskIds.every((id) => candidate.frozenContributorProofs!.some((proof) => proof.id === id && proof.commit === candidate.participatingCommits[id] && proof.ref === `refs/flaregit/tasks/${id}`)))) return { ok: false, error: "Frozen contributor proofs do not match every participating checkpoint" };
     const canonical = await this.canonicalRemote(stub);
 
     let r = await run(`rm -rf ${WORK} && git clone --quiet ${q(canonical.remote)} ${WORK}`, gitAuthEnv(canonical.token));
@@ -234,6 +252,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     candidate.repairAttempts = [];
     await stub.recordComposition(candidate.id, []);
     const repair = async (type: "text_conflict" | "behavior_failure", files: string[], evidence?: VerificationEvidence): Promise<boolean> => {
+      if (externalOnly) return false; // External CI never grants implicit model repair authority.
       const started = Date.now();
       round += 1;
       if (round > MAX_REPAIR_ROUNDS) return false;
@@ -273,6 +292,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       const m = await run(`git -C ${WORK} merge --no-ff -m ${q(`FlareGit candidate ${candidate.id}: ${t.id}`)} refs/flaregit/tasks/${t.id}`);
       if (m.success) continue;
       const files = (await run(`git -C ${WORK} diff --name-only --diff-filter=U`)).stdout.split("\n").filter(Boolean);
+      if (externalOnly) return { ok: false, error: "Native Git conflict requires explicit contributor resolution; saved branches are preserved" };
       if (files.length === 0 || !(await repair("text_conflict", files))) return { ok: false, error: "Conflict repair failed" };
     }
 
@@ -291,8 +311,11 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     for (;;) {
       if (!(await squash())) return { ok: false, error: "Could not create the squashed commit" };
       const commit = (await run(`git -C ${WORK} rev-parse HEAD`)).stdout.trim();
-      const v = await run(
-        `cd /opt/flaregit && bun src/core/verification/cli.ts ${settings.fixture} ${WORK} ${commit} ${candidate.expectedAcceptedBase} ${candidate.frozenPolicyVersion} ${q(JSON.stringify(candidate.frozenVerificationPolicy))}`
+      const tree = externalOnly ? (await run(`git -C ${WORK} rev-parse ${q(`${commit}^{tree}`)}`)).stdout.trim() : undefined;
+      const nativeInput = { repoDir: WORK, candidateCommit: commit, candidateTree: tree, expectedBase: candidate.expectedAcceptedBase, requirementsVersion: candidate.frozenPolicyVersion, policy: candidate.frozenVerificationPolicy, protectedPaths: settings.protectedPaths, allowedScope: settings.allowedScope, contributors: candidate.frozenContributorProofs, landing: settings.landing };
+      const v = await run(externalOnly
+        ? `cd /opt/flaregit && bun src/core/verification/cli.ts --native-integrity ${q(JSON.stringify(nativeInput))}`
+        : `cd /opt/flaregit && bun src/core/verification/cli.ts ${settings.fixture} ${WORK} ${commit} ${candidate.expectedAcceptedBase} ${candidate.frozenPolicyVersion} ${q(JSON.stringify(candidate.frozenVerificationPolicy))}`
       );
       if (!v.success) return { ok: false, error: `Verifier crashed: ${v.stderr.slice(-500)}` };
       const evidence = JSON.parse(v.stdout.trim().split("\n").at(-1)!) as VerificationEvidence;
@@ -300,7 +323,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       if (evidence.status === "passed") {
         // Build the exact verified commit and store it under that commit hash for immutable previews.
         // Only web apps with an index.html get a stored preview; other repositories are verified and accepted without one.
-        const hasPage = (await run(`test -f ${WORK}/index.html`)).success && settings.fixture === "ticket-booking";
+        const hasPage = !externalOnly && settings.fixture === "ticket-booking" && (await run(`test -f ${WORK}/index.html`)).success;
         const built = hasPage
           ? await run(`bun /opt/flaregit/src/core/verification/build-preview.ts ${q(WORK)} /tmp/build-out`)
           : { success: true, stderr: "" };
@@ -318,11 +341,15 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
         if (!shared.success) return { ok: false, error: "Could not store the candidate for review" };
         return { ok: true, commit, evidenceId: evidence.id, branch };
       }
+      if (externalOnly) return { ok: false, error: "Native Git integrity failed; no customer commands or automatic repairs ran" };
       const editable = (await run(`git -C ${WORK} ls-files`)).stdout
         .split("\n")
         .filter((f) => f && inAgentScope({ allowedScope: settings.allowedScope }, f) && !isProtectedPath(f, settings.protectedPaths) && /\.(ts|tsx|js|jsx|mjs|css|json|html|md|py|go|rs|rb|java|c|h|cpp|sh)$/.test(f))
         .slice(0, 40);
       if (!(await repair("behavior_failure", editable, evidence))) return { ok: false, error: "Protected verification failed and repair did not fix it" };
+    }
+    } finally {
+      await sb.destroy();
     }
   }
 
@@ -333,6 +360,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
    */
   private async casPush(candidate: CandidateGeneration, commit: string, stub: Stub, branch: string): Promise<{ ok: true } | { ok: false; error: string; stale?: boolean }> {
     const sb = this.sandbox(`publish-${candidate.id}`);
+    try {
     const canonical = await this.canonicalRemote(stub);
     const dir = "/workspace/publish";
     const fetched = await sb.exec(
@@ -354,6 +382,9 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     // A retried step may find its own earlier push already landed: that is success, not a conflict.
     if (await alreadyLanded()) return { ok: true };
     return { ok: false, error: `Canonical ref update refused: ${res.stderr.replace(/Bearer [^\s"]+/g, "Bearer ***").slice(-300).trim()}`, stale: /stale info|rejected/i.test(res.stderr) };
+    } finally {
+      await sb.destroy();
+    }
   }
 
 }

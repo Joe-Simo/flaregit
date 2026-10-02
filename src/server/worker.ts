@@ -21,7 +21,12 @@ import type { Env, QueueMessage } from "./env.js";
 import type { Task } from "../core/types.js";
 import { redactSecrets } from "../agents/prompt.js";
 import { assertWorkflowControlPermission, controlWorkflow, WorkflowControlError } from "./workflow-control.js";
+import { inspectImport, startImport, type ImportJob, type ImportReadiness } from "./import-job.js";
+import type { Ledger } from "./durable-object.js";
 import { validateImportSource, validateRepositoryCommand } from "./import-source.js";
+import { integrationCapabilities, verifyIntegrationCallback } from "./integration-auth.js";
+import type { ExternalCheckPolicy } from "../core/external-checks.js";
+import { verifyServiceRead } from "./service-read-auth.js";
 
 export { RepositoryController, FlareGitIntegrationWorkflow, FlareGitScenarioWorkflow, FlareGitAgentWorkflow };
 export { IntegratorSandbox, AgentSandbox } from "./integrator.js";
@@ -91,6 +96,43 @@ export default {
     }
 
     if (!url.pathname.startsWith("/api/")) return env.ASSETS.fetch(request);
+
+    const serviceReadRoute = /^\/api\/p\/([a-z0-9]{12,16})\/connections\/(svc_[a-f0-9-]{36})\/candidates\/([a-z0-9_-]+)$/.exec(url.pathname);
+    if (serviceReadRoute && request.method === "GET") {
+      const project = projectOf(env, serviceReadRoute[1]!);
+      const config = await project.connectionSigningConfig(serviceReadRoute[2]!).catch(() => null);
+      if (!config) return text("Unauthorized", 401);
+      const limited = await env.API_LIMITER.limit({ key: `service:${serviceReadRoute[1]}:${serviceReadRoute[2]}` });
+      if (!limited.success) return text("Too many requests", 429);
+      const nonce = request.headers.get("X-Flaregit-Nonce") ?? "";
+      const timestamp = Number(request.headers.get("X-Flaregit-Timestamp"));
+      const verified = await verifyServiceRead({ ...config, method: request.method, path: url.pathname + url.search, timestamp, nonce, signature: request.headers.get("X-Flaregit-Signature") ?? "" });
+      if (!verified) return text("Invalid signed request", 401);
+      const commit = url.searchParams.get("commit") ?? "";
+      if (!/^[a-f0-9]{40}$/.test(commit)) return text("Exact candidate commit required", 400);
+      const snapshot = await project.serviceCandidateSnapshot(serviceReadRoute[2]!, serviceReadRoute[3]!, commit, nonce);
+      if (!snapshot) return text("Candidate unavailable or request already used", 404);
+      return Response.json(snapshot, { headers: { "Cache-Control": "no-store" } });
+    }
+
+    const callbackRoute = /^\/api\/p\/([a-z0-9]{12,16})\/connections\/(svc_[a-f0-9-]{36})\/events$/.exec(url.pathname);
+    if (callbackRoute && request.method === "POST") {
+      const project = projectOf(env, callbackRoute[1]!);
+      const config = await project.connectionSigningConfig(callbackRoute[2]!).catch(() => null);
+      if (!config) return text("Unauthorized", 401);
+      const limited = await env.API_LIMITER.limit({ key: `service:${callbackRoute[1]}:${callbackRoute[2]}` });
+      if (!limited.success) return text("Too many requests", 429);
+      const reader = request.body?.getReader();
+      if (!reader) return text("Body required", 400);
+      const chunks: Uint8Array[] = []; let size = 0;
+      for (;;) { const next = await reader.read(); if (next.done) break; size += next.value.byteLength; if (size > 65_536) { await reader.cancel(); return text("Report too large", 413); } chunks.push(next.value); }
+      const bytes = new Uint8Array(size); let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+      const callback = await verifyIntegrationCallback({ ...config, raw: new TextDecoder().decode(bytes), signature: request.headers.get("X-Flaregit-Signature") ?? "", serviceId: callbackRoute[2]!, repositoryId: callbackRoute[1]! });
+      if (!callback) return text("Invalid signed report", 401);
+      const result = await project.acceptIntegrationCallback(callback);
+      return json(result, result.kind === "rejected" ? 409 : 200);
+    }
 
     const auth = await authenticate(request, env);
     if (auth instanceof Response) return auth;
@@ -167,7 +209,7 @@ export default {
         const details = clean(b.details, 5000);
         if (!target || details.length < 10) return text("Say what you are reporting (a repository, handle or domain) and describe what happened", 400);
         const report = await globalOf(env).fileReport({ reporter: accountKey, kind: b.kind, target, details });
-        return json({ id: report.id, status: report.status, note: "A person reviews every report. You can follow it under Account → Reports. The number of open reports and the age of the oldest one are public on /status." }, 201);
+        return json({ id: report.id, status: report.status, note: "Your report is saved for operator review. You can track its status under Account → Reports. The number of open reports and the age of the oldest one are public on /status." }, 201);
       }
       if (path === "/reports" && method === "GET") return json(await globalOf(env).listReports({ reporter: accountKey }));
       const operators = (env.OPERATOR_ACCOUNTS ?? "").split(",").map((x) => x.trim()).filter(Boolean);
@@ -247,10 +289,20 @@ export default {
         }
       }
 
+      if (path === "/imports" && method === "GET") return json({ imports: (await account.listImportJobs()).filter((job) => job.ownerId === userId) });
+      const resumeImport = /^\/imports\/([a-z0-9]{12,16})\/resume$/.exec(path);
+      if (resumeImport && method === "POST") {
+        const job = await account.getImportJob(resumeImport[1]!);
+        if (!job || job.ownerId !== userId) return text("Import not found", 404);
+        const result = await finishImport(env, account, job, job.status === "failed" ? { status: "failed", detail: job.detail } : await inspectImport(env.ARTIFACTS, job.canonicalRepoName));
+        return json(result, result.status === "ready" ? 201 : result.status === "failed" ? 409 : 202);
+      }
+
       if (path === "/projects" && method === "POST") {
         const b = await body<{ kind?: string; name?: string; url?: string; branch?: string; install?: string; build?: string; test?: string }>();
         const existing = await account.listProjects();
-        if (existing.length >= 10) return text("Repository limit reached (10).", 409);
+        const pendingImports = (await account.listImportJobs()).filter((job) => job.status !== "ready");
+        if (existing.length + pendingImports.length >= 10) return text("Repository limit reached (10).", 409);
         const name = clean(b.name, 60) || "my-repo";
         if (!/^[A-Za-z0-9._ -]{1,60}$/.test(name)) return text("Use letters, numbers, spaces, '.', '_' and '-' in the name.", 400);
         const projectId = newProjectId();
@@ -261,9 +313,8 @@ export default {
           if (b.branch !== undefined && (typeof b.branch !== "string" || (b.branch !== "" && !isSafeRef(b.branch)))) return text("Enter a valid Git branch name", 400);
           try { for (const command of [b.install, b.build, b.test]) validateRepositoryCommand(command); }
           catch (error) { return text(error instanceof Error ? error.message : "Invalid repository command", 400); }
-          const created = await importRepository(env, { projectId, name, userId, url: source.toString(), branch: b.branch ?? "", install: clean(b.install, 300), build: clean(b.build, 300), test: clean(b.test, 300) });
-          await account.addProject({ id: projectId, name, role: "owner", kind: "import" });
-          return json({ id: projectId, ...created }, 201);
+          const created = await importRepository(env, account, { projectId, name, userId, url: source.toString(), branch: b.branch ?? "", install: clean(b.install, 300), build: clean(b.build, 300), test: clean(b.test, 300) });
+          return json(created, created.status === "ready" ? 201 : created.status === "failed" ? 409 : 202);
         }
         const created = await createDemoRepository(env, projectId, name, userId);
         await account.addProject({ id: projectId, name, role: "owner", kind: "demo" });
@@ -307,6 +358,37 @@ export default {
         }
 
         if (sub === "/activity" && method === "GET") return json(await project.listActivity(60));
+
+        if (sub === "/connections" && method === "GET") {
+          if (!isOwner) return text("Only the owner can configure connections", 403);
+          return json(await project.listConnections());
+        }
+        if (sub === "/connections" && method === "POST") {
+          if (!isOwner) return text("Only the owner can configure connections", 403);
+          const value = await body<{ name: string; capabilities: Array<typeof integrationCapabilities[number]> }>();
+          try { return json(await project.createConnection(value.name, value.capabilities), 201); } catch { return text("Invalid connection", 400); }
+        }
+        if (sub === "/connections/policy" && method === "PUT") {
+          if (!isOwner) return text("Only the owner can configure checks", 403);
+          const policy = await body<ExternalCheckPolicy>();
+          if (policy.mode === "external" && !isCommandPolicy(state.verificationPolicy)) return text("External CI is available for imported custom repositories; this demo retains its protected checks", 409);
+          try { return json({ policy: await project.setConnectionPolicy(policy) }); } catch { return text("Invalid or stale check policy", 409); }
+        }
+        const connectionRoute = /^\/connections\/(svc_[a-f0-9-]{36})$/.exec(sub);
+        if (connectionRoute && method === "DELETE") {
+          if (!isOwner) return text("Only the owner can revoke connections", 403);
+          await project.revokeConnection(connectionRoute[1]!); return json({ revoked: true });
+        }
+        const checksRoute = /^\/candidates\/([a-z0-9_-]+)\/checks$/.exec(sub);
+        if (checksRoute && method === "GET") {
+          const [checks, reports] = await Promise.all([project.externalChecks(checksRoute[1]!), project.externalCheckReports(checksRoute[1]!)]);
+          return json({ checks, reports });
+        }
+        if (checksRoute && method === "POST") {
+          if (!isOwner) return text("Only the owner can retry checks", 403);
+          const value = await body<{ checkId: string }>();
+          try { return json({ checks: await project.registerExternalRun(checksRoute[1]!, value.checkId, `run_${crypto.randomUUID()}`) }, 201); } catch { return text("Unknown candidate or check", 404); }
+        }
 
         // ----- code browser -----
         if (sub === "/commits" && method === "GET") {
@@ -720,12 +802,21 @@ export default {
           const canonicalToken = (await repo.createToken("read", 900)).plaintext;
           const sb = env.INTEGRATOR.getByName(`${projectId}-mirror-retry`);
           const exec = (cmd: string, e?: Record<string, string>) => sb.exec(["sh", "-c", cmd], { env: e });
-          const branch = (await exec(`git ls-remote --symref ${q(remote)} HEAD`, gitAuthEnv(canonicalToken))).stdout.match(/ref: refs\/heads\/(\S+)\s+HEAD/)?.[1] ?? state.defaultBranch ?? "main";
+          const cleanup = async () => {
+            try { await sb.destroy(); }
+            catch { await project.logActivity("FlareGit", "container.cleanup_failed", "Mirror retry container did not confirm shutdown; accepted history is preserved").catch(() => console.warn("Container cleanup evidence unavailable")); }
+          };
+          let branch: string;
+          try { branch = (await exec(`git ls-remote --symref ${q(remote)} HEAD`, gitAuthEnv(canonicalToken))).stdout.match(/ref: refs\/heads\/(\S+)\s+HEAD/)?.[1] ?? state.defaultBranch ?? "main"; } catch (error) {
+            await cleanup();
+            throw error;
+          }
           const commit = state.acceptedState.currentCommit;
           ctx.waitUntil(
             pushMirror({ exec }, { canonicalRemote: remote, canonicalToken, target: cfg.target, githubToken: cfg.token, branch, commit })
               .then((r) => project.recordMirrorRun(commit, r.status, r.detail))
               .catch(() => project.recordMirrorRun(commit, "error", "Mirror run failed to start"))
+              .finally(cleanup)
           );
           return json({ queued: true }, 202);
         }
@@ -832,44 +923,37 @@ async function createDemoRepository(env: Env, projectId: string, name: string, u
   }
 }
 
+async function finishImport(env: Env, account: Ledger, job: ImportJob, readiness: ImportReadiness) {
+  if (readiness.status === "ready") {
+    try {
+      await projectOf(env, job.id).initialize({ projectId: job.id, projectName: job.name, canonicalRepoName: job.canonicalRepoName, head: readiness.head, verificationPolicy: job.verificationPolicy as unknown as Record<string, unknown>, kind: "import", defaultBranch: readiness.defaultBranch, ownerId: job.ownerId, source: job.source });
+      await account.addProject({ id: job.id, name: job.name, role: "owner", kind: "import" });
+      await account.saveImportJob({ ...job, status: "ready", updatedAt: new Date().toISOString(), detail: "Repository is available. No shallow depth was requested; completeness of imported history is not verified." });
+      return { id: job.id, status: "ready" as const, head: readiness.head, kind: "import", remote: readiness.remote };
+    } catch {
+      // Repository data survives an account/controller failure and can be retried.
+      readiness = { status: "pending", detail: "Repository is preserved, but account setup did not finish; retry this saved import" };
+    }
+  }
+  const pending: ImportJob = { ...job, status: readiness.status, updatedAt: new Date().toISOString(), detail: readiness.detail };
+  await account.saveImportJob(pending);
+  return { id: job.id, status: readiness.status, import: pending };
+}
+
 async function importRepository(
   env: Env,
+  account: Ledger,
   o: { projectId: string; name: string; userId: string; url: string; branch: string; install: string; build: string; test: string }
 ) {
   const source = validateImportSource(o.url);
   if (!o.test) throw new Error("A test command is required: it is the protected check every change must pass.");
-  const canonicalName = canonicalNameFor(o.projectId);
-  const imported = await env.ARTIFACTS.import({
-    source: { url: source.toString(), ...(o.branch ? { branch: o.branch } : {}), depth: 200 },
-    target: { name: canonicalName, opts: { description: `Imported from ${source.host}${source.pathname}` } },
-  });
-  try {
-    const repo = await env.ARTIFACTS.get(canonicalName);
-    const head = (await repo.log({ limit: 1 }))[0]?.hash;
-    if (!head) throw new Error("The imported repository has no commits.");
-    const defaultBranch = String((await repo.info()).defaultBranch ?? "main");
-    const policy: CommandPolicy = {
-      kind: "command",
-      ...(o.install ? { install: o.install } : {}),
-      ...(o.build ? { build: o.build } : {}),
-      test: o.test,
-      allowedScope: ["*"],
-      protectedPaths: DEFAULT_PROTECTED_PATHS,
-    };
-    await projectOf(env, o.projectId).initialize({
-      projectId: o.projectId,
-      projectName: o.name,
-      canonicalRepoName: canonicalName,
-      head,
-      verificationPolicy: policy as unknown as Record<string, unknown>,
-      kind: "import",
-      defaultBranch,
-      ownerId: o.userId,
-      source: source.toString(),
-    });
-    return { head, kind: "import", remote: imported.remote };
-  } catch (e) {
-    await env.ARTIFACTS.delete(canonicalName).catch(() => false);
-    throw e;
-  }
+  const now = new Date().toISOString();
+  const job: ImportJob = {
+    id: o.projectId, ownerId: o.userId, name: o.name, canonicalRepoName: canonicalNameFor(o.projectId), source: source.toString(), branch: o.branch,
+    verificationPolicy: { kind: "command", ...(o.install ? { install: o.install } : {}), ...(o.build ? { build: o.build } : {}), test: o.test, allowedScope: ["*"], protectedPaths: DEFAULT_PROTECTED_PATHS },
+    status: "requested", historyIntent: "provider-default-no-depth-requested", createdAt: now, updatedAt: now, detail: "Import request is saved; provider readiness has not been observed",
+  };
+  // Persist ownership and recovery identity BEFORE contacting the provider.
+  await account.saveImportJob(job);
+  return finishImport(env, account, job, await startImport(env.ARTIFACTS, job));
 }

@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { structuredPatch } from "diff";
+import { readServiceCandidate, sendServiceReport } from "../src/cli/report.js";
 
 const CONFIG_DIR = path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"), "flaregit");
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
@@ -102,6 +103,8 @@ const HELP = `flaregit — JSON by default (--pretty for humans)
   repo import <url> --name N --test "cmd" [--install "cmd"] [--build "cmd"] [--branch B]
   repo demo [--name N]
   repo delete <repo> --confirm <name>
+  service-candidate <repository-id> <candidate-id> --service ID --commit SHA   signed metadata snapshot; no clone credential
+  report <repository-id> --service ID --file report.json [--event stable-id]   signed service report; environment secret only
   changes <repo>
   change new <repo> "<goal>" [--agent]
   work <repo> "<goal>" [--dir D] [--on CHANGE] [--issue N]   create a change (stacked on CHANGE if given), clone it and check out its branch
@@ -122,6 +125,34 @@ const HELP = `flaregit — JSON by default (--pretty for humans)
 async function main() {
   const [cmd, sub, ...rest] = pos;
   if (!cmd || flags.has("help")) return console.log(HELP);
+
+  if (cmd === "service-candidate") {
+    const secret = process.env.FLAREGIT_CONNECTION_SECRET;
+    if (!secret || secret.length < 32) fail("Set FLAREGIT_CONNECTION_SECRET in the local service environment");
+    const repositoryId = sub ?? fail("Specify the exact repository ID");
+    const candidateId = rest[0] ?? fail("Specify the exact candidate ID");
+    const serviceId = flag("service") ?? fail("--service is required");
+    const commit = flag("commit") ?? fail("--commit requires the exact 40-character candidate SHA");
+    try { return out(await readServiceCandidate({ origin: API, repositoryId, candidateId, serviceId, commit, secret })); }
+    catch { fail("Service snapshot was not confirmed. Check the exact IDs, active read-candidate capability and signing secret. Raw provider errors are suppressed."); }
+  }
+
+  if (cmd === "report") {
+    const secret = process.env.FLAREGIT_CONNECTION_SECRET;
+    if (!secret || secret.length < 32) fail("Set FLAREGIT_CONNECTION_SECRET in the local service environment (at least 32 characters)");
+    const repositoryId = sub ?? fail("Specify the exact repository ID; service reporting does not use human account lookup");
+    const serviceId = flag("service") ?? fail("--service is required");
+    const file = flag("file") ?? fail("--file is required (strict check or automated-comment JSON)");
+    const eventId = flag("event") ?? crypto.randomUUID();
+    // Print only the stable retry identifier before dispatch, including on a lost response.
+    console.error(JSON.stringify({ eventId, note: "Retain this ID for retries of unchanged report contents" }));
+    try {
+      const report: unknown = JSON.parse(await Bun.file(file).text());
+      return out(await sendServiceReport({ origin: API, repositoryId, serviceId, eventId, report, secret }));
+    } catch {
+      fail(`Report was not confirmed. Validate the JSON and connection capability, then retry unchanged contents with --event ${eventId}. Credentials and raw errors are suppressed.`);
+    }
+  }
 
   if (cmd === "auth" && sub === "token") {
     const scope = flag("scope") ?? "read";

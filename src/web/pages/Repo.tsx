@@ -113,12 +113,12 @@ export function Repo({ projectId, tab, params }: { projectId: string; tab: strin
       {tab === "code" && <CodeTab projectId={projectId} />}
       {tab === "commits" && <CommitsTab projectId={projectId} />}
       {tab === "changes" && <ChangesTab projectId={projectId} state={state} reload={reload} />}
-      {tab === "integration" && <IntegrationTab projectId={projectId} state={state} reload={reload} kind={meta.kind} />}
+      {tab === "integration" && <IntegrationTab isOwner={meta.role === "owner"} projectId={projectId} state={state} reload={reload} kind={meta.kind} />}
       {tab === "activity" && <ActivityTab projectId={projectId} />}
       {tab === "issues" && <IssuesTab projectId={projectId} issue={params.get("n") ? Number(params.get("n")) : undefined} />}
       {tab === "people" && <PeopleTab projectId={projectId} />}
-      {tab === "review" && <ReviewTab projectId={projectId} task={params.get("task") ?? undefined} candidate={params.get("candidate") ? state.candidates[params.get("candidate")!] : undefined} evidence={state} reload={reload} />}
-      {tab === "commit" && <ReviewTab projectId={projectId} commit={params.get("hash") ?? undefined} />}
+      {tab === "review" && <ReviewTab isOwner={meta.role === "owner"} projectId={projectId} task={params.get("task") ?? undefined} candidate={params.get("candidate") ? state.candidates[params.get("candidate")!] : undefined} evidence={state} reload={reload} />}
+      {tab === "commit" && <ReviewTab isOwner={meta.role === "owner"} projectId={projectId} commit={params.get("hash") ?? undefined} />}
       {tab === "settings" && <SettingsTab meta={meta} reload={reload} />}
       </div>
 

@@ -20,7 +20,7 @@ function summarize(state: FlareGitProjectState): { stage: PipelineStage; message
   if (Object.values(state.decisions).some((d) => d.status === "pending")) {
     return { stage: "decision_needed", message: "Decision needed", detail: "Two requirements contradict each other. The last accepted version stays live until you choose." };
   }
-  if (candidates.some((c) => c.status === "awaiting_review")) return { stage: "verifying", message: "Verified, waiting for your review", detail: "Checks passed on the exact candidate. Nothing lands until a person accepts it." };
+  if (candidates.some((c) => c.status === "awaiting_review")) return { stage: "verifying", message: "Candidate waiting for your review", detail: "Read the candidate diff and native and connected check evidence before acceptance." };
   if (candidates.some((c) => c.status === "repairing")) return { stage: "repairing", message: "Repairing", detail: "Workers AI proposes a fix; it is only accepted if your protected checks pass." };
   if (candidates.some((c) => c.status === "verifying") || tasks.some((t) => t.status === "verifying")) {
     return { stage: "verifying", message: "Verifying the exact candidate", detail: "Your protected checks run against the candidate commit in an isolated workspace." };
@@ -37,11 +37,13 @@ export function IntegrationTab({
   state,
   reload,
   kind,
+  isOwner = false,
 }: {
   projectId: string;
   state: FlareGitProjectState;
   reload: () => void;
   kind: string;
+  isOwner?: boolean;
 }) {
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const [resolving, setResolving] = useState(false);
@@ -106,7 +108,7 @@ export function IntegrationTab({
       <section aria-labelledby="int-review" className="space-y-2">
         <h2 id="int-review" className="text-sm font-semibold">Waiting for your review ({reviewing.length})</h2>
         {reviewing.length === 0 ? <p className="text-sm text-muted-foreground">Nothing needs your review.</p> :
-          reviewing.map((c) => <CandidateReview key={c.id} projectId={projectId} candidate={c} evidence={c.evidenceId ? state.evidence[c.evidenceId] : undefined} onDone={reload} />)}
+          reviewing.map((c) => <CandidateReview key={c.id} projectId={projectId} isOwner={isOwner} candidate={c} evidence={c.evidenceId ? state.evidence[c.evidenceId] : undefined} onDone={reload} />)}
       </section>
       <div className="grid gap-4 md:grid-cols-3">
         <section aria-labelledby="int-running" className="rounded-lg border border-border p-3 space-y-2 min-w-0">

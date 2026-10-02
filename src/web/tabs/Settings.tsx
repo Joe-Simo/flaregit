@@ -5,6 +5,8 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { WebhooksCard } from "../components/WebhooksCard";
 import { DomainsCard } from "../components/DomainsCard";
+import { isCommandPolicy } from "@/core/command-policy";
+import { ConnectionsCard } from "../components/ConnectionsCard";
 import { MirrorCard } from "../components/MirrorCard";
 import { apiJson } from "../api";
 import { navigate } from "../router";
@@ -151,6 +153,7 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
         </CardContent>
       </Card>
 
+      {isOwner && <ConnectionsCard key={meta.id} projectId={meta.id} isOwner={isOwner} isCustom={meta.kind === "import" && isCommandPolicy(meta.verification)} />}
       <WebhooksCard projectId={meta.id} isOwner={isOwner} />
       <DomainsCard projectId={meta.id} isOwner={isOwner} />
       {isOwner && <MirrorCard projectId={meta.id} isOwner={isOwner} />}

@@ -44,7 +44,7 @@ export function BillingBar({ refreshKey }: { refreshKey: number }) {
     <div className="flex items-center gap-3 px-6 py-2 text-xs border-b border-border bg-card/40">
       <Badge variant={billing.plan === "pro" ? "success" : "secondary"}>{billing.plan === "pro" ? "Pro" : "Free"}</Badge>
       <span className="text-muted-foreground">
-        {billing.runsToday} / {billing.runsPerDay} agent runs today
+        {billing.runsToday} / {billing.runsPerDay} agent and integration runs today
       </span>
       {billing.plan === "free" && billing.checkoutConfigured && (
         <Button size="sm" variant="orange" disabled={busy} onClick={upgrade}>

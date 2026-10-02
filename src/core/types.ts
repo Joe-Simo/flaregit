@@ -1,3 +1,5 @@
+import type { ExternalCheckPolicy } from "./external-checks.js";
+import type { FrozenContributorProof } from "./verification/integrity.js";
 export type ContributorType = "human" | "agent";
 
 export interface Contributor {
@@ -104,6 +106,9 @@ export interface CandidateGeneration {
   expectedAcceptedBase: string;
   frozenPolicyVersion: number;
   frozenVerificationPolicy: Record<string, unknown>;
+  /** Owner policy and contributor inputs captured before composition; absent on legacy candidates. */
+  frozenExternalChecksPolicy?: ExternalCheckPolicy;
+  frozenContributorProofs?: FrozenContributorProof[];
   frozenRequirements: Requirement[];
   compositionMethod?: CompositionMethod;
   candidateCommit?: string;

@@ -3,7 +3,12 @@ import { freezeCandidateGeneration } from "../core/pipeline/freeze.js";
 import { createProductDecision, detectContradiction } from "../core/decision/contradiction.js";
 import type { Env } from "./env.js";
 import { accountKeyFor, accountOf } from "./projects.js";
-import { isCommandPolicy } from "../core/command-policy.js";
+import { isCommandPolicy, settingsFor } from "../core/command-policy.js";
+import { VERIFIER_IDENTITIES } from "../core/verification-identities.js";
+import { RepositoryConnections, type ConnectionMetadata, type CallbackReceipt } from "./connections.js";
+import type { IntegrationCallback, IntegrationCapability } from "./integration-auth.js";
+import { externalCheckGate, type ExternalCheckPolicy, type ExternalCheckState } from "../core/external-checks.js";
+import type { ImportJob } from "./import-job.js";
 import type {
   CandidateGeneration,
   FlareGitProjectState,
@@ -154,6 +159,19 @@ export interface ActivityRow {
 }
 
 export interface Ledger {
+  saveImportJob(job: ImportJob): Promise<void>;
+  getImportJob(id: string): Promise<ImportJob | null>;
+  listImportJobs(): Promise<ImportJob[]>;
+  externalCheckReports(candidateId: string): Promise<ReturnType<RepositoryConnections["reports"]>>;
+  serviceCandidateSnapshot(serviceId: string, candidateId: string, commit: string, nonce: string): Promise<ReturnType<RepositoryConnections["serviceCandidateSnapshot"]>>;
+  listConnections(): Promise<{ connections: ConnectionMetadata[]; policy: ExternalCheckPolicy }>;
+  createConnection(name: string, capabilities: IntegrationCapability[]): Promise<{ connection: ConnectionMetadata; secret: string }>;
+  revokeConnection(id: string): Promise<void>;
+  connectionSigningConfig(id: string): Promise<{ secret: string; capabilities: IntegrationCapability[] } | null>;
+  setConnectionPolicy(policy: ExternalCheckPolicy): Promise<ExternalCheckPolicy>;
+  externalChecks(candidateId: string): Promise<ExternalCheckState | null>;
+  registerExternalRun(candidateId: string, checkId: string, runId: string): Promise<ExternalCheckState>;
+  acceptIntegrationCallback(callback: IntegrationCallback): Promise<CallbackReceipt>;
   listProjects(): Promise<ProjectRow[]>;
   addProject(p: { id: string; name: string; role: "owner" | "member"; kind: string }): Promise<void>;
   removeProject(id: string): Promise<void>;
@@ -247,6 +265,51 @@ const LEASE_MS = 20 * 60_000;
  */
 export class RepositoryController extends DurableObject<Env> {
   private state: FlareGitProjectState | null = null;
+
+  private importTable(): void { this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS import_jobs (id TEXT PRIMARY KEY, doc TEXT NOT NULL)"); }
+  async getImportJob(id: string): Promise<ImportJob | null> {
+    this.importTable();
+    const row = this.ctx.storage.sql.exec<{ doc: string }>("SELECT doc FROM import_jobs WHERE id=?", id).toArray()[0];
+    return row ? JSON.parse(row.doc) as ImportJob : null;
+  }
+  async listImportJobs(): Promise<ImportJob[]> {
+    this.importTable();
+    return this.ctx.storage.sql.exec<{ doc: string }>("SELECT doc FROM import_jobs ORDER BY id").toArray().map((row) => JSON.parse(row.doc) as ImportJob);
+  }
+  async saveImportJob(job: ImportJob): Promise<void> {
+    this.importTable();
+    this.ctx.storage.transactionSync(() => {
+      const row = this.ctx.storage.sql.exec<{ doc: string }>("SELECT doc FROM import_jobs WHERE id=?", job.id).toArray()[0];
+      if (row) {
+        const previous = JSON.parse(row.doc) as ImportJob;
+        const immutable = ({ status: _status, updatedAt: _updated, detail: _detail, ...identity }: ImportJob) => identity;
+        if (JSON.stringify(immutable(previous)) !== JSON.stringify(immutable(job))) throw new Error("Import job identity cannot change");
+        if (previous.status === "ready" && job.status !== "ready") return;
+      } else {
+        const reserved = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM (SELECT id FROM projects UNION SELECT id FROM import_jobs WHERE json_extract(doc, '$.status') <> 'ready')").toArray()[0]!.count;
+        if (reserved >= 10) throw new Error("Repository limit reached, including saved imports (10)");
+        const jobs = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM import_jobs").toArray()[0]!.count;
+        if (jobs >= 100) throw new Error("Import job history limit reached; contact support");
+      }
+      this.ctx.storage.sql.exec("INSERT INTO import_jobs VALUES (?,?) ON CONFLICT(id) DO UPDATE SET doc=excluded.doc", job.id, JSON.stringify(job));
+    });
+  }
+
+  private connections() { return new RepositoryConnections(this.ctx.storage, this.load().projectId); }
+  async externalCheckReports(candidateId: string) { return this.connections().reports(candidateId); }
+  async serviceCandidateSnapshot(serviceId: string, candidateId: string, commit: string, nonce: string) { return this.connections().serviceCandidateSnapshot(serviceId, candidateId, commit, nonce); }
+  async listConnections(): Promise<{ connections: ConnectionMetadata[]; policy: ExternalCheckPolicy }> { const ledger = this.connections(); return { connections: ledger.list(), policy: ledger.policy() }; }
+  async createConnection(name: string, capabilities: IntegrationCapability[]) { const created = this.connections().create(name, capabilities); return { connection: created.metadata, secret: created.secret }; }
+  async revokeConnection(id: string): Promise<void> { this.connections().revoke(id); }
+  async connectionSigningConfig(id: string) { return this.connections().signingConfig(id); }
+  async setConnectionPolicy(policy: ExternalCheckPolicy): Promise<ExternalCheckPolicy> { const ledger = this.connections(); ledger.setPolicy(policy); return ledger.policy(); }
+  async externalChecks(candidateId: string): Promise<ExternalCheckState | null> { return this.connections().candidateState(candidateId); }
+  async registerExternalRun(candidateId: string, checkId: string, runId: string): Promise<ExternalCheckState> {
+    const candidate = this.load().candidates[candidateId];
+    if (candidate?.status !== "awaiting_review" || candidate.review) throw new Error("Checks can only be retried before the review decision");
+    return this.connections().registerRun(candidateId, checkId, runId);
+  }
+  async acceptIntegrationCallback(callback: IntegrationCallback): Promise<CallbackReceipt> { return this.connections().accept(callback); }
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -953,6 +1016,8 @@ export class RepositoryController extends DurableObject<Env> {
     try {
       this.ctx.storage.transactionSync(() => {
         candidate.workflowInstanceId = req.holder;
+        candidate.frozenExternalChecksPolicy = structuredClone(this.connections().policy());
+        candidate.frozenContributorProofs = tasks.map((task) => ({ id: task.id, commit: task.currentCommit, baseCommit: task.baseCommit, ref: `refs/flaregit/tasks/${task.id}`, allowedScope: [...(task.allowedScope ?? settingsFor(s.verificationPolicy).allowedScope)] }));
         s.candidates[candidate.id] = candidate;
         for (const t of tasks) {
           t.status = "integrating";
@@ -993,7 +1058,11 @@ export class RepositoryController extends DurableObject<Env> {
     // Nothing becomes accepted history without a human approving this exact commit.
     if (!c.review?.approved || c.review.commit !== c.candidateCommit) return { ok: false, error: "No human approval for this candidate commit" };
     if (ev.status !== "passed" || ev.candidateCommit !== c.candidateCommit) return { ok: false, error: "Evidence does not match candidate" };
-    const verifierIdentity = isCommandPolicy(c.frozenVerificationPolicy) ? "flaregit-command-verifier-v2" : "flaregit-ticket-booking-protected-verifier-v2";
+    const external = this.connections().candidateState(candidateId);
+    if (external && (external.frozen.repositoryId !== s.projectId || external.frozen.candidateId !== candidateId || external.frozen.commit !== c.candidateCommit || external.frozen.tree !== ev.candidateTree || externalCheckGate(external) !== "passed")) return { ok: false, error: "Required external checks have not passed for this exact candidate" };
+    const externalOnly = c.frozenExternalChecksPolicy?.mode === "external";
+    if (externalOnly && (!isCommandPolicy(c.frozenVerificationPolicy) || !external || !c.frozenContributorProofs?.length || !external.frozen.policy.checks.some((check) => check.required) || JSON.stringify(external.frozen.policy) !== JSON.stringify(c.frozenExternalChecksPolicy))) return { ok: false, error: "External CI policy and contributor proof are unavailable for this candidate" };
+    const verifierIdentity = externalOnly ? VERIFIER_IDENTITIES.external : isCommandPolicy(c.frozenVerificationPolicy) ? VERIFIER_IDENTITIES.custom : VERIFIER_IDENTITIES["ticket-booking"];
     if (ev.verifierIdentity !== verifierIdentity) return { ok: false, error: "Candidate needs verification with the current isolated verifier before publication" };
     if (ev.expectedAcceptedBase !== c.expectedAcceptedBase || ev.requirementsVersion !== c.frozenPolicyVersion) return { ok: false, error: "Evidence was produced for different inputs" };
     const cancelled = c.participatingTaskIds.filter((id) => s.tasks[id]?.status === "cancelled");
@@ -1004,7 +1073,7 @@ export class RepositoryController extends DurableObject<Env> {
       return { ok: false, stale: true, error: "Accepted head moved" };
     }
     const journal: PublicationJournalEntry = {
-      id: `jrnl_${crypto.randomUUID().slice(0, 8)}`,
+      id: `jrnl_${crypto.randomUUID()}`,
       candidateId,
       candidateCommit: c.candidateCommit,
       candidateTree: ev.candidateTree,
@@ -1081,6 +1150,14 @@ export class RepositoryController extends DurableObject<Env> {
     const s = this.load();
     const c = s.candidates[candidateId];
     if (!c || c.candidateCommit !== commit) return;
+    const evidence = c.evidenceId ? s.evidence[c.evidenceId] : undefined;
+    if (!evidence || evidence.candidateCommit !== commit) throw new Error("Candidate evidence is unavailable");
+    const ledger = this.connections();
+    const external = ledger.candidateState(candidateId) ?? ledger.freeze({ repositoryId: s.projectId, candidateId, commit, tree: evidence.candidateTree, policy: c.frozenExternalChecksPolicy ?? ledger.policy() });
+    if (external.frozen.commit !== commit || external.frozen.tree !== evidence.candidateTree) throw new Error("Frozen checks belong to another candidate revision");
+    for (const check of external.frozen.policy.checks) {
+      if (!external.selectedRuns[check.id]) ledger.registerRun(candidateId, check.id, `run_${crypto.randomUUID()}`);
+    }
     c.status = "awaiting_review";
     c.workflowInstanceId = workflowInstanceId;
     c.updatedAt = new Date().toISOString();
@@ -1096,6 +1173,10 @@ export class RepositoryController extends DurableObject<Env> {
       return c.review.approved === review.approved ? { ok: true, instanceId: c.workflowInstanceId } : { ok: false, error: `Already ${c.review.approved ? "approved" : "rejected"} by ${c.review.by}` };
     }
     if (c.status !== "awaiting_review") return { ok: false, error: "This candidate is not waiting for review" };
+    const external = this.connections().candidateState(candidateId);
+    const evidence = c.evidenceId ? s.evidence[c.evidenceId] : undefined;
+    if (review.approved && c.frozenExternalChecksPolicy?.checks.some((check) => check.required) && !external) return { ok: false, error: "Required external check evidence is unavailable" };
+    if (review.approved && external && (external.frozen.repositoryId !== s.projectId || external.frozen.candidateId !== candidateId || external.frozen.commit !== c.candidateCommit || external.frozen.tree !== evidence?.candidateTree || externalCheckGate(external) !== "passed")) return { ok: false, error: "Required external checks must pass for this exact candidate before acceptance" };
     c.review = { ...review, at: new Date().toISOString(), commit: c.candidateCommit };
     c.status = review.approved ? "verified" : "failed";
     c.updatedAt = new Date().toISOString();

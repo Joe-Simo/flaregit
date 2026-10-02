@@ -11,7 +11,7 @@ import { navigate } from "../router";
 interface DiffResponse { repo: string; base: string | null; head: { hash: string; message: string; author: { name: string } }; files: FileChange[] }
 
 /** Review of one commit (against its parent) or one change (against the commit it started from). */
-export function ReviewTab({ projectId, task, commit, candidate, evidence, reload }: { projectId: string; task?: string; commit?: string; candidate?: CandidateGeneration; evidence?: FlareGitProjectState; reload?: () => void }) {
+export function ReviewTab({ projectId, task, commit, candidate, evidence, reload, isOwner = false }: { projectId: string; task?: string; commit?: string; candidate?: CandidateGeneration; evidence?: FlareGitProjectState; reload?: () => void; isOwner?: boolean }) {
   const [diff, setDiff] = useState<DiffResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [anchor, setAnchor] = useState<{ path: string; line: number } | null>(null);
@@ -43,7 +43,7 @@ export function ReviewTab({ projectId, task, commit, candidate, evidence, reload
             <span className="text-xs text-muted-foreground ml-2">{diff.head.author.name} · <code>{diff.head.hash.slice(0, 7)}</code></span>
           </div>
           {candidate?.status === "awaiting_review" && (
-            <CandidateReview projectId={projectId} candidate={candidate} evidence={candidate.evidenceId ? evidence?.evidence[candidate.evidenceId] : undefined} showOpen={false} onDone={() => { reload?.(); navigate(`/p/${projectId}/integration`); }} />
+            <CandidateReview projectId={projectId} isOwner={isOwner} candidate={candidate} evidence={candidate.evidenceId ? evidence?.evidence[candidate.evidenceId] : undefined} showOpen={false} onDone={() => { reload?.(); navigate(`/p/${projectId}/integration`); }} />
           )}
           <DiffViewer files={diff.files} loadBlob={loadBlob} commented={commented} onLineClick={subject ? (path, line) => { setAnchor({ path, line }); document.getElementById("review-conversation")?.scrollIntoView({ behavior: "smooth" }); } : undefined} />
           {subject && (
