@@ -17,7 +17,7 @@ export interface TreeEntry {
 }
 
 const HEX40 = /^[0-9a-f]{40}$/;
-const MAX_BLOB_BYTES = 512 * 1024;
+const MAX_BLOB_BYTES = 4 * 1024 * 1024;
 
 const asCommit = (c: Record<string, any>): CommitInfo => ({
   hash: c.hash,
@@ -96,7 +96,7 @@ export interface FileChange {
   mode?: string;
 }
 
-const MAX_CHANGED_FILES = 400;
+const MAX_CHANGED_FILES = 5000;
 
 /** Tree-to-tree comparison using only hashes: unchanged subtrees are skipped without being read. */
 export async function diffTrees(

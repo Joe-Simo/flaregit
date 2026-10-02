@@ -24,6 +24,11 @@ const STATUS_COLOR: Record<FileChange["status"], string> = { added: "text-emeral
  * Virtualized review canvas: only the rows in view are in the DOM, diffs are computed in a Web Worker,
  * file contents load lazily, and everything is reachable from the keyboard.
  */
+/** Memoised so a row that scrolls back into view does not re-parse its highlighted HTML. */
+const CodeLine = React.memo(function CodeLine({ text, html }: { text: string; html?: string }) {
+  return html ? <span className="hljs-line" dangerouslySetInnerHTML={{ __html: html }} /> : <span>{text}</span>;
+});
+
 export function DiffViewer({ files, loadBlob }: { files: FileChange[]; loadBlob: (hash: string) => Promise<BlobResult> }) {
   const [state, setState] = useState<Record<number, FileState>>({});
   const [helpOpen, setHelpOpen] = useState(false);
@@ -73,7 +78,7 @@ export function DiffViewer({ files, loadBlob }: { files: FileChange[]; loadBlob:
           ]);
           if (cancelled) return;
           if (a.binary || b.binary) setState((s) => ({ ...s, [i]: { collapsed: false, note: "Binary file not shown" } }));
-          else if (a.truncated || b.truncated) setState((s) => ({ ...s, [i]: { collapsed: false, note: "File too large to display" } }));
+          else if (a.truncated || b.truncated) setState((s) => ({ ...s, [i]: { collapsed: false, note: `File is ${((Math.max(a.size, b.size)) / 1048576).toFixed(1)} MB, beyond the 4 MB inline limit. Fetch it with flaregit cat or clone the repository.` } }));
           else {
             const rows = await diffInWorker(i, a.content, b.content, f.path);
             if (!cancelled) setState((s) => ({ ...s, [i]: { collapsed: false, rows } }));
@@ -169,7 +174,7 @@ export function DiffViewer({ files, loadBlob }: { files: FileChange[]; loadBlob:
                 <span className="hidden sm:block w-10 shrink-0 text-right pr-2 text-muted-foreground select-none">{row.a ?? ""}</span>
                 <span className="sticky left-0 z-10 bg-background w-9 sm:w-10 shrink-0 text-right pr-2 text-muted-foreground select-none">{row.b ?? row.a ?? ""}</span>
                 <span className="w-4 shrink-0 select-none">{row.t === "h" ? "" : row.t}</span>
-                {row.html ? <span className="hljs-line" dangerouslySetInnerHTML={{ __html: row.html }} /> : <span>{row.text}</span>}
+                <CodeLine text={row.text} html={row.html} />
               </div>
             );
           })}

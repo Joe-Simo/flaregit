@@ -297,7 +297,8 @@ export default {
           const repoName = taskParam ? state.tasks[taskParam]?.workspace.repoName : state.canonicalRepoName;
           if (!repoName) return text("Unknown change", 404);
           const repo = await env.ARTIFACTS.get(repoName);
-          return json(await readBlobByHash(repo, hash));
+          // Content-addressed: the bytes behind a hash never change, so the browser may keep them forever.
+          return Response.json(await readBlobByHash(repo, hash), { headers: { "Cache-Control": "private, max-age=31536000, immutable" } });
         }
 
         // ----- clone credentials (read-only, short-lived) -----
