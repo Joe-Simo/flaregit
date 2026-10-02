@@ -1,3 +1,5 @@
+import { nativeFunding } from "./support/native-funding.js";
+import { accountKeyFor } from "../src/server/projects.js";
 import { expect, mock, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -34,6 +36,8 @@ test("publication releases its ephemeral checkout while preserving the reviewed 
     await git(["-C", seed, "push", "origin", `${commit}:refs/flaregit/candidates/test`]);
     let destroyed = 0;
     const env = {
+    ...nativeFunding(),
+      ...nativeFunding(),
       ARTIFACTS: { get: async () => ({ info: async () => ({ remote: canonical }), createToken: async () => ({ plaintext: "fixture-token" }) }) },
       INTEGRATOR: { getByName: () => ({
         exec: async (argv: string[]) => {
@@ -46,6 +50,7 @@ test("publication releases its ephemeral checkout while preserving the reviewed 
       }) },
     } as unknown as Env;
     const workflow = new FlareGitIntegrationWorkflow({} as ExecutionContext, env);
+    Object.assign(workflow,{projectId:"repo",computeAccountKey:await accountKeyFor("fixture-human"),computeWorkflowId:"registered-parent"});
     const callable = workflow as unknown as { casPush(candidate: CandidateGeneration, commit: string, stub: Ledger, branch: string): Promise<{ ok: boolean }> };
     const result = await callable.casPush({ id: "test", expectedAcceptedBase: base } as CandidateGeneration, commit, { getState: async () => ({ canonicalRepoName: "repo" }) } as unknown as Ledger, "main");
     expect(result.ok).toBe(true);
@@ -60,12 +65,15 @@ test("operation error survives failed shutdown and cleanup failure becomes durab
   const activities: string[] = [];
   let destroyCalls = 0;
   const original = new Error("Original fetch failure");
+  const funding=nativeFunding();
   const env = {
+    ...nativeFunding(),
     ARTIFACTS: { get: async () => ({ info: async () => ({ remote: "https://repo.example" }), createToken: async () => ({ plaintext: "fixture-token" }) }) },
     INTEGRATOR: { getByName: () => ({ exec: async () => { throw original; }, destroy: async () => { destroyCalls++; throw new Error("Shutdown failed"); } }) },
-    REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: () => ({ logActivity: async (_actor: string, kind: string) => { activities.push(kind); } }) },
+    REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: (name: string) => name === "global" ? funding.REPOSITORY_CONTROLLER.get(funding.REPOSITORY_CONTROLLER.idFromName("global")) : ({ accountLifecycle:async()=>"active",getWorkflowRun:async()=>({actorId:"fixture-human"}),roleOf:async()=>"owner",logActivity: async (_actor: string, kind: string) => { activities.push(kind); } }) },
   } as unknown as Env;
   const workflow = new FlareGitIntegrationWorkflow({} as ExecutionContext, env);
+    Object.assign(workflow,{projectId:"repo",computeAccountKey:await accountKeyFor("fixture-human"),computeWorkflowId:"registered-parent"});
   const callable = workflow as unknown as { casPush(candidate: CandidateGeneration, commit: string, stub: Ledger, branch: string): Promise<unknown> };
   await expect(callable.casPush({ id: "test", expectedAcceptedBase: "a".repeat(40) } as CandidateGeneration, "b".repeat(40), { getState: async () => ({ canonicalRepoName: "repo" }) } as unknown as Ledger, "main")).rejects.toBe(original);
   expect(destroyCalls).toBe(1);
@@ -91,6 +99,8 @@ test("external-only workflow composes native Git and stores immutable candidate 
     let destroyed = 0, aiCalls = 0;
     const commands: string[] = [], stored: string[] = [];
     const env = {
+    ...nativeFunding(),
+      ...nativeFunding(),
       ARTIFACTS: { get: async () => ({ info: async () => ({ remote: canonical }), createToken: async () => ({ plaintext: "fixture-token" }) }) },
       EVIDENCE_BUCKET: { put: async (key: string) => { stored.push(key); } }, AI: { run: async () => { aiCalls++; throw new Error("AI must not run"); } },
       INTEGRATOR: { getByName: () => ({ exec: async (argv: string[]) => {
@@ -106,6 +116,7 @@ test("external-only workflow composes native Git and stores immutable candidate 
     const evidence: import("../src/core/types.js").VerificationEvidence[] = [];
     const ledger = { getState: async () => ({ canonicalRepoName: "repo", tasks: { one: task }, defaultBranch: "main" }), recordComposition: async () => {}, recordVerification: async (_id: string, _commit: string, proof: import("../src/core/types.js").VerificationEvidence) => { evidence.push(proof); } } as unknown as Ledger;
     const workflow = new FlareGitIntegrationWorkflow({} as ExecutionContext, env);
+    Object.assign(workflow,{projectId:"repo",computeAccountKey:await accountKeyFor("fixture-human"),computeWorkflowId:"registered-parent"});
     const callable = workflow as unknown as { composeRepairVerify(candidate: CandidateGeneration, params: { projectId: string; taskIds: string[] }, ledger: Ledger): Promise<{ ok: boolean; commit?: string }> };
     const result = await callable.composeRepairVerify(candidate, { projectId: "repo", taskIds: ["one"] }, ledger);
     expect(result.ok).toBe(true); expect(destroyed).toBe(1); expect(aiCalls).toBe(0);

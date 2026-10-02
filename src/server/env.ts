@@ -2,6 +2,8 @@ import type { ArtifactsBinding } from "../artifacts/cloudflare.js";
 import type { AiBinding } from "../ai/workers-ai.js";
 
 export interface Env {
+  CORE_GIT_GLOBAL_MONTHLY_USD_MICROS?: string;
+  CORE_GIT_ACCOUNT_MONTHLY_USD_MICROS?: string;
   REPOSITORY_CONTROLLER: DurableObjectNamespace;
   INTEGRATOR: DurableObjectNamespace<import("./integrator.js").IntegratorSandbox>;
   AGENT: DurableObjectNamespace<import("./integrator.js").AgentSandbox>;
@@ -34,13 +36,22 @@ export interface Env {
   GLOBAL_RUNS_PER_DAY?: string;
   /** Set to "false" to stop all model-backed runs immediately (kill switch). */
   RUNS_ENABLED?: string;
+  /** Explicit USD micros caps; unset disables managed execution. No customer billing effect. */
+  MANAGED_ACCOUNT_MONTHLY_USD_MICROS?: string;
+  MANAGED_GLOBAL_MONTHLY_USD_MICROS?: string;
   FREE_RUNS_PER_DAY?: string;
   PRO_RUNS_PER_DAY?: string;
   /** Polar billing: product for the Pro plan, API environment, and secrets set with `wrangler secret put`. */
   POLAR_PRODUCT_ID?: string;
   POLAR_SERVER?: "production" | "sandbox";
   POLAR_ACCESS_TOKEN?: string;
+  /** New paid checkout requires a verified offering; existing billing remains manageable. */
+  PAID_CHECKOUT_ENABLED?: string;
   POLAR_WEBHOOK_SECRET?: string;
+  /** Conservative retained-repository envelope, not customer storage entitlement. */
+  ARTIFACT_STORAGE_NAMESPACE?: string;
+  ARTIFACT_STORAGE_GLOBAL_SLOTS?: string;
+  ARTIFACT_STORAGE_ACCOUNT_SLOTS?: string;
   CANONICAL_REPO: string;
 }
 

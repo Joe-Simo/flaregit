@@ -26,7 +26,9 @@ test("public community SQL opt-in separates private history, binds authors and g
     const safeLink={...post,body:"Read [the check](https://checks.example.com/run?step=tests&view=summary).",idempotencyKey:"safe-url-fixture"};
     expect((await call("/post",safeLink)).status).toBe(200);
     expect((await call("/post",{...post,body:"IPv6 documentation: https://[2001:db8::1]",idempotencyKey:"safe-ipv6-fixture"})).status).toBe(200);
+    await Bun.sleep(5);
     const saved=await(await call("/post",post)).json() as PublicPost;
+    expect((await(await call("/list")).json() as PublicPost[])[0]!.id).toBe(saved.id);
     expect(saved.author).toBe("Contributor");
     expect((await(await call("/post",post)).json() as PublicPost).id).toBe(saved.id);
     expect((await call("/post",{...post,body:"Changed event contents"})).status).toBe(409);

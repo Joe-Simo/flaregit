@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env.js";
+import {ContainerLifetime,MANAGED_CONTAINER_LIFETIME_MS,AGENT_CONTAINER_LIFETIME_MS} from "./container-lifetime.js";
 import { fileBytes, MAX_FILE_BYTES } from "./file-bytes.js";
 
 const DEC = new TextDecoder();
@@ -17,9 +18,14 @@ export interface ExecResult {
  * in the environment of the single `exec` that needs them.
  */
 export class IntegratorSandbox extends DurableObject<Env> {
-  private container() {
+  protected maximumLifetimeMs=MANAGED_CONTAINER_LIFETIME_MS;
+  private lifetime(){return new ContainerLifetime(this.ctx.storage,()=>this.ctx.container,this.maximumLifetimeMs);}
+  async lifetimeStatus(){return this.lifetime().status();}
+  override async alarm():Promise<void>{await this.lifetime().alarm();}
+  private async container() {
     const container = this.ctx.container;
     if (!container) throw new Error("Container binding is not configured");
+    await this.lifetime().beforeWork();
     if (!container.running) {
       // The image comes from the container application bound to this class in wrangler.jsonc.
       container.start({
@@ -35,7 +41,7 @@ export class IntegratorSandbox extends DurableObject<Env> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 40; attempt++) {
       try {
-        return await this.container().exec(argv, options);
+        return await (await this.container()).exec(argv, options);
       } catch (err) {
         lastError = err;
         if (!/not (been )?started|not running|starting/i.test(String(err))) throw err;
@@ -76,9 +82,9 @@ export class IntegratorSandbox extends DurableObject<Env> {
   }
 
   async destroy(): Promise<void> {
-    await this.ctx.container?.destroy();
+    await this.lifetime().stop();
   }
 }
 
 /** Separate container class for contributor agents: it never holds integrator or canonical credentials. */
-export class AgentSandbox extends IntegratorSandbox {}
+export class AgentSandbox extends IntegratorSandbox {protected override maximumLifetimeMs=AGENT_CONTAINER_LIFETIME_MS;}

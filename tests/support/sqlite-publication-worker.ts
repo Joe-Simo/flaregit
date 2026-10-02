@@ -14,6 +14,8 @@ export class PublicationFixture extends RepositoryController {
     this.ctx.storage.sql.exec("INSERT INTO webhooks (id,url,secret,events,active,created_at) VALUES ('hook','https://example.com/hook','test-secret','change.accepted,change.ready,change.blocked,decision.needed',1,'now')");
   }
   failMembership(enabled:boolean) { if(enabled)this.ctx.storage.sql.exec("CREATE TRIGGER fail_member BEFORE INSERT ON members BEGIN SELECT RAISE(ABORT,'synthetic membership failure'); END"); else this.ctx.storage.sql.exec("DROP TRIGGER fail_member"); }
+  failRegistry(enabled:boolean) {if(enabled)this.ctx.storage.sql.exec("CREATE TRIGGER fail_registry BEFORE INSERT ON projects BEGIN SELECT RAISE(ABORT,'synthetic registry failure'); END");else this.ctx.storage.sql.exec("DROP TRIGGER fail_registry");}
+  async fixtureAlarm(){await this.alarm();}
   async visibilitySnapshot() { return { visibility: await this.repositoryVisibility(), grant: await this.publicGrant(), rows: this.ctx.storage.sql.exec("SELECT version FROM repository_visibility WHERE id=1").toArray() }; }
   fixtureDeploymentService(){return new RepositoryConnections(this.ctx.storage,"test").create("Deployment provider",["report-deployment"]);}
   fixtureConnection() { return new RepositoryConnections(this.ctx.storage, "test").create("External test provider", ["report-check"]); }
@@ -40,7 +42,7 @@ export class PublicationFixture extends RepositoryController {
 }
 
 export default {
-  async fetch(request: Request, env: { TEST: DurableObjectNamespace<PublicationFixture> }) {
+  async fetch(request: Request, env: { TEST: DurableObjectNamespace<PublicationFixture>;REPOSITORY_CONTROLLER:DurableObjectNamespace<PublicationFixture> }) {
     const url = new URL(request.url);
     const stub = env.TEST.get(env.TEST.idFromName(url.searchParams.get("name") ?? "test"));
     try {
@@ -63,6 +65,12 @@ export default {
       if(url.pathname==="/community-requests")return Response.json(await stub.publicContributionRequests(actor));
       if(url.pathname==="/community-public")return Response.json(await stub.publicCommunity());
       if(url.pathname==="/community-decide"){const value=await request.json() as {id:string;decision:"approved"|"rejected";confirmed:boolean};return Response.json(await stub.decidePublicContribution(actor,value.id,value.decision,value.confirmed));}
+      if(url.pathname==="/registration-reconcile"){await stub.reconcileContributorRegistrations();return Response.json(await stub.publicContributionRequests(actor));}
+      if(url.pathname==="/registration-alarm"){await stub.fixtureAlarm();return Response.json(await stub.publicContributionRequests(actor));}
+      if(url.pathname==="/registration-fail"){await env.REPOSITORY_CONTROLLER.getByName("account:author-key").failRegistry(url.searchParams.get("enabled")==="true");return Response.json({ok:true});}
+      if(url.pathname==="/registry")return Response.json(await env.REPOSITORY_CONTROLLER.getByName("account:author-key").listProjects());
+      if(url.pathname==="/account-delete-start"){await env.REPOSITORY_CONTROLLER.getByName("account:author-key").beginAccountDeletion();return Response.json({ok:true});}
+      if(url.pathname==="/account-delete-finish"){await env.REPOSITORY_CONTROLLER.getByName("account:author-key").finishAccountDeletion();return Response.json(await env.REPOSITORY_CONTROLLER.getByName("account:author-key").accountLifecycle());}
       if(url.pathname==="/remove-member")await stub.removeMember(url.searchParams.get("user")!);
       if(url.pathname==="/member-role")return Response.json(await stub.roleOf(url.searchParams.get("user")!));
       if(url.pathname==="/fail-membership")await stub.failMembership(url.searchParams.get("enabled")==="true");
@@ -87,7 +95,7 @@ export default {
       if (url.pathname === "/await-review") await stub.awaitReview("candidate", url.searchParams.get("commit") ?? "landed", "old-holder");
       if (url.pathname === "/checks") return Response.json(await stub.externalChecks("candidate"));
       if (url.pathname === "/external") await stub.injectExternal(await request.json() as ExternalCheckState);
-      if (url.pathname === "/review") return Response.json(await stub.recordReview("candidate", { approved: true, by: "test-reviewer" }));
+      if (url.pathname === "/review") return Response.json(await stub.recordReview("candidate", { approved: true, by: "test-reviewer" }, url.searchParams.get("expected") ?? "b".repeat(40)));
       if (url.pathname === "/prepare") return Response.json(await stub.preparePublish("candidate"));
       return Response.json(await stub.snapshot());
     } catch (error) { return Response.json({ error: String(error) }, { status: 500 }); }

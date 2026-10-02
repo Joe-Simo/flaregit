@@ -9,7 +9,7 @@ import { timeAgo } from "../router";
 
 interface Token { id: string; label: string; created_at: string; last_used: string | null; scope: string; repo: string | null; expires_at: number | null }
 interface Billing { plan: "free" | "pro"; runsToday: number; runsPerDay: number }
-interface Profile { handle: string; displayName: string; bio: string }
+interface Profile { handle: string; displayName: string; bio: string; visibility: "private" | "public"; version: number }
 const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm";
 const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive";
 const okCls = "rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200";
@@ -30,6 +30,10 @@ export function Account() {
   const [billing, setBilling] = useState<Billing | null>(null);
   const [billingError, setBillingError] = useState<string | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [visibilityUnknown, setVisibilityUnknown] = useState(false);
+  const [publishConfirmed, setPublishConfirmed] = useState(false);
+  const [visibilityNotice, setVisibilityNotice] = useState<{ ok: boolean; text: string } | null>(null);
+  const [savedProfile, setSavedProfile] = useState<Profile | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileSave, setProfileSave] = useState<{ ok: boolean; text: string } | null>(null);
   const [label, setLabel] = useState("");
@@ -37,10 +41,28 @@ export function Account() {
   const [copied, setCopied] = useState(false);
   const [tokenError, setTokenError] = useState<string | null>(null);
   const [tokenNotice, setTokenNotice] = useState<string | null>(null);
+  const [deletionStarted, setDeletionStarted] = useState(false);
+  const [serverDeleted, setServerDeleted] = useState(false);
+  const [deletionNotice, setDeletionNotice] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const { user } = useUser();
+  useEffect(() => {
+    if (!user?.id) return;
+    try {
+      const saved = sessionStorage.getItem(`flaregit.account-deletion.${user.id}`);
+      if (saved === "pending" || saved === "server-deleted") {
+        setDeletionStarted(true); setServerDeleted(saved === "server-deleted"); setConfirm("delete my account");
+        setDeletionNotice(saved === "server-deleted" ? "Repository deletion was confirmed. Sign-in deletion still needs to finish." : "A previous deletion request has an unresolved outcome. Retry to continue the same request.");
+      }
+    } catch { /* Server retry is authoritative even when browser persistence is unavailable. */ }
+  }, [user?.id]);
+  const retainDeletion = (state: "pending" | "server-deleted") => {
+    if (!user?.id) return;
+    try { sessionStorage.setItem(`flaregit.account-deletion.${user.id}`, state); }
+    catch { setDeletionNotice("This browser could not retain deletion progress across reloads. The server preserves the deletion operation; keep this page open to retry."); }
+  };
 
   const loadTokens = useCallback(async () => {
     setTokensError(null);
@@ -54,7 +76,8 @@ export function Account() {
     setProfileError(null);
     try {
       const p = await apiJson<Profile>("/profile");
-      setProfile({ handle: p.handle, displayName: p.displayName, bio: p.bio });
+      setProfile(p); setSavedProfile(p); setVisibilityUnknown(false); setVisibilityNotice(null);
+      setPublishConfirmed(false);
     } catch (e) { setProfileError(errText(e, "Could not load your profile")); }
   }, []);
   useEffect(() => {
@@ -68,10 +91,11 @@ export function Account() {
     setBusy("profile");
     setProfileSave(null);
     try {
-      await apiJson("/profile", { method: "PUT", json: profile });
+      await apiJson("/profile", { method: "PUT", json: { handle: profile.handle, displayName: profile.displayName, bio: profile.bio, expectedVersion: savedProfile?.version } });
       setProfileSave({ ok: true, text: "Profile saved." });
+      await loadProfile();
     } catch (e) {
-      setProfileSave({ ok: false, text: errText(e, "Profile not saved") });
+      setProfileSave({ ok: false, text: `${errText(e, "Profile save response unavailable")}. The saved state is not confirmed. Your draft is retained; reload the saved profile to inspect its current state.` });
     } finally {
       setBusy(null);
     }
@@ -94,6 +118,8 @@ export function Account() {
   return (
     <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8 space-y-4 min-w-0">
       <h1 className="text-xl font-bold">Account</h1>
+      {deletionStarted && <p role="status" className="rounded-md border border-border p-3 text-sm">Account deletion has started or its outcome is uncertain. The account details below are retained from before this request and may be stale. Continue deletion below; other account changes are disabled.</p>}
+      <fieldset disabled={deletionStarted} className="space-y-4 min-w-0">
       <Card>
         <CardHeader><CardTitle className="text-base">Profile</CardTitle></CardHeader>
         <CardContent className="space-y-2">
@@ -102,15 +128,34 @@ export function Account() {
           {!profile && !profileError && <p role="status" className="text-sm text-muted-foreground">Loading profile…</p>}
           {profile && (
             <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); void saveProfile(); }}>
-              <label className="block text-xs text-muted-foreground">Handle<input className={field} value={profile.handle} maxLength={39} onChange={(e) => setProfile({ ...profile, handle: e.target.value })} placeholder="ada" /></label>
-              <label className="block text-xs text-muted-foreground">Display name<input className={field} value={profile.displayName} maxLength={60} onChange={(e) => setProfile({ ...profile, displayName: e.target.value })} placeholder="Ada Lovelace" /></label>
-              <label className="block text-xs text-muted-foreground">Bio<textarea className={field} rows={2} value={profile.bio} maxLength={300} onChange={(e) => setProfile({ ...profile, bio: e.target.value })} /></label>
+              {profile.visibility === "public" && <p className="text-xs text-muted-foreground">This profile is public. Saving changes updates the public name, handle and biography.</p>}
+              <label className="block text-xs text-muted-foreground">Handle<input className={field} disabled={busy !== null || visibilityUnknown} value={profile.handle} maxLength={39} onChange={(e) => setProfile({ ...profile, handle: e.target.value })} placeholder="ada" /></label>
+              <label className="block text-xs text-muted-foreground">Display name<input className={field} disabled={busy !== null || visibilityUnknown} value={profile.displayName} maxLength={60} onChange={(e) => setProfile({ ...profile, displayName: e.target.value })} placeholder="Ada Lovelace" /></label>
+              <label className="block text-xs text-muted-foreground">Bio<textarea className={field} disabled={busy !== null || visibilityUnknown} rows={2} value={profile.bio} maxLength={300} onChange={(e) => setProfile({ ...profile, bio: e.target.value })} /></label>
               {profileSave && (profileSave.ok
                 ? <div role="status" className={okCls}>{profileSave.text}</div>
                 : <div role="alert" className={alertCls}>{profileSave.text}</div>)}
-              <Button type="submit" variant="orange" disabled={busy !== null}>{busy === "profile" ? "Saving…" : "Save profile"}</Button>
+              <div className="flex flex-wrap gap-2"><Button type="submit" variant="orange" disabled={busy !== null || visibilityUnknown}>{busy === "profile" ? "Saving…" : "Save profile"}</Button><Button type="button" variant="outline" disabled={busy !== null} onClick={() => void loadProfile()}>Reload saved profile (discard draft)</Button></div>
             </form>
           )}
+          {profile && <div className="space-y-3 border-t border-border pt-4 mt-4">
+            <h2 className="text-sm font-medium">Public profile</h2>
+            <p className="text-xs leading-6 text-muted-foreground">Currently {profile.visibility === "public" ? "public" : "private"}. Publishing exposes your handle, display name, biography, join date and accepted contributions from currently public repositories. Private repository activity and sign-in details are excluded.</p>
+            {profile.visibility === "private" && savedProfile && (profile.handle !== savedProfile.handle || profile.displayName !== savedProfile.displayName || profile.bio !== savedProfile.bio) && <p className="text-xs text-muted-foreground">Save your profile edits before publishing.</p>}
+            {profile.visibility === "private" && <label className="flex items-start gap-2 text-xs leading-5"><input type="checkbox" className="mt-1 accent-orange-600" checked={publishConfirmed} disabled={busy !== null} onChange={event => setPublishConfirmed(event.target.checked)} /><span>I confirm that these profile fields and public contribution records may be viewed by anyone.</span></label>}
+            {visibilityNotice && <p role={visibilityNotice.ok ? "status" : "alert"} className={visibilityNotice.ok ? "text-xs text-muted-foreground" : "text-xs text-destructive"}>{visibilityNotice.text}</p>}
+            <div className="flex flex-wrap gap-3 items-center"><Button size="sm" variant="outline" disabled={busy !== null || visibilityUnknown || (profile.visibility === "private" && (!publishConfirmed || !savedProfile?.handle || profile.handle !== savedProfile.handle || profile.displayName !== savedProfile.displayName || profile.bio !== savedProfile.bio))} onClick={async () => {
+              setBusy("visibility"); setVisibilityNotice(null);
+              const visibility = profile.visibility === "public" ? "private" : "public";
+              try {
+                await apiJson("/profile/visibility", { method: "PUT", json: { visibility, confirmed: visibility === "public" && publishConfirmed, ...(visibility === "public" ? { expectedVersion: savedProfile?.version } : {}) } });
+                setProfile(value => value ? { ...value, visibility } : value); setPublishConfirmed(false);
+                setVisibilityUnknown(true); await loadProfile();
+                setVisibilityNotice({ ok: true, text: visibility === "public" ? "Public profile enabled." : "Public profile disabled." });
+              } catch (failure) { setVisibilityUnknown(true); setVisibilityNotice({ ok: false, text: `${errText(failure, "Publication response unavailable")}. Publication state is not confirmed. Reload the saved profile before continuing.` }); }
+              finally { setBusy(null); }
+            }}>{busy === "visibility" ? "Saving…" : profile.visibility === "public" ? "Make profile private" : "Publish profile"}</Button>{profile.visibility === "public" && <a className="text-xs underline underline-offset-4" href={`/#/profile/${encodeURIComponent(savedProfile?.handle ?? profile.handle)}`}>View public profile</a>}</div>
+          </div>}
         </CardContent>
       </Card>
       <Card>
@@ -181,13 +226,15 @@ export function Account() {
           </form>
         </CardContent>
       </Card>
+      </fieldset>
       <Card>
         <CardHeader><CardTitle className="text-base text-destructive">Delete account</CardTitle></CardHeader>
         <CardContent className="space-y-3">
           <p className="text-sm text-muted-foreground">Permanently deletes every repository you own (code, changes, webhooks), removes you from shared repositories, revokes all tokens, and deletes your sign-in. This cannot be undone. Cancel an active Pro subscription first.</p>
           {deleteError && <div role="alert" className={alertCls}>{deleteError}</div>}
+          {deletionNotice && <p role="status" className="text-sm text-muted-foreground">{deletionNotice}</p>}
           <div className="flex flex-col sm:flex-row gap-2">
-            <input className={field} value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder='Type "delete my account"' aria-label="Confirm account deletion" />
+            <input className={field} value={confirm} disabled={deletionStarted} onChange={(e) => setConfirm(e.target.value)} placeholder='Type "delete my account"' aria-label="Confirm account deletion" />
             <Button
               variant="destructive"
               className="shrink-0"
@@ -196,15 +243,25 @@ export function Account() {
                 setBusy("delete");
                 setDeleteError(null);
                 try {
-                  await apiJson("/account", { method: "DELETE", json: { confirm } });
-                  await user?.delete();
+                  setDeletionStarted(true); setDeletionNotice(null); retainDeletion(serverDeleted ? "server-deleted" : "pending");
+                  if (!serverDeleted) {
+                    const result = await apiJson<{ deleted: boolean; status?: "deleting"; reason?: string }>("/account", { method: "DELETE", json: { confirm } });
+                    if (result.deleted !== true) {
+                      setDeletionNotice(result.reason ?? "Deletion is pending. Repository cleanup has not been confirmed; retry this same deletion request.");
+                      setBusy(null); return;
+                    }
+                    setServerDeleted(true); retainDeletion("server-deleted");
+                  }
+                  if (!user) throw new Error("Repository deletion is confirmed, but your sign-in identity is unavailable. Retry identity deletion after the session recovers.");
+                  await user.delete();
+                  try { sessionStorage.removeItem(`flaregit.account-deletion.${user.id}`); } catch { /* The identity deletion is confirmed. */ }
                   window.location.href = "/";
                 } catch (e) {
-                  setDeleteError(errText(e, "Account not deleted"));
+                  setDeleteError(`${errText(e, "Deletion response unavailable")}. Deletion is not fully confirmed. Retrying continues this same deletion request.`);
                   setBusy(null);
                 }
               }}
-            >{busy === "delete" ? "Deleting…" : "Delete everything"}</Button>
+            >{busy === "delete" ? "Deleting…" : serverDeleted ? "Retry sign-in deletion" : deletionStarted ? "Retry deletion" : "Delete everything"}</Button>
           </div>
         </CardContent>
       </Card>

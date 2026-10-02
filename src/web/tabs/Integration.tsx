@@ -160,7 +160,7 @@ export function IntegrationTab({
         </div>
         {kind === "demo" && (
           <div className="min-h-[560px]">
-            <LivePreview projectId={projectId} currentCommit={state.acceptedState.currentCommit} />
+            <LivePreview key={`${projectId}:${state.acceptedState.currentCommit}`} isOwner={isOwner} projectId={projectId} currentCommit={state.acceptedState.currentCommit} />
           </div>
         )}
       </div>

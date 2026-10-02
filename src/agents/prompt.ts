@@ -20,6 +20,7 @@ const SECRET_PATTERNS = [
   /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g,
   /\bsk-(?:live|test|proj|ant)?[-_]?[A-Za-z0-9]{20,}\b/g,
   /\bfgt_[0-9a-f]{12}_[A-Za-z0-9]{32,64}\b/g,
+  /\bfgg_p?[0-9a-f]{12}_[A-Za-z0-9_-]{32,128}\b/g,
   /\bart_v1_[A-Za-z0-9_-]{16,}(?:\?expires=\d+)?/g,
   /(\bBearer\s+)[A-Za-z0-9._~+\/-]{16,}=*/gi,
   /\bwhsec_[A-Za-z0-9+/=]{16,}\b/g,

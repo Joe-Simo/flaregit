@@ -1,10 +1,12 @@
+import { CloudflareBadge } from "./components/CloudflareBadge";
 import React, { useEffect, useRef, useState } from "react";
 import { GitBranch, Search, Menu, X, Inbox as InboxIcon, Settings, FolderGit2, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogHeader, DialogTitle, DialogClose } from "@/components/ui/dialog";
+import { SearchDialog, type SearchLoader } from "./components/SearchDialog";
 import { BillingBar } from "./components/BillingBar";
 import { Home } from "./pages/Home";
 import { PublicParticipation } from "./pages/PublicParticipation";
+import { CommunityCompose } from "./pages/Community";
 import { NewRepo } from "./pages/NewRepo";
 import { Repo } from "./pages/Repo";
 import { Join } from "./pages/Join";
@@ -14,40 +16,10 @@ import { OperatorPage, ReportPage } from "./pages/Reports";
 import { apiJson } from "./api";
 import { navigate, useRoute } from "./router";
 
-interface SearchRepository { id: string; name: string }
-function RepositorySearch({ open, close }: { open: boolean; close: () => void }) {
-  const [repositories, setRepositories] = useState<SearchRepository[] | null>(null);
-  const [query, setQuery] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const input = useRef<HTMLInputElement>(null);
-  const panel = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    let active = true;
-    const previous = document.activeElement;
-    setRepositories(null); setQuery(""); setError(null);
-    void apiJson<{ projects: SearchRepository[] }>("/account").then((response) => { if (active) setRepositories(response.projects); }).catch((cause: unknown) => { if (active) setError(cause instanceof Error ? cause.message : "Could not load repositories"); });
-    const frame = requestAnimationFrame(() => input.current?.focus());
-    const trap = (event: KeyboardEvent) => {
-      if (event.key !== "Tab") return;
-      const controls = panel.current?.querySelectorAll<HTMLElement>("button:not(:disabled),input,a[href]");
-      if (!controls?.length) return;
-      const first = controls[0], last = controls[controls.length - 1];
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-    };
-    document.addEventListener("keydown", trap);
-    return () => { active = false; cancelAnimationFrame(frame); document.removeEventListener("keydown", trap); if (previous instanceof HTMLElement) previous.focus(); };
-  }, [open]);
-  const results = repositories?.filter((repository) => repository.name.toLowerCase().includes(query.toLowerCase())) ?? [];
-  return <Dialog open={open} onOpenChange={close}><div ref={panel} role="dialog" aria-modal="true" aria-labelledby="repository-search-title">
-    <DialogClose onClick={close} /><DialogHeader><DialogTitle id="repository-search-title">Find a repository</DialogTitle></DialogHeader>
-    <input ref={input} aria-label="Search your repositories" className="w-full border border-input rounded-md bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder="Repository name" value={query} onChange={(event) => setQuery(event.target.value)} />
-    {error && <p role="alert" className="mt-3 text-sm text-destructive">{error}</p>}
-    {!repositories && !error && <p role="status" className="mt-3 text-sm text-muted-foreground">Loading repositories…</p>}
-    {repositories && <ul className="mt-3 max-h-72 overflow-auto divide-y divide-border">{results.map((repository) => <li key={repository.id}><Button variant="ghost" className="w-full justify-start h-auto py-3 text-left break-all whitespace-normal" onClick={() => { navigate(`/p/${repository.id}`); close(); }}><FolderGit2 className="h-4 w-4 mr-2 shrink-0" aria-hidden="true" />{repository.name}</Button></li>)}{results.length === 0 && <li className="py-3 text-sm text-muted-foreground">{repositories.length === 0 ? "No repositories yet." : "No matching repositories."}</li>}</ul>}
-  </div></Dialog>;
-}
+const loadSearch: SearchLoader = async (query, signal) => {
+  const response = await apiJson<{ results: { id: string; kind: string; title: string; description: string; href: string }[]; incomplete: boolean }>(`/search?q=${encodeURIComponent(query)}`, { signal });
+  return { results: response.results.map(result => ({ ...result, group: result.kind.charAt(0).toUpperCase() + result.kind.slice(1) })), incomplete: response.incomplete };
+};
 
 export function App() {
   const route = useRoute();
@@ -81,7 +53,7 @@ export function App() {
       <header className="h-14 border-b border-border flex items-center gap-3 px-4 lg:pl-[264px] pr-16 bg-card">
         <Button ref={menuButton} size="icon" variant="ghost" className="lg:hidden" aria-label={sidebarOpen ? "Close navigation" : "Open navigation"} aria-controls="workspace-navigation" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen((value) => !value)}>{sidebarOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}</Button>
         <span className="text-xs text-muted-foreground hidden sm:inline">Workspace</span><span className="text-border hidden sm:inline">/</span><span className="text-sm font-medium truncate">{section}</span>
-        <Button variant="ghost" size="sm" className="ml-auto gap-2 text-muted-foreground" onClick={() => setSearchOpen(true)} aria-label="Search repositories, Command or Control K"><Search className="h-4 w-4" aria-hidden="true" /><span className="hidden sm:inline">Quick search</span><kbd className="hidden sm:inline text-[10px] border border-border rounded px-1.5 py-0.5">⌘ K</kbd></Button>
+        <Button variant="ghost" size="sm" className="ml-auto gap-2 text-muted-foreground" onClick={() => setSearchOpen(true)} aria-label="Search repositories, changes and issues, Command or Control K"><Search className="h-4 w-4" aria-hidden="true" /><span className="hidden sm:inline">Quick search</span><kbd className="hidden sm:inline text-[10px] border border-border rounded px-1.5 py-0.5">⌘ K</kbd></Button>
       </header>
       <aside id="workspace-navigation" className={`dashboard-sidebar border-r border-border lg:fixed lg:inset-y-0 lg:left-0 lg:w-[240px] lg:flex flex-col ${sidebarOpen ? "flex border-b" : "hidden"}`}>
         <button className="h-14 px-5 flex items-center gap-2.5 border-b border-border font-semibold text-lg tracking-tight focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" onClick={() => { navigate("/"); setSidebarOpen(false); }} aria-label="FlareGit repositories"><span className="h-7 w-7 rounded-md bg-primary flex items-center justify-center text-primary-foreground"><GitBranch className="h-4 w-4" aria-hidden="true" /></span>FlareGit</button>
@@ -98,6 +70,7 @@ export function App() {
       <main id="workspace-content" tabIndex={-1} className="flex-1 min-w-0">
         {route.name === "home" && <Home />}
         {route.name === "participate" && <PublicParticipation key={route.projectId} projectId={route.projectId} />}
+        {route.name === "community-post" && <CommunityCompose key={route.params.get("topic") ?? "new"} topic={route.params.get("topic") ?? undefined} />}
         {route.name === "new" && <NewRepo />}
         {route.name === "account" && <Account />}
         {route.name === "inbox" && <Inbox onCount={setUnread} />}
@@ -106,13 +79,13 @@ export function App() {
         {route.name === "join" && <Join projectId={route.projectId} token={route.token} />}
         {route.name === "repo" && <Repo projectId={route.projectId} tab={route.tab} params={route.params} />}
       </main>
-      <footer className="px-4 sm:px-6 py-3 text-xs text-muted-foreground flex flex-wrap gap-x-4 gap-y-1 border-t border-border">
+      <footer className="px-4 sm:px-6 py-3 text-xs text-muted-foreground flex flex-wrap items-center gap-x-4 gap-y-3 border-t border-border">
         <a href="/terms" className="hover:underline">Terms</a>
         <a href="/privacy" className="hover:underline">Privacy</a>
-
+        <CloudflareBadge className="ml-auto" />
       </footer>
       </div>
-      <RepositorySearch open={searchOpen} close={() => { setSearchOpen(false); setSidebarOpen(false); }} />
+      <SearchDialog open={searchOpen} onOpenChange={setSearchOpen} load={loadSearch} onNavigate={href => { setSidebarOpen(false); if (href.startsWith("/#/")) navigate(href.slice(2)); else window.location.assign(href); }} />
     </div>
   );
 }

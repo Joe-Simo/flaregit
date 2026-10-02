@@ -172,7 +172,7 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
           <CardContent className="space-y-3">
             <p className="text-xs text-muted-foreground break-words">Permanently deletes the repository, all changes, history and settings. This cannot be undone. Type <strong>{meta.name}</strong> to confirm.</p>
             <input className={field} value={confirmName} onChange={(e) => setConfirmName(e.target.value)} aria-label="Type the repository name to confirm" />
-            <Button variant="destructive" disabled={busy !== null || confirmName !== meta.name} onClick={() => guard("delete", async () => { await apiJson(`/p/${meta.id}`, { method: "DELETE" }); navigate("/"); })}>
+            <Button variant="destructive" disabled={busy !== null || confirmName !== meta.name} onClick={() => guard("delete", async () => { const result = await apiJson<{ deleted: string | false; status?: string; detail?: string }>(`/p/${meta.id}`, { method: "DELETE" }); if (result.deleted === false) throw new Error(result.detail ?? "Repository cleanup is pending. Retry deletion."); navigate("/"); })}>
               {busy === "delete" ? "Deleting…" : "Delete this repository"}
             </Button>
           </CardContent>

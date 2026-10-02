@@ -1,9 +1,10 @@
+import { admitNativeCompute } from "./native-compute.js";
 import { isSafeRef } from "../core/sanitize.js";
 import { buildPrefix } from "./preview-access.js";
 import { publicationInHistory } from "./publication.js";
 import { pushMirror } from "./mirror.js";
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
-import { WorkersAIClient } from "../ai/workers-ai.js";
+import { WorkersAIClient, DEFAULT_CODE_MODEL } from "../ai/workers-ai.js";
 import { buildRepairPrompt, parseRepairResponse, MAX_REPAIR_ROUNDS } from "../core/pipeline/repair.js";
 import type { CandidateGeneration, VerificationEvidence } from "../core/types.js";
 import type { Env } from "./env.js";
@@ -12,11 +13,12 @@ import { gitAuthEnv, q } from "./shell.js";
 import { ledgerOf } from "./scenario-workflow.js";
 import { settingsFor } from "../core/command-policy.js";
 import { inAgentScope, isProtectedPath, redactSecrets } from "../agents/prompt.js";
-import { globalOf } from "./projects.js";
+import { globalOf, reserveManagedAgent, assertManagedInitiator } from "./projects.js";
 import type { WorkflowOutcome } from "./durable-object.js";
 
 export interface IntegrationParams {
   projectId: string;
+  accountKey?: string;
   /** One to eight changes, merged in this order. */
   taskIds: string[];
 }
@@ -44,6 +46,8 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
   private async execute(event: WorkflowEvent<IntegrationParams>, step: WorkflowStep) {
     const stub = ledgerOf(this.env, event.payload.projectId) as Stub;
     this.projectId = event.payload.projectId;
+    this.computeAccountKey = event.payload.accountKey;
+    this.computeWorkflowId = event.instanceId;
     const holder = event.instanceId;
 
     // Merge queue: landings are serialized by the ledger lease. A busy lease means "wait your turn" (durably, via
@@ -63,7 +67,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     const integrated = await step.do(
       "compose-repair-verify",
       { retries: { limit: 1, delay: "10 seconds", backoff: "constant" }, timeout: "20 minutes" },
-      async () => this.composeRepairVerify(candidate, event.payload, stub)
+      async () => this.composeRepairVerify(candidate, event.payload, stub, event.instanceId)
     );
 
     if (!integrated.ok) {
@@ -107,7 +111,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     await step.do("mirror-to-github", async () => {
       const cfg = await stub.mirrorSecret();
       if (!cfg) return { skipped: true };
-      const mirror = this.sandbox(`mirror-${candidate.id}`);
+      const mirror = await this.sandbox(`mirror-${candidate.id}`);
       try {
         const canonical = await this.canonicalRemote(stub);
         const r = await pushMirror({ exec: mirror.exec }, { target: cfg.target, githubToken: cfg.token, canonicalRemote: canonical.remote, canonicalToken: canonical.token, branch: integrated.branch, commit: integrated.commit });
@@ -132,7 +136,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     const accepted = new Set(candidate.participatingTaskIds);
     const tasks = Object.values(state.tasks);
     if (!tasks.some((t) => t.dependsOn && accepted.has(t.dependsOn))) return { rebased: [], blocked: [] };
-    const sb = this.sandbox(`rebase-${candidate.id}`);
+    const sb = await this.sandbox(`rebase-${candidate.id}`);
     try {
     const canonical = await this.canonicalRemote(stub);
     const cloned = await sb.exec(`rm -rf ${WORK} && git clone --quiet ${q(canonical.remote)} ${WORK} && git -C ${WORK} config user.name FlareGit && git -C ${WORK} config user.email integrator@flaregit.com`, gitAuthEnv(canonical.token));
@@ -185,9 +189,15 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
 
   private projectId = "";
 
-  /** Containers are named per repository and candidate, so concurrent runs elsewhere can never share a workspace. */
-  private sandbox(id: string) {
-    const sb = this.env.INTEGRATOR.getByName(`${this.projectId}-${id}`);
+  /** Every allocation is isolated; interrupted work is recovered from retained Git refs. */
+  private computeAccountKey?: string;
+  private computeWorkflowId?: string;
+  private async sandbox(id: string) {
+    const repository=ledgerOf(this.env,this.projectId);
+    await assertManagedInitiator(this.env,repository,this.computeWorkflowId,this.computeAccountKey);
+    const allocationId=`native-${crypto.randomUUID()}`;
+    await admitNativeCompute(this.env,this.computeAccountKey!,allocationId);
+    const sb = this.env.INTEGRATOR.getByName(allocationId);
     return {
       exec: (cmd: string, env?: Record<string, string>) => sb.exec(["sh", "-c", cmd], { env }),
       readFile: async (p: string) => ({ content: await sb.readFile(p) }),
@@ -212,12 +222,22 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
   private async composeRepairVerify(
     candidate: CandidateGeneration,
     params: IntegrationParams,
-    stub: Stub
+    stub: Stub,
+    parentWorkflowId: string
   ): Promise<{ ok: true; commit: string; evidenceId: string; branch: string } | { ok: false; error: string }> {
     const settings = settingsFor(candidate.frozenVerificationPolicy);
     const externalOnly = candidate.frozenExternalChecksPolicy?.mode === "external";
     if (externalOnly && (settings.fixture !== "custom" || !candidate.frozenExternalChecksPolicy?.checks.some((check) => check.required) || !candidate.frozenContributorProofs?.length)) return { ok: false, error: "External CI requires a custom repository, frozen contributor proofs and at least one required check" };
-    const sb = this.sandbox(`integrate-${candidate.id}`);
+    const spendRunId = `repair-${candidate.id}`;
+    let spending: Awaited<ReturnType<typeof reserveManagedAgent>> | null = null;
+    try {
+      if (!externalOnly) await assertManagedInitiator(this.env, stub, parentWorkflowId, params.accountKey);
+      spending = externalOnly ? null : await reserveManagedAgent(this.env, params.accountKey, spendRunId);
+      if (spending) await globalOf(this.env).consumeManagedSpend(spendRunId, 0, 0, 600);
+    } catch {
+      return { ok: false, error: "Managed verification budget unavailable; saved contributor checkpoints remain available. Configure a budget or use external checks." };
+    }
+    const sb = await this.sandbox(`integrate-${candidate.id}`);
     try {
     const run = async (cmd: string, env?: Record<string, string>) => sb.exec(cmd, env);
     const state = await stub.getState();
@@ -247,7 +267,11 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       if (bad.length) return { ok: false, error: `Contributor change rejected: ${bad.join(", ")}` };
     }
 
-    const ai = new WorkersAIClient({ binding: this.env.AI, gatewayId: this.env.AI_GATEWAY_ID });
+    const ai = new WorkersAIClient({ binding: this.env.AI, gatewayId: this.env.AI_GATEWAY_ID, model: DEFAULT_CODE_MODEL, maxOutputTokens: 8192, maxCalls: 8, beforeDispatch: async ({ model, inputBytes, maxOutputTokens }) => {
+      if (!spending || model !== DEFAULT_CODE_MODEL) throw new Error("Managed repair budget unavailable");
+      await assertManagedInitiator(this.env, stub, parentWorkflowId, params.accountKey);
+      await globalOf(this.env).consumeManagedSpend(spendRunId, inputBytes, maxOutputTokens, 0);
+    } });
     let round = 0;
     candidate.repairAttempts = [];
     await stub.recordComposition(candidate.id, []);
@@ -359,7 +383,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
    * stored candidate ref, proves it is the reviewed commit, and only moves the branch if it still equals the base.
    */
   private async casPush(candidate: CandidateGeneration, commit: string, stub: Stub, branch: string): Promise<{ ok: true } | { ok: false; error: string; stale?: boolean }> {
-    const sb = this.sandbox(`publish-${candidate.id}`);
+    const sb = await this.sandbox(`publish-${candidate.id}`);
     try {
     const canonical = await this.canonicalRemote(stub);
     const dir = "/workspace/publish";

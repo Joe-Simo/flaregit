@@ -16,6 +16,8 @@ export interface WorkersAIConfig {
   maxOutputTokens?: number;
   /** Hard spending control: calls allowed before the client refuses further work. */
   maxCalls?: number;
+  /** Server-only durable admission, invoked before every real provider attempt. */
+  beforeDispatch?: (input: { model: string; inputBytes: number; maxOutputTokens: number }) => Promise<void>;
 }
 
 export const DEFAULT_CODE_MODEL = "@cf/openai/gpt-oss-120b";
@@ -60,6 +62,7 @@ export class WorkersAIClient {
   async complete(prompt: string): Promise<string> {
     if (!this.isConfigured) throw new WorkersAINotConfiguredError();
     if (++this.calls > this.maxCalls) throw new Error(`Workers AI call budget exhausted (${this.maxCalls})`);
+    await this.cfg.beforeDispatch?.({ model: this.model, inputBytes: new TextEncoder().encode(prompt).length, maxOutputTokens: this.maxTokens });
     const input = { messages: [{ role: "user", content: prompt }], max_tokens: this.maxTokens };
 
     if (this.cfg.binding) {

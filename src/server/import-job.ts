@@ -7,6 +7,7 @@ export interface ImportJob {
   id: string; ownerId: string; name: string; canonicalRepoName: string; source: string; branch: string;
   verificationPolicy: CommandPolicy; status: "requested" | "pending" | "ready" | "failed";
   historyIntent: "provider-default-no-depth-requested";
+  importedHead?: string; importedBranch?: string;
   createdAt: string; updatedAt: string; detail: string;
 }
 interface ImportReader {

@@ -5,6 +5,7 @@ import { apiJson } from "../api";
 import { ExternalCheckRows, type ExternalCheckDetail } from "./ExternalCheckRows";
 import { VERIFIER_IDENTITIES } from "@/core/verification-identities";
 import { externalCheckGate, type ExternalCheckState } from "@/core/external-checks";
+import { blocksExternalAcceptance } from "../review-gate";
 import { navigate } from "../router";
 import type { CandidateGeneration, VerificationEvidence } from "@/core/types";
 
@@ -12,7 +13,7 @@ import type { CandidateGeneration, VerificationEvidence } from "@/core/types";
  * The explicit human gate: a verified candidate shows what would land, which checks passed, and asks for
  * Accept or Reject. Nothing becomes repository history without this decision on this exact commit.
  */
-export function CandidateReview({ projectId, candidate, evidence, onDone, showOpen = true, externalChecks, providerNames, onRetryExternalCheck, isOwner = false }: { projectId: string; candidate: CandidateGeneration; evidence?: VerificationEvidence; onDone: () => void; showOpen?: boolean; externalChecks?: ExternalCheckState; providerNames?: Record<string, string>; onRetryExternalCheck?: (checkId: string) => Promise<void>; isOwner?: boolean }) {
+export function CandidateReview({ projectId, candidate, evidence, onDone, showOpen = true, externalChecks, providerNames, onRetryExternalCheck, isOwner = false, reviewReady = true }: { projectId: string; candidate: CandidateGeneration; evidence?: VerificationEvidence; onDone: () => void; showOpen?: boolean; externalChecks?: ExternalCheckState; providerNames?: Record<string, string>; onRetryExternalCheck?: (checkId: string) => Promise<void>; isOwner?: boolean; reviewReady?: boolean }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -20,7 +21,9 @@ export function CandidateReview({ projectId, candidate, evidence, onDone, showOp
   const nativeOnly = evidence?.verifierIdentity === VERIFIER_IDENTITIES.external || candidate.frozenExternalChecksPolicy?.mode === "external";
   const total = evidence?.testResults.reduce((n, s) => n + s.passedCount + s.failedCount, 0) ?? 0;
 
-  const scope = `${projectId}:${candidate.id}`;
+  const scope = `${projectId}:${candidate.id}:${candidate.candidateCommit ?? ""}`;
+  const decisionGeneration = useRef(0);
+  useEffect(() => { decisionGeneration.current++; setBusy(null); setError(null); return () => { decisionGeneration.current++; }; }, [scope]);
   const [loadedChecks, setLoadedChecks] = useState<{ scope: string; checks: ExternalCheckState | null; reports: ExternalCheckDetail[] } | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
   const [names, setNames] = useState<Record<string, string>>({});
@@ -28,6 +31,7 @@ export function CandidateReview({ projectId, candidate, evidence, onDone, showOp
   const requestSequence = useRef(0);
   const retryInFlight = useRef(false);
   const [retryingCheck, setRetryingCheck] = useState(false);
+  const [retryingRequired, setRetryingRequired] = useState(false);
   const refreshChecks = async () => {
     if (retryInFlight.current) return;
     const sequence = ++requestSequence.current;
@@ -42,49 +46,51 @@ export function CandidateReview({ projectId, candidate, evidence, onDone, showOp
   };
   useEffect(() => {
     let active = true;
-    setLoadedChecks(null); setCheckError(null); setNames({}); retryInFlight.current = false; setRetryingCheck(false);
+    setLoadedChecks(null); setCheckError(null); setNames({}); retryInFlight.current = false; setRetryingCheck(false); setRetryingRequired(false); setRetryingRequired(false);
     const check = async () => {
       if (retryInFlight.current) return;
       const sequence = ++requestSequence.current;
       try {
         const response = await apiJson<{ checks: ExternalCheckState | null; reports: ExternalCheckDetail[] }>(`/p/${projectId}/candidates/${candidate.id}/checks`);
-        if (active && sequence === requestSequence.current) { setLoadedChecks({ scope: `${projectId}:${candidate.id}`, checks: response.checks, reports: response.reports ?? [] }); setCheckError(null); }
+        if (active && sequence === requestSequence.current) { setLoadedChecks({ scope, checks: response.checks, reports: response.reports ?? [] }); setCheckError(null); }
       } catch (cause) { if (active && sequence === requestSequence.current) setCheckError(cause instanceof Error ? cause.message : "Could not load connected checks"); }
     };
     void check();
     if (isOwner) void apiJson<{ connections: Array<{ id: string; name: string }> }>(`/p/${projectId}/connections`).then((response) => { if (active) setNames(Object.fromEntries(response.connections.map((connection) => [connection.id, connection.name]))); }).catch(() => undefined);
     const timer = setInterval(() => void check(), 8000);
     return () => { active = false; requestSequence.current++; clearInterval(timer); };
-  }, [projectId, candidate.id, isOwner]);
+  }, [projectId, candidate.id, candidate.candidateCommit, isOwner, scope]);
   const checksKnown = loadedChecks?.scope === scope;
   const checks = checksKnown ? loadedChecks.checks : externalChecks;
-  const identityMismatch = checks && (checks.frozen.repositoryId !== projectId || checks.frozen.candidateId !== candidate.id || checks.frozen.commit !== candidate.candidateCommit || (evidence && (checks.frozen.commit !== evidence.candidateCommit || checks.frozen.tree !== evidence.candidateTree)));
-  const checkGate = checks ? externalCheckGate(checks) : "passed";
-  const acceptanceBlocked = retryingCheck || !checksKnown || checkError !== null || Boolean(identityMismatch) || checkGate !== "passed";
+  const identityMismatch = checks && (checks.frozen.repositoryId !== projectId || checks.frozen.candidateId !== candidate.id || checks.frozen.commit !== candidate.candidateCommit || (candidate.frozenExternalChecksPolicy && (checks.frozen.policy.version !== candidate.frozenExternalChecksPolicy.version || checks.frozen.policy.mode !== candidate.frozenExternalChecksPolicy.mode)) || (evidence && (checks.frozen.commit !== evidence.candidateCommit || checks.frozen.tree !== evidence.candidateTree)));
+  const declaredRequiredChecks = candidate.frozenExternalChecksPolicy?.checks.some((check) => check.required) ?? false;
+  const checkGate = checks ? externalCheckGate(checks) : declaredRequiredChecks ? "pending" : "passed";
+  const acceptanceBlocked = !reviewReady || !candidate.candidateCommit || blocksExternalAcceptance({ required: declaredRequiredChecks, known: checksKnown, readFailed: checkError !== null, identityMismatch: Boolean(identityMismatch), gate: checkGate, retryingRequired });
   const retryCheck = isOwner ? async (checkId: string) => {
     const sequence = ++requestSequence.current;
-    retryInFlight.current = true; setRetryingCheck(true);
+    retryInFlight.current = true; setRetryingCheck(true); setRetryingRequired(checks?.frozen.policy.checks.find((check) => check.id === checkId)?.required ?? declaredRequiredChecks);
     try {
       if (onRetryExternalCheck) { await onRetryExternalCheck(checkId); if (sequence === requestSequence.current) setLoadedChecks(null); return; }
       const response = await apiJson<{ checks: ExternalCheckState; reports?: ExternalCheckDetail[] }>(`/p/${projectId}/candidates/${candidate.id}/checks`, { method: "POST", json: { checkId } });
       if (sequence === requestSequence.current) { setLoadedChecks({ scope, checks: response.checks, reports: response.reports ?? [] }); setCheckError(null); }
-    } finally { if (sequence === requestSequence.current) { retryInFlight.current = false; setRetryingCheck(false); } }
+    } finally { if (sequence === requestSequence.current) { retryInFlight.current = false; setRetryingCheck(false); setRetryingRequired(false); } }
   } : undefined;
   const connectedRows = <>
     {checks && <ExternalCheckRows key={`${scope}:${checks.frozen.commit}:${checks.frozen.policy.version}`} externalChecks={checks} reports={checksKnown ? loadedChecks.reports : []} providerNames={providerNames ?? names} onRetryExternalCheck={retryCheck} />}
-    {(!checksKnown || checkError) && <div className="text-xs text-muted-foreground flex flex-wrap gap-2 items-center"><span role={checkError ? "alert" : "status"}>{checkError ? `Connected check state unavailable: ${checkError}. Acceptance is paused; review remains available.` : "Reading connected check requirements…"}</span>{checkError && <Button size="sm" variant="outline" disabled={checking || retryingCheck} onClick={() => void refreshChecks()}>{checking ? "Checking…" : "Retry check status"}</Button>}</div>}
+    {(!checksKnown || checkError) && <div className="text-xs text-muted-foreground flex flex-wrap gap-2 items-center"><span role={checkError ? "alert" : "status"}>{checkError ? declaredRequiredChecks ? `Required check state unavailable: ${checkError}. Acceptance is paused; review remains available.` : `Required connected checks: none. Optional reports are unavailable: ${checkError}.` : declaredRequiredChecks ? "Reading required connected check evidence…" : "Required connected checks: none. Reading optional reports…"}</span>{checkError && <Button size="sm" variant="outline" disabled={checking || retryingCheck} onClick={() => void refreshChecks()}>{checking ? "Checking…" : "Retry check status"}</Button>}</div>}
   </>;
 
   const decide = async (approved: boolean) => {
+    const generation = decisionGeneration.current;
     setBusy(approved ? "approve" : "reject");
     setError(null);
     try {
-      await apiJson(`/p/${projectId}/candidates/${candidate.id}/review`, { method: "POST", json: { approved, note } });
-      onDone();
+      await apiJson(`/p/${projectId}/candidates/${candidate.id}/review`, { method: "POST", json: { approved, note, expectedCommit: candidate.candidateCommit } });
+      if (generation === decisionGeneration.current) onDone();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not record the review");
+      if (generation === decisionGeneration.current) setError(e instanceof Error ? e.message : "Could not record the review");
     } finally {
-      setBusy(null);
+      if (generation === decisionGeneration.current) setBusy(null);
     }
   };
 
@@ -122,6 +128,7 @@ export function CandidateReview({ projectId, candidate, evidence, onDone, showOp
         </details>)}
       </div>}
       {connectedRows}
+      {!reviewReady && <p role="status" className="text-xs text-muted-foreground">Diff files are loading or unavailable. Acceptance from this review is paused; comments and rejection remain available.</p>}
       {checksKnown && !checkError && (identityMismatch || checkGate !== "passed") && <p role="status" className="text-xs text-amber-800 dark:text-amber-200">{identityMismatch ? "Connected check evidence does not match this candidate. Reload before accepting." : checkGate === "failed" ? "A required connected check failed or was cancelled. Acceptance is blocked." : "Waiting for required connected checks before acceptance."}</p>}
       <textarea className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm" rows={2} maxLength={500} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Review note (optional; required context if you reject)" aria-label="Review note" />
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}

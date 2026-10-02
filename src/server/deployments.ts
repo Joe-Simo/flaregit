@@ -25,6 +25,12 @@ export class RepositoryDeployments {
   constructor(private readonly storage:DurableObjectStorage,private readonly repositoryId:string){storage.sql.exec(`CREATE TABLE IF NOT EXISTS deployments(id TEXT PRIMARY KEY,doc TEXT NOT NULL);CREATE TABLE IF NOT EXISTS deployment_requests(actor_id TEXT NOT NULL,event_key TEXT NOT NULL,payload TEXT NOT NULL,deployment_id TEXT NOT NULL,PRIMARY KEY(actor_id,event_key));CREATE TABLE IF NOT EXISTS deployment_receipts(service_id TEXT NOT NULL,event_id TEXT NOT NULL,payload TEXT NOT NULL,deployment_id TEXT NOT NULL,PRIMARY KEY(service_id,event_id));`);}
   get(deploymentId:string):DeploymentRecord|null{const row=this.storage.sql.exec<{doc:string}>("SELECT doc FROM deployments WHERE id=?",deploymentId).toArray()[0];return row?JSON.parse(row.doc) as DeploymentRecord:null;}
   list():DeploymentRecord[]{return this.storage.sql.exec<{doc:string}>("SELECT doc FROM deployments ORDER BY id").toArray().map(row=>JSON.parse(row.doc) as DeploymentRecord);}
+  existingRequest(target: AcceptedDeploymentTarget, serviceId: string, environment: string, key: string, actorId: string): DeploymentRecord | null {
+    const row=this.storage.sql.exec<{payload:string;deployment_id:string}>("SELECT payload,deployment_id FROM deployment_requests WHERE actor_id=? AND event_key=?",actorId,key).toArray()[0];
+    if(!row)return null;
+    if(row.payload!==JSON.stringify({target:targetSchema.parse(target),serviceId,environment:environment.trim()}))throw new Error("Deployment request key belongs to different accepted state");
+    return this.get(row.deployment_id);
+  }
   request(target:AcceptedDeploymentTarget,serviceId:string,environment:string,idempotencyKey:string,actorId:string,stage:(event:DeploymentRequestedEvent)=>void){
     const frozen=targetSchema.parse(target);id.parse(serviceId);id.parse(actorId);id.parse(idempotencyKey);
     if(typeof environment!=="string"||!environment.trim()||environment.length>100||/[\x00-\x1f<>]/.test(environment)||redactSecrets(environment)!==environment)throw new Error("Invalid deployment environment");

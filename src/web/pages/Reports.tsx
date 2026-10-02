@@ -23,10 +23,10 @@ function ReportList({ reports }: { reports: Report[] }) {
   );
 }
 
-/** Anyone signed in can report; every report reaches a person, and its status stays visible to the reporter. */
+/** Anyone signed in can report; reports enter the operator queue, and its status stays visible to the reporter. */
 export function ReportPage() {
   const [kind, setKind] = useState("impersonation");
-  const [target, setTarget] = useState("");
+  const [target, setTarget] = useState(() => { const query = window.location.hash.split("?")[1] ?? ""; return new URLSearchParams(query).get("target")?.slice(0, 300) ?? ""; });
   const [details, setDetails] = useState("");
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -50,7 +50,7 @@ export function ReportPage() {
     <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8 space-y-6">
       <div>
         <h1 className="text-xl font-bold">Report abuse or impersonation</h1>
-        <p className="text-sm text-muted-foreground">Someone using your name, a squatted repository or domain, malware, extortion or a security problem. A person reads every report; the open count and the age of the oldest are public on <a className="underline" href="/status">/status</a>.</p>
+        <p className="text-sm text-muted-foreground">Someone using your name, a squatted repository or domain, malware, extortion or a security problem. Reports are saved for operator review, and a written resolution is required when closed. The open count and age of the oldest are public on <a className="underline" href="/status">/status</a>.</p>
       </div>
       <form onSubmit={submit} className="space-y-3">
         <label className="block text-sm"><span className="font-medium">What kind of problem</span>

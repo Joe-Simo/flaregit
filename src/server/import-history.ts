@@ -19,7 +19,7 @@ export async function captureArtifactsHistory(binding: HistoryBinding, name: str
   try {
     using repo = await timeout(binding.get(name));
     const ref = `refs/heads/${branch}`;
-    if ((await timeout(repo.log({ ref, limit: 1 })))[0]?.hash !== expectedHead) return null;
+    if (!(await timeout(repo.readCommit(expectedHead)))) return null;
     const commits: GitHistoryInventory["commits"] = {};
     const seen = new Set<string>();
     const pending = [expectedHead];
@@ -34,7 +34,7 @@ export async function captureArtifactsHistory(binding: HistoryBinding, name: str
       commits[hash] = { tree: commit.treeHash, parents: commit.parents };
       pending.push(...commit.parents);
     }
-    if ((await timeout(repo.log({ ref, limit: 1 })))[0]?.hash !== expectedHead) return null;
+    if (!(await timeout(repo.readCommit(expectedHead)))) return null;
     return { refs: { [ref]: expectedHead }, commits, shallow: incomplete, capturedAt: new Date().toISOString() };
   } catch { return null; }
 }
@@ -44,6 +44,6 @@ export async function verifyImportedHistory(binding: HistoryBinding, name: strin
   const destination = await captureArtifactsHistory(binding, name, branch, expectedHead);
   if (!destination) return { status: "unavailable", detail: "Imported history inspection is unavailable or its branch changed; retry without deleting the repository." };
   const receipt = compareMigrationHistory(source, destination, [`refs/heads/${branch}`]);
-  if (destination.shallow || receipt.status === "incomplete") return { status: "incomplete", detail: "History inspection reached a bound or missing ancestry; complete selected-branch migration remains unverified." };
+  if (receipt.status === "incomplete") return { status: "incomplete", detail: "History inspection reached a bound or missing ancestry; complete selected-branch migration remains unverified." };
   return { status: receipt.status, receipt, detail: receipt.detail };
 }

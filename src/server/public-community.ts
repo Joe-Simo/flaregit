@@ -9,7 +9,7 @@ export type PublicCommunityScope = typeof PUBLIC_COMMUNITY_SCOPES[number];
 export interface PublicCommunityActor { userId: string; accountKey: string; displayName: string }
 export interface PublicCommunityPolicy { enabled: boolean; scopes: PublicCommunityScope[] }
 export interface PublicPost { id: string; scope: "discussions" | "issues"; title: string; body: string; author: string; version: number; createdAt: string; updatedAt: string }
-export interface ContributionRequest { id: string; requesterUserId: string; requesterAccountKey: string; requesterName: string; purpose: string; status: "requested" | "approved" | "rejected"; privateContextAcknowledged: boolean; createdAt: string; updatedAt: string }
+export interface ContributionRequest { id: string; requesterUserId: string; requesterAccountKey: string; requesterName: string; purpose: string; status: "requested" | "approved" | "rejected"; registrationStatus?: "pending" | "registered" | "revoked"; privateContextAcknowledged: boolean; createdAt: string; updatedAt: string }
 const policySchema = z.object({ enabled: z.boolean(), scopes: z.array(z.enum(PUBLIC_COMMUNITY_SCOPES)).max(3).refine((scopes) => new Set(scopes).size === scopes.length) }).strict();
 const key = z.string().min(8).max(128).regex(/^[A-Za-z0-9_-]+$/);
 const title = z.string().trim().min(1).max(200);
@@ -81,7 +81,7 @@ export class RepositoryPublicCommunity {
   }
   listPublic(): PublicPost[] {
     const policy = this.policy(); if (!policy.enabled) return [];
-    return this.storage.sql.exec<{doc:string}>("SELECT doc FROM public_community_posts WHERE removed=0 ORDER BY id").toArray().map(row=>{const post=JSON.parse(row.doc) as PublicPost;return {...post,version:post.version??1};}).filter(post=>policy.scopes.includes(post.scope));
+    return this.storage.sql.exec<{doc:string}>("SELECT doc FROM public_community_posts WHERE removed=0 ORDER BY json_extract(doc,'$.createdAt') DESC,id DESC").toArray().map(row=>{const post=JSON.parse(row.doc) as PublicPost;return {...post,version:post.version??1};}).filter(post=>policy.scopes.includes(post.scope));
   }
   editPost(actor: PublicCommunityActor, postId: string, input: { title:string;body:string;expectedVersion:number }, ownerId: string): PublicPost {
     actorName(actor); const value = z.object({title,body,expectedVersion:z.number().int().positive()}).strict().parse(input); safeContent(value.title,value.body);
@@ -114,9 +114,9 @@ export class RepositoryPublicCommunity {
       this.storage.sql.exec("INSERT INTO public_contribution_requests VALUES(?,?,?)",request.id,actor.userId,JSON.stringify(request));this.storage.sql.exec("INSERT INTO public_community_receipts VALUES(?,?,?,?,?)",actor.userId,value.idempotencyKey,payload,request.id,"request");return request;
     });
   }
-  requestsFor(actor:PublicCommunityActor,ownerId:string):ContributionRequest[]{actorName(actor);return this.storage.sql.exec<{requester_id:string;doc:string}>("SELECT requester_id,doc FROM public_contribution_requests ORDER BY id").toArray().filter(row=>actor.userId===ownerId||row.requester_id===actor.userId).map(row=>JSON.parse(row.doc) as ContributionRequest);}
+  requestsFor(actor:PublicCommunityActor,ownerId:string):ContributionRequest[]{actorName(actor);return this.storage.sql.exec<{requester_id:string;doc:string}>("SELECT requester_id,doc FROM public_contribution_requests ORDER BY json_extract(doc,'$.createdAt') DESC,id DESC").toArray().filter(row=>actor.userId===ownerId||row.requester_id===actor.userId).map(row=>JSON.parse(row.doc) as ContributionRequest);}
   decideRequest(actor:PublicCommunityActor,requestId:string,decision:"approved"|"rejected",confirmedPrivateAccess:boolean,ownerId:string):ContributionRequest{
     actorName(actor);if(actor.userId!==ownerId||!["approved","rejected"].includes(decision)||(decision==="approved"&&confirmedPrivateAccess!==true))throw new Error("Owner approval must explicitly acknowledge access to private repository context");
-    return this.storage.transactionSync(()=>{this.scope("contribution-requests");const row=this.storage.sql.exec<{doc:string}>("SELECT doc FROM public_contribution_requests WHERE id=?",requestId).toArray()[0];if(!row)throw new Error("Unknown contribution request");const previous=JSON.parse(row.doc) as ContributionRequest;if(previous.status!=="requested"){if(previous.status!==decision)throw new Error("Request already decided");return previous;}const next={...previous,status:decision,privateContextAcknowledged:decision==="approved",updatedAt:new Date().toISOString()};this.storage.sql.exec("UPDATE public_contribution_requests SET doc=? WHERE id=?",JSON.stringify(next),requestId);return next;});
+    return this.storage.transactionSync(()=>{const row=this.storage.sql.exec<{doc:string}>("SELECT doc FROM public_contribution_requests WHERE id=?",requestId).toArray()[0];if(!row)throw new Error("Unknown contribution request");const previous=JSON.parse(row.doc) as ContributionRequest;if(previous.status!=="requested"){if(previous.status!==decision)throw new Error("Request already decided");return previous;}const next={...previous,status:decision,privateContextAcknowledged:decision==="approved",updatedAt:new Date().toISOString()};this.storage.sql.exec("UPDATE public_contribution_requests SET doc=? WHERE id=?",JSON.stringify(next),requestId);return next;});
   }
 }

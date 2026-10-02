@@ -2,10 +2,10 @@
 
 A Git collaboration platform on Cloudflare Workers and Artifacts for humans and AI agents working at the same time. Each change lives in its own Artifacts fork and is pushed with ordinary `git`. FlareGit composes ready changes onto the accepted head, repairs what it safely can, verifies the exact candidate commit, waits for a human to accept that commit, and lands only that commit with a compare-and-swap ref update.
 
-The deployed prototype improvements are on [`codex/concurrent-collaboration-integrity`](https://github.com/Joe-Simo/flaregit/tree/codex/concurrent-collaboration-integrity), under review in [PR #1](https://github.com/Joe-Simo/flaregit/pull/1). To reproduce that version before the PR is merged:
+The current collaboration and interface improvements are on [`codex/docs-community-and-delivery`](https://github.com/Joe-Simo/flaregit/tree/codex/docs-community-and-delivery), under review in [PR #2](https://github.com/Joe-Simo/flaregit/pull/2). To reproduce this branch before the PR is merged:
 
 ```bash
-git clone --branch codex/concurrent-collaboration-integrity https://github.com/Joe-Simo/flaregit.git
+git clone --branch codex/docs-community-and-delivery https://github.com/Joe-Simo/flaregit.git
 cd flaregit
 ```
 
@@ -73,6 +73,9 @@ Edit `wrangler.jsonc`:
 - `vars`: `CLERK_ISSUER`, `CLERK_PUBLISHABLE_KEY`, `CLERK_AUTHORIZED_PARTIES` (comma separated; must include the exact origin you serve the UI from, e.g. your `workers.dev` URL or custom domain), `PREVIEW_ORIGIN` (a separate hostname that serves previews), `AI_GATEWAY_ID`, `CANONICAL_REPO`, run caps (`GLOBAL_RUNS_PER_DAY`, `FREE_RUNS_PER_DAY`, `PRO_RUNS_PER_DAY`, `RUNS_ENABLED`). For billing: `POLAR_SERVER` (`sandbox` or `production`) and `POLAR_PRODUCT_ID`.
 - `routes`: replace `flaregit.com` / `preview.flaregit.com` with your own zones, or remove them and use `workers.dev`.
 - `artifacts[0].namespace` if you use a different Artifacts namespace.
+- Set `ARTIFACT_STORAGE_NAMESPACE` to that same namespace. `ARTIFACT_STORAGE_GLOBAL_SLOTS` and `ARTIFACT_STORAGE_ACCOUNT_SLOTS` bound conservative retained-repository capacity, including workspaces. Allocation requires a complete stable inventory and reserves the provider's 1 GB maximum per named repository; this is not measured usage. Unknown allocation/deletion outcomes remain recorded for recovery, and same-day deletion does not erase daily storage liability.
+- Set `MANAGED_GLOBAL_MONTHLY_USD_MICROS` and `MANAGED_ACCOUNT_MONTHLY_USD_MICROS` for managed execution and native preview/deployment compute, and `CORE_GIT_GLOBAL_MONTHLY_USD_MICROS` / `CORE_GIT_ACCOUNT_MONTHLY_USD_MICROS` for Git transport. Values are integer USD micros; missing configuration refuses covered execution. Daily run counters are admission limits, not purchased compute allowances. These controls do not cap the complete Cloudflare invoice or other providers' costs.
+- Keep `PAID_CHECKOUT_ENABLED=false` until the paid offering and provider price have been verified. Existing billing remains manageable; Free collaboration and private repositories do not require checkout.
 
 Secrets:
 

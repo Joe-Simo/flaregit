@@ -23,6 +23,7 @@ describe("redactSecrets", () => {
     ["slack", "xoxb-1234567890-abcdefghij"],
     ["sk", "sk-" + "Z".repeat(32)],
     ["fgt", "fgt_0123456789ab_" + "x".repeat(40)],
+    ["fgg", "fgg_p0123456789ab_" + "a".repeat(64)],
     ["whsec", "whsec_" + "Q".repeat(24)],
     ["jwt", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlX3ZhbHVl"],
   ];

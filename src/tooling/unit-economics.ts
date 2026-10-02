@@ -52,6 +52,22 @@ export function calculateUnitEconomics(raw: EconomicsInputs) {
   };
 }
 
+const exposureSchema = z.object({
+  callsPerAdmission: z.number().int().positive(), inputTokensPerCall: nonnegative, outputTokensPerCall: nonnegative,
+  admissionsPerDay: z.number().int().nonnegative(), days: z.number().int().positive(),
+  containerSecondsPerAdmission: nonnegative, activeCpuSecondsPerAdmission: nonnegative,
+}).strict();
+/** Sensitivity only: an admission is not a billable resource ceiling; retries/new clients can add calls. */
+export function calculateAdmissionExposure(raw: z.infer<typeof exposureSchema>, rates = DEFAULT_ECONOMICS_INPUTS) {
+  const input = exposureSchema.parse(raw);
+  const cost = calculateUnitEconomics({ ...rates, inputTokens: input.inputTokensPerCall * input.callsPerAdmission,
+    outputTokens: input.outputTokensPerCall * input.callsPerAdmission,
+    containerSecondsPerRun: input.containerSecondsPerAdmission, activeCpuSecondsPerRun: input.activeCpuSecondsPerAdmission,
+    runs: input.admissionsPerDay * input.days });
+  return { assumptions: input, admissions: input.admissionsPerDay * input.days, ...cost.managed,
+    isEnforcedSpendCeiling: false, exclusions: cost.exclusions };
+}
+
 if (import.meta.main) {
   const raw: unknown = process.argv[2] ? await Bun.file(process.argv[2]!).json() : DEFAULT_ECONOMICS_INPUTS;
   console.log(JSON.stringify(calculateUnitEconomics(inputsSchema.parse(raw)), null, 2));

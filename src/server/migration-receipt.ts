@@ -51,7 +51,7 @@ export function compareMigrationHistory(source: GitHistoryInventory, destination
     else receipt.commitsCompared++;
   }
   receipt.missingCommits.sort(); receipt.differentCommits.sort();
-  receipt.status = receipt.differentRefs.length || receipt.missingCommits.length || receipt.differentCommits.length ? "mismatch" : incomplete ? "incomplete" : "verified";
+  receipt.status = receipt.differentRefs.length || (!destination.shallow && receipt.missingCommits.length) || receipt.differentCommits.length ? "mismatch" : incomplete ? "incomplete" : "verified";
   receipt.detail = receipt.status === "verified" ? "Selected refs and every inventoried reachable commit agree at the captured snapshots. Blob transfer, annotated tag objects and unselected refs are not verified." : receipt.status === "mismatch" ? "Selected refs or reachable commit history differ; do not report this migration as verified." : "A shallow or incomplete inventory prevents complete selected-ref history verification.";
   return receipt;
 }

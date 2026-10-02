@@ -1,14 +1,21 @@
+import { ArtifactAllocationFence, type PendingArtifactAllocation } from "./allocation-fence.js";
+import { ArtifactStorageAdmission, type ArtifactKind, type StorageAdmissionPolicy, type StorageReservation } from "./storage-admission.js";
+import { CoreGitOperationLedger, type CoreGitBudget, type CoreGitAdmission } from "./core-git-budget.js";
+import { ManagedSpendLedger, type ManagedEnvelope, type ManagedBudget, type ManagedAdmission, type ManagedReservation } from "./managed-spend-ledger.js";
+import { PlatformCommunity } from "./platform-community.js";
+import { safeContent } from "./public-community.js";
 import { DurableObject } from "cloudflare:workers";
 import { freezeCandidateGeneration } from "../core/pipeline/freeze.js";
 import { createProductDecision, detectContradiction } from "../core/decision/contradiction.js";
 import type { Env } from "./env.js";
-import { accountKeyFor, accountOf } from "./projects.js";
+import { accountKeyFor, accountOf, projectOf } from "./projects.js";
 import { isCommandPolicy, settingsFor } from "../core/command-policy.js";
 import { VERIFIER_IDENTITIES } from "../core/verification-identities.js";
 import { RepositoryDeployments,type AcceptedDeploymentTarget,type DeploymentRecord } from "./deployments.js";
 import { RepositoryConnections, type ConnectionMetadata, type CallbackReceipt } from "./connections.js";
 import type { IntegrationCallback, IntegrationCapability } from "./integration-auth.js";
 import { externalCheckGate, type ExternalCheckPolicy, type ExternalCheckState } from "../core/external-checks.js";
+import type { PublicProfileState } from "./public-profile.js";
 import type { ImportJob } from "./import-job.js";
 import type { PublicRepositoryGrant } from "./public-repositories.js";
 import { AgentRunLedger, type AgentRunInput, type AgentRunRecord, type AgentRunClaim } from "./agent-run-ledger.js";
@@ -166,6 +173,20 @@ export interface ActivityRow {
 export interface ImportHistoryOperation { projectId: string; head: string; canonicalRepoName: string; ownerId: string; instanceId: string; createdAt: string }
 
 export interface Ledger {
+  nativeComputeFailure(key: string): Promise<boolean>;
+  setNativeComputeFailure(key: string, failed: boolean): Promise<void>;
+  nativeComputeStatus(key: string): Promise<{ active: boolean; sandboxName: string; token: string; deadline: number } | null>;
+  existingDeploymentRequest(target: AcceptedDeploymentTarget, serviceId: string, environment: string, key: string, actorId: string): Promise<DeploymentRecord | null>;
+  claimNativeCompute(key: string): Promise<string | null>;
+  finishNativeCompute(key: string, token: string): Promise<void>;
+  reserveCoreGitOperation(operationId: string, accountKey: string, budget: CoreGitBudget): Promise<CoreGitAdmission>;
+  markManagedDispatchAttempted(runIds: string[], accountKey: string): Promise<void>;
+  cancelUnstartedManagedSpend(runIds: string[], accountKey: string): Promise<void>;
+  managedSpendReserved(month: string, accountKey?: string): Promise<number>;
+  reserveManagedSpendBatch(inputs: ManagedEnvelope[], budget: ManagedBudget): Promise<ManagedAdmission[]>;
+  reserveManagedSpend(input: ManagedEnvelope, budget: ManagedBudget): Promise<ManagedAdmission>;
+  consumeManagedSpend(runId: string, inputBytes: number, outputTokens: number, containerSeconds: number): Promise<ManagedReservation>;
+
   acceptedDeploymentTarget(journalId:string):Promise<{canonicalRepoName:string;target:AcceptedDeploymentTarget}|null>;
   acceptedDeploymentTargets():Promise<AcceptedDeploymentTarget[]>;
   listDeployments():Promise<DeploymentRecord[]>;
@@ -179,6 +200,13 @@ export interface Ledger {
   requestPublicContribution(actor: PublicCommunityActor, input: Parameters<RepositoryPublicCommunity["requestContribution"]>[1]): Promise<ContributionRequest>;
   publicContributionRequests(actor: PublicCommunityActor): Promise<ContributionRequest[]>;
   decidePublicContribution(actor: PublicCommunityActor, requestId: string, decision: "approved" | "rejected", confirmedPrivateAccess: boolean): Promise<ContributionRequest>;
+  reconcileContributorRegistrations(): Promise<void>;
+  cancelContributorRegistration(userId: string): Promise<void>;
+  accountLifecycle(): Promise<"active" | "deleting" | "deleted">;
+  beginAccountDeletion(): Promise<void>;
+  finishAccountDeletion(): Promise<void>;
+  accountArtifactDeleted(name:string):Promise<boolean>;
+  recordAccountArtifactDeleted(name:string):Promise<void>;
   getAgentRun(runId: string): Promise<AgentRunRecord | null>;
   claimAgentRun(input: AgentRunInput): Promise<AgentRunClaim>;
   resumeAgentRun(runId: string, taskId: string, previousRunId: string): Promise<AgentRunClaim>;
@@ -194,6 +222,7 @@ export interface Ledger {
   listImportJobs(): Promise<ImportJob[]>;
   claimImportHistoryOperation(input: { projectId: string; head: string; canonicalRepoName: string; ownerId: string; instanceId: string }): Promise<ImportHistoryOperation>;
   getImportHistoryOperation(instanceId: string): Promise<ImportHistoryOperation | null>;
+  listImportHistoryOperations(): Promise<ImportHistoryOperation[]>;
   externalCheckReports(candidateId: string): Promise<ReturnType<RepositoryConnections["reports"]>>;
   serviceCandidateSnapshot(serviceId: string, candidateId: string, commit: string, nonce: string): Promise<ReturnType<RepositoryConnections["serviceCandidateSnapshot"]>>;
   listConnections(): Promise<{ connections: ConnectionMetadata[]; policy: ExternalCheckPolicy }>;
@@ -220,14 +249,17 @@ export interface Ledger {
   inboxUnread(): Promise<{ direct: number; activity: number }>;
   domainsFor(projectId: string): Promise<DomainRow[]>;
   getProfile(): Promise<Profile>;
+  publicProfileState(): Promise<PublicProfileState>;
+  setPublicProfileVisibility(visibility: "public" | "private", confirmed: boolean, ownerId: string, expectedVersion?: number): Promise<void>;
   listIssues(state: "open" | "closed"): Promise<IssueRow[]>;
   getIssue(n: number): Promise<IssueRow | null>;
   createIssue(i: { title: string; body: string; author: string }): Promise<IssueRow>;
   setIssueState(n: number, state: "open" | "closed", by: string): Promise<IssueRow | null>;
   listComments(subject: string): Promise<CommentRow[]>;
   addComment(c: { subject: string; author: string; body: string; path?: string; line?: number; commit?: string }): Promise<CommentRow>;
-  setProfile(p: Profile): Promise<void>;
+  setProfile(p: Profile, expectedVersion?: number): Promise<void>;
   claimHandle(handle: string, accountKey: string): Promise<boolean>;
+  commitHandle(handle: string, accountKey: string): Promise<void>;
   releaseHandle(handle: string, accountKey: string): Promise<void>;
   accountForHandle(handle: string): Promise<string | null>;
   claimDomain(domain: string, projectId: string): Promise<DomainRow>;
@@ -241,6 +273,7 @@ export interface Ledger {
   statusSummary(): Promise<ComponentStatus[]>;
   recordWorkflowOutcome(kind: WorkflowKind, instanceId: string, status: WorkflowOutcome): Promise<void>;
   workflowCounts(sinceMs: number): Promise<WorkflowCount[]>;
+  listRepositoryWorkflows(): Promise<Array<{ instanceId: string; kind: "agent" | "integration" | "scenario" }>>;
   registerWorkflow(instanceId: string, kind: "agent" | "integration" | "scenario", taskId?: string, actorId?: string): Promise<void>;
   getWorkflowRun(instanceId: string): Promise<{ instanceId: string; kind: "agent" | "integration" | "scenario"; actorId: string | null } | null>;
   getMirror(): Promise<{ target: string | null; enabled: boolean; hasToken: boolean; runs: Array<{ id: string; commit: string; status: string; detail: string; at: string }> }>;
@@ -249,6 +282,12 @@ export interface Ledger {
   setMirror(p: { target?: string; token?: string; enabled?: boolean }): Promise<void>;
   deleteMirror(): Promise<void>;
   recordMirrorRun(commit: string, status: string, detail: string): Promise<void>;
+  forumList(input:{category?:string;q?:string;sort?:string}):Promise<ReturnType<PlatformCommunity["list"]>>;
+  forumTopic(id:string):Promise<ReturnType<PlatformCommunity["topic"]>>;
+  forumCreate(actor:PublicCommunityActor,input:unknown,topicId?:string):Promise<ReturnType<PlatformCommunity["create"]>>;
+  forumEdit(actor:PublicCommunityActor,id:string,input:unknown):Promise<ReturnType<PlatformCommunity["edit"]>>;
+  forumPermissions(actor:PublicCommunityActor,topicId:string,moderator:boolean):Promise<ReturnType<PlatformCommunity["permissions"]>>;
+  forumRemove(actor:PublicCommunityActor,id:string,input:unknown,moderator:boolean):Promise<ReturnType<PlatformCommunity["remove"]>>;
   fileReport(r: { reporter: string; kind: string; target: string; details: string }): Promise<ReportRow>;
   listReports(filter: { status?: "open" | "resolved"; reporter?: string }): Promise<ReportRow[]>;
   resolveReport(id: string, resolution: string, by: string): Promise<ReportRow | null>;
@@ -266,15 +305,36 @@ export interface Ledger {
   listActivity(limit: number): Promise<ActivityRow[]>;
   setVerificationPolicy(policy: Record<string, unknown>): Promise<void>;
   destroy(): Promise<void>;
+  repositoryDeletionPending(): Promise<boolean>;
+  beginRepositoryDeletion(): Promise<void>;
+  repositoryArtifactDeleted(name: string): Promise<boolean>;
+  recordRepositoryArtifactDeleted(name: string): Promise<void>;
   initialize(init: { projectId: string; projectName: string; canonicalRepoName: string; head: string; verificationPolicy: Record<string, unknown>; kind?: "demo" | "import" | "empty"; defaultBranch?: string; ownerId?: string; source?: string }): Promise<FlareGitProjectState>;
-  createTask(task: Task): Promise<Task>;
+  createTask(task: Task, actorId?: string): Promise<Task>;
+  mintGitCapability(userId: string, taskId: string | null, write: boolean, parentTokenHash?: string): Promise<{token: string; expiresInSeconds: number}>;
+  verifyGitCapability(secret: string, taskId: string | null, write: boolean): Promise<{userId:string;parentTokenHash:string|null}|null>;
+  canGitAccess(userId: string, taskId: string | null, write: boolean): Promise<boolean>;
+  apiTokenHashActive(hash: string): Promise<boolean>;
+  beginArtifactAllocation(input:Omit<PendingArtifactAllocation,"phase">,scope:"account"|"project"):Promise<void>;
+  activateArtifactAllocation(name:string,operationId:string,scope:"account"|"project"):Promise<void>;
+  settleArtifactAllocation(name:string,operationId:string):Promise<void>;
+  pendingArtifactAllocations():Promise<PendingArtifactAllocation[]>;
+  reconcileArtifactInventory(namespace:string,names:string[]):Promise<void>;
+  claimArtifactExisting(name:string,userId:string,kind:ArtifactKind,projectId:string):Promise<void>;
+  reserveArtifactStorage(name:string,owner:string,kind:ArtifactKind,projectId:string,policy:StorageAdmissionPolicy):Promise<StorageReservation>;
+  recordArtifactDeletion(name:string,confirmed:boolean):Promise<void>;
+  artifactProjectManifest(projectId:string):Promise<Array<{name:string;state:string}>>;
+  artifactOwnerManifest(owner:string):Promise<Array<{name:string;state:string;projectId:string|null}>>;
+  artifactStorageSnapshot():Promise<ReturnType<ArtifactStorageAdmission["snapshot"]>>;
+
+  revokeGitCapabilities(userId: string): Promise<void>;
   resolveDecision(decisionId: string, selectedOptionId: string): Promise<{ taskIds: string[] }>;
   getState(): Promise<FlareGitProjectState>;
   claimLanding(req: { holder: string; taskIds: string[] }): Promise<ClaimResult>;
   recordVerification(candidateId: string, commit: string, evidence: VerificationEvidence): Promise<void>;
   recordComposition(candidateId: string, attempts: RepairAttempt[]): Promise<void>;
   awaitReview(candidateId: string, commit: string, workflowInstanceId: string): Promise<void>;
-  recordReview(candidateId: string, review: { approved: boolean; by: string; note?: string }): Promise<{ ok: boolean; instanceId?: string; error?: string }>;
+  recordReview(candidateId: string, review: { approved: boolean; by: string; note?: string }, expectedCommit: string): Promise<{ ok: boolean; instanceId?: string; error?: string }>;
   preparePublish(candidateId: string): Promise<PrepareResult>;
   completePublish(journalId: string): Promise<void>;
   abortPublish(candidateId: string, journalId: string | undefined, reason: string, outcome: "failed" | "stale"): Promise<void>;
@@ -373,19 +433,77 @@ export class RepositoryController extends DurableObject<Env> {
     this.requirePublicRepository();
     const ownerId = await this.roleOf(actor.userId) === "owner" ? actor.userId : "";
     this.requirePublicRepository();
-    return this.community().requestsFor(actor, ownerId);
+    return this.community().requestsFor(actor, ownerId).map((request)=>this.contributionRegistration(request));
+  }
+  private registrationTable(): void {this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS member_registrations(request_id TEXT PRIMARY KEY,user_id TEXT NOT NULL,account_key TEXT NOT NULL,status TEXT NOT NULL)");}
+  private contributionRegistration(request:ContributionRequest):ContributionRequest {
+    this.registrationTable();
+    const row=this.ctx.storage.sql.exec<{status:"pending"|"registered"|"revoked"}>("SELECT status FROM member_registrations WHERE request_id=?",request.id).toArray()[0];
+    return row?{...request,registrationStatus:row.status}:request;
   }
   async decidePublicContribution(actor: PublicCommunityActor, requestId: string, decision: "approved" | "rejected", confirmedPrivateAccess: boolean): Promise<ContributionRequest> {
+    await this.ensureRecoveryAlarm();
     if (await this.roleOf(actor.userId) !== "owner") throw new Error("Only the owner can decide contribution access");
     this.requirePublicRepository();
-    return this.ctx.storage.transactionSync(() => {
+    this.registrationTable();
+    const decided=this.ctx.storage.transactionSync(() => {
       const community = this.community();
       const previous = community.requestsFor(actor, actor.userId).find((request) => request.id === requestId);
       const request = community.decideRequest(actor, requestId, decision, confirmedPrivateAccess, actor.userId);
-      if (previous?.status === "requested" && request.status === "approved") this.ctx.storage.sql.exec("INSERT OR IGNORE INTO members (user_id,role,label,added_at) VALUES (?,'member',?,?)", request.requesterUserId, request.requesterName, new Date().toISOString());
+      const existingMember=this.ctx.storage.sql.exec("SELECT user_id FROM members WHERE user_id=?",request.requesterUserId).toArray().length>0;
+      // Reconcile legacy approved members that predate the outbox, but never use
+      // approval replay to restore a removed member.
+      if ((previous?.status === "requested"||existingMember) && request.status === "approved") this.ctx.storage.sql.exec("INSERT OR IGNORE INTO member_registrations VALUES(?,?,?,'pending')",request.id,request.requesterUserId,request.requesterAccountKey);
       return request;
     });
+    await this.reconcileContributorRegistrations();
+    return this.contributionRegistration(decided);
   }
+  async reconcileContributorRegistrations():Promise<void> {
+    this.registrationTable();
+    const rows=this.ctx.storage.sql.exec<{request_id:string;user_id:string;account_key:string}>("SELECT request_id,user_id,account_key FROM member_registrations WHERE status='pending'").toArray();
+    for(const row of rows) {
+      try {
+        const state=this.load();
+        const account=accountOf(this.env,row.account_key);
+        if(await account.accountLifecycle()!=="active") {await this.cancelContributorRegistration(row.user_id);continue;}
+        const role=await this.roleOf(row.user_id);
+        await account.addProject({id:state.projectId,name:state.projectName,role:role==="owner"?"owner":"member",kind:state.kind??"demo"});
+        this.requirePublicRepository();
+        this.ctx.storage.transactionSync(()=>{
+          const current=this.ctx.storage.sql.exec<{status:string}>("SELECT status FROM member_registrations WHERE request_id=?",row.request_id).toArray()[0];
+          if(current?.status!=="pending")return;
+          const request=this.community().requestsFor({userId:row.user_id,accountKey:row.account_key,displayName:"Contributor"},"").find(item=>item.id===row.request_id);
+          if(!request||request.status!=="approved")throw new Error("Registration intent is stale");
+          this.ctx.storage.sql.exec("INSERT OR IGNORE INTO members (user_id,role,label,added_at) VALUES (?,'member',?,?)",row.user_id,request.requesterName,new Date().toISOString());
+          this.ctx.storage.sql.exec("UPDATE member_registrations SET status='registered' WHERE request_id=?",row.request_id);
+        });
+      } catch { /* Durable pending intent is retried by the alarm; no access is silently granted. */ }
+    }
+    if(this.ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) AS n FROM member_registrations WHERE status='pending'").toArray()[0]!.n)await this.ensureRecoveryAlarm();
+  }
+  async cancelContributorRegistration(userId:string):Promise<void> {
+    if(await this.roleOf(userId)==="owner")throw new Error("The owner cannot be removed");
+    this.registrationTable();
+    this.ctx.storage.transactionSync(()=>{this.ctx.storage.sql.exec("UPDATE member_registrations SET status='revoked' WHERE user_id=?",userId);this.ctx.storage.sql.exec("DELETE FROM members WHERE user_id=?",userId);});
+  }
+  private accountLifecycleState():"active"|"deleting"|"deleted" {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS account_lifecycle(id INTEGER PRIMARY KEY,status TEXT NOT NULL)");
+    return this.ctx.storage.sql.exec<{status:"deleting"|"deleted"}>("SELECT status FROM account_lifecycle WHERE id=1").toArray()[0]?.status??"active";
+  }
+  async accountLifecycle():Promise<"active"|"deleting"|"deleted"> {return this.accountLifecycleState();}
+  async beginAccountDeletion():Promise<void> {
+    if(this.accountLifecycleState()==="deleted")throw new Error("Account is deleted");
+    this.ctx.storage.sql.exec("INSERT INTO account_lifecycle VALUES(1,'deleting') ON CONFLICT(id) DO UPDATE SET status='deleting'");
+  }
+  async finishAccountDeletion():Promise<void> {
+    if(this.accountLifecycleState()!=="deleting")throw new Error("Account deletion was not started");
+    const tables=this.ctx.storage.sql.exec<{name:string}>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name!='account_lifecycle'").toArray();
+    this.ctx.storage.transactionSync(()=>{for(const table of tables)this.ctx.storage.sql.exec(`DELETE FROM "${table.name.replaceAll('"','""')}"`);this.ctx.storage.sql.exec("UPDATE account_lifecycle SET status='deleted' WHERE id=1");});
+    this.state=null;
+  }
+  async accountArtifactDeleted(name:string):Promise<boolean> {this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS account_artifact_deletions(name TEXT PRIMARY KEY)");return this.ctx.storage.sql.exec("SELECT name FROM account_artifact_deletions WHERE name=?",name).toArray().length>0;}
+  async recordAccountArtifactDeleted(name:string):Promise<void> {this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS account_artifact_deletions(name TEXT PRIMARY KEY)");this.ctx.storage.sql.exec("INSERT OR IGNORE INTO account_artifact_deletions VALUES(?)",name);}
 
   private agentRuns() { return new AgentRunLedger(this.ctx.storage); }
   private agentScope(task: Task, projectScope: string[]): string[] {
@@ -455,6 +573,7 @@ export class RepositoryController extends DurableObject<Env> {
     return row?.visibility === "public" ? "public" : "private";
   }
   async publicGrant(): Promise<PublicGrantMetadata | null> {
+    if (this.repositoryDeleting()) return null;
     this.visibilityTable();
     const row = this.ctx.storage.sql.exec<{ visibility: string; version: number; confirmed_by: string }>("SELECT visibility,version,confirmed_by FROM repository_visibility WHERE id=1").toArray()[0];
     if (row?.visibility !== "public" || !row.confirmed_by) return null;
@@ -462,6 +581,7 @@ export class RepositoryController extends DurableObject<Env> {
     return { visibility: "public", confirmedByOwner: true, acceptedCommit: state.acceptedState.currentCommit, name: state.projectName, canonicalRepoName: state.canonicalRepoName, version: row.version };
   }
   async setRepositoryVisibility(visibility: "public" | "private", confirmed: boolean, by: string): Promise<void> {
+    if (this.repositoryDeleting()) throw new Error("Repository deletion is in progress");
     if (!by || !["public", "private"].includes(visibility) || (visibility === "public" && confirmed !== true)) throw new Error("Explicit owner confirmation is required");
     if (await this.roleOf(by) !== "owner") throw new Error("Only the owner can change visibility");
     this.visibilityTable();
@@ -485,9 +605,10 @@ export class RepositoryController extends DurableObject<Env> {
       const row = this.ctx.storage.sql.exec<{ doc: string }>("SELECT doc FROM import_jobs WHERE id=?", job.id).toArray()[0];
       if (row) {
         const previous = JSON.parse(row.doc) as ImportJob;
-        const immutable = ({ status: _status, updatedAt: _updated, detail: _detail, ...identity }: ImportJob) => identity;
+        const immutable = ({ status: _status, updatedAt: _updated, detail: _detail, importedHead: _head, importedBranch: _branch, ...identity }: ImportJob) => identity;
         if (JSON.stringify(immutable(previous)) !== JSON.stringify(immutable(job))) throw new Error("Import job identity cannot change");
-        if (previous.status === "ready" && job.status !== "ready") return;
+        if (previous.importedHead && (previous.importedHead !== job.importedHead || previous.importedBranch !== job.importedBranch)) throw new Error("Import snapshot cannot change");
+        if (previous.status === "ready" && (!previous.importedHead || job.status !== "ready")) return;
       } else {
         const reserved = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM (SELECT id FROM projects UNION SELECT id FROM import_jobs WHERE json_extract(doc, '$.status') <> 'ready')").toArray()[0]!.count;
         if (reserved >= 10) throw new Error("Repository limit reached, including saved imports (10)");
@@ -511,6 +632,10 @@ export class RepositoryController extends DurableObject<Env> {
       this.ctx.storage.sql.exec("INSERT INTO import_history_operations VALUES(?,?,?)", input.instanceId, scope, JSON.stringify(operation));
       return operation;
     });
+  }
+  async listImportHistoryOperations(): Promise<ImportHistoryOperation[]> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS import_history_operations(instance TEXT PRIMARY KEY,scope TEXT UNIQUE,doc TEXT)");
+    return this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM import_history_operations ORDER BY instance").toArray().map((row)=>JSON.parse(row.doc) as ImportHistoryOperation);
   }
   async getImportHistoryOperation(instanceId: string): Promise<ImportHistoryOperation | null> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS import_history_operations(instance TEXT PRIMARY KEY,scope TEXT UNIQUE,doc TEXT)");
@@ -574,7 +699,8 @@ export class RepositoryController extends DurableObject<Env> {
     }
   }
 
-  private load(): FlareGitProjectState {
+  private load(allowDeleting = false): FlareGitProjectState {
+    if (!allowDeleting && this.repositoryDeleting()) throw new Error("Repository deletion is in progress");
     if (this.state) return this.state;
     const row = this.ctx.storage.sql.exec<{ doc: string }>("SELECT doc FROM project WHERE id = 1").toArray()[0];
     if (!row) throw new Error("Project not initialized: call initialize() with the seeded canonical head");
@@ -583,11 +709,13 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   private save(): void {
+    if (this.repositoryDeleting()) throw new Error("Repository deletion is in progress");
     this.ctx.storage.sql.exec("INSERT INTO project (id, doc) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET doc = excluded.doc", JSON.stringify(this.state));
   }
 
   /** First-time setup with the real head of the canonical Artifacts repository. */
   async initialize(init: { projectId: string; projectName: string; canonicalRepoName: string; head: string; verificationPolicy: Record<string, unknown>; kind?: "demo" | "import" | "empty"; defaultBranch?: string; ownerId?: string; source?: string }): Promise<FlareGitProjectState> {
+    if (this.repositoryDeleting()) throw new Error("Repository deletion has sealed this identity");
     const existing = this.ctx.storage.sql.exec("SELECT 1 FROM project WHERE id = 1").toArray();
     if (existing.length > 0) return this.load();
     this.state = {
@@ -614,7 +742,7 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   async getState(): Promise<FlareGitProjectState> {
-    return this.load();
+    return this.load(true);
   }
 
   /** Returns false if this event id was already processed (at-least-once delivery safe). */
@@ -629,11 +757,14 @@ export class RepositoryController extends DurableObject<Env> {
     if (current === null || current > deadline) await this.ctx.storage.setAlarm(deadline);
   }
 
-  async createTask(task: Task): Promise<Task> {
+  async createTask(task: Task, actorId?: string): Promise<Task> {
     const s = this.load();
     if (s.tasks[task.id]) return s.tasks[task.id]!;
     s.tasks[task.id] = task;
-    this.save();
+    this.ctx.storage.transactionSync(() => {
+      if(actorId) { this.gitTables(); this.ctx.storage.sql.exec("INSERT INTO git_task_writers(task_id,user_id) VALUES (?,?)",task.id,actorId); }
+      this.save();
+    });
     await this.logActivity(task.contributor.name, "task.created", `Change started: ${task.goal}`);
     return task;
   }
@@ -677,6 +808,7 @@ export class RepositoryController extends DurableObject<Env> {
     return this.ctx.storage.sql.exec("SELECT id, name, role, kind, created_at FROM projects ORDER BY created_at DESC").toArray() as unknown as ProjectRow[];
   }
   async addProject(p: { id: string; name: string; role: "owner" | "member"; kind: string }): Promise<void> {
+    if(this.accountLifecycleState()!=="active")throw new Error("Account is not active");
     this.ctx.storage.sql.exec("INSERT OR REPLACE INTO projects (id, name, role, kind, created_at) VALUES (?, ?, ?, ?, ?)", p.id, p.name, p.role, p.kind, new Date().toISOString());
   }
   async removeProject(id: string): Promise<void> {
@@ -689,12 +821,13 @@ export class RepositoryController extends DurableObject<Env> {
     return (row?.role as "owner" | "member" | undefined) ?? null;
   }
   async addMember(userId: string, role: "owner" | "member", label?: string): Promise<void> {
+    if (this.repositoryDeleting()) throw new Error("Repository deletion is in progress");
     this.ctx.storage.sql.exec("INSERT OR REPLACE INTO members (user_id, role, label, added_at) VALUES (?, ?, ?, ?)", userId, role, label ?? null, new Date().toISOString());
   }
   async removeMember(userId: string): Promise<void> {
     const role = await this.roleOf(userId);
     if (role === "owner") throw new Error("The owner cannot be removed");
-    this.ctx.storage.sql.exec("DELETE FROM members WHERE user_id = ?", userId);
+    await this.cancelContributorRegistration(userId);
   }
   async listMembers() {
     return this.ctx.storage.sql.exec<{ user_id: string; role: string; label: string | null; added_at: string }>("SELECT user_id, role, label, added_at FROM members ORDER BY added_at").toArray();
@@ -810,6 +943,7 @@ export class RepositoryController extends DurableObject<Env> {
 
   /** Recovery sweep: re-send deliveries whose queue message was never sent or was lost, until none are pending. */
   override async alarm(): Promise<void> {
+    await this.reconcileContributorRegistrations();
     const now = Date.now();
     const stuck = this.ctx.storage.sql
       .exec<{ id: string; attempts: number; updated_at: string; created_at: string }>("SELECT id, attempts, updated_at, created_at FROM deliveries WHERE status = 'pending' ORDER BY seq")
@@ -826,6 +960,66 @@ export class RepositoryController extends DurableObject<Env> {
     if (pending > 0) await this.ensureRecoveryAlarm(5 * 60_000);
   }
 
+
+  async beginArtifactAllocation(input:Omit<PendingArtifactAllocation,"phase">,scope:"account"|"project"):Promise<void>{new ArtifactAllocationFence(this.ctx.storage).begin(input,()=>scope==="account"?this.accountLifecycleState()==="active":!this.repositoryDeleting());}
+  async activateArtifactAllocation(name:string,operationId:string,scope:"account"|"project"):Promise<void>{new ArtifactAllocationFence(this.ctx.storage).activate(name,operationId,()=>scope==="account"?this.accountLifecycleState()==="active":!this.repositoryDeleting());}
+  async settleArtifactAllocation(name:string,operationId:string):Promise<void>{new ArtifactAllocationFence(this.ctx.storage).settle(name,operationId);}
+  async pendingArtifactAllocations():Promise<PendingArtifactAllocation[]>{return new ArtifactAllocationFence(this.ctx.storage).pending();}
+  async reconcileArtifactInventory(namespace:string,names:string[]):Promise<void>{new ArtifactStorageAdmission(this.ctx.storage).reconcileCompleteInventory(namespace,names);}
+  async claimArtifactExisting(name:string,userId:string,kind:ArtifactKind,projectId:string):Promise<void>{
+    const project=projectOf(this.env,projectId),accountKey=await accountKeyFor(userId);let verified=false;
+    if(await project.roleOf(userId).catch(()=>null)==="owner") {const state=await project.getState().catch(()=>null);verified=!!state&&(kind==="canonical"?state.canonicalRepoName===name:kind==="workspace"&&Object.values(state.tasks).some(task=>task.workspace.repoName===name));}
+    if(!verified&&kind==="workspace"){const state=await project.getState().catch(()=>null);const task=state&&Object.values(state.tasks).find(task=>task.workspace.repoName===name);verified=!!task&&await project.canGitAccess(userId,task.id,true);}
+    if(!verified&&kind==="import"){const job=await accountOf(this.env,accountKey).getImportJob(projectId);verified=!!job&&job.ownerId===userId&&job.canonicalRepoName===name;}
+    if(!verified)throw new Error("Existing storage ownership is unverified");
+    const ledger=new ArtifactStorageAdmission(this.ctx.storage);ledger.claimVerifiedExisting(name,accountKey,kind,true);ledger.associateProject(name,projectId);
+  }
+  async reserveArtifactStorage(name:string,owner:string,kind:ArtifactKind,projectId:string,policy:StorageAdmissionPolicy):Promise<StorageReservation>{
+    const ledger=new ArtifactStorageAdmission(this.ctx.storage);
+    return this.ctx.storage.transactionSync(()=>{const result=ledger.reserve(name,owner,kind,policy);if(result.allowed)ledger.associateProject(name,projectId);return result;});
+  }
+  async recordArtifactDeletion(name:string,confirmed:boolean):Promise<void>{new ArtifactStorageAdmission(this.ctx.storage).recordConfirmedDeletion(name,confirmed);}
+  async artifactProjectManifest(projectId:string):Promise<Array<{name:string;state:string}>>{return new ArtifactStorageAdmission(this.ctx.storage).projectManifest(projectId);}
+  async artifactOwnerManifest(owner:string):Promise<Array<{name:string;state:string;projectId:string|null}>>{return new ArtifactStorageAdmission(this.ctx.storage).ownerManifest(owner);}
+  async artifactStorageSnapshot():Promise<ReturnType<ArtifactStorageAdmission["snapshot"]>>{return new ArtifactStorageAdmission(this.ctx.storage).snapshot();}
+
+  private gitTables(): void {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS git_task_writers(task_id TEXT PRIMARY KEY,user_id TEXT NOT NULL)");
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS git_capabilities(hash TEXT PRIMARY KEY,user_id TEXT NOT NULL,task_id TEXT,write_access INTEGER NOT NULL,expires_at INTEGER NOT NULL,parent_token_hash TEXT)");
+  }
+  async canGitAccess(userId: string, taskId: string | null, write: boolean): Promise<boolean> {
+    if (this.repositoryDeleting()) return false;
+    const role=await this.roleOf(userId); if(!role)return false;
+    if(taskId===null)return !write;
+    const task=this.load().tasks[taskId];if(!task)return false;
+    if(!write)return true;
+    if(task.status==="accepted"||task.status==="cancelled")return false;
+    this.gitTables();
+    return role==="owner"||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",taskId).toArray()[0]?.user_id===userId;
+  }
+  async mintGitCapability(userId: string, taskId: string | null, write: boolean, parentTokenHash?: string): Promise<{token:string;expiresInSeconds:number}> {
+    if(!(await this.canGitAccess(userId,taskId,write)))throw new Error("Git access denied");
+    this.gitTables();this.ctx.storage.sql.exec("DELETE FROM git_capabilities WHERE expires_at<=?",Date.now());
+    if((this.ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) AS n FROM git_capabilities").toArray()[0]?.n??0)>=1000)throw new Error("Git capability limit reached");
+    if((this.ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) AS n FROM git_capabilities WHERE user_id=?",userId).toArray()[0]?.n??0)>=50)throw new Error("Active Git capability limit reached; existing credentials remain usable until expiry");
+    const token=`fgg_${this.load().projectId}_${crypto.randomUUID().replaceAll("-","")}${crypto.randomUUID().replaceAll("-","")}`;
+    const hash=await this.sha256(token);if(!(await this.canGitAccess(userId,taskId,write)))throw new Error("Git access changed");
+    this.ctx.storage.sql.exec("INSERT INTO git_capabilities VALUES(?,?,?,?,?,?)",hash,userId,taskId,write?1:0,Date.now()+3600_000,parentTokenHash??null);
+    return {token,expiresInSeconds:3600};
+  }
+  async verifyGitCapability(secret:string,taskId:string|null,write:boolean):Promise<{userId:string;parentTokenHash:string|null}|null>{
+    this.gitTables(); const hash=await this.sha256(secret);
+    const row=this.ctx.storage.sql.exec<{user_id:string;task_id:string|null;write_access:number;expires_at:number;parent_token_hash:string|null}>("SELECT * FROM git_capabilities WHERE hash=?",hash).toArray()[0];
+    if(!row||row.expires_at<=Date.now()||row.task_id!==taskId||(write&&!row.write_access)||!(await this.canGitAccess(row.user_id,taskId,write)))return null;
+    return {userId:row.user_id,parentTokenHash:row.parent_token_hash};
+  }
+  async revokeGitCapabilities(userId:string):Promise<void>{
+    this.gitTables();this.ctx.storage.sql.exec("DELETE FROM git_capabilities WHERE user_id=?",userId);
+  }
+  async apiTokenHashActive(hash:string):Promise<boolean>{
+    if(!/^[a-f0-9]{64}$/.test(hash))return false;
+    return this.ctx.storage.sql.exec("SELECT id FROM api_tokens WHERE hash=? AND (expires_at IS NULL OR expires_at>?)",hash,Date.now()).toArray().length===1;
+  }
 
   // ---- personal API tokens (stored as SHA-256 hashes; the secret is shown once) ----
   private async sha256(value: string): Promise<string> {
@@ -877,6 +1071,14 @@ export class RepositoryController extends DurableObject<Env> {
     return this.ctx.storage.sql.exec("SELECT kind, status, COUNT(*) AS count FROM workflow_runs WHERE finished_at >= ? OR finished_at IS NULL GROUP BY kind, status", sinceMs).toArray() as unknown as WorkflowCount[];
   }
   /** Repository ownership of run IDs is durable and independent of global health telemetry. */
+  async listRepositoryWorkflows(): Promise<Array<{ instanceId: string; kind: "agent" | "integration" | "scenario" }>> {
+    const state = this.load(true);
+    const rows = this.ctx.storage.sql.exec<{ instanceId: string; kind: "agent" | "integration" | "scenario" }>("SELECT instance_id AS instanceId, kind FROM project_workflows").toArray();
+    const byId = new Map(rows.map((row) => [row.instanceId, row]));
+    for (const candidate of Object.values(state.candidates)) if (candidate.workflowInstanceId) byId.set(candidate.workflowInstanceId, { instanceId: candidate.workflowInstanceId, kind: "integration" });
+    for (const task of Object.values(state.tasks)) if (task.agentWorkflowInstanceId) byId.set(task.agentWorkflowInstanceId, { instanceId: task.agentWorkflowInstanceId, kind: "agent" });
+    return [...byId.values()];
+  }
   async registerWorkflow(instanceId: string, kind: "agent" | "integration" | "scenario", taskId?: string, actorId?: string): Promise<void> {
     if (!/^[a-zA-Z0-9_-]{1,128}$/.test(instanceId) || !["agent", "integration", "scenario"].includes(kind)) throw new Error("Invalid workflow registration");
     const state = this.load();
@@ -1010,6 +1212,12 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   // ---- abuse and impersonation reports (global instance): a human queue whose backlog is published ----
+  async forumList(input:{category?:string;q?:string;sort?:string}) {return new PlatformCommunity(this.ctx.storage).list(input);}
+  async forumTopic(id:string) {return new PlatformCommunity(this.ctx.storage).topic(id);}
+  async forumCreate(actor:PublicCommunityActor,input:unknown,topicId?:string) {return new PlatformCommunity(this.ctx.storage).create(actor,input,topicId);}
+  async forumEdit(actor:PublicCommunityActor,id:string,input:unknown) {return new PlatformCommunity(this.ctx.storage).edit(actor,id,input);}
+  async forumPermissions(actor:PublicCommunityActor,topicId:string,moderator:boolean) {return new PlatformCommunity(this.ctx.storage).permissions(actor,topicId,moderator);}
+  async forumRemove(actor:PublicCommunityActor,id:string,input:unknown,moderator:boolean) {return new PlatformCommunity(this.ctx.storage).remove(actor,id,input,moderator);}
   async fileReport(r: { reporter: string; kind: string; target: string; details: string }): Promise<ReportRow> {
     const id = `rpt_${crypto.randomUUID().slice(0, 10)}`;
     this.ctx.storage.sql.exec("INSERT INTO reports (id, at, reporter, kind, target, details) VALUES (?, ?, ?, ?, ?, ?)", id, new Date().toISOString(), r.reporter, r.kind, r.target, r.details);
@@ -1066,22 +1274,66 @@ export class RepositoryController extends DurableObject<Env> {
     const row = this.ctx.storage.sql.exec<{ doc: string }>("SELECT doc FROM profile WHERE id = 1").toArray()[0];
     return row ? (JSON.parse(row.doc) as Profile) : { handle: "", displayName: "", bio: "", joinedAt: new Date().toISOString() };
   }
-  async setProfile(p: Profile): Promise<void> {
-    this.ctx.storage.sql.exec("INSERT INTO profile (id, doc) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET doc = excluded.doc", JSON.stringify(p));
+  async publicProfileState(): Promise<PublicProfileState> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS profile_publication(id INTEGER PRIMARY KEY CHECK(id=1),visibility TEXT,version INTEGER,owner_id TEXT)");
+    const row = this.ctx.storage.sql.exec<{visibility:"public"|"private";version:number;owner_id:string}>("SELECT visibility,version,owner_id FROM profile_publication WHERE id=1").toArray()[0];
+    return { profile: await this.getProfile(), visibility: row?.visibility ?? "private", version: row?.version ?? 0, ownerId: row?.owner_id ?? null };
   }
+  async setPublicProfileVisibility(visibility: "public" | "private", confirmed: boolean, ownerId: string, expectedVersion?: number): Promise<void> {
+    if (!["public","private"].includes(visibility) || !ownerId || (visibility === "public" && confirmed !== true)) throw new Error("Explicit profile publication confirmation required");
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS profile_publication(id INTEGER PRIMARY KEY CHECK(id=1),visibility TEXT,version INTEGER,owner_id TEXT)");
+    this.ctx.storage.transactionSync(() => {
+      const version = this.ctx.storage.sql.exec<{version:number}>("SELECT version FROM profile_publication WHERE id=1").toArray()[0]?.version ?? 0;
+      if (visibility === "public" && (!Number.isSafeInteger(expectedVersion) || expectedVersion !== version)) throw new Error("Profile version changed; refresh before publishing");
+      const row = this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM profile WHERE id=1").toArray()[0];
+      const profile = row ? JSON.parse(row.doc) as Profile : null;
+      if (visibility === "public" && !profile?.handle) throw new Error("Save a profile handle first");
+      if (visibility === "public" && profile) safeContent(profile.handle,profile.displayName,profile.bio);
+      this.ctx.storage.sql.exec("INSERT INTO profile_publication VALUES(1,?,1,?) ON CONFLICT(id) DO UPDATE SET visibility=excluded.visibility,version=version+1,owner_id=excluded.owner_id", visibility, ownerId);
+    });
+  }
+  async setProfile(p: Profile, expectedVersion?: number): Promise<void> {
+    safeContent(p.handle,p.displayName,p.bio);
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS profile_publication(id INTEGER PRIMARY KEY CHECK(id=1),visibility TEXT,version INTEGER,owner_id TEXT)");
+    this.ctx.storage.transactionSync(() => {
+      const version = this.ctx.storage.sql.exec<{version:number}>("SELECT version FROM profile_publication WHERE id=1").toArray()[0]?.version ?? 0;
+      if (expectedVersion !== undefined && (!Number.isSafeInteger(expectedVersion) || expectedVersion !== version)) throw new Error("Profile version changed; refresh before saving");
+      this.ctx.storage.sql.exec("INSERT INTO profile (id, doc) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET doc = excluded.doc", JSON.stringify(p));
+      this.ctx.storage.sql.exec("INSERT INTO profile_publication VALUES(1,'private',1,NULL) ON CONFLICT(id) DO UPDATE SET version=version+1");
+    });
+  }
+
   /** First come, first served, one handle per account; changing handles releases the old one. */
   async claimHandle(handle: string, accountKey: string): Promise<boolean> {
-    const owner = this.ctx.storage.sql.exec<{ account_key: string }>("SELECT account_key FROM handles WHERE handle = ?", handle).toArray()[0];
-    if (owner && owner.account_key !== accountKey) return false;
-    this.ctx.storage.sql.exec("DELETE FROM handles WHERE account_key = ?", accountKey);
-    this.ctx.storage.sql.exec("INSERT INTO handles (handle, account_key) VALUES (?, ?)", handle, accountKey);
-    return true;
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS handle_reservations(handle TEXT PRIMARY KEY,account_key TEXT UNIQUE NOT NULL)");
+    return this.ctx.storage.transactionSync(() => {
+      const owner = this.ctx.storage.sql.exec<{account_key:string}>("SELECT account_key FROM handles WHERE handle=? UNION SELECT account_key FROM handle_reservations WHERE handle=?",handle,handle).toArray();
+      if (owner.some((row) => row.account_key !== accountKey)) return false;
+      this.ctx.storage.sql.exec("DELETE FROM handle_reservations WHERE account_key=?",accountKey);
+      this.ctx.storage.sql.exec("INSERT INTO handle_reservations VALUES(?,?)",handle,accountKey);
+      return true;
+    });
+  }
+  async commitHandle(handle: string, accountKey: string): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS handle_reservations(handle TEXT PRIMARY KEY,account_key TEXT UNIQUE NOT NULL)");
+    this.ctx.storage.transactionSync(() => {
+      const reserved = this.ctx.storage.sql.exec<{account_key:string}>("SELECT account_key FROM handle_reservations WHERE handle=?",handle).toArray()[0];
+      if (reserved?.account_key !== accountKey) throw new Error("Profile handle reservation changed; retry saving");
+      this.ctx.storage.sql.exec("DELETE FROM handles WHERE account_key=?",accountKey);
+      this.ctx.storage.sql.exec("INSERT INTO handles VALUES(?,?)",handle,accountKey);
+      this.ctx.storage.sql.exec("DELETE FROM handle_reservations WHERE account_key=?",accountKey);
+    });
   }
   async releaseHandle(handle: string, accountKey: string): Promise<void> {
-    this.ctx.storage.sql.exec("DELETE FROM handles WHERE handle = ? AND account_key = ?", handle, accountKey);
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS handle_reservations(handle TEXT PRIMARY KEY,account_key TEXT UNIQUE NOT NULL)");
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("DELETE FROM handles WHERE handle = ? AND account_key = ?", handle, accountKey);
+      this.ctx.storage.sql.exec("DELETE FROM handle_reservations WHERE handle=? AND account_key=?",handle,accountKey);
+    });
   }
   async accountForHandle(handle: string): Promise<string | null> {
-    return this.ctx.storage.sql.exec<{ account_key: string }>("SELECT account_key FROM handles WHERE handle = ?", handle).toArray()[0]?.account_key ?? null;
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS handle_reservations(handle TEXT PRIMARY KEY,account_key TEXT UNIQUE NOT NULL)");
+    return this.ctx.storage.sql.exec<{ account_key: string }>("SELECT account_key FROM handles WHERE handle=? UNION SELECT account_key FROM handle_reservations WHERE handle=?",handle,handle).toArray()[0]?.account_key ?? null;
   }
 
   // ---- domain ownership (used on the global instance) ----
@@ -1142,9 +1394,33 @@ export class RepositoryController extends DurableObject<Env> {
     await this.logActivity("owner", "config.updated", "Verification settings changed");
   }
 
+  private repositoryDeleting(): boolean {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS repository_deletion(id INTEGER PRIMARY KEY)");
+    return this.ctx.storage.sql.exec("SELECT id FROM repository_deletion WHERE id=1").toArray().length > 0;
+  }
+  async repositoryDeletionPending(): Promise<boolean> { return this.repositoryDeleting(); }
+  async beginRepositoryDeletion(): Promise<void> {
+    this.repositoryDeleting();
+    this.ctx.storage.sql.exec("INSERT OR IGNORE INTO repository_deletion VALUES(1)");
+  }
+  async repositoryArtifactDeleted(name: string): Promise<boolean> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS repository_artifact_deletions(name TEXT PRIMARY KEY)");
+    return this.ctx.storage.sql.exec("SELECT name FROM repository_artifact_deletions WHERE name=?", name).toArray().length > 0;
+  }
+  async recordRepositoryArtifactDeleted(name: string): Promise<void> {
+    if (!this.repositoryDeleting()) throw new Error("Repository deletion was not started");
+    await this.repositoryArtifactDeleted(name);
+    this.ctx.storage.sql.exec("INSERT OR IGNORE INTO repository_artifact_deletions VALUES(?)", name);
+  }
+
   /** Delete everything this project stores (account deletion / repository deletion). */
   async destroy(): Promise<void> {
-    await this.ctx.storage.deleteAll();
+    this.repositoryDeleting();
+    const tables = this.ctx.storage.sql.exec<{name:string}>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name!='repository_deletion'").toArray();
+    this.ctx.storage.transactionSync(() => {
+      for (const table of tables) this.ctx.storage.sql.exec(`DELETE FROM "${table.name.replaceAll('"','""')}"`);
+      this.ctx.storage.sql.exec("INSERT OR IGNORE INTO repository_deletion VALUES(1)");
+    });
     this.state = null;
   }
 
@@ -1163,6 +1439,64 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   /** Spend guard: atomically count a model-backed run against today's per-project allowance. */
+  async existingDeploymentRequest(target: AcceptedDeploymentTarget, serviceId: string, environment: string, key: string, actorId: string): Promise<DeploymentRecord | null> {
+    if(await this.roleOf(actorId)!=="owner")throw new Error("Owner required");
+    const state=await this.getState();
+    return new RepositoryDeployments(this.ctx.storage,state.projectId).existingRequest(target,serviceId,environment,key,actorId);
+  }
+  async nativeComputeFailure(key: string): Promise<boolean> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS native_compute_failures(key TEXT PRIMARY KEY)");
+    return this.ctx.storage.sql.exec("SELECT key FROM native_compute_failures WHERE key=?",key).toArray().length>0;
+  }
+  async setNativeComputeFailure(key: string, failed: boolean): Promise<void> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS native_compute_failures(key TEXT PRIMARY KEY)");
+    if(failed)this.ctx.storage.sql.exec("INSERT OR IGNORE INTO native_compute_failures VALUES(?)",key);
+    else this.ctx.storage.sql.exec("DELETE FROM native_compute_failures WHERE key=?",key);
+  }
+  async nativeComputeStatus(key: string): Promise<{ active: boolean; sandboxName: string; token: string; deadline: number } | null> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS native_compute(key TEXT PRIMARY KEY, token TEXT NOT NULL, active INTEGER NOT NULL, started_at INTEGER)");
+    try{this.ctx.storage.sql.exec("ALTER TABLE native_compute ADD COLUMN started_at INTEGER");}catch{/* Column already exists. */}
+    this.ctx.storage.sql.exec("UPDATE native_compute SET started_at=? WHERE key=? AND started_at IS NULL",Date.now(),key);
+    const row=this.ctx.storage.sql.exec<{token:string;active:number;started_at:number}>("SELECT token,active,started_at FROM native_compute WHERE key=?",key).toArray()[0];
+    return row?{active:!!row.active,sandboxName:`native-${row.token}`,token:row.token,deadline:row.started_at+1200000}:null;
+  }
+  async claimNativeCompute(key: string): Promise<string | null> {
+    if (!/^[a-zA-Z0-9_-]{1,200}$/.test(key)) throw new Error("Invalid native operation");
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS native_compute(key TEXT PRIMARY KEY, token TEXT NOT NULL, active INTEGER NOT NULL, started_at INTEGER)");
+    try{this.ctx.storage.sql.exec("ALTER TABLE native_compute ADD COLUMN started_at INTEGER");}catch{/* Column already exists. */}
+    return this.ctx.storage.transactionSync(() => {
+      const existing = this.ctx.storage.sql.exec<{active:number}>("SELECT active FROM native_compute WHERE key=?",key).toArray()[0];
+      if(existing?.active) return null;
+      const token=crypto.randomUUID();
+      this.ctx.storage.sql.exec("INSERT INTO native_compute VALUES(?,?,1,?) ON CONFLICT(key) DO UPDATE SET token=excluded.token,active=1,started_at=excluded.started_at",key,token,Date.now());
+      return token;
+    });
+  }
+  async finishNativeCompute(key: string, token: string): Promise<void> {
+    this.ctx.storage.sql.exec("UPDATE native_compute SET active=0 WHERE key=? AND token=?",key,token);
+  }
+  async markManagedDispatchAttempted(runIds: string[], accountKey: string): Promise<void> {
+    new ManagedSpendLedger(this.ctx.storage).markDispatchAttempted(runIds, accountKey);
+  }
+  async cancelUnstartedManagedSpend(runIds: string[], accountKey: string): Promise<void> {
+    new ManagedSpendLedger(this.ctx.storage).cancelUnstarted(runIds, accountKey);
+  }
+  async managedSpendReserved(month: string, accountKey?: string): Promise<number> {
+    if (!/^\d{4}-\d{2}$/.test(month) || (accountKey !== undefined && !/^[A-Za-z0-9_-]{1,200}$/.test(accountKey))) throw new Error("Invalid spending scope");
+    return new ManagedSpendLedger(this.ctx.storage).used(month, accountKey);
+  }
+  async reserveCoreGitOperation(operationId: string, accountKey: string, budget: CoreGitBudget): Promise<CoreGitAdmission> {
+    return new CoreGitOperationLedger(this.ctx.storage).reserve(operationId, accountKey, budget);
+  }
+  async reserveManagedSpendBatch(inputs: ManagedEnvelope[], budget: ManagedBudget): Promise<ManagedAdmission[]> {
+    return new ManagedSpendLedger(this.ctx.storage).reserveBatch(inputs, budget);
+  }
+  async reserveManagedSpend(input: ManagedEnvelope, budget: ManagedBudget): Promise<ManagedAdmission> {
+    return new ManagedSpendLedger(this.ctx.storage).reserve(input, budget);
+  }
+  async consumeManagedSpend(runId: string, inputBytes: number, outputTokens: number, containerSeconds: number): Promise<ManagedReservation> {
+    return new ManagedSpendLedger(this.ctx.storage).consume(runId, inputBytes, outputTokens, containerSeconds);
+  }
   async consumeRun(limit: number, admissionKey?: string): Promise<{ allowed: boolean; used: number }> {
     if (admissionKey && !/^[A-Za-z0-9:_-]{1,200}$/.test(admissionKey)) throw new Error("Invalid admission key");
     const day = new Date().toISOString().slice(0, 10);
@@ -1400,10 +1734,11 @@ export class RepositoryController extends DurableObject<Env> {
     this.save();
     await this.logActivity("FlareGit", "review.requested", `Verified candidate ${commit.slice(0, 7)} (${c.participatingTaskIds.join(" + ")}) is waiting for review`);
   }
-  async recordReview(candidateId: string, review: { approved: boolean; by: string; note?: string }): Promise<{ ok: boolean; instanceId?: string; error?: string }> {
+  async recordReview(candidateId: string, review: { approved: boolean; by: string; note?: string }, expectedCommit: string): Promise<{ ok: boolean; instanceId?: string; error?: string }> {
     const s = this.load();
     const c = s.candidates[candidateId];
     if (!c || !c.candidateCommit || !c.workflowInstanceId) return { ok: false, error: "This candidate is not waiting for review" };
+    if (!/^[a-f0-9]{40}$/.test(expectedCommit ?? "") || expectedCommit !== c.candidateCommit) return { ok: false, error: "The candidate changed from the commit you reviewed. Refresh and inspect its diff before deciding." };
     // Idempotent: the same decision can be re-sent if notifying the integration run failed the first time.
     if (c.review && c.review.commit === c.candidateCommit && (c.status === "verified" || c.status === "failed") && !s.journal.some((j) => j.candidateId === c.id)) {
       return c.review.approved === review.approved ? { ok: true, instanceId: c.workflowInstanceId } : { ok: false, error: `Already ${c.review.approved ? "approved" : "rejected"} by ${c.review.by}` };

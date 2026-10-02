@@ -17,3 +17,12 @@ test("trusted provider capture disables redirects/hooks and always removes owned
   expect(commands[0]).toContain("core.hooksPath=/dev/null");
   expect(commands.at(-1)).toMatch(/^rm -rf -- '\/tmp\/flaregit-import-history-/);
 });
+
+test("cleanup failure preserves captured inventory", async () => {
+  const head = "a".repeat(40), tree = "b".repeat(40);
+  const result = await capturePublicSourceHistory({ exec: async (command) => {
+    if (command.startsWith("rm ")) throw new Error("sensitive provider error");
+    return { success: true, stderr: "", stdout: command.includes("rev-parse --verify") ? head : command.includes("is-shallow") ? "false" : command.includes("log --max-count") ? `${head} ${tree}` : "" };
+  } }, "https://github.com/owner/repository.git", "main", head);
+  expect(result?.refs["refs/heads/main"]).toBe(head);
+});

@@ -1,3 +1,10 @@
+import { recoverNativeCompute, claimNativeCompute, admitNativeCompute, NativeComputeAdmissionError } from "./native-compute.js";
+import { allocateArtifact } from "./storage-allocation.js";
+import { gitRemote, gitParentTokenHash } from "./git-gateway-handler.js";
+import { scenarioAgentRunIds } from "./scenario-workflow.js";
+import { reserveManagedAgents } from "./projects.js";
+import { searchAccountMetadata } from "./metadata-search.js";
+import { communityQuerySchema } from "./platform-community.js";
 import { RepositoryController, WEBHOOK_EVENTS } from "./durable-object.js";
 import { FlareGitIntegrationWorkflow } from "./workflow.js";
 import { FlareGitScenarioWorkflow } from "./scenario-workflow.js";
@@ -5,6 +12,8 @@ import { FlareGitAgentWorkflow } from "./agent-workflow.js";
 import { FlareGitImportHistoryWorkflow, importHistoryReceiptKey } from "./import-history-workflow.js";
 import { handleQueueBatch } from "./queue.js";
 import { authenticate } from "./access.js";
+import { handleGitGateway } from "./git-gateway-handler.js";
+import { admitGitOperation } from "./core-git-budget.js";
 import { gitAuthEnv, q } from "./shell.js";
 import { ensureBuild } from "./build.js";
 import { buildPrefix, signPreview, verifyPreview } from "./preview-access.js";
@@ -17,7 +26,7 @@ import { lookupTxt, normalizeDomain, txtHost, txtValue } from "./dns.js";
 import { isSafeRef } from "../core/sanitize.js";
 import { diffTrees, listCommits, listDirectory, readBlobByHash, readFileText, resolveCommit } from "./browse.js";
 import { validateWebhookUrl } from "./webhooks.js";
-import { PROJECT_ID, accountKeyFor, accountOf, admitRun, adoptLegacyProject, canonicalNameFor, globalOf, newProjectId, projectOf, taskRepoName } from "./projects.js";
+import { PROJECT_ID, accountKeyFor, accountOf, admitRun, adoptLegacyProject, canonicalNameFor, globalOf, managedSpendStatus, newProjectId, projectOf, taskRepoName } from "./projects.js";
 import type { Env, QueueMessage } from "./env.js";
 import type { Task } from "../core/types.js";
 import { assertAgentWrites, redactSecrets } from "../agents/prompt.js";
@@ -32,6 +41,7 @@ import { validateImportSource, validateRepositoryCommand } from "./import-source
 import { integrationCapabilities, verifyIntegrationCallback } from "./integration-auth.js";
 import type { ExternalCheckPolicy } from "../core/external-checks.js";
 import { verifyServiceRead } from "./service-read-auth.js";
+import { publicProfileProjection, type PublicContribution } from "./public-profile.js";
 import { parsePublicBrowseRequest, readPublicRepository } from "./public-repositories.js";
 
 export { RepositoryController, FlareGitIntegrationWorkflow, FlareGitScenarioWorkflow, FlareGitAgentWorkflow, FlareGitImportHistoryWorkflow };
@@ -48,6 +58,17 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/health") return json({ ok: true });
+    if (url.pathname.startsWith("/git/")) return handleGitGateway(request, env, async (_account, userId, _route, operationId) => {
+      const admission = await admitGitOperation(env, userId, operationId);
+      return admission instanceof Response ? admission : { finish: admission.finish ?? (async () => {}) };
+    });
+    if (url.pathname === "/pricing" && request.method === "GET" && request.headers.get("Accept")?.includes("text/html")) return env.ASSETS.fetch(request);
+    if (["/pricing", "/plan-price"].includes(url.pathname) && request.method === "GET") {
+      const ip = request.headers.get("CF-Connecting-IP");
+      if (!ip) return text("Public pricing is unavailable", 503);
+      if (!(await env.API_LIMITER.limit({ key: `plan-price:${ip}` })).success) return text("Too many price requests; retry shortly", 429);
+    }
+    if (url.pathname === "/plan-price" && request.method === "GET") return Response.json({ price: await readPublicPlanPrice(env), limits: planLimits(env), repositoryLimit: 10 }, { headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
     if (url.pathname === "/pricing" && request.method === "GET") {
       const limited = await env.API_LIMITER.limit({ key: `pricing:${request.headers.get("CF-Connecting-IP") ?? "unknown"}` });
       if (!limited.success) return text("Too many requests", 429);
@@ -108,6 +129,48 @@ export default {
     }
 
     if (!url.pathname.startsWith("/api/")) return env.ASSETS.fetch(request);
+
+    if (url.pathname.startsWith("/api/profiles/")) {
+      const respond = (data: unknown, status = 200) => Response.json(data, { status, headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
+      const match = /^\/api\/profiles\/([a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?)$/.exec(url.pathname);
+      if (!match || request.method !== "GET" || url.search) return respond({ error: "Not found" }, 404);
+      const ip = request.headers.get("CF-Connecting-IP");
+      if (!ip) return respond({ error: "Public profiles unavailable" }, 503);
+      if (!(await env.API_LIMITER.limit({ key: `public-profile:${ip}` })).success) return respond({ error: "Too many requests" }, 429);
+      const handle = match[1]!;
+      const registry = globalOf(env);
+      const key = await registry.accountForHandle(handle);
+      if (!key) return respond({ error: "Profile not found" }, 404);
+      const profileAccount = accountOf(env, key);
+      const publication = await profileAccount.publicProfileState();
+      const projection = publicProfileProjection(handle, publication);
+      if (!projection) return respond({ error: "Profile not found" }, 404);
+      const contributions: PublicContribution[] = [];
+      const references = (await profileAccount.listProjects()).slice(0, 10);
+      const observed: Array<{ id: string; version: number; commit: string }> = [];
+      for (const reference of references) {
+        try {
+          const repository = projectOf(env, reference.id);
+          const grant = await repository.publicGrant();
+          if (!grant || !(await repository.roleOf(publication.ownerId!))) continue;
+          const members = await repository.listMembers();
+          const suffix = publication.ownerId!.slice(-12);
+          if (members.filter((member) => member.user_id.slice(-12) === suffix).length !== 1) continue;
+          const state = await repository.getState();
+          const mine = new Set(Object.values(state.tasks).filter((task) => task.contributor.type === "human" && task.contributor.id === suffix).map((task) => task.id));
+          const records = state.acceptedState.history.slice(-100).filter((record) => record.participatingTasks.some((task) => mine.has(task)));
+          for (const record of records) if (/^[a-f0-9]{40}$/.test(record.commit)) contributions.push({ repository: { id: reference.id, name: grant.name }, commit: record.commit, acceptedAt: record.acceptedAt });
+          observed.push({ id: reference.id, version: grant.version, commit: grant.acceptedCommit });
+        } catch { /* Unavailable public repositories contribute no private or inferred counts. */ }
+      }
+      for (const value of observed) {
+        const current = await projectOf(env, value.id).publicGrant();
+        if (!current || current.version !== value.version || current.acceptedCommit !== value.commit) return respond({ error: "Public contribution visibility changed; reload" }, 409);
+      }
+      const current = await profileAccount.publicProfileState();
+      if (await registry.accountForHandle(handle) !== key || current.version !== publication.version || !publicProfileProjection(handle, current)) return respond({ error: "Profile publication changed; reload" }, 409);
+      return respond({ profile: projection, contributions: contributions.sort((a,b) => b.acceptedAt.localeCompare(a.acceptedAt)).slice(0,100), contributionScope: "Accepted FlareGit contributions from up to 10 currently accessible public member repositories and their latest 100 acceptance records; not a complete lifetime history" });
+    }
 
     const publicRoute = /^\/api\/public\/(p?[0-9a-f]{12})\/(meta|history|tree|file|diff|community)$/.exec(url.pathname);
     const publicParticipationRoute = /^\/api\/public\/(p?[0-9a-f]{12})\/community\/(posts|requests)(?:\/(post_[a-f0-9-]{36}))?$/.exec(url.pathname);
@@ -190,6 +253,18 @@ export default {
       return json(result, result.kind === "rejected" ? 409 : 200);
     }
 
+    if (request.method === "GET" && (url.pathname === "/api/community" || /^\/api\/community\/topics\/forum_[a-f0-9-]{36}$/.test(url.pathname))) {
+      const respond=(data:unknown,status=200)=>Response.json(data,{status,headers:{"Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
+      const ip=request.headers.get("CF-Connecting-IP");if(!ip)return respond({error:"Community browsing unavailable"},503);
+      if(!(await env.API_LIMITER.limit({key:`community:${ip}`})).success)return respond({error:"Too many requests"},429);
+      const query=communityQuerySchema.safeParse({...(url.searchParams.has("category")?{category:url.searchParams.get("category")!}:{}),...(url.searchParams.has("q")?{q:url.searchParams.get("q")!}:{}),...(url.searchParams.has("sort")?{sort:url.searchParams.get("sort")!}:{})});
+      if(!query.success)return respond({error:"Invalid community request"},400);
+      try {
+        if(url.pathname === "/api/community") return respond(await globalOf(env).forumList(query.data));
+        const topic=await globalOf(env).forumTopic(url.pathname.split("/").at(-1)!);return topic?respond(topic):respond({error:"Topic unavailable"},404);
+      }catch{return respond({error:"Community is temporarily unavailable; retry"},503);}
+    }
+
     const auth = await authenticate(request, env);
     if (auth instanceof Response) return auth;
     const userId = auth.id;
@@ -197,12 +272,14 @@ export default {
     const { success: withinLimit } = await env.API_LIMITER.limit({ key: accountKey });
     if (!withinLimit) return new Response("Too many requests. Please slow down.", { status: 429, headers: { "Retry-After": "60" } });
     const account = accountOf(env, accountKey);
+    const lifecycle=await account.accountLifecycle();
+    if(lifecycle!=="active"&&!(lifecycle==="deleting"&&url.pathname==="/api/account"&&request.method==="DELETE"))return text(lifecycle==="deleted"?"Account was deleted":"Account deletion is in progress; retry deletion from Account",403);
     const path = url.pathname.slice(4); // strip "/api"
     const method = request.method;
     // Scoped tokens: read-only tokens may only read (and ask for a read-only clone credential); repo-pinned tokens see one repository.
     if (auth.viaToken) {
       const pinned = auth.tokenRepo;
-      if (pinned && !path.startsWith(`/p/${pinned}/`) && path !== `/p/${pinned}`) return text("This token is limited to one repository", 403);
+      if (pinned && !path.startsWith(`/p/${pinned}/`) && path !== `/p/${pinned}` && !path.startsWith(`/public/${pinned}/`) && path !== `/public/${pinned}`) return text("This token is limited to one repository", 403);
       if (auth.tokenScope === "read" && method !== "GET" && !/^\/p\/[a-z0-9]+\/clone$/.test(path)) return text("This token is read-only", 403);
     }
     const body = async <T>() => {
@@ -229,6 +306,23 @@ export default {
     };
 
     try {
+      if (path.startsWith("/community")) {
+        if(auth.viaToken && (auth.tokenScope !== "full" || auth.tokenRepo)) return text("Community publishing requires an account session or full account token",403);
+        const profile=await account.getProfile(),actor={userId,accountKey,displayName:profile.displayName||"Contributor"};
+        const reply=/^\/community\/topics\/(forum_[a-f0-9-]{36})\/replies$/.exec(path);
+        const entry=/^\/community\/entries\/(forum_[a-f0-9-]{36})$/.exec(path);
+        try {
+          if(path === "/community/permissions" && method === "GET") {
+            const topic=url.searchParams.get("topic")??"";if(!/^forum_[a-f0-9-]{36}$/.test(topic))return text("Invalid topic",400);
+            return json(await globalOf(env).forumPermissions(actor,topic,!auth.viaToken&&(env.OPERATOR_ACCOUNTS??"").split(",").map(x=>x.trim()).includes(accountKey)));
+          }
+          if(path === "/community/topics" && method === "POST")return json(await globalOf(env).forumCreate(actor,await body<unknown>()),201);
+          if(reply && method === "POST")return json(await globalOf(env).forumCreate(actor,await body<unknown>(),reply[1]!),201);
+          if(entry && method === "PUT")return json(await globalOf(env).forumEdit(actor,entry[1]!,await body<unknown>()));
+          if(entry && method === "DELETE")return json(await globalOf(env).forumRemove(actor,entry[1]!,await body<unknown>(),!auth.viaToken&&(env.OPERATOR_ACCOUNTS??"").split(",").map(x=>x.trim()).includes(accountKey)));
+          return text("Not found",404);
+        }catch(error){if(error instanceof RequestBodyError)throw error;return text("Community change was not saved; check confirmation, content, ownership and version before retrying",409);}
+      }
       if (publicParticipationRoute) {
         const project = projectOf(env, publicParticipationRoute[1]!);
         const participationGrant = await project.publicGrant().catch(() => null);
@@ -268,6 +362,12 @@ export default {
         }
         return text("Not found", 404);
       }
+      if (path === "/search" && method === "GET") {
+        const query = url.searchParams.get("q") ?? "";
+        if (query.length > 200) return json({ error: "Search is limited to 200 characters" }, 400);
+        return Response.json(await searchAccountMetadata({ query, userId, references: await account.listProjects(), repository: (id) => projectOf(env, id), lifecycle: () => account.accountLifecycle() }), { headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
+      }
+
       // ---------- account level ----------
       if (path === "/config" && method === "GET") return json({ previewBase: env.PREVIEW_ORIGIN });
 
@@ -279,7 +379,8 @@ export default {
         for (const p of projects) {
           const role = await projectOf(env, p.id).roleOf(userId).catch(() => null);
           if (role) visible.push({ ...p, role });
-          else await account.removeProject(p.id);
+          // Hide pending/revoked/unavailable membership from navigation, but retain
+          // its durable reference for account cleanup. Reading must not delete it.
         }
         const billing = await account.getBilling();
         return json({
@@ -288,7 +389,7 @@ export default {
           plan: billing.plan,
           runsToday: await account.usageToday(),
           runsPerDay: planLimits(env)[billing.plan],
-          checkoutConfigured: Boolean(env.POLAR_PRODUCT_ID && env.POLAR_ACCESS_TOKEN),
+          checkoutConfigured: env.PAID_CHECKOUT_ENABLED === "true" && Boolean(env.POLAR_PRODUCT_ID && env.POLAR_ACCESS_TOKEN),
         });
       }
 
@@ -298,21 +399,64 @@ export default {
         if (b.confirm !== "delete my account") return text('Send {"confirm":"delete my account"} to confirm', 400);
         const billing = await account.getBilling();
         if (billing.plan === "pro" && billing.status === "active") return text("Cancel your Pro subscription first (Account → Billing), then delete your account", 409);
+        await account.beginAccountDeletion();
+        const removeArtifact=async(name:string)=>{
+          if(await account.accountArtifactDeleted(name)) { await globalOf(env).recordArtifactDeletion(name, true); return true; }
+          const deleted=await env.ARTIFACTS.delete(name).catch(()=>false);
+          if(!deleted)return false;
+          await account.recordAccountArtifactDeleted(name); await globalOf(env).recordArtifactDeletion(name, true); return true;
+        };
+        const imports = (await account.listImportJobs()).filter((job) => job.ownerId === userId);
+        // Cancel only operations durably attributed to this account/import. Unknown
+        // workflow state is retained rather than claiming its work has stopped.
+        for (const operation of await account.listImportHistoryOperations()) {
+          if (operation.ownerId !== userId || !imports.some((job) => job.id === operation.projectId && job.canonicalRepoName === operation.canonicalRepoName)) continue;
+          try {
+            const handle = await env.IMPORT_HISTORY_WORKFLOW.get(operation.instanceId);
+            const status = await handle.status();
+            if (!["complete", "errored", "terminated"].includes(status.status)) {
+              await handle.terminate();
+              if ((await handle.status()).status !== "terminated") return json({ deleted: false, status: "deleting", reason: "Import inspection shutdown is unconfirmed; retry deletion" }, 202);
+            }
+          } catch { return json({ deleted: false, status: "deleting", reason: "Import inspection state is unavailable; retry deletion" }, 202); }
+        }
+        for (const reference of await account.listProjects()) {
+          const ledger = projectOf(env, reference.id);
+          if (await ledger.roleOf(userId) !== "owner") continue;
+          await ledger.beginRepositoryDeletion();
+          if (!await stopRepositoryWorkflows(env, ledger)) return json({ deleted: false, status: "deleting", reason: "Repository workflow shutdown is unconfirmed; retry deletion" }, 202);
+        }
+        if (!await reconcileSealedAllocations(env, account)) return json({ deleted: false, status: "deleting", reason: "An in-flight repository allocation remains unconfirmed; retry deletion" }, 202);
+        for (const job of imports) {
+          if (await account.accountArtifactDeleted(job.canonicalRepoName)) continue;
+          if (job.status !== "ready") {
+            const readiness = await inspectImport(env.ARTIFACTS, job.canonicalRepoName);
+            if (readiness.status !== "ready") return json({ deleted: false, status: "deleting", reason: "Saved import may still allocate repository storage; cleanup is unconfirmed. Retry deletion." }, 202);
+          }
+          if (!await removeArtifact(job.canonicalRepoName)) return json({ deleted: false, status: "deleting", reason: "Imported repository storage cleanup is unconfirmed; retry deletion" }, 202);
+        }
         for (const p of await account.listProjects()) {
           const ledger = projectOf(env, p.id);
           const role = await ledger.roleOf(userId).catch(() => null);
           if (role === "owner") {
             const st = await ledger.getState().catch(() => null);
+            if(!st)return json({deleted:false,status:"deleting",reason:"Repository cleanup metadata is unavailable; retry deletion"},202);
             if (st) {
-              for (const t of Object.values(st.tasks)) await env.ARTIFACTS.delete(t.workspace.repoName).catch(() => false);
-              await env.ARTIFACTS.delete(st.canonicalRepoName).catch(() => false);
+              for (const t of Object.values(st.tasks)) if(!await removeArtifact(t.workspace.repoName))return json({deleted:false,status:"deleting",reason:"Repository storage cleanup is unconfirmed; retry deletion"},202);
+              if(!await removeArtifact(st.canonicalRepoName))return json({deleted:false,status:"deleting",reason:"Repository storage cleanup is unconfirmed; retry deletion"},202);
             }
+            await account.removeProject(p.id);
             await ledger.destroy();
-          } else if (role) {
-            await ledger.removeMember(userId).catch(() => undefined);
+          } else {
+            await ledger.cancelContributorRegistration(userId);
           }
         }
-        await account.destroy();
+        for (const allocation of await globalOf(env).artifactOwnerManifest(accountKey)) {
+          if (allocation.state === "deleted") continue;
+          if (await account.accountArtifactDeleted(allocation.name)) { await globalOf(env).recordArtifactDeletion(allocation.name, true); continue; }
+          if (!await allocatedArtifactReadable(env, allocation.name) || !await removeArtifact(allocation.name)) return json({ deleted: false, status: "deleting", reason: "Reserved repository allocation cleanup is unconfirmed; retry deletion" }, 202);
+        }
+        await account.finishAccountDeletion();
         return json({ deleted: true });
       }
 
@@ -345,17 +489,30 @@ export default {
       if (path === "/me" && method === "GET") return json({ operator: operators.includes(accountKey) });
 
       // ----- profile -----
-      if (path === "/profile" && method === "GET") return json(await account.getProfile());
+      if (path === "/profile" && method === "GET") { const publication = await account.publicProfileState(); return json({ ...publication.profile, visibility: publication.visibility, version: publication.version }); }
+      if (path === "/profile/visibility" && method === "PUT") {
+        if (auth.viaToken) return text("Change profile publication from the web app", 403);
+        const value = await body<{ visibility?: string; confirmed?: boolean; expectedVersion?: number }>();
+        if (value.visibility !== "public" && value.visibility !== "private") return text("Invalid profile visibility",400);
+        if (value.visibility === "public" && value.confirmed !== true) return text("Confirm publication of your profile and accepted contributions from public repositories",400);
+        if (value.visibility === "public" && (!Number.isSafeInteger(value.expectedVersion) || value.expectedVersion! < 0)) return text("A saved profile version is required for publication",400);
+        try { await account.setPublicProfileVisibility(value.visibility, value.confirmed === true, userId, value.expectedVersion); }
+        catch (error) { if (String(error).includes("Profile version changed")) return text("Profile changed on another device. Your publication was not applied; refresh and review before confirming.",409); throw error; }
+        return json({ visibility: value.visibility });
+      }
       if (path === "/profile" && method === "PUT") {
         if (auth.viaToken) return text("Edit your profile from the web app", 403);
-        const b = await body<{ handle?: string; displayName?: string; bio?: string }>();
+        const b = await body<{ handle?: string; displayName?: string; bio?: string; expectedVersion?: number }>();
+        if (!Number.isSafeInteger(b.expectedVersion) || b.expectedVersion! < 0) return text("A saved profile version is required",400);
         const handle = clean(b.handle, 39).toLowerCase();
         if (!/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(handle)) return text("Handle: 1-39 characters, a-z, 0-9 and single hyphens", 400);
         const displayName = clean(b.displayName, 60);
         if (!displayName || /[<>\u0000-\u001f]/.test(displayName)) return text("Enter a display name (no control characters or angle brackets)", 400);
         const current = await account.getProfile();
         if (!(await globalOf(env).claimHandle(handle, accountKey))) return text("That handle is taken", 409);
-        await account.setProfile({ handle, displayName, bio: clean(b.bio, 300), joinedAt: current.handle ? current.joinedAt : new Date().toISOString() });
+        try { await account.setProfile({ handle, displayName, bio: clean(b.bio, 300), joinedAt: current.handle ? current.joinedAt : new Date().toISOString() }, b.expectedVersion); }
+        catch(error) { if(String(error).includes("Profile version changed")) return text("Profile changed on another device. Your edits were not saved; keep your draft and refresh the saved profile.",409); throw error; }
+        await globalOf(env).commitHandle(handle, accountKey);
         return json({ ok: true });
       }
 
@@ -375,9 +532,13 @@ export default {
 
       if (path === "/billing" && method === "GET") {
         const billing = await account.getBilling();
-        return json({ ...billing, runsToday: await account.usageToday(), runsPerDay: planLimits(env)[billing.plan], checkoutConfigured: Boolean(env.POLAR_PRODUCT_ID && env.POLAR_ACCESS_TOKEN) });
+        const managed = await managedSpendStatus(env, accountKey).catch(() => ({ status: "unavailable" as const }));
+        return json({ ...billing, managed, runsToday: await account.usageToday(), runsPerDay: planLimits(env)[billing.plan], checkoutConfigured: env.PAID_CHECKOUT_ENABLED === "true" && Boolean(env.POLAR_PRODUCT_ID && env.POLAR_ACCESS_TOKEN) });
       }
       if (path === "/billing/checkout" && method === "POST") {
+        if (env.PAID_CHECKOUT_ENABLED !== "true") return text("Paid plans are still being validated. Free collaboration remains available.", 503);
+        const price = await readPublicPlanPrice(env);
+        if (price.status !== "known" || price.environment !== "production") return text("The paid price could not be confirmed. Checkout is unavailable; free collaboration remains available.", 503);
         return json({ url: await createCheckout(env, { projectId: accountKey, email: auth.email ?? "", successUrl: `${url.origin}/?checkout=success` }) });
       }
 
@@ -418,7 +579,7 @@ export default {
         const b = await body<{ kind?: string; name?: string; url?: string; branch?: string; install?: string; build?: string; test?: string }>();
         const existing = await account.listProjects();
         const pendingImports = (await account.listImportJobs()).filter((job) => job.status !== "ready");
-        if (existing.length + pendingImports.length >= 10) return text("Repository limit reached (10).", 409);
+        if (existing.filter((project)=>project.role==="owner").length + pendingImports.length >= 10) return text("Owned repository limit reached (10).", 409);
         const name = clean(b.name, 60) || "my-repo";
         if (!/^[A-Za-z0-9._ -]{1,60}$/.test(name)) return text("Use letters, numbers, spaces, '.', '_' and '-' in the name.", 400);
         const projectId = newProjectId();
@@ -456,6 +617,7 @@ export default {
         const project = projectOf(env, projectId);
         const role = await project.roleOf(userId).catch(() => null);
         if (!role) return text("Not found", 404);
+        if (await project.repositoryDeletionPending() && !(sub === "" && method === "DELETE")) return json({ status: "deleting", detail: "Repository storage cleanup is pending; the owner can retry deletion." }, 409);
         const state = await project.getState().catch(() => null);
         if (!state) return text("Not found", 404);
         const settings = settingsFor(state.verificationPolicy);
@@ -469,11 +631,12 @@ export default {
           if (!isOwner) return text("Only the owner can inspect import history", 403);
           const job = await account.getImportJob(projectId);
           if (!job || job.ownerId !== userId || job.status !== "ready" || job.canonicalRepoName !== state.canonicalRepoName) return text("Ready owned import required", 409);
+          if (!job.importedHead || !job.importedBranch) return json({ status: "unavailable", detail: "This legacy import has no recorded import-time head; its migration cannot be verified from the current branch." }, 409);
           const requestBody = request.body ? await body<{ instanceId?: string }>() : {};
           if (Object.keys(requestBody).some((key) => key !== "instanceId") || (requestBody.instanceId !== undefined && !/^import-history-[a-f0-9-]{36}$/.test(requestBody.instanceId))) return text("Invalid import inspection retry", 400);
           const operation = requestBody.instanceId
             ? await account.getImportHistoryOperation(requestBody.instanceId)
-            : await account.claimImportHistoryOperation({ projectId, head: state.acceptedState.currentCommit, canonicalRepoName: state.canonicalRepoName, ownerId: userId, instanceId: `import-history-${crypto.randomUUID()}` });
+            : await account.claimImportHistoryOperation({ projectId, head: job.importedHead, canonicalRepoName: state.canonicalRepoName, ownerId: userId, instanceId: `import-history-${crypto.randomUUID()}` });
           if (!operation || operation.ownerId !== userId || operation.projectId !== projectId || operation.canonicalRepoName !== state.canonicalRepoName) return text("Saved inspection operation not found", 404);
           if (Date.now() - Date.parse(operation.createdAt) > 30 * 86400_000) return text("Inspection retry window expired; contact support", 410);
           const existing = await env.IMPORT_HISTORY_WORKFLOW.get(operation.instanceId).then(async (handle) => ({ handle, status: await handle.status() })).catch(() => null);
@@ -513,7 +676,7 @@ export default {
 
         if (sub === "/state" && method === "GET") {
           if (settings.fixture === "ticket-booking") {
-            ctx.waitUntil(ensureBuild(env, projectId, state.acceptedState.currentCommit, state.canonicalRepoName).catch((e) => console.error("preview build failed", String(e))));
+            ctx.waitUntil(ensureBuild(env, projectId, state.acceptedState.currentCommit, state.canonicalRepoName, accountKey).catch((e) => console.error("preview build failed", String(e))));
           }
           return json({ ...state, role });
         }
@@ -545,14 +708,37 @@ export default {
           let request;
           try { request = await project.decidePublicContribution(actor, contributionDecision[1]!, value.decision, value.confirmedPrivateAccess === true); }
           catch { return text("Access was not changed; approval requires explicit acknowledgment of private repository context", 409); }
-          if (request.status === "approved") ctx.waitUntil((async () => {
-            const role = await project.roleOf(request.requesterUserId);
-            if (!role) return;
-            await accountOf(env, request.requesterAccountKey).addProject({ id: projectId, name: state.projectName, role: role === "owner" ? "owner" : "member", kind: state.kind ?? "demo" });
-          })().catch(() => console.error("Contributor navigation registration unavailable; repository access remains recorded")));
-          return json({ request });
+          return json({ request },request.registrationStatus==="pending"?202:200);
         }
 
+        if(sub==="/preview/retry"&&method==="POST"){
+          if(!isOwner)return text("Only the owner can retry preview compute",403);
+          const input=await body<{commit?:unknown}>();
+          const state=await project.getState(),key=`build-${projectId}-${state.acceptedState.currentCommit}`;
+          if(settingsFor(state.verificationPolicy).fixture!=="ticket-booking")return text("This repository uses external preview tooling",409);
+          if(typeof input.commit!=="string"||input.commit!==state.acceptedState.currentCommit)return text("Preview retry must reference the current accepted commit",409);
+          if(await project.roleOf(userId)!=="owner")return text("Owner access was revoked",403);
+          try {
+            await recoverNativeCompute(env,key);
+            await globalOf(env).setNativeComputeFailure(key,false);
+            ctx.waitUntil(ensureBuild(env,projectId,state.acceptedState.currentCommit,state.canonicalRepoName,accountKey).catch(()=>console.error("Explicit preview retry failed")));
+            return json({status:"requested"},202);
+          }catch{return text("Previous preview workspace stop is unconfirmed; retry remains locked",409);}
+        }
+        if(sub==="/preview/recover"&&method==="POST"){
+          if(!isOwner)return text("Only the owner can recover preview compute",403);
+          const state=await project.getState();
+          try{return json(await recoverNativeCompute(env,`build-${projectId}-${state.acceptedState.currentCommit}`));}
+          catch{return text("Preview workspace stop remains unconfirmed; saved Git state is preserved and retry remains locked",409);}
+        }
+        if(sub==="/deployments/recover"&&method==="POST"){
+          if(!isOwner)return text("Only the owner can recover deployment compute",403);
+          const parsed=deploymentRequestParametersSchema.safeParse(await body<unknown>());
+          if(!parsed.success)return text("Valid saved deployment request parameters required",400);
+          const operationKey=`deployment-${await accountKeyFor(`${projectId}-${userId}-${parsed.data.idempotencyKey}`)}`;
+          try{return json(await recoverNativeCompute(env,operationKey));}
+          catch{return text("Deployment workspace stop remains unconfirmed; retained Git state is preserved and retry remains locked",409);}
+        }
         if(sub==="/deployments"&&method==="GET")return json({deployments:await project.listDeployments()});
         if(sub==="/deployment-targets"&&method==="GET"){
           if(!isOwner)return text("Only the owner can select deployment targets",403);
@@ -569,8 +755,20 @@ export default {
             const service=await project.connectionSigningConfig(input.serviceId);
             if(!service?.capabilities.includes("report-deployment"))return text("Register an active deployment reporting service first",409);
             if(!(await project.listWebhooks()).some(hook=>hook.active&&hook.events.split(",").includes("deployment.requested")))return text("Configure an active deployment.requested webhook first",409);
-            await retainDeploymentTarget(env,accepted.canonicalRepoName,accepted.target);
-            return json(await project.requestDeployment(accepted.target,input.serviceId,input.environment,input.idempotencyKey,userId),201);
+            const duplicate = await project.existingDeploymentRequest(accepted.target,input.serviceId,input.environment,input.idempotencyKey,userId);
+            if(duplicate)return json({kind:"duplicate",deployment:duplicate});
+            const operationKey = `deployment-${await accountKeyFor(`${projectId}-${userId}-${input.idempotencyKey}`)}`;
+            const computeLease = await claimNativeCompute(env, operationKey);
+            if(!computeLease)return text("Deployment verification is already in progress; retry the same key",409);
+            let nativeStopConfirmed = false;
+            try {
+              await retainDeploymentTarget(env,accepted.canonicalRepoName,accepted.target,accountKey,`native-${computeLease}`);
+              nativeStopConfirmed = true;
+              return json(await project.requestDeployment(accepted.target,input.serviceId,input.environment,input.idempotencyKey,userId),201);
+            } catch(error) {
+              if(error instanceof NativeComputeAdmissionError) nativeStopConfirmed=true;
+              throw error;
+            } finally { if(nativeStopConfirmed)await globalOf(env).finishNativeCompute(operationKey,computeLease); }
           }catch{return text("Deployment request was not dispatched; inspect the accepted journal, retained ref and configured service before retrying the same key",409);}
         }
 
@@ -675,11 +873,16 @@ export default {
           return Response.json(await readBlobByHash(repo, hash), { headers: { "Cache-Control": "private, max-age=31536000, immutable" } });
         }
 
+        // Revoke only this actor's opaque Git credentials; other contributors retain access.
+        if(sub === "/git-credentials" && method === "DELETE") {
+          await project.revokeGitCapabilities(userId);
+          return json({revoked:true});
+        }
+
         // ----- clone credentials (read-only, short-lived) -----
         if (sub === "/clone" && method === "POST") {
-          const repo = await env.ARTIFACTS.get(state.canonicalRepoName);
-          const remote = String((await repo.info()).remote);
-          const token = (await repo.createToken("read", 3600)).plaintext;
+          const remote = gitRemote(url.origin,projectId,null);
+          const {token}=await project.mintGitCapability(userId,null,false,await gitParentTokenHash(request));
           return json({ remote, token, expiresInSeconds: 3600, command: `git -c http.extraHeader="Authorization: Bearer ${token}" clone ${remote}` });
         }
 
@@ -694,9 +897,8 @@ export default {
           if (b.dependsOn && (!parent || parent.status === "cancelled")) return text("dependsOn must name an existing, uncancelled change", 400);
           const source = await env.ARTIFACTS.get(parent ? parent.workspace.repoName : state.canonicalRepoName);
           const repoName = taskRepoName(projectId, b.taskId);
-          const fork = await source.fork(repoName, { description: goal });
-          const forkRepo = await env.ARTIFACTS.get(repoName);
-          const token = (await forkRepo.createToken("write", 3600)).plaintext;
+          const fork = await allocateArtifact(env,{name:repoName,projectId,userId,kind:"workspace"},()=>source.fork(repoName,{description:goal}));
+          const remote=gitRemote(url.origin,projectId,b.taskId);
           const now = new Date().toISOString();
           const task: Task = {
             id: b.taskId,
@@ -710,20 +912,21 @@ export default {
             requirements: [],
             workspace: { repoName, remote: fork.remote, branch: `task/${b.taskId}` },
             checkpoints: [],
-            currentCommit: state.acceptedState.currentCommit,
+            currentCommit: parent ? parent.currentCommit : state.acceptedState.currentCommit,
             createdAt: now,
             updatedAt: now,
           };
-          await project.createTask(task);
+          await project.createTask(task,userId);
+          const {token}=await project.mintGitCapability(userId,b.taskId,true,await gitParentTokenHash(request));
           return json({
             task: b.taskId,
-            remote: fork.remote,
+            remote,
             branch: task.workspace.branch,
             token,
             expiresInSeconds: 3600,
             commands: [
-              `git -c http.extraHeader="Authorization: Bearer ${token}" clone ${fork.remote} ${b.taskId} && cd ${b.taskId}`,
-              ...(parent ? [`git checkout ${parent.workspace.branch}   # stacked: start from the parent change`] : []),
+              `git -c http.extraHeader="Authorization: Bearer ${token}" clone ${remote} ${b.taskId} && cd ${b.taskId}`,
+              ...(parent ? [`git checkout --detach ${parent.currentCommit}   # stacked: start from the recorded parent checkpoint`] : []),
               `git checkout -b ${task.workspace.branch}   # edit, then commit`,
               `git -c http.extraHeader="Authorization: Bearer ${token}" push origin ${task.workspace.branch}`,
             ],
@@ -741,14 +944,16 @@ export default {
         if (tokenRoute && method === "POST") {
           const task = state.tasks[tokenRoute[1]!];
           if (!task || task.status === "accepted" || task.status === "cancelled") return text("Change is not open", 404);
-          const token = (await (await env.ARTIFACTS.get(task.workspace.repoName)).createToken("write", 3600)).plaintext;
-          return json({ remote: task.workspace.remote, branch: task.workspace.branch, token, expiresInSeconds: 3600 });
+          if(!(await project.canGitAccess(userId,task.id,true)))return text("Only this change's author or repository owner can push",403);
+          const {token}=await project.mintGitCapability(userId,task.id,true,await gitParentTokenHash(request));
+          return json({ remote: gitRemote(url.origin,projectId,task.id), branch: task.workspace.branch, token, expiresInSeconds: 3600 });
         }
 
         const taskRoute = /^\/tasks\/([a-z0-9-]+)\/(ready|cancel|agent)$/.exec(sub);
         if (taskRoute && method === "POST") {
           const task = state.tasks[taskRoute[1]!];
           if (!task) return text("Unknown change", 404);
+          if (!(await project.canGitAccess(userId, task.id, true))) return text("Only this workspace's contributor or the owner can change it", 403);
           const action = taskRoute[2];
           if (action === "cancel") {
             await project.cancelTask(task.id);
@@ -784,15 +989,24 @@ export default {
             resumeFrom = previous.runId;
           }
           const { plan } = await account.getBilling();
-          const denied = await admitRun(env, account, planLimits(env)[plan]);
-          if (denied) return denied;
           const instanceId = `agent-${projectId}-${task.id}-${crypto.randomUUID()}`;
-          if (!(await project.beginAgentTask(task.id, instanceId))) return text("This change already has active agent work or cannot start an agent", 409);
+          const spendDenied = await reserveManagedAgents(env, accountKey, [instanceId]);
+          if (spendDenied) return spendDenied;
+          const denied = await admitRun(env, account, planLimits(env)[plan], instanceId);
+          if (denied) { await globalOf(env).cancelUnstartedManagedSpend([instanceId], accountKey); return denied; }
+          if (!(await project.beginAgentTask(task.id, instanceId))) {
+            await globalOf(env).cancelUnstartedManagedSpend([instanceId], accountKey);
+            return text("This change already has active agent work or cannot start an agent", 409);
+          }
           let instance: WorkflowInstance;
+          let dispatchAttempted = false;
           try {
             await project.registerWorkflow(instanceId, "agent", task.id, userId);
-            instance = await env.AGENT_WORKFLOW.create({ id: instanceId, params: { projectId, taskId: task.id, ...(resumeFrom ? { resumeFrom } : {}) } });
+            dispatchAttempted = true;
+            await globalOf(env).markManagedDispatchAttempted([instanceId], accountKey);
+            instance = await env.AGENT_WORKFLOW.create({ id: instanceId, params: { projectId, accountKey, taskId: task.id, ...(resumeFrom ? { resumeFrom } : {}) } });
           } catch {
+            if (!dispatchAttempted) await globalOf(env).cancelUnstartedManagedSpend([instanceId], accountKey);
             await project.failAgentTask(task.id, instanceId);
             return text("Change is saved, but the agent could not start. Retry or continue on its saved branch.", 503);
           }
@@ -818,10 +1032,11 @@ export default {
         const reviewRoute = /^\/candidates\/([a-z0-9_-]+)\/review$/.exec(sub);
         if (reviewRoute && method === "POST") {
           if (!canAdminister) return text("Approving or rejecting needs a signed-in session or a full-access token", 403);
-          const b = await body<{ approved?: boolean; note?: string }>();
+          const b = await body<{ approved?: boolean; note?: string; expectedCommit?: string }>();
           if (typeof b.approved !== "boolean") return text("approved (true or false) is required", 400);
+          if (typeof b.expectedCommit !== "string" || !/^[a-f0-9]{40}$/.test(b.expectedCommit)) return text("The exact commit you reviewed is required. Refresh the page and inspect the candidate.", 400);
           const by = (await account.getProfile()).displayName || `member-${accountKey.slice(0, 6)}`;
-          const r = await project.recordReview(reviewRoute[1]!, { approved: b.approved, by, note: clean(b.note, 500) || undefined });
+          const r = await project.recordReview(reviewRoute[1]!, { approved: b.approved, by, note: clean(b.note, 500) || undefined }, b.expectedCommit);
           if (!r.ok || !r.instanceId) return text(r.error ?? "Review failed", 409);
           try {
             await (await env.INTEGRATION_WORKFLOW.get(r.instanceId)).sendEvent({ type: "review", payload: { approved: b.approved, by, note: clean(b.note, 500) || undefined } });
@@ -849,12 +1064,17 @@ export default {
           const b = await body<{ act?: string }>();
           if (b.act !== "act1" && b.act !== "act2" && b.act !== "act3") return text("act must be act1, act2 or act3", 400);
           const { plan } = await account.getBilling();
-          const denied = await admitRun(env, account, planLimits(env)[plan]);
-          if (denied) return denied;
           const runId = crypto.randomUUID();
           const instanceId = `scn-${projectId}-${runId}`;
-          await project.registerWorkflow(instanceId, "scenario", undefined, userId);
-          const instance = await env.SCENARIO_WORKFLOW.create({ id: instanceId, params: { projectId, act: b.act, runId } });
+          const managedRunIds = scenarioAgentRunIds(instanceId, b.act, runId);
+          const spendDenied = await reserveManagedAgents(env, accountKey, managedRunIds);
+          if (spendDenied) return spendDenied;
+          const denied = await admitRun(env, account, planLimits(env)[plan], instanceId);
+          if (denied) { await globalOf(env).cancelUnstartedManagedSpend(managedRunIds, accountKey); return denied; }
+          try { await project.registerWorkflow(instanceId, "scenario", undefined, userId); }
+          catch { await globalOf(env).cancelUnstartedManagedSpend(managedRunIds, accountKey); return text("Scenario could not be registered; no managed execution was dispatched", 503); }
+          await globalOf(env).markManagedDispatchAttempted(managedRunIds, accountKey);
+          const instance = await env.SCENARIO_WORKFLOW.create({ id: instanceId, params: { projectId, accountKey, act: b.act, runId } });
           ctx.waitUntil(reportUsage(env, accountKey, "scenario_run", `${projectId}-${runId}`, { act: b.act, plan }));
           return json({ instanceId: instance.id }, 202);
         }
@@ -881,10 +1101,17 @@ export default {
           const commit = url.searchParams.get("commit") ?? state.acceptedState.currentCommit;
           if (!/^[0-9a-f]{40}$/.test(commit)) return text("Invalid commit", 400);
           const ready = Boolean(await env.EVIDENCE_BUCKET.head(`${buildPrefix(projectId, commit)}/index.html`));
-          if (!ready && commit === state.acceptedState.currentCommit && settings.fixture === "ticket-booking") ctx.waitUntil(ensureBuild(env, projectId, commit, state.canonicalRepoName).catch((e) => console.error("preview build failed", String(e))));
-          if (!ready) return json({ ready: false });
+          if (!ready && commit === state.acceptedState.currentCommit && settings.fixture === "ticket-booking") ctx.waitUntil(ensureBuild(env, projectId, commit, state.canonicalRepoName, accountKey).catch((e) => console.error("preview build failed", String(e))));
+          if (!ready) {
+            const key=`build-${projectId}-${commit}`;
+            const failed=await globalOf(env).nativeComputeFailure(key);
+            const compute=await globalOf(env).nativeComputeStatus(key);
+            const spending=await managedSpendStatus(env,accountKey,false);
+            const status=failed?"failed":spending.status!=="configured"?"unavailable":compute?.active?"pending":"not_started";
+            return json({ready:false,status,canRetry:isOwner&&commit===state.acceptedState.currentCommit&&settings.fixture==="ticket-booking",reason:failed?"Build failed; retry requires owner action":status==="unavailable"?"Compute budget unavailable":undefined});
+          }
           const { exp, sig } = await signPreview(env, projectId, commit);
-          return json({ ready: true, url: `${env.PREVIEW_ORIGIN}/preview/${projectId}/${commit}/?exp=${exp}&sig=${sig}`, expiresAt: new Date(exp * 1000).toISOString() });
+          return json({ ready: true, status:"available", url: `${env.PREVIEW_ORIGIN}/preview/${projectId}/${commit}/?exp=${exp}&sig=${sig}`, expiresAt: new Date(exp * 1000).toISOString() });
         }
 
         // ----- issues -----
@@ -934,6 +1161,19 @@ export default {
           const line = b.line === undefined ? undefined : Number(b.line);
           if (line !== undefined && !(Number.isInteger(line) && line > 0 && line < 10_000_000)) return text("Invalid line", 400);
           if (b.commit && !/^[0-9a-f]{40}$/.test(b.commit)) return text("Invalid commit", 400);
+          if (path_ || line !== undefined) {
+            if (!path_ || line === undefined || typeof b.commit !== "string" || !/^[0-9a-f]{40}$/.test(b.commit)) return text("A file comment requires its path, line and exact viewed commit", 400);
+          }
+          if (b.commit) {
+            const [kind, id] = subject.split(":");
+            const task = kind === "change" && id ? state.tasks[id] : undefined;
+            const candidate = kind === "candidate" && id ? state.candidates[id] : undefined;
+            const known = task
+              ? [task.baseCommit, task.currentCommit, ...task.checkpoints.map((checkpoint) => checkpoint.commitHash)].includes(b.commit)
+              : candidate ? candidate.candidateCommit === b.commit
+              : state.acceptedState.currentCommit === b.commit || state.acceptedState.history.some((record) => record.commit === b.commit);
+            if (!known) return text("The comment revision is not recorded for this subject. Reload without losing your draft.", 409);
+          }
           return json(await project.addComment({ subject, author: await me(), body: text_, path: path_, line, commit: b.commit }), 201);
         }
 
@@ -1036,7 +1276,9 @@ export default {
           const repo = await env.ARTIFACTS.get(state.canonicalRepoName);
           const remote = String((await repo.info()).remote);
           const canonicalToken = (await repo.createToken("read", 900)).plaintext;
-          const sb = env.INTEGRATOR.getByName(`${projectId}-mirror-retry`);
+          const nativeRunId=`native-${crypto.randomUUID()}`;
+          await admitNativeCompute(env,accountKey,nativeRunId);
+          const sb = env.INTEGRATOR.getByName(nativeRunId);
           const exec = (cmd: string, e?: Record<string, string>) => sb.exec(["sh", "-c", cmd], { env: e });
           const cleanup = async () => {
             try { await sb.destroy(); }
@@ -1110,10 +1352,21 @@ export default {
 
         if (sub === "" && method === "DELETE") {
           if (!isOwner) return text("Only the owner can delete a repository", 403);
-          for (const t of Object.values(state.tasks)) await env.ARTIFACTS.delete(t.workspace.repoName).catch(() => false);
-          await env.ARTIFACTS.delete(state.canonicalRepoName).catch(() => false);
-          await project.destroy();
+          await project.beginRepositoryDeletion();
+          if (!await stopRepositoryWorkflows(env, project)) return json({ deleted: false, status: "deleting", detail: "Repository workflow shutdown is unconfirmed. Retry deletion; metadata is preserved." }, 202);
+          if (!await reconcileSealedAllocations(env, project)) return json({ deleted: false, status: "deleting", detail: "An in-flight repository allocation remains unconfirmed. Retry deletion." }, 202);
+          const manifest = await globalOf(env).artifactProjectManifest(projectId);
+          const names = [...new Set([...Object.values(state.tasks).map((task) => task.workspace.repoName), state.canonicalRepoName, ...manifest.filter((allocation) => allocation.state !== "deleted").map((allocation) => allocation.name)])];
+          const knownNames = new Set([...Object.values(state.tasks).map((task) => task.workspace.repoName), state.canonicalRepoName]);
+          for (const name of names) {
+            if (await project.repositoryArtifactDeleted(name)) { await globalOf(env).recordArtifactDeletion(name, true); continue; }
+            if (!knownNames.has(name) && !await allocatedArtifactReadable(env, name)) return json({ deleted: false, status: "deleting", detail: "Reserved repository allocation is still unconfirmed. Retry deletion; metadata is preserved." }, 202);
+            if (!await env.ARTIFACTS.delete(name).catch(() => false)) return json({ deleted: false, status: "deleting", detail: "Repository storage cleanup is unconfirmed. Retry deletion; cleanup metadata is preserved." }, 202);
+            await project.recordRepositoryArtifactDeleted(name);
+            await globalOf(env).recordArtifactDeletion(name, true);
+          }
           await account.removeProject(projectId);
+          await project.destroy();
           return json({ deleted: projectId });
         }
       }
@@ -1139,8 +1392,10 @@ export default {
 async function createDemoRepository(env: Env, projectId: string, name: string, userId: string) {
   const ledger = projectOf(env, projectId);
   const canonicalName = canonicalNameFor(projectId);
-  const created = await env.ARTIFACTS.create(canonicalName, { description: `FlareGit demo repository for ${name}` });
-  const sb = env.INTEGRATOR.getByName(`bootstrap-${projectId}`);
+  const nativeRunId=`native-${crypto.randomUUID()}`;
+  await admitNativeCompute(env,await accountKeyFor(userId),nativeRunId);
+  const created = await allocateArtifact(env,{name:canonicalName,projectId,userId,kind:"canonical"},()=>env.ARTIFACTS.create(canonicalName,{description:`FlareGit demo repository for ${name}`}));
+  const sb = env.INTEGRATOR.getByName(nativeRunId);
   const run = (cmd: string, e?: Record<string, string>) => sb.exec(["sh", "-c", cmd], { env: e });
   const seed = "/workspace/seed";
   try {
@@ -1153,7 +1408,8 @@ async function createDemoRepository(env: Env, projectId: string, name: string, u
     await ledger.initialize({ projectId, projectName: name, canonicalRepoName: canonicalName, head, verificationPolicy: { ...TICKET_BOOKING_POLICY }, kind: "demo", defaultBranch: "main", ownerId: userId });
     return { head, kind: "demo" };
   } catch (e) {
-    await env.ARTIFACTS.delete(canonicalName).catch(() => false);
+    const removed=await env.ARTIFACTS.delete(canonicalName).catch(() => false);
+    if(removed)await globalOf(env).recordArtifactDeletion(canonicalName,true).catch(()=>undefined);
     throw e;
   } finally {
     await sb.destroy().catch(() => undefined);
@@ -1163,9 +1419,15 @@ async function createDemoRepository(env: Env, projectId: string, name: string, u
 async function finishImport(env: Env, account: Ledger, job: ImportJob, readiness: ImportReadiness) {
   if (readiness.status === "ready") {
     try {
-      await projectOf(env, job.id).initialize({ projectId: job.id, projectName: job.name, canonicalRepoName: job.canonicalRepoName, head: readiness.head, verificationPolicy: job.verificationPolicy as unknown as Record<string, unknown>, kind: "import", defaultBranch: readiness.defaultBranch, ownerId: job.ownerId, source: job.source });
+      // Persist the first observed import snapshot before controller/account setup.
+      // A retry cannot substitute a later accepted branch head after interruption.
+      if (!job.importedHead && job.status !== "ready") {
+        job = { ...job, importedHead: readiness.head, importedBranch: readiness.defaultBranch };
+        await account.saveImportJob(job);
+      }
+      await projectOf(env, job.id).initialize({ projectId: job.id, projectName: job.name, canonicalRepoName: job.canonicalRepoName, head: job.importedHead ?? readiness.head, verificationPolicy: job.verificationPolicy as unknown as Record<string, unknown>, kind: "import", defaultBranch: job.importedBranch ?? readiness.defaultBranch, ownerId: job.ownerId, source: job.source });
       await account.addProject({ id: job.id, name: job.name, role: "owner", kind: "import" });
-      await account.saveImportJob({ ...job, status: "ready", updatedAt: new Date().toISOString(), detail: "Repository is available. No shallow depth was requested; completeness of imported history is not verified." });
+      await account.saveImportJob({ ...job, importedHead: job.importedHead ?? readiness.head, importedBranch: job.importedBranch ?? readiness.defaultBranch, status: "ready", updatedAt: new Date().toISOString(), detail: "Repository is available. No shallow depth was requested; completeness of imported history is not verified." });
       return { id: job.id, status: "ready" as const, head: readiness.head, kind: "import", remote: readiness.remote };
     } catch {
       // Repository data survives an account/controller failure and can be retried.
@@ -1192,5 +1454,38 @@ async function importRepository(
   };
   // Persist ownership and recovery identity BEFORE contacting the provider.
   await account.saveImportJob(job);
-  return finishImport(env, account, job, await startImport(env.ARTIFACTS, job));
+  const readiness=await allocateArtifact(env,{name:job.canonicalRepoName,projectId:job.id,userId:job.ownerId,kind:"import"},()=>startImport(env.ARTIFACTS,job));
+  return finishImport(env,account,job,readiness);
+}
+
+async function stopRepositoryWorkflows(env: Env, ledger: Ledger): Promise<boolean> {
+  for (const run of await ledger.listRepositoryWorkflows()) {
+    const binding = run.kind === "agent" ? env.AGENT_WORKFLOW : run.kind === "scenario" ? env.SCENARIO_WORKFLOW : env.INTEGRATION_WORKFLOW;
+    try {
+      const handle = await binding.get(run.instanceId);
+      if (!["complete", "errored", "terminated"].includes((await handle.status()).status)) {
+        await handle.terminate();
+        if ((await handle.status()).status !== "terminated") return false;
+      }
+    } catch { return false; }
+  }
+  return true;
+}
+async function allocatedArtifactReadable(env: Env, name: string): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([(async () => { using repo = await env.ARTIFACTS.get(name); await repo.info(); return true; })(), new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), 5000); })]);
+  } catch { return false; }
+  finally { if (timer) clearTimeout(timer); }
+}
+
+async function reconcileSealedAllocations(env: Env, ledger: Ledger): Promise<boolean> {
+  for (const allocation of await ledger.pendingArtifactAllocations()) {
+    // reserved never passed the sealed controller's activation boundary. An
+    // allocating request may already have reached the provider; require readiness.
+    if (allocation.phase === "allocating" && !await allocatedArtifactReadable(env, allocation.name)) return false;
+    await projectOf(env, allocation.projectId).settleArtifactAllocation(allocation.name, allocation.operationId);
+    await accountOf(env, allocation.accountKey).settleArtifactAllocation(allocation.name, allocation.operationId);
+  }
+  return (await ledger.pendingArtifactAllocations()).length === 0;
 }

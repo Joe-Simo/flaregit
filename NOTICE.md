@@ -12,7 +12,7 @@ FlareGit is an independent, owner-operated project built for the Cloudflare "Bui
 FlareGit utilizes the following open-source libraries under permissive licenses:
 
 - **React & React DOM**: MIT License, Copyright (c) Meta Platforms, Inc.
-- **Vite**: MIT License, Copyright (c) 2019-present Evan You & Vite Contributors
+- **Radix UI Dialog**: MIT License, Copyright (c) WorkOS
 - **Tailwind CSS**: MIT License, Copyright (c) Tailwind Labs, Inc.
 - **shadcn/ui**: MIT License, Copyright (c) 2023 shadcn
 - **Lucide Icons**: ISC License, Copyright (c) Lucide Contributors
@@ -22,3 +22,7 @@ FlareGit utilizes the following open-source libraries under permissive licenses:
 - **Zod**: MIT License, Copyright (c) 2020 Colin McDonnell
 - **jose**: MIT License, Copyright (c) 2018 Filip Skokan
 - **Bun**: MIT License, Copyright (c) Jarred Sumner
+
+## Cloudflare badge
+
+The supplied `public/cloudflare-protected-badge.png` is a Cloudflare brand asset, used unchanged. Cloudflare retains its trademarks and ownership; the badge is not covered by FlareGit's Apache-2.0 license.

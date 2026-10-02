@@ -15,7 +15,7 @@ try {
   fs.writeFileSync(credential, "FAKE_ONLY_NOT_REAL", { mode: 0o600 });
   fs.writeFileSync(trusted, "unchanged", { mode: 0o644 });
   boundary = createExecutionBoundary(work, [candidate, home]);
-  const invocation = boundary.command("sh", ["-c", `test ! -r ${credential} && test ! -w ${trusted} && test ! -r /proc/1/environ && touch ${candidate}/writable; sleep 60 &`]);
+  const invocation = boundary.command("sh", ["-c", `bun --version >/dev/null && test ! -r ${credential} && test ! -w ${trusted} && test ! -r /proc/1/environ && touch ${candidate}/writable; sleep 60 &`]);
   const ran = spawnSync(invocation.executable, invocation.args, { env: executionEnv(home), stdio: "ignore" });
   boundary.dispose(); boundary = undefined;
   if (ran.status !== 0 || !fs.existsSync(path.join(candidate, "writable")) || fs.readFileSync(trusted, "utf8") !== "unchanged") throw new Error("UID boundary probe failed");

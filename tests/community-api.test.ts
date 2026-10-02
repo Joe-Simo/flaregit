@@ -26,5 +26,13 @@ test("production public mutation routes authenticate stored tokens and preserve 
     expect((await call(`${path}/${saved.id}`,"DELETE","author",{expectedVersion:1})).status).toBe(409);
     expect((await call(`${path}/${saved.id}`,"DELETE","author",{expectedVersion:2})).status).toBe(200);
     expect((await call(path,"POST","author",{scope:"issues",title:"Public post",body:"Deliberate public content",idempotencyKey:"same-key-fixture"})).status).toBe(409);
+    const commentPath="/api/p/abcdef123456/comments";
+    const anchor={subject:"change:task-one",body:"This comment refers to the earlier checkpoint",path:"src/change.ts",line:2};
+    expect((await call(commentPath,"POST","author",anchor)).status).toBe(400);
+    expect((await call(commentPath,"POST","author",{...anchor,commit:"d".repeat(40)})).status).toBe(409);
+    const recorded=await call(commentPath,"POST","author",{...anchor,commit:"b".repeat(40)});
+    expect(recorded.status).toBe(201);
+    expect(await recorded.json()).toMatchObject({commit:"b".repeat(40),path:anchor.path,line:anchor.line});
+    expect((await call("/api/p/abcdef123456/candidates/candidate-one/review","POST","author",{approved:true})).status).toBe(400);
   } finally {await mf.dispose();}
 },30000);

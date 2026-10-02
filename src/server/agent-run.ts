@@ -1,3 +1,5 @@
+import { globalOf, reserveManagedAgent, assertManagedInitiator } from "./projects.js";
+import { DEFAULT_CODE_MODEL } from "../ai/workers-ai.js";
 import { WorkersAIClient } from "../ai/workers-ai.js";
 import { assertAgentWrites, buildAgentPrompt, inAgentScope, isProtectedPath, redactSecrets } from "../agents/prompt.js";
 import { parseRepairResponse } from "../core/pipeline/repair.js";
@@ -19,7 +21,7 @@ const stopped = (task: Task | undefined) => !task || ["accepted", "cancelled", "
  */
 export type AgentExecutionLedger = Ledger;
 
-export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task: Task, runId = task.agentWorkflowInstanceId, options?: { stopAfterProposal?: boolean; resumeFrom?: string }): Promise<{ commit: string; recovered?: boolean; proposalId?: string }> {
+export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task: Task, runId = task.agentWorkflowInstanceId, options?: { stopAfterProposal?: boolean; resumeFrom?: string; accountKey?: string; parentWorkflowId?: string }): Promise<{ commit: string; recovered?: boolean; proposalId?: string }> {
   if (!runId || !/^[A-Za-z0-9_-]{1,200}$/.test(runId)) throw new Error("A durable agent workflow identity is required");
   let durable = await ledger.getAgentRun(runId);
   if (durable && options?.resumeFrom && durable.resumedFrom !== options.resumeFrom) throw new Error("Resume selection differs from the durable run identity");
@@ -28,9 +30,17 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
   const state = await ledger.getState();
   if (stopped(state.tasks[task.id])) throw new Error("Change is no longer available for agent work");
   const settings = settingsFor(state.verificationPolicy);
+  await assertManagedInitiator(env, ledger, options?.parentWorkflowId, options?.accountKey, task.id);
+  const spending = await reserveManagedAgent(env, options?.accountKey, runId);
+  await globalOf(env).consumeManagedSpend(runId, 0, 0, 300);
+  const deadline = Date.now() + 300_000;
   const sb = env.AGENT.getByName(`agent-${state.projectId}-${task.id}-${crypto.randomUUID()}`);
   let repo: ArtifactsRepoCapability | undefined, token: string | undefined;
-  const run = (cmd: string, e?: Record<string, string>) => sb.exec(["sh", "-c", cmd], { env: e });
+  const run = (cmd: string, e?: Record<string, string>) => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("Managed container deadline exhausted");
+    return sb.exec(["sh", "-c", cmd], { env: e, timeoutMs: remaining });
+  };
   try {
     repo = await env.ARTIFACTS.get(task.workspace.repoName);
     const remote = String((await repo.info()).remote);
@@ -95,7 +105,11 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
         total += content.length; files[file] = content;
       }
       const context = [durable.context.issue ? `Issue #${durable.context.issue.number}: ${durable.context.issue.title}\n${durable.context.issue.summary}` : "", ...durable.context.comments.map((comment) => comment.summary), `Continue from saved Git commit ${durable.startingCommit}.`].filter(Boolean).join("\n\n");
-      const ai = new WorkersAIClient({ binding: env.AI, gatewayId: env.AI_GATEWAY_ID });
+      const ai = new WorkersAIClient({ binding: env.AI, gatewayId: env.AI_GATEWAY_ID, model: DEFAULT_CODE_MODEL, maxCalls: spending.maxCalls, maxOutputTokens: spending.maxOutputTokens, beforeDispatch: async ({ model, inputBytes, maxOutputTokens }) => {
+        if (model !== DEFAULT_CODE_MODEL || Date.now() >= deadline) throw new Error("Managed execution model or deadline unavailable");
+        await assertManagedInitiator(env, ledger, options?.parentWorkflowId, options?.accountKey, task.id);
+        await globalOf(env).consumeManagedSpend(runId, inputBytes, maxOutputTokens, 0);
+      } });
       const proposed = parseRepairResponse(await ai.complete(buildAgentPrompt(frozenTask, task.contributor.name, files, settings.checkCommand, context)));
       if (!proposed.size) throw new Error("Model returned no file changes");
       assertAgentWrites(frozenTask, proposed.keys(), durable.protectedPaths);

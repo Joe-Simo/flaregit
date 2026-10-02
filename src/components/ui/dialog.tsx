@@ -1,4 +1,5 @@
 import * as React from "react";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -6,34 +7,16 @@ interface DialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   children: React.ReactNode;
+  className?: string;
+  backdropClassName?: string;
 }
 
-export function Dialog({ open, onOpenChange, children }: DialogProps) {
-  React.useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && open) {
-        onOpenChange(false);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open, onOpenChange]);
-
-  if (!open) return null;
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      {/* Backdrop */}
-      <div
-        className="fixed inset-0 bg-black/80 backdrop-blur-sm transition-opacity"
-        onClick={() => onOpenChange(false)}
-      />
-      {/* Content */}
-      <div className="relative z-50 w-full max-w-lg rounded-xl border border-border bg-card p-6 shadow-2xl animate-in fade-in-0 zoom-in-95">
-        {children}
-      </div>
-    </div>
-  );
+export function Dialog({ open, onOpenChange, children, className, backdropClassName }: DialogProps) {
+  const returnFocus = React.useRef<HTMLElement | null>(null);
+  return <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}><DialogPrimitive.Portal>
+    <DialogPrimitive.Overlay className={cn("fixed inset-0 z-50 bg-black/80 backdrop-blur-sm transition-opacity", backdropClassName)} />
+    <DialogPrimitive.Content aria-describedby={undefined} onOpenAutoFocus={() => { if (document.activeElement instanceof HTMLElement) returnFocus.current = document.activeElement; }} onCloseAutoFocus={event => { event.preventDefault(); if (returnFocus.current?.isConnected) returnFocus.current.focus(); }} className={cn("fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[calc(100%-2rem)] max-w-lg rounded-xl border border-border bg-card p-6 shadow-2xl animate-in fade-in-0 zoom-in-95", className)}>{children}</DialogPrimitive.Content>
+  </DialogPrimitive.Portal></DialogPrimitive.Root>;
 }
 
 export function DialogHeader({
@@ -56,7 +39,7 @@ export function DialogTitle({
   ...props
 }: React.HTMLAttributes<HTMLHeadingElement>) {
   return (
-    <h2
+    <DialogPrimitive.Title
       className={cn(
         "text-lg font-semibold leading-none tracking-tight text-foreground",
         className

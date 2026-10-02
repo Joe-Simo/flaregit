@@ -1,0 +1,4 @@
+import { expect,test } from "bun:test";
+import {stableArtifactInventory} from "../src/server/storage-allocation";
+test("storage bootstrap requires complete stable pagination twice",async()=>{let calls=0;const inventory=await stableArtifactInventory({list:async({cursor})=>{calls++;return cursor?{repos:[{name:"second"}]}:{repos:[{name:"first"}],cursor:"page-two"};}});expect(inventory).toEqual(["first","second"]);expect(calls).toBe(4);});
+test("storage bootstrap refuses changing inventory, repeated cursors and duplicates",async()=>{let calls=0;await expect(stableArtifactInventory({list:async()=>({repos:[{name:++calls===1?"first":"second"}]})})).rejects.toThrow("changed");await expect(stableArtifactInventory({list:async()=>({repos:[],cursor:"repeat"})})).rejects.toThrow("cursor repeated");await expect(stableArtifactInventory({list:async()=>({repos:[{name:"same"},{name:"same"}]})})).rejects.toThrow("unstable");});

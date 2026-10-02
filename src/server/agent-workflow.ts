@@ -6,6 +6,7 @@ import { globalOf } from "./projects.js";
 
 export interface AgentParams {
   projectId: string;
+  accountKey?: string;
   taskId: string;
   resumeFrom?: string;
 }
@@ -28,19 +29,19 @@ export class FlareGitAgentWorkflow extends WorkflowEntrypoint<Env, AgentParams> 
     }
   }
   private async execute(event: WorkflowEvent<AgentParams>, step: WorkflowStep) {
-    const { projectId, taskId, resumeFrom } = event.payload;
+    const { projectId, taskId, resumeFrom, accountKey } = event.payload;
     const ledger = ledgerOf(this.env, projectId);
     try {
       const proposal = await step.do("plan-agent-proposal", { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "10 minutes" }, async () => {
         const task = (await ledger.getState()).tasks[taskId];
         if (!task || ["accepted", "cancelled", "integrating", "verifying"].includes(task.status)) return { commit: "" };
-        return runAgentTask(this.env, ledger, task, event.instanceId, { stopAfterProposal: true, ...(resumeFrom ? { resumeFrom } : {}) });
+        return runAgentTask(this.env, ledger, task, event.instanceId, { stopAfterProposal: true, accountKey, parentWorkflowId: event.instanceId, ...(resumeFrom ? { resumeFrom } : {}) });
       });
       if (proposal.commit || !("proposalId" in proposal)) return proposal;
       return await step.do("apply-saved-proposal", { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "10 minutes" }, async () => {
         const task = (await ledger.getState()).tasks[taskId];
         if (!task || ["accepted", "cancelled", "integrating", "verifying"].includes(task.status)) return { commit: "" };
-        return runAgentTask(this.env, ledger, task, event.instanceId, resumeFrom ? { resumeFrom } : undefined);
+        return runAgentTask(this.env, ledger, task, event.instanceId, { accountKey, parentWorkflowId: event.instanceId, ...(resumeFrom ? { resumeFrom } : {}) });
       });
     } catch {
       await step.do("record-agent-failure", async () => { await ledger.failAgentRun(event.instanceId, taskId); await ledger.failAgentTask(taskId, event.instanceId); });

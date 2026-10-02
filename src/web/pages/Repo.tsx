@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Copy, Lock, Globe } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -30,7 +30,9 @@ const TABS = [
   ["settings", "Settings", "Repository configuration."],
 ] as const;
 
-export function Repo({ projectId, tab, params }: { projectId: string; tab: string; params: URLSearchParams }) {
+type RepoProps = { projectId: string; tab: string; params: URLSearchParams };
+export function Repo(props: RepoProps) { return <RepositoryView key={props.projectId} {...props} />; }
+function RepositoryView({ projectId, tab, params }: RepoProps) {
   const [meta, setMeta] = useState<Meta | null>(null);
   const [state, setState] = useState<State | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -40,10 +42,18 @@ export function Repo({ projectId, tab, params }: { projectId: string; tab: strin
   const [cloneError, setCloneError] = useState<string | null>(null);
   const [cloning, setCloning] = useState(false);
 
-  const reload = useCallback(() => {
-    apiJson<Meta>(`/p/${projectId}`).then((next) => { setMeta(next); setError(null); }).catch((e: Error) => setError(e.message));
-    apiJson<State>(`/p/${projectId}/state`).then((s) => { setState(s); setStateError(null); }).catch((e: Error) => setStateError(e.message));
+  const metaRequest = useRef(0);
+  const stateRequest = useRef(0);
+  const lifetime = useRef(0);
+  const loadState = useCallback(() => {
+    const sequence = ++stateRequest.current;
+    void apiJson<State>(`/p/${projectId}/state`).then((next) => { if (sequence === stateRequest.current) { setState(next); setStateError(null); } }).catch((cause: Error) => { if (sequence === stateRequest.current) setStateError(cause.message); });
   }, [projectId]);
+  const reload = useCallback(() => {
+    const sequence = ++metaRequest.current;
+    void apiJson<Meta>(`/p/${projectId}`).then((next) => { if (sequence === metaRequest.current) { setMeta(next); setError(null); } }).catch((cause: Error) => { if (sequence === metaRequest.current) setError(cause.message); });
+    loadState();
+  }, [projectId, loadState]);
 
   useEffect(() => {
     setMeta(null);
@@ -51,9 +61,9 @@ export function Repo({ projectId, tab, params }: { projectId: string; tab: strin
     setError(null);
     setStateError(null);
     reload();
-    const t = setInterval(() => apiJson<State>(`/p/${projectId}/state`).then((s) => { setState(s); setStateError(null); }).catch((e: Error) => setStateError(e.message)), 6000);
-    return () => clearInterval(t);
-  }, [projectId, reload]);
+    const t = setInterval(loadState, 6000);
+    return () => { clearInterval(t); metaRequest.current++; stateRequest.current++; lifetime.current++; };
+  }, [projectId, reload, loadState]);
 
   if (error) return <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10 text-sm text-destructive" role="alert">{error === "Not found" ? "Repository not found, or you don't have access." : error}</div>;
   if (!meta || !state) {
@@ -62,14 +72,16 @@ export function Repo({ projectId, tab, params }: { projectId: string; tab: strin
   }
 
   const getClone = async () => {
+    const generation = lifetime.current;
     setCloning(true);
     setCloneError(null);
     try {
-      setClone(await apiJson<{ command: string; remote: string }>(`/p/${projectId}/clone`, { method: "POST" }));
+      const credential = await apiJson<{ command: string; remote: string }>(`/p/${projectId}/clone`, { method: "POST" });
+      if (generation === lifetime.current) setClone(credential);
     } catch (e) {
-      setCloneError(e instanceof Error ? e.message : "Could not create a clone credential");
+      if (generation === lifetime.current) setCloneError(e instanceof Error ? e.message : "Could not create a clone credential");
     } finally {
-      setCloning(false);
+      if (generation === lifetime.current) setCloning(false);
     }
   };
   const current = TABS.find(([key]) => key === tab);

@@ -8,14 +8,15 @@ export class ImportRetryFixture extends DurableObject {
     const outsider = await this.ctx.storage.get("outsider") === true;
     const owner = "fixture-owner", canonical = "fixture-repo", projectId = "abcdef123456";
     const account = {
-      verifyApiToken: async () => ({ userId: outsider ? "other-owner" : owner, scope: "full", repo: null }),
-      getImportJob: async () => ({ ownerId: owner, status: "ready", canonicalRepoName: canonical }),
+      accountLifecycle: async()=>"active",
+          verifyApiToken: async () => ({ userId: outsider ? "other-owner" : owner, scope: "full", repo: null }),
+      getImportJob: async () => ({ ownerId: owner, status: "ready", canonicalRepoName: canonical, importedHead: "a".repeat(40), importedBranch: "main" }),
       getBilling: async () => ({ plan: "free" }),
       consumeRun: async () => ({ allowed: true, used: 1 }),
       getImportHistoryOperation: async (instanceId: string) => { const op = await this.ctx.storage.get<{instanceId:string}>("operation"); return op?.instanceId === instanceId ? op : null; },
       claimImportHistoryOperation: async (input: object) => { const op = { ...input, createdAt: new Date().toISOString() }; await this.ctx.storage.put("operation", op); return op; },
     };
-    const project = { roleOf: async () => outsider ? "contributor" : "owner", getState: async () => ({ canonicalRepoName: canonical, projectName: "Fixture", verificationPolicy: {}, acceptedState: { currentCommit: await this.ctx.storage.get("head") ?? "a".repeat(40) } }) };
+    const project = { repositoryDeletionPending: async () => false, roleOf: async () => outsider ? "contributor" : "owner", getState: async () => ({ canonicalRepoName: canonical, projectName: "Fixture", verificationPolicy: {}, acceptedState: { currentCommit: await this.ctx.storage.get("head") ?? "a".repeat(40) } }) };
     const env = {
       REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: (name: string) => name === `project:${projectId}` ? project : account },
       API_LIMITER: { limit: async () => ({ success: true }) },

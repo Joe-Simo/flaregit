@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { RotateCw, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -33,39 +33,37 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
+  const generation = useRef(0);
+  const load = useCallback(async (current = generation.current) => {
     try {
       const [h, d] = await Promise.allSettled([
         apiJson<Hook[]>(`/p/${projectId}/webhooks`),
         apiJson<Delivery[]>(`/p/${projectId}/deliveries`),
       ]);
+      if (current !== generation.current) return;
       if (h.status === "fulfilled") setHooks(h.value);
       if (d.status === "fulfilled") setDeliveries(d.value);
       const failures = [h.status === "rejected" ? `Webhook settings: ${errText(h.reason, "Unavailable")}` : null, d.status === "rejected" ? `Delivery log: ${errText(d.reason, "Unavailable")}` : null].filter(Boolean);
       setLoadError(failures.length > 0 ? `${failures.join(". ")}. Previously loaded rows may be outdated.` : null);
     } catch (e) {
+      if (current !== generation.current) return;
       setLoadError(errText(e, "Could not load webhooks"));
     }
   }, [projectId]);
   useEffect(() => {
-    void load();
-    const t = setInterval(() => void load(), 8000);
-    return () => clearInterval(t);
+    const current = ++generation.current;
+    setHooks(null); setDeliveries(null); setSecret(null); setUrl(""); setEvents(["change.accepted", "change.blocked"]); setError(null); setNotice(null); setLoadError(null); setBusy(null);
+    void load(current);
+    const t = setInterval(() => void load(current), 8000);
+    return () => { generation.current++; clearInterval(t); };
   }, [load]);
 
-  const guard = async (label: string, done: string, fn: () => Promise<void>) => {
-    setBusy(label);
-    setError(null);
-    setNotice(null);
-    try {
-      await fn();
-      setNotice(done);
-      await load();
-    } catch (e) {
-      setError(errText(e, "Something went wrong"));
-    } finally {
-      setBusy(null);
-    }
+  const guard = async (label: string, done: string, fn: (current: number) => Promise<void>) => {
+    const current = generation.current;
+    setBusy(label); setError(null); setNotice(null);
+    try { await fn(current); if (current !== generation.current) return; setNotice(done); await load(current); }
+    catch (e) { if (current === generation.current) setError(errText(e, "Something went wrong")); }
+    finally { if (current === generation.current) setBusy(null); }
   };
 
   const failing = deliveries?.filter((d) => d.status !== "success").length ?? 0;
@@ -118,8 +116,9 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
         {isOwner && (
           <form className="space-y-2" onSubmit={(e) => {
             e.preventDefault();
-            void guard("add", "Webhook added.", async () => {
+            void guard("add", "Webhook added.", async (current) => {
               const r = await apiJson<{ secret: string }>(`/p/${projectId}/webhooks`, { method: "POST", json: { url, events } });
+              if (current !== generation.current) return;
               setSecret(r.secret);
               setUrl("");
             });

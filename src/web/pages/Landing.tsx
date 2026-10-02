@@ -1,3 +1,5 @@
+import { CloudflareBadge } from "../components/CloudflareBadge";
+import { PublicSearchButton } from "../components/SearchDialog";
 import { ArrowRight, ArrowUpRight, GitBranch } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ThemeSelector } from "../ThemeProvider";
@@ -27,7 +29,7 @@ export function Landing({ onSignIn }: { onSignIn: () => void }) {
     <header className="border-b border-border/60">
       <div className="mx-auto flex min-h-[60px] max-w-[1100px] flex-wrap items-center justify-between gap-3 px-6 py-2.5 lg:px-0">
         <a href="#/" className="flex items-center gap-2 text-base font-semibold tracking-tight" aria-label="FlareGit home"><GitBranch className="h-5 w-5 text-[#d04400]" aria-hidden />FlareGit</a>
-        <nav aria-label="Primary" className="flex items-center gap-3 sm:gap-6"><a href="#how-it-works" className="hidden text-xs text-muted-foreground hover:text-foreground sm:block">How it works</a><a href="/docs" className="text-xs text-muted-foreground hover:text-foreground">Docs</a><ThemeSelector compact /><Button variant="ghost" size="sm" onClick={onSignIn}>Sign in <ArrowUpRight className="ml-1 h-3 w-3" aria-hidden /></Button></nav>
+        <nav aria-label="Primary" className="flex flex-wrap items-center gap-3 sm:gap-6"><a href="#how-it-works" className="hidden text-xs text-muted-foreground hover:text-foreground sm:block">How it works</a><a href="/docs" className="text-xs text-muted-foreground hover:text-foreground">Docs</a><a href="/community" className="text-xs text-muted-foreground hover:text-foreground">Community</a><a href="/pricing" className="text-xs text-muted-foreground hover:text-foreground">Pricing</a><a href="/about" className="text-xs text-muted-foreground hover:text-foreground">About</a><PublicSearchButton /><ThemeSelector compact /><Button variant="ghost" size="sm" onClick={onSignIn}>Sign in <ArrowUpRight className="ml-1 h-3 w-3" aria-hidden /></Button></nav>
       </div>
     </header>
     <main className="relative">
@@ -56,6 +58,6 @@ export function Landing({ onSignIn }: { onSignIn: () => void }) {
         <section className="flex flex-col justify-between gap-5 border-t border-border/60 px-6 py-8 sm:px-9 md:flex-row md:items-center"><p className="max-w-[640px] text-xs leading-6 text-muted-foreground">Core collaboration and basic private repositories are free. Bring your own editor and agents. Integrations run in FlareGit containers with daily limits; connected checks supplement repository verification.</p><a href="https://github.com/Joe-Simo/flaregit" className="flex shrink-0 items-center gap-2 text-xs">View source <ArrowUpRight className="h-3.5 w-3.5" aria-hidden /></a></section>
       </div>
     </main>
-    <footer className="border-t border-border/60"><div className="mx-auto flex max-w-[1100px] flex-wrap justify-between gap-4 px-6 py-6 text-[11px] text-muted-foreground lg:px-0"><span>FlareGit</span><div className="flex gap-5"><a href="/status">Status</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="mailto:support@flaregit.com">Support</a></div></div></footer>
+    <footer className="border-t border-border/60"><div className="mx-auto flex max-w-[1100px] flex-wrap justify-between gap-4 px-6 py-6 text-[11px] text-muted-foreground lg:px-0"><div className="flex flex-col items-start gap-3"><span>FlareGit</span><CloudflareBadge /></div><div className="flex flex-wrap gap-5"><a href="/status">Status</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="mailto:support@flaregit.com">Support</a></div></div></footer>
   </div>;
 }

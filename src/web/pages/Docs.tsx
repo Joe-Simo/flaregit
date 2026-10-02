@@ -1,59 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { CloudflareBadge } from "../components/CloudflareBadge";
+import { useEffect, useState } from "react";
 import { ArrowRight, ArrowUpRight, BookOpen, Check, Copy, GitBranch, GitMerge, Menu, Monitor, Search, ShieldCheck, Terminal, Webhook, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogClose, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { AppearanceDialog, ThemeSelector } from "../ThemeProvider";
 import "./docs.css";
 
-type Guide = { id: string; title: string; group: string; description: string; sections: { title: string; body: string; code?: string }[] };
-const guides: Guide[] = [
-  { id: "start", title: "Your first contribution", group: "Get started", description: "Give a change its own purpose, workspace and review.", sections: [
-    { title: "Open a repository", body: "Sign in and create a repository, or open one where you are a member. Basic private repositories are available on the free plan. An owner can also import a public HTTPS Git repository; an import remains pending until its stored job is ready." },
-    { title: "Create a change", body: "In Changes, describe the outcome you want. FlareGit records the purpose and accepted base, and creates an isolated Artifacts fork. Use the workspace with your own tools, or explicitly start the built-in agent. A listed provider name alone does not mean that provider is connected." },
-    { title: "Checkpoint and review", body: "Push your work and mark the change ready. Integrate ready contributions to compose a candidate. Checks, repairs, conversations and the exact candidate commit remain available for a human decision. Acceptance moves shared history only after the repository ref update succeeds." },
-  ] },
-  { id: "cli", title: "CLI setup", group: "Get started", description: "Use ordinary Git and the FlareGit command line from your own workspace.", sections: [
-    { title: "Build the CLI", body: "Install Bun and Git, then run these commands from the public source checkout. The compiled CLI is written to dist-cli/flaregit.", code: "git clone https://github.com/Joe-Simo/flaregit.git\ncd flaregit\nbun install\nbun run build:cli\n./dist-cli/flaregit --help" },
-    { title: "Authenticate", body: "Create an API token in Account → API tokens. Supply it through the FLAREGIT_TOKEN environment variable using your secret manager. Keep tokens out of shell history, source code, screenshots and agent prompts. Use a repository-scoped token with the minimum permissions and an expiry." },
-    { title: "Create a workspace", body: "Replace the repository ID and purpose below with your own. The command creates a change and workspace; it does not accept that change into shared history.", code: 'bun cli/flaregit.ts work <repository-id> "Describe your change"' },
-  ] },
-  { id: "agents", title: "Bring your own tools", group: "Collaborate", description: "Independent workspaces for your editor, coding agent and external services.", sections: [
-    { title: "Work through Git", body: "Create a FlareGit change workspace and use its Git remote with your preferred editor or coding agent. Each contribution stays isolated. Share the task purpose and permitted scope; keep credentials outside agent context." },
-    { title: "Connect checks and automated reviews", body: "Repository owners register an external service in Settings → Connections. The owner issues a signing secret once and assigns checks to the service. Store that secret on the service backend. Connections are vendor-neutral; compatibility with a named provider must be verified separately." },
-    { title: "Report an exact result", body: "The report CLI signs the exact report bytes using FLAREGIT_CONNECTION_SECRET from the service environment. Reports bind the candidate, commit, tree, policy and registered check run. Retry unchanged bytes with the same event ID; use a new event ID for a new status. Automated reviews cannot approve or merge.", code: "bun cli/flaregit.ts report <repository-id> --service <connection-id> --file <report.json> --event <stable-event-id>" },
-  ] },
-  { id: "review", title: "Review and acceptance", group: "Collaborate", description: "Decide what becomes shared history, with the original work intact.", sections: [
-    { title: "Review the composed candidate", body: "An integration combines one to eight ready contributions against the accepted head. Inspect the composed diff, checks and all repair rounds. Add review conversations and line comments. A green check is evidence for its stated scope; it does not replace human review." },
-    { title: "Choose the history strategy", body: "Merge preserves the composed graph. Squash produces a single accepted change while preserving original contributor forks for review and recovery. Review the exact candidate commit before accepting; acceptance does not authorize a different rebuilt commit." },
-    { title: "When the base moves", body: "If accepted history changes before publication, the compare-and-swap push refuses the stale candidate. Re-run integration against the new head and review the resulting candidate. Overlapping changes and consequential repairs remain visible." },
-  ] },
-  { id: "recovery", title: "Interruptions and recovery", group: "Collaborate", description: "Understand saved work, failed runs and the next safe action.", sections: [
-    { title: "Read the run state", body: "The recovery panel distinguishes a saved proposal, a pushed Git commit and a recorded checkpoint. These states are different. A failed run retains its frozen purpose, context, scope and saved proposal when available." },
-    { title: "Resume deliberately", body: "Open the recovery panel and use Resume saved proposal when offered. FlareGit revalidates current permissions, purpose and scope. Resuming uses the saved proposal rather than silently asking a model to invent a replacement. A newer remote branch prevents a stale push." },
-    { title: "Recover publication", body: "Candidate commits are retained under private repository refs. A publication journal tracks preparation and completion. Recovery can fetch that exact stored commit after the original container is gone. An external integration failure does not revert an accepted landing." },
-  ] },
-  { id: "webhooks", title: "Webhooks and delivery", group: "Integrate", description: "Visible delivery attempts, retries and deliberate replay.", sections: [
-    { title: "Register a destination", body: "Repository owners configure HTTPS webhook destinations in Settings. Keep receiver secrets server-side. Verify the Standard Webhooks signature over the raw request bytes before processing an event." },
-    { title: "Handle duplicates", body: "Use webhook-id as the stable event identity. webhook-sequence identifies repository ordering. Delivery is retried with backoff, and maintainers can replay failed deliveries. Consumers must deduplicate an event safely; a retry is not a new repository change." },
-    { title: "Inspect failures", body: "Delivery status and attempts are visible in Settings. Publication events are recorded only after durable repository integration. Browsing and review remain available when a webhook destination is unavailable." },
-  ] },
-  { id: "migration", title: "Imports and mirroring", group: "Integrate", description: "Move incrementally while keeping FlareGit independent of GitHub availability.", sections: [
-    { title: "Import a public repository", body: "Create a repository from a public HTTPS Git URL. Import requests are durable jobs. If the provider is slow or unavailable, inspect or resume the same pending job rather than creating another repository. Readiness confirms the imported head; preservation of every historical ref is not yet a verified product guarantee." },
-    { title: "Use your existing CI", body: "Imported repositories use native Git integrity checks plus maintainer-required external checks. FlareGit does not install or execute arbitrary imported application code as a substitute for those checks. Register your CI service and report results for the exact candidate." },
-    { title: "Mirror accepted changes", body: "Configure optional one-way GitHub mirroring in Settings. Mirroring runs after acceptance and never force-pushes. Failure stays visible without reverting the accepted FlareGit commit. Importing once does not enable continuous inbound synchronization." },
-  ] },
-  { id: "security", title: "Access and security", group: "Operate", description: "Private by default, explicit sharing and narrow credentials.", sections: [
-    { title: "Repository isolation", body: "Private repositories require membership. Owners manage members and integration settings. Read and write API tokens can be scoped to one repository and expire. Never put server credentials in browser bundles, logs, public comments or agent context." },
-    { title: "Publish deliberately", body: "An owner must explicitly confirm public visibility. Public browsing exposes accepted source and history; private task context and candidate refs remain private. Enabling public community spaces publishes only new explicitly public records, not existing private conversations." },
-    { title: "Report abuse or impersonation", body: "Signed-in users can submit an abuse report from the application footer. Reports enter a human operator queue. A written resolution is required when a report is closed. Public status includes the open-report count and age; this is not a claim that every report has already been reviewed." },
-  ] },
-  { id: "self-host", title: "Self-host on Cloudflare", group: "Operate", description: "Deploy the open-source project under your own account.", sections: [
-    { title: "Requirements", body: "You need Bun, Git, Docker, a Workers Paid account with Containers, Durable Objects, Workflows and Queues, Artifacts access, and a Clerk application. Configure your own domain and a separate preview origin. Consult the repository README for the exact bindings and secrets before deployment." },
-    { title: "Build and check", body: "Run from the repository root. Tests use real local Git and isolated emulator fixtures; passing them does not prove hosted throughput or customer behavior.", code: "bun install\nbun run lint\nbun run typecheck\nbun test\nbun run build" },
-    { title: "Configure before deploying", body: "Set your own account bindings, authorized Clerk origins and required secrets in wrangler.jsonc and Wrangler. Keep billing credentials optional. Once configured, build and deploy using the supported toolchain.", code: "bun run build\nbunx wrangler deploy" },
-  ] },
-];
+import { guides } from "../search-catalog";
+import type { Guide } from "../search-catalog";
+import { SearchDialog } from "../components/SearchDialog";
 const groups = ["Get started", "Collaborate", "Integrate", "Operate"];
 function CodeBlock({ code }: { code: string }) {
   const [status, setStatus] = useState("");
@@ -65,16 +20,12 @@ export function Docs() {
   const [toolTab, setToolTab] = useState("people");
   const [active, setActive] = useState(() => window.location.hash.slice(1) || "overview");
   const [filter, setFilter] = useState("");
-  const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const searchInput = useRef<HTMLInputElement>(null);
-  const searchPanel = useRef<HTMLDivElement>(null);
   const guide = guides.find(item => item.id === active);
   useEffect(() => { const update = () => { setActive(window.location.hash.slice(1) || "overview"); setMobileOpen(false); window.scrollTo({ top: 0 }); }; window.addEventListener("hashchange", update); return () => window.removeEventListener("hashchange", update); }, []);
   useEffect(() => { document.title = `${guide?.title ?? "Developer Docs"} · FlareGit`; }, [guide]);
   useEffect(() => { const shortcut = (event: KeyboardEvent) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); setSearchOpen(true); } }; window.addEventListener("keydown", shortcut); return () => window.removeEventListener("keydown", shortcut); }, []);
-  useEffect(() => { if (!searchOpen) return; const previous = document.activeElement; const frame = requestAnimationFrame(() => searchInput.current?.focus()); const trap = (event: KeyboardEvent) => { if (event.key !== "Tab") return; const elements = searchPanel.current?.querySelectorAll<HTMLElement>('a[href], button, input'); if (!elements?.length) return; const first = elements[0], last = elements[elements.length - 1]; if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); } }; document.addEventListener("keydown", trap); return () => { cancelAnimationFrame(frame); document.removeEventListener("keydown", trap); if (previous instanceof HTMLElement) previous.focus(); }; }, [searchOpen]);
   const matches = (item: Guide, query: string) => `${item.title} ${item.description} ${item.sections.map(section => `${section.title} ${section.body}`).join(" ")}`.toLowerCase().includes(query.toLowerCase());
   return <div className="docs-page"><a href="#docs-main" className="docs-skip">Skip to content</a>
     <header className="docs-header"><a href="/" className="docs-brand"><GitBranch size={21} aria-hidden /><strong>FLAREGIT</strong><span>DOCS</span></a><nav aria-label="Documentation links"><a href="/docs">Overview</a><a href="/docs#cli">CLI</a><a href="/docs#agents">Agent setup</a></nav><div className="docs-header-actions"><Button variant="outline" size="sm" className="docs-search-trigger" onClick={() => setSearchOpen(true)}><Search size={13} />Search <kbd>⌘ K</kbd></Button><ThemeSelector compact /><Button variant="ghost" size="icon" className="docs-mobile-appearance" aria-label="Choose appearance" onClick={() => setAppearanceOpen(true)}><Monitor size={16} /></Button><a className="docs-dashboard" href="/#/">Dashboard</a><Button size="icon" variant="ghost" className="docs-menu" aria-label="Toggle documentation navigation" aria-expanded={mobileOpen} aria-controls="docs-sidebar" onClick={() => setMobileOpen(!mobileOpen)}>{mobileOpen ? <X size={19} /> : <Menu size={19} />}</Button></div></header>
@@ -88,8 +39,8 @@ export function Docs() {
       <section className="docs-section"><h2>Connect your existing workflow</h2><p className="docs-section-subtitle">Integrate incrementally, with delivery and failure states you can inspect.</p><div className="docs-grid">{guides.filter(item => ["agents", "webhooks", "migration"].includes(item.id)).map(item => <a className="docs-grid-card" key={item.id} href={`/docs#${item.id}`}><span className="docs-eyebrow">{item.group}</span><h3>{item.title}</h3><p>{item.description}</p><span className="docs-card-action">Read guide <ArrowRight size={12} /></span></a>)}</div></section>
       <section className="docs-section"><h2>Operate with clear boundaries</h2><p className="docs-section-subtitle">Private access, honest health reporting and source you can inspect.</p><div className="docs-grid">{[{ id: "security", label: "SECURITY", title: "Make access explicit", body: "Private repositories, scoped credentials and deliberate public sharing." }, { id: "self-host", label: "OPEN SOURCE", title: "Run on your account", body: "Build and deploy the Apache-2.0 project with Cloudflare Workers and Artifacts." }].map(item => <a className="docs-grid-card" key={item.id} href={`/docs#${item.id}`}><div><ShieldCheck size={19} /><span>{item.label}</span></div><h3>{item.title}</h3><p>{item.body}</p><span className="docs-card-action">Read guide <ArrowRight size={12} /></span></a>)}<a href="/status" className="docs-grid-card"><span className="docs-eyebrow">STATUS</span><h3>See what is measured</h3><p>Read probe scope, workflow outcomes and unresolved operations. Missing evidence stays unverified.</p><span className="docs-card-action">View status <ArrowRight size={12} /></span></a></div></section>
       </div></>}
-      <footer className="docs-footer"><strong>FLAREGIT</strong><div><a href="/docs#start">Get started</a><a href="/docs#self-host">Self-host</a><a href="https://github.com/Joe-Simo/flaregit">Source · Apache-2.0</a></div><div><a href="/status">System status</a><a href="mailto:support@flaregit.com">Support</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></div></footer>
+      <footer className="docs-footer"><div className="flex flex-col items-start gap-3"><strong>FLAREGIT</strong><CloudflareBadge /></div><div><a href="/docs#start">Get started</a><a href="/docs#self-host">Self-host</a><a href="https://github.com/Joe-Simo/flaregit">Source · Apache-2.0</a></div><div><a href="/status">System status</a><a href="mailto:support@flaregit.com">Support</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></div></footer>
     </main>
-    <AppearanceDialog open={appearanceOpen} onOpenChange={setAppearanceOpen} /><Dialog open={searchOpen} onOpenChange={setSearchOpen}><div ref={searchPanel} role="dialog" aria-modal="true" aria-labelledby="docs-search-title"><DialogClose onClick={() => setSearchOpen(false)} /><DialogHeader><DialogTitle id="docs-search-title">Search documentation</DialogTitle></DialogHeader><label className="docs-search-input"><Search size={16} /><input ref={searchInput} value={search} onChange={event => setSearch(event.target.value)} placeholder="Search guides, commands and concepts" aria-label="Search documentation" /></label><div className="docs-search-results">{guides.filter(item => matches(item, search)).map(item => <a href={`/docs#${item.id}`} key={item.id} onClick={() => setSearchOpen(false)}><strong>{item.title}</strong><span>{item.description}</span></a>)}{!guides.some(item => matches(item, search)) && <p>No guides match “{search}”. Try Git, review or recovery.</p>}</div></div></Dialog>
+    <AppearanceDialog open={appearanceOpen} onOpenChange={setAppearanceOpen} /><SearchDialog open={searchOpen} onOpenChange={setSearchOpen} />
   </div>;
 }

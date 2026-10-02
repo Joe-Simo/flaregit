@@ -8,9 +8,24 @@ test("saved import operations and compute admission retries are durable and idem
   if (await built.exited !== 0) throw new Error(await new Response(built.stderr).text());
   const script = await Bun.file(path).text();
   await Bun.file(path).delete();
-  const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ name: "import-operation-test", modules: true, script, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], durableObjects: { TEST: { className: "RepositoryController", useSQLite: true } }, queueProducers: ["INTEGRATION_QUEUE"] }] }));
+  const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ name: "import-operation-test", modules: true, script, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], durableObjects: { TEST: { className: "ProfilePrivacyFixture", useSQLite: true } }, queueProducers: ["INTEGRATION_QUEUE"] }] }));
   const request = async (path: string, body?: unknown) => (await mf.getWorker("import-operation-test")).fetch(`http://test${path}`, body ? { method: "POST", body: JSON.stringify(body) } : undefined);
   try {
+    expect(await (await request("/profile")).json()).toMatchObject({visibility:"private",version:0,ownerId:null});
+    await request("/profile-save",{handle:"old",displayName:"Owner",bio:"",joinedAt:"2026-10-02"});
+    await request("/profile-public");
+    expect(await (await request("/profile")).json()).toMatchObject({visibility:"public",version:2,ownerId:"owner"});
+    await request("/profile-save?version=2",{handle:"old",displayName:"Changed on another device",bio:"",joinedAt:"2026-10-02"});
+    expect((await request("/profile-public?version=2")).status).toBe(409);
+    expect(await (await request("/profile")).json()).toMatchObject({version:3,profile:{displayName:"Changed on another device"}});
+    expect(await (await request("/handle-reserve?handle=old&account=one")).json()).toBe(true);
+    await request("/handle-commit?handle=old&account=one");
+    expect(await (await request("/handle-reserve?handle=new&account=one")).json()).toBe(true);
+    expect(await (await request("/handle-owner?handle=old")).json()).toBe("one");
+    expect(await (await request("/handle-reserve?handle=new&account=two")).json()).toBe(false);
+    await request("/handle-commit?handle=new&account=one");
+    expect(await (await request("/handle-owner?handle=old")).json()).toBeNull();
+    expect(await (await request("/handle-owner?handle=new")).json()).toBe("one");
     const input = { projectId: "abcdef123456", head: "a".repeat(40), canonicalRepoName: "repo", ownerId: "owner", instanceId: `import-history-${crypto.randomUUID()}` };
     const first = await (await request("/claim", input)).json() as { instanceId: string };
     const retry = await (await request("/claim", { ...input, instanceId: `import-history-${crypto.randomUUID()}` })).json() as typeof first;
@@ -18,5 +33,9 @@ test("saved import operations and compute admission retries are durable and idem
     expect(await (await request("/admit?key=operation-one")).json()).toEqual({ allowed: true, used: 1 });
     expect(await (await request("/admit?key=operation-one")).json()).toEqual({ allowed: true, used: 1 });
     expect(await (await request("/admit?key=operation-two")).json()).toEqual({ allowed: false, used: 1 });
+    expect(await (await request("/repository-delete-proof")).json()).toEqual({ pending: true, confirmed: true, unconfirmed: false, name: "Retained", gitAccess: false, publicGrant: null, mutationRejected: true });
+    expect(await (await request("/repository-tombstone-proof")).json()).toEqual({ sealed: true, initializeRejected: true });
+    await request("/unsafe-legacy");
+    expect((await request("/profile-public?version=3")).status).toBe(409);
   } finally { await mf.dispose(); }
 }, 30_000);

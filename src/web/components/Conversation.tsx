@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useId, useState } from "react";
+import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { apiJson } from "../api";
 import { timeAgo } from "../router";
@@ -13,7 +13,7 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
   /** Renders a heading for the thread; omit when the caller already provides one. */
   title?: string;
   subject: string;
-  anchor?: { path: string; line: number } | null;
+  anchor?: { path: string; line: number; commit: string } | null;
   onAnchorUsed?: () => void;
   onLoaded?: (comments: Comment[]) => void;
 }) {
@@ -24,34 +24,42 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const draftId = useId();
+  const lifetime = useRef(0);
+  const readSequence = useRef(0);
+  useEffect(() => { lifetime.current++; return () => { lifetime.current++; readSequence.current++; }; }, [projectId, subject]);
 
   const load = useCallback(async () => {
+    const generation = lifetime.current, sequence = ++readSequence.current;
     setLoadError(null);
     try {
       const c = await apiJson<Comment[]>(`/p/${projectId}/comments?subject=${encodeURIComponent(subject)}`);
+      if (generation !== lifetime.current || sequence !== readSequence.current) return;
       setComments(c);
       onLoaded?.(c);
     } catch (e) {
-      setLoadError(e instanceof Error ? e.message : "Could not load comments");
+      if (generation === lifetime.current && sequence === readSequence.current) setLoadError(e instanceof Error ? e.message : "Could not load comments");
     }
   }, [projectId, subject, onLoaded]);
   useEffect(() => { void load(); }, [load]);
 
   const send = async () => {
     if (saving || !draft.trim()) return;
+    const generation = lifetime.current;
+    readSequence.current++;
     setSaving(true);
     setError(null);
     setSaved(false);
     try {
-      await apiJson(`/p/${projectId}/comments`, { method: "POST", json: { subject, body: draft, ...(anchor ? { path: anchor.path, line: anchor.line } : {}) } });
+      await apiJson(`/p/${projectId}/comments`, { method: "POST", json: { subject, body: draft, ...(anchor ? { path: anchor.path, line: anchor.line, commit: anchor.commit } : {}) } });
+      if (generation !== lifetime.current) return;
       setDraft("");
       setSaved(true);
       onAnchorUsed?.();
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Comment not saved");
+      if (generation === lifetime.current) setError(e instanceof Error ? e.message : "Comment result is unknown. Your draft remains available.");
     } finally {
-      setSaving(false);
+      if (generation === lifetime.current) setSaving(false);
     }
   };
 
@@ -72,7 +80,7 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
               <div className="text-xs text-muted-foreground mb-1 break-words">
                 <span className="font-medium text-foreground">{c.author}</span> · {timeAgo(c.created_at)}
                 {c.path && <> · <code className="break-all">{c.path}{c.line ? `:${c.line}` : ""}</code></>}
-                {c.commit && <> · <code>{c.commit.slice(0, 7)}</code></>}
+                {c.commit && <> · <code title={c.commit}>{c.commit.slice(0, 7)}</code></>}
               </div>
               <p className="whitespace-pre-wrap break-words">{c.body}</p>
             </li>
@@ -82,7 +90,7 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
       )}
       <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); void send(); }}>
         {anchor && (
-          <p className="text-xs text-muted-foreground break-all">Commenting on <code>{anchor.path}:{anchor.line}</code> <button type="button" className="underline" onClick={onAnchorUsed}>clear</button></p>
+          <p className="text-xs text-muted-foreground break-all">Commenting on <code>{anchor.path}:{anchor.line}</code> at <code title={anchor.commit}>{anchor.commit.slice(0, 7)}</code> <button type="button" className="underline" onClick={onAnchorUsed}>clear</button></p>
         )}
         <label htmlFor={draftId} className="sr-only">Comment</label>
         <textarea id={draftId} className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm" rows={3} maxLength={10000} value={draft}

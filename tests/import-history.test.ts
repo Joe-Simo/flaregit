@@ -11,9 +11,15 @@ test("Artifacts inventory captures pinned entire ancestry without executing sour
   expect(inventory!.shallow).toBe(false);
   expect(await verifyImportedHistory(fixture(), "repo", "main", head, inventory)).toMatchObject({ status: "verified" });
 });
-test("missing ancestry is incomplete and changed ref invalidates snapshot", async () => {
+test("missing ancestry is incomplete and later branch movement preserves historical snapshot", async () => {
   const source = await captureArtifactsHistory(fixture(), "repo", "main", head);
   expect(await verifyImportedHistory(fixture(true), "repo", "main", head, source)).toMatchObject({ status: "incomplete" });
-  expect(await captureArtifactsHistory(fixture(false, true), "repo", "main", head)).toBeNull();
+  expect(await captureArtifactsHistory(fixture(false, true), "repo", "main", head)).toMatchObject({ refs: { "refs/heads/main": head } });
   expect(await verifyImportedHistory(fixture(), "repo", "main", head, null)).toMatchObject({ status: "unavailable" });
+});
+
+test("partial destination keeps proven metadata mismatch while missing entries remain incomplete", async () => {
+  const source = await captureArtifactsHistory(fixture(), "repo", "main", head);
+  const changed = { get: async () => ({ [Symbol.dispose]() {}, log: async () => [{ hash: head }], readCommit: async (hash: string) => hash === parent ? null : { hash, treeHash: "d".repeat(40), parents: [parent] } }) };
+  expect(await verifyImportedHistory(changed, "repo", "main", head, source)).toMatchObject({ status: "mismatch", receipt: { differentCommits: [head], missingCommits: [parent] } });
 });

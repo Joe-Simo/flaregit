@@ -19,7 +19,7 @@ test("local workerd SQLite executes production publication rollback and recovery
   if (await built.exited !== 0) throw new Error(await new Response(built.stderr).text());
   const script = await Bun.file(bundlePath).text();
   await Bun.file(bundlePath).delete();
-  const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ name: "publication-test", modules: true, script, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], durableObjects: { TEST: { className: "PublicationFixture", useSQLite: true } }, queueProducers: ["INTEGRATION_QUEUE"] }] }));
+  const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ name: "publication-test", modules: true, script, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], durableObjects: { TEST: { className: "PublicationFixture", useSQLite: true },REPOSITORY_CONTROLLER:{className:"PublicationFixture",useSQLite:true} }, queueProducers: ["INTEGRATION_QUEUE"] }] }));
   const request = async (route: string, body?: unknown) => (await mf.getWorker("publication-test")).fetch(`http://test${route}`, body ? { method: "POST", body: JSON.stringify(body) } : undefined);
   try {
     const publishable = {
@@ -27,6 +27,12 @@ test("local workerd SQLite executes production publication rollback and recovery
       evidence: { evidence: { id: "evidence", candidateCommit: "landed", candidateTree: "tree", status: "passed", verifierIdentity: "flaregit-ticket-booking-protected-verifier-v2", expectedAcceptedBase: "base", requirementsVersion: 1, builtOutputDigest: "build" } },
       candidates: { candidate: { ...state().candidates.candidate, candidateCommit: "landed", expectedAcceptedBase: "base", frozenVerificationPolicy: {}, review: { approved: true, commit: "landed", by: "reviewer" } } },
     };
+    const reviewedCommit = "b".repeat(40);
+    await request("/seed?name=exact-review", { state: { ...publishable, journal: [], candidates: { candidate: { ...publishable.candidates.candidate, candidateCommit: reviewedCommit, status: "awaiting_review", review: undefined } } }, holder: "old-holder" });
+    expect((await (await request(`/review?name=exact-review&expected=${"a".repeat(40)}`)).json() as { ok: boolean }).ok).toBe(false);
+    expect((await (await request(`/review?name=exact-review&expected=${reviewedCommit}`)).json() as { ok: boolean }).ok).toBe(true);
+    expect((await (await request(`/review?name=exact-review&expected=${"a".repeat(40)}`)).json() as { ok: boolean }).ok).toBe(false);
+    expect((await (await request(`/review?name=exact-review&expected=${reviewedCommit}`)).json() as { ok: boolean }).ok).toBe(true);
     const agentTask = { ...publishable.tasks.task, status: "ready", baseCommit: "a".repeat(40), allowedScope: ["src/"], workspace: { repoName: "test-agent", remote: "https://git.example.com/test", branch: "task/task" }, currentCommit: "a".repeat(40) };
     const agentState = { ...publishable, tasks: { task: agentTask } };
     const agentClaim = { runId: "run-one", taskId: "task", startingCommit: "a".repeat(40), startingBranchHead: null, branch: "task/task", goal: "Frozen goal", context: { comments: [] }, allowedScope: ["src/"], protectedPaths: [] };
@@ -122,15 +128,35 @@ test("local workerd SQLite executes production publication rollback and recovery
     expect((await request("/community-decide?name=community&actor=author",{id:requested.id,decision:"approved",confirmed:true})).status).toBe(500);
     expect((await request("/community-decide?name=community&actor=owner",{id:requested.id,decision:"approved",confirmed:"true"})).status).toBe(500);
     await request("/fail-membership?name=community&enabled=true");
-    expect((await request("/community-decide?name=community&actor=owner",{id:requested.id,decision:"approved",confirmed:true})).status).toBe(500);
-    expect((await(await request("/community-requests?name=community")).json() as Array<{status:string}>)[0]?.status).toBe("requested");
+    expect((await request("/community-decide?name=community&actor=owner",{id:requested.id,decision:"approved",confirmed:true})).status).toBe(200);
+    expect((await(await request("/community-requests?name=community")).json() as Array<{status:string;registrationStatus:string}>)[0]).toMatchObject({status:"approved",registrationStatus:"pending"});
     expect(await(await request("/member-role?name=community&user=community-author")).json()).toBeNull();
+    expect((await(await request("/registry")).json() as unknown[]).length).toBe(1);
     await request("/fail-membership?name=community&enabled=false");
     expect((await request("/community-decide?name=community&actor=owner",{id:requested.id,decision:"approved",confirmed:true})).status).toBe(200);
     expect(await(await request("/member-role?name=community&user=community-author")).json()).toBe("member");
     await request("/remove-member?name=community&user=community-author");
     await request("/community-decide?name=community&actor=owner",{id:requested.id,decision:"approved",confirmed:true});
     expect(await(await request("/member-role?name=community&user=community-author")).json()).toBeNull();
+    await request("/registration-reconcile?name=community");
+    expect(await(await request("/member-role?name=community&user=community-author")).json()).toBeNull();
+    const later=await(await request("/community-request?name=community",{purpose:"A new separately approved contribution",idempotencyKey:"later-public-request"})).json() as{id:string};
+    await request("/registration-fail?enabled=true");
+    await request("/community-configure?name=community&actor=owner",{policy:{enabled:false,scopes:[]},confirmed:false});
+    expect((await request("/community-request?name=community",{purpose:"Intake has been closed",idempotencyKey:"closed-intake-request"})).status).toBe(500);
+    const pending=await(await request("/community-decide?name=community&actor=owner",{id:later.id,decision:"approved",confirmed:true})).json() as{registrationStatus:string};
+    expect(pending.registrationStatus).toBe("pending");
+    expect(await(await request("/member-role?name=community&user=community-author")).json()).toBeNull();
+    await request("/registration-fail?enabled=false");
+    await request("/registration-alarm?name=community");
+    expect(await(await request("/member-role?name=community&user=community-author")).json()).toBe("member");
+    await request("/account-delete-start");
+    await request("/remove-member?name=community&user=community-author");
+    expect(await(await request("/account-delete-finish")).json()).toBe("deleted");
+    await request("/registration-alarm?name=community");
+    await request("/community-decide?name=community&actor=owner",{id:later.id,decision:"approved",confirmed:true});
+    expect(await(await request("/member-role?name=community&user=community-author")).json()).toBeNull();
+    expect(await(await request("/registry")).json()).toEqual([]);
     await request("/seed?name=community-other",{state:publishable,holder:"old-holder"});
     expect((await(await request("/community-public?name=community-other")).json() as {posts:unknown[]}).posts).toEqual([]);
     await request("/visibility?name=community",{visibility:"private",confirmed:false,by:"community-owner"});

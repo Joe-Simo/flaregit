@@ -1,3 +1,4 @@
+import { admitNativeCompute } from "./native-compute.js";
 import type {Env} from "./env.js";
 import type {AcceptedDeploymentTarget} from "./deployments.js";
 import {gitAuthEnv,q} from "./shell.js";
@@ -6,10 +7,11 @@ import {isSafeRef,isSafeSha} from "../core/sanitize.js";
 /** Privileged Git-only operation: pin and read back an accepted commit/tree.
  * No working tree or customer code is executed, and ref replacement uses CAS.
  */
-export async function retainDeploymentTarget(env:Env,canonicalRepoName:string,target:AcceptedDeploymentTarget):Promise<void>{
+export async function retainDeploymentTarget(env:Env,canonicalRepoName:string,target:AcceptedDeploymentTarget, accountKey: string, computeRunId: string):Promise<void>{
   if(!isSafeSha(target.commit)||!isSafeSha(target.tree)||!isSafeRef(target.recoverableRef)||!target.recoverableRef.startsWith("refs/flaregit/deployments/"))throw new Error("Invalid accepted deployment target");
+  await admitNativeCompute(env, accountKey, computeRunId);
   using repository=await env.ARTIFACTS.get(canonicalRepoName);
-  const sandbox=env.INTEGRATOR.getByName(`deployment-pin-${crypto.randomUUID()}`);
+  const sandbox=env.INTEGRATOR.getByName(computeRunId);
   let token:string|undefined;
   let verified=false;
   const execute=(command:string)=>sandbox.exec(["sh","-c",command],{env:{GIT_CONFIG_GLOBAL:"/dev/null",GIT_CONFIG_NOSYSTEM:"1",...(token?gitAuthEnv(token):{}),GIT_CONFIG_COUNT:token?"2":"1",[token?"GIT_CONFIG_KEY_1":"GIT_CONFIG_KEY_0"]:"core.hooksPath",[token?"GIT_CONFIG_VALUE_1":"GIT_CONFIG_VALUE_0"]:"/dev/null"}});

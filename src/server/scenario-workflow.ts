@@ -1,3 +1,4 @@
+import { allocateArtifact } from "./storage-allocation.js";
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { ACT1, ACT2, ACT3, type TaskSpec } from "../scenarios/ticket-booking.js";
 import type { Task } from "../core/types.js";
@@ -7,12 +8,17 @@ import { runAgentTask } from "./agent-run.js";
 
 export interface ScenarioParams {
   projectId: string;
+  accountKey?: string;
   act: "act1" | "act2" | "act3";
   /** Unique suffix so a scenario can be re-run against the same project. */
   runId: string;
 }
 
 const ACTS = { act1: ACT1, act2: ACT2, act3: ACT3 } as const;
+
+export function scenarioAgentRunIds(instanceId: string, act: ScenarioParams["act"], runId: string): string[] {
+  return ACTS[act].map((spec) => `${instanceId}-${spec.taskId}-${runId}`);
+}
 
 /** Each project (tenant) has its own Durable Object ledger. */
 export const ledgerOf = (env: Env, projectId: string): Ledger =>
@@ -27,13 +33,14 @@ export class FlareGitScenarioWorkflow extends WorkflowEntrypoint<Env, ScenarioPa
     const { act, runId, projectId } = event.payload;
     const specs = ACTS[act].map((s) => ({ ...s, taskId: `${s.taskId}-${runId}` })) as [TaskSpec, TaskSpec];
     const ledger = ledgerOf(this.env, projectId);
+    const initiator = await ledger.getWorkflowRun(event.instanceId);
 
-    const tasks = await Promise.all(specs.map((spec) => step.do(`create-task-${spec.taskId}`, async () => ({ id: (await this.createTask(spec, ledger, projectId)).id }))));
+    const tasks = await Promise.all(specs.map((spec) => step.do(`create-task-${spec.taskId}`, async () => ({ id: (await this.createTask(spec, ledger, projectId, initiator?.actorId ?? undefined)).id }))));
 
     const stage = async (taskId: string, plan: boolean) => {
       const agentRunId = `${event.instanceId}-${taskId}`;
       try {
-        return await step.do(`${plan ? "plan-agent" : "apply-agent"}-${taskId}`, { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "10 minutes" }, async () => runAgentTask(this.env, ledger, (await ledger.getState()).tasks[taskId]!, agentRunId, { stopAfterProposal: plan }));
+        return await step.do(`${plan ? "plan-agent" : "apply-agent"}-${taskId}`, { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "10 minutes" }, async () => runAgentTask(this.env, ledger, (await ledger.getState()).tasks[taskId]!, agentRunId, { stopAfterProposal: plan, accountKey: event.payload.accountKey, parentWorkflowId: event.instanceId }));
       } catch (error) {
         await step.do(`agent-failed-${taskId}`, async () => { await ledger.failAgentRun(agentRunId, taskId); await ledger.failAgentTask(taskId, agentRunId); });
         throw error;
@@ -44,20 +51,22 @@ export class FlareGitScenarioWorkflow extends WorkflowEntrypoint<Env, ScenarioPa
     await Promise.all(tasks.map((task, index) => proposals[index]?.commit ? proposals[index] : stage(task.id, false)));
 
     const instance = await step.do("start-integration", async () => {
-      await ledger.registerWorkflow(`int-${projectId}-${runId}-${act}`, "integration");
+      const parent = await ledger.getWorkflowRun(event.instanceId);
+      await ledger.registerWorkflow(`int-${projectId}-${runId}-${act}`, "integration", undefined, parent?.kind === "scenario" ? parent.actorId ?? undefined : undefined);
       const wf = await this.env.INTEGRATION_WORKFLOW.create({
         id: `int-${projectId}-${runId}-${act}`,
-        params: { projectId, taskIds: [tasks[0]!.id, tasks[1]!.id] },
+        params: { projectId, accountKey: event.payload.accountKey, taskIds: [tasks[0]!.id, tasks[1]!.id] },
       });
       return { id: wf.id };
     });
     return { tasks: tasks.map((t) => t.id), integrationInstance: instance.id };
   }
 
-  private async createTask(spec: TaskSpec, ledger: Ledger, projectId: string) {
+  private async createTask(spec: TaskSpec, ledger: Ledger, projectId: string, actorId?: string) {
     const state = await ledger.getState();
     const canonical = await this.env.ARTIFACTS.get(state.canonicalRepoName);
-    const fork = await canonical.fork(`t-${projectId}-${spec.taskId}`, { description: spec.goal });
+    if(!actorId)throw new Error("Scenario storage allocation has no accountable owner");
+    const fork=await allocateArtifact(this.env,{name:`t-${projectId}-${spec.taskId}`,projectId,userId:actorId,kind:"workspace"},()=>canonical.fork(`t-${projectId}-${spec.taskId}`,{description:spec.goal}));
     const task: Task = {
       id: spec.taskId,
       goal: spec.goal,
@@ -72,7 +81,7 @@ export class FlareGitScenarioWorkflow extends WorkflowEntrypoint<Env, ScenarioPa
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    await (ledger as unknown as { createTask(t: Task): Promise<Task> }).createTask(task);
+    await ledger.createTask(task, actorId);
     return task;
   }
 }

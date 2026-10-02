@@ -9,7 +9,7 @@ export interface HistoryExecutor {
  * Source capture is limited to the trusted github.com public Git provider; arbitrary hosts
  * remain unavailable until enforced network egress controls exist. Redirects are disabled.
  */
-export async function capturePublicSourceHistory(executor: HistoryExecutor, source: string, branch: string): Promise<GitHistoryInventory | null> {
+export async function capturePublicSourceHistory(executor: HistoryExecutor, source: string, branch: string, expectedHead?: string): Promise<GitHistoryInventory | null> {
   const url = validateImportSource(source);
   if (url.hostname !== "github.com" || !/^\/[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+(?:\.git)?\/?$/.test(url.pathname)) return null;
   if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branch) || branch.includes("..") || branch.includes("//") || branch.endsWith(".lock")) throw new Error("Invalid source branch");
@@ -25,18 +25,24 @@ export async function capturePublicSourceHistory(executor: HistoryExecutor, sour
     const git = (args: string) => run(`git --git-dir ${q(directory)} ${args}`);
     const head = await git(`rev-parse --verify ${q(`refs/heads/${branch}^{commit}`)}`);
     if (!/^[a-f0-9]{40}$/.test(head)) return null;
+    if (expectedHead && !/^[a-f0-9]{40}$/.test(expectedHead)) throw new Error("Invalid source snapshot");
+    const pinnedHead = expectedHead ?? head;
+    if (expectedHead && (await git(`rev-parse --verify ${q(`${expectedHead}^{commit}`)}`)) !== expectedHead) return null;
     const shallow = await git("rev-parse --is-shallow-repository");
     // Capture at most 1001 to make truncation explicit. Never execute customer files.
-    const lines = (await git(`log --max-count=1001 --format='%H %T %P' ${q(head)}`)).split("\n");
+    const lines = (await git(`log --max-count=1001 --format='%H %T %P' ${q(pinnedHead)}`)).split("\n");
     const commits: GitHistoryInventory["commits"] = {};
     for (const line of lines.slice(0, 1000)) {
       const [hash, tree, ...parents] = line.split(" ");
       if (!hash || !tree || !/^[a-f0-9]{40}$/.test(hash) || !/^[a-f0-9]{40}$/.test(tree) || parents.some((parent) => !/^[a-f0-9]{40}$/.test(parent))) return null;
       commits[hash] = { tree, parents };
     }
-    return { capturedAt: new Date().toISOString(), refs: { [`refs/heads/${branch}`]: head }, commits, shallow: shallow !== "false" || lines.length > 1000 };
+    return { capturedAt: new Date().toISOString(), refs: { [`refs/heads/${branch}`]: pinnedHead }, commits, shallow: shallow !== "false" || lines.length > 1000 };
   } catch { return null; }
-  finally { await executor.exec(`rm -rf -- ${q(directory)}`, { env, timeout: 5000 }); }
+  finally {
+    try { const cleanup = await executor.exec(`rm -rf -- ${q(directory)}`, { env, timeout: 5000 }); if (!cleanup.success) console.warn("Import history temporary clone cleanup failed"); }
+    catch { console.warn("Import history temporary clone cleanup failed"); }
+  }
 }
 export async function inspectImportedHistory(executor: HistoryExecutor, binding: HistoryBinding, job: { source: string; canonicalRepoName: string }, head: string, branch: string): Promise<ImportHistoryResult> {
   return verifyImportedHistory(binding, job.canonicalRepoName, branch, head, await capturePublicSourceHistory(executor, job.source, branch));

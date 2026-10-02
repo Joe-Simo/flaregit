@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronDown, ChevronRight, Keyboard } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import type { DiffRequest, DiffRow } from "../diff.worker";
 
 export interface FileChange {
@@ -29,15 +30,19 @@ const CodeLine = React.memo(function CodeLine({ text, html }: { text: string; ht
   return html ? <span className="hljs-line" dangerouslySetInnerHTML={{ __html: html }} /> : <span>{text}</span>;
 });
 
-export function DiffViewer({ files, loadBlob, onLineClick, commented }: {
+export function DiffViewer({ files, loadBlob, onLineClick, commented, onReadyChange }: {
   files: FileChange[];
   loadBlob: (hash: string) => Promise<BlobResult>;
   /** Click a line number to start a comment anchored to that line. */
   onLineClick?: (path: string, line: number) => void;
   /** "path:line" keys that already have comments. */
   commented?: Set<string>;
+  onReadyChange?: (ready: boolean) => void;
 }) {
   const [state, setState] = useState<Record<number, FileState>>({});
+  const [revision, setRevision] = useState(0);
+  const [loadFailure, setLoadFailure] = useState(false);
+  const [stateFiles, setStateFiles] = useState(files);
   const [helpOpen, setHelpOpen] = useState(false);
   const parentRef = useRef<HTMLDivElement>(null);
   const workerRef = useRef<Worker | null>(null);
@@ -45,7 +50,7 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented }: {
   const flat = useMemo<FlatRow[]>(() => {
     const out: FlatRow[] = [];
     files.forEach((file, fileIndex) => {
-      const st = state[fileIndex];
+      const st = stateFiles === files ? state[fileIndex] : undefined;
       const rows = st?.rows ?? [];
       out.push({ kind: "file", file, fileIndex, adds: rows.filter((r) => r.t === "+").length, dels: rows.filter((r) => r.t === "-").length });
       if (st?.collapsed) return;
@@ -54,30 +59,44 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented }: {
       else for (const row of st.rows) out.push({ kind: "line", fileIndex, row });
     });
     return out;
-  }, [files, state]);
+  }, [files, state, stateFiles]);
 
   const virtualizer = useVirtualizer({ count: flat.length, getScrollElement: () => parentRef.current, estimateSize: () => ROW_HEIGHT, overscan: 30 });
 
   // Compute each file's diff in the worker, three at a time.
   useEffect(() => {
-    const worker = new Worker("/diff.worker.js", { type: "module" });
+    setState({}); setStateFiles(files); setLoadFailure(false);
+    let worker: Worker;
+    try { worker = new Worker("/diff.worker.js", { type: "module" }); }
+    catch { setLoadFailure(true); setState(Object.fromEntries(files.map((_, index) => [index, { collapsed: false, note: "Could not start the background diff worker. Retry the diff." }]))); return; }
     workerRef.current = worker;
     let cancelled = false;
-    const pending = new Map<number, (rows: DiffRow[]) => void>();
-    worker.onmessage = (e: MessageEvent<{ id: number; rows: DiffRow[] }>) => {
-      pending.get(e.data.id)?.(e.data.rows);
-      pending.delete(e.data.id);
+    let workerFailure: Error | null = null;
+    const pending = new Map<number, { resolve: (rows: DiffRow[]) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+    const failWorker = () => {
+      if (cancelled) return;
+      workerFailure = new Error("The background diff worker failed or did not respond. Retry the diff."); setLoadFailure(true);
+      for (const job of pending.values()) { clearTimeout(job.timer); job.reject(workerFailure); }
+      pending.clear(); worker.terminate();
     };
-    const diffInWorker = (id: number, a: string, b: string, path: string) =>
-      new Promise<DiffRow[]>((resolve) => {
-        pending.set(id, resolve);
-        worker.postMessage({ id, a, b, path } satisfies DiffRequest);
-      });
+    worker.onerror = failWorker; worker.onmessageerror = failWorker;
+    worker.onmessage = (event: MessageEvent<{ id: number; rows: DiffRow[] }>) => {
+      const job = pending.get(event.data.id);
+      if (!job) return;
+      clearTimeout(job.timer); pending.delete(event.data.id); job.resolve(event.data.rows);
+    };
+    const diffInWorker = (id: number, a: string, b: string, path: string) => new Promise<DiffRow[]>((resolve, reject) => {
+      if (workerFailure) { reject(workerFailure); return; }
+      const timer = setTimeout(failWorker, 30_000);
+      pending.set(id, { resolve, reject, timer });
+      try { worker.postMessage({ id, a, b, path } satisfies DiffRequest); } catch { failWorker(); }
+    });
 
     const queue = files.map((_, i) => i);
     const runOne = async () => {
       for (let i = queue.shift(); i !== undefined && !cancelled; i = queue.shift()) {
         const f = files[i]!;
+        if (workerFailure) { setState((previous) => ({ ...previous, [i]: { collapsed: false, note: workerFailure!.message } })); continue; }
         try {
           const [a, b] = await Promise.all([
             f.aHash ? loadBlob(f.aHash) : Promise.resolve<BlobResult>({ binary: false, truncated: false, size: 0, content: "" }),
@@ -91,16 +110,20 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented }: {
             if (!cancelled) setState((s) => ({ ...s, [i]: { collapsed: false, rows } }));
           }
         } catch (err) {
-          if (!cancelled) setState((s) => ({ ...s, [i]: { collapsed: false, note: err instanceof Error ? err.message : "Could not load" } }));
+          if (!cancelled) { setLoadFailure(true); setState((s) => ({ ...s, [i]: { collapsed: false, note: err instanceof Error ? err.message : "Could not load" } })); }
         }
       }
     };
     void Promise.all([runOne(), runOne(), runOne()]);
     return () => {
       cancelled = true;
-      worker.terminate();
+      for (const job of pending.values()) { clearTimeout(job.timer); job.reject(new Error("Review changed")); }
+      pending.clear(); worker.terminate(); workerRef.current = null;
     };
-  }, [files, loadBlob]);
+  }, [files, loadBlob, revision]);
+
+  const ready = stateFiles === files && !loadFailure && files.every((_, index) => { const item = state[index]; return item && (item.rows !== undefined || item.note !== undefined); });
+  useEffect(() => { onReadyChange?.(ready); }, [ready, onReadyChange]);
 
   const fileStarts = useMemo(() => flat.flatMap((r, i) => (r.kind === "file" ? [i] : [])), [flat]);
   const hunkStarts = useMemo(() => flat.flatMap((r, i) => (r.kind === "line" && r.row.t === "h" ? [i] : [])), [flat]);
@@ -146,6 +169,7 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented }: {
     <div className="rounded-lg border border-border overflow-hidden">
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-border text-xs text-muted-foreground bg-muted/20">
         <span>{files.length} file{files.length === 1 ? "" : "s"} changed</span>
+        {loadFailure && <Button size="sm" variant="outline" onClick={() => setRevision((value) => value + 1)}>Retry diff files</Button>}
         <button className="flex items-center gap-1 hover:text-foreground" onClick={() => setHelpOpen((v) => !v)}><Keyboard className="h-3.5 w-3.5" /> shortcuts (?)</button>
       </div>
       {helpOpen && (
