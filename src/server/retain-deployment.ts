@@ -14,9 +14,16 @@ export async function retainDeploymentTarget(env:Env,canonicalRepoName:string,ta
   const sandbox=env.INTEGRATOR.getByName(computeRunId);
   let token:string|undefined;
   let verified=false;
-  const execute=(command:string)=>sandbox.exec(["sh","-c",command],{env:{GIT_CONFIG_GLOBAL:"/dev/null",GIT_CONFIG_NOSYSTEM:"1",...(token?gitAuthEnv(token):{}),GIT_CONFIG_COUNT:token?"2":"1",[token?"GIT_CONFIG_KEY_1":"GIT_CONFIG_KEY_0"]:"core.hooksPath",[token?"GIT_CONFIG_VALUE_1":"GIT_CONFIG_VALUE_0"]:"/dev/null"}});
+  const execute=(command:string)=>sandbox.exec(["sh","-c",command],{env:{GIT_CONFIG_GLOBAL:"/dev/null",GIT_CONFIG_NOSYSTEM:"1",...(token?gitAuthEnv(token):{}),GIT_CONFIG_COUNT:token?"3":"2",[token?"GIT_CONFIG_KEY_1":"GIT_CONFIG_KEY_0"]:"core.hooksPath",[token?"GIT_CONFIG_VALUE_1":"GIT_CONFIG_VALUE_0"]:"/dev/null",[token?"GIT_CONFIG_KEY_2":"GIT_CONFIG_KEY_1"]:"http.followRedirects",[token?"GIT_CONFIG_VALUE_2":"GIT_CONFIG_VALUE_1"]:"false"}});
   try{
-    const remote=(await repository.info()).remote;token=(await repository.createToken("write",900)).plaintext;
+    const remote=(await repository.info()).remote;
+    if(typeof remote!=="string"||/[\x00-\x1f\x7f\\]/.test(remote))throw new Error("Invalid deployment repository remote");
+    const local=remote.startsWith("/")&&!remote.startsWith("//");
+    if(!local){
+      let url:URL;try{url=new URL(remote);}catch{throw new Error("Deployment repository requires an HTTPS remote or absolute local fixture path");}
+      if(url.protocol!=="https:"||url.username||url.password||url.search||url.hash)throw new Error("Deployment repository requires credential-free HTTPS");
+      token=(await repository.createToken("write",900)).plaintext;
+    }
     const dir="/workspace/deployment-pin";
     const fetched=await execute(`git init --quiet --bare ${dir} && git -C ${dir} fetch --quiet --no-tags ${q(remote)} ${q(target.commit)}`);
     if(!fetched.success)throw new Error("Accepted deployment commit could not be recovered; no request was dispatched");

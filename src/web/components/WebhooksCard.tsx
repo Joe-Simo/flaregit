@@ -15,7 +15,6 @@ const EVENTS: Array<[string, string]> = [
   ["change.accepted", "Work was accepted"],
   ["change.blocked", "Integration was blocked"],
   ["decision.needed", "A decision is needed"],
-  ["deployment.requested", "An accepted revision is requested for deployment"],
 ];
 const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive";

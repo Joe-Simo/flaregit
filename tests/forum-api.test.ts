@@ -9,8 +9,11 @@ test("production forum HTTP+SQL binds signed authors, enforces version/moderator
   const pair=await generateKeyPair("RS256"),jwk={...await exportJWK(pair.publicKey),kid:"synthetic-test-key",alg:"RS256",use:"sig"};
   const issuer=Bun.serve({hostname:"127.0.0.1",port:0,fetch:()=>Response.json({keys:[jwk]})});
   const file=`/tmp/flaregit-forum-api-${crypto.randomUUID()}.js`,build=Bun.spawn([process.execPath,"build","tests/support/forum-api-worker.ts","--target=browser","--external=cloudflare:workers","--external=node:*",`--outfile=${file}`],{stdout:"ignore",stderr:"pipe"});const[error,code]=await Promise.all([new Response(build.stderr).text(),build.exited]);if(code!==0){issuer.stop(true);throw new Error(error);}const script=await Bun.file(file).text();await Bun.file(file).delete();
-  const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:"forum-api",modules:true,script,compatibilityDate:"2026-10-02",compatibilityFlags:["nodejs_compat"],bindings:{FIXTURE_ISSUER:issuer.url.origin},durableObjects:{TEST:{className:"ForumApiRepository",useSQLite:true}}}]}));
-  const call=async(path:string,method="GET",body?:unknown,token?:string)=>(await mf.getWorker("forum-api")).fetch(`http://test${path}`,{method,headers:{"CF-Connecting-IP":"198.51.100.20",...(token?{Authorization:`Bearer ${token}`}:{})},...(body===undefined?{}:{body:typeof body==="string"?body:JSON.stringify(body)})});
+  const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:"forum-api",unsafeDirectSockets:[{host:"127.0.0.1"}],modules:true,script,compatibilityDate:"2026-10-02",compatibilityFlags:["nodejs_compat"],bindings:{FIXTURE_ISSUER:issuer.url.origin},durableObjects:{TEST:{className:"ForumApiRepository",useSQLite:true}}}]}));
+  const directUrl=await mf.unsafeGetDirectURL("forum-api");
+  // Rejected auth/body requests intentionally finish without consuming a body.
+  // Independent real HTTP connections avoid the Linux Bun platform-proxy reset.
+  const call=async(path:string,method="GET",body?:unknown,token?:string)=>fetch(new URL(path,directUrl),{method,headers:{Connection:"close","CF-Connecting-IP":"198.51.100.20",...(token?{Authorization:`Bearer ${token}`}:{})},...(body===undefined?{}:{body:typeof body==="string"?body:JSON.stringify(body)})});
   try{
     const tokens=await(await call("/fixture/bootstrap")).json() as Record<string,string>;
     const initial=await(await call("/api/community")).json() as{topics:unknown[]};expect(initial.topics).toEqual([]);
