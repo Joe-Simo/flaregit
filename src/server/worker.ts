@@ -1,3 +1,4 @@
+import { directoryQuerySchema, directoryUpdateSchema, projectPublicDirectory } from "./public-directory.js";
 import { recoverNativeCompute, claimNativeCompute, admitNativeCompute, NativeComputeAdmissionError } from "./native-compute.js";
 import { allocateArtifact } from "./storage-allocation.js";
 import { gitRemote, gitParentTokenHash } from "./git-gateway-handler.js";
@@ -172,9 +173,17 @@ export default {
       return respond({ profile: projection, contributions: contributions.sort((a,b) => b.acceptedAt.localeCompare(a.acceptedAt)).slice(0,100), contributionScope: "Accepted FlareGit contributions from up to 10 currently accessible public member repositories and their latest 100 acceptance records; not a complete lifetime history" });
     }
 
+    const discussionRoute=/^\/api\/public\/(p?[0-9a-f]{12})\/discussions(?:\/(permissions|discussion_[a-f0-9-]{36})(?:\/(replies|control))?)?$/.exec(url.pathname);
+    if(discussionRoute&&request.method==="GET"&&discussionRoute[2]!=="permissions"){
+      const respond=(data:unknown,status=200)=>Response.json(data,{status,headers:{"Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
+      const ip=request.headers.get("CF-Connecting-IP");if(!ip)return respond({error:"Public browsing unavailable"},503);
+      if(!(await env.API_LIMITER.limit({key:`public-discussions:${discussionRoute[1]}:${ip}`})).success)return respond({error:"Too many requests"},429);
+      const project=projectOf(env,discussionRoute[1]!);const grant=await project.publicGrant().catch(()=>null);if(!grant)return respond({error:"Not found"},404);
+      try{const value=discussionRoute[2]?await project.discussionTopic(discussionRoute[2],true):await project.discussionList(true);const current=await project.publicGrant();if(!current||current.version!==grant.version||current.acceptedCommit!==grant.acceptedCommit)return respond({error:"Published repository changed; reload"},409);return value?respond(value):respond({error:"Discussion unavailable"},404);}catch{return respond({error:"Repository discussions unavailable"},404);}
+    }
     const publicRoute = /^\/api\/public\/(p?[0-9a-f]{12})\/(meta|history|tree|file|diff|community)$/.exec(url.pathname);
     const publicParticipationRoute = /^\/api\/public\/(p?[0-9a-f]{12})\/community\/(posts|requests)(?:\/(post_[a-f0-9-]{36}))?$/.exec(url.pathname);
-    if (url.pathname.startsWith("/api/public/") && !publicParticipationRoute) {
+    if (url.pathname.startsWith("/api/public/") && !publicParticipationRoute && !discussionRoute) {
       const publicResponse = (data: unknown, status = 200) => Response.json(data, { status, headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
       if (!publicRoute || request.method !== "GET") return publicResponse({ error: "Not found" }, 404);
       const projectId = publicRoute[1]!;
@@ -253,6 +262,18 @@ export default {
       return json(result, result.kind === "rejected" ? 409 : 200);
     }
 
+    if (url.pathname === "/api/community/repositories" && request.method === "GET") {
+      const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" };
+      if (!(await env.API_LIMITER.limit({key:`directory:${request.headers.get("CF-Connecting-IP") ?? "unknown"}`})).success) return Response.json({error:"Too many requests"},{status:429,headers});
+      const query = directoryQuerySchema.safeParse(Object.fromEntries(url.searchParams));
+      if (!query.success) return Response.json({error:"Invalid directory query"},{status:400,headers});
+      try {
+        const page = await globalOf(env).directoryPage(query.data.cursor);
+        const projection = await projectPublicDirectory({rows:page.rows,query:query.data.q,repository:(id)=>projectOf(env,id)});
+        return Response.json({...projection,nextCursor:page.nextCursor},{headers});
+      } catch { return Response.json({repositories:[],nextCursor:null,incomplete:true,checked:0},{status:503,headers}); }
+    }
+
     if (request.method === "GET" && (url.pathname === "/api/community" || /^\/api\/community\/topics\/forum_[a-f0-9-]{36}$/.test(url.pathname))) {
       const respond=(data:unknown,status=200)=>Response.json(data,{status,headers:{"Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
       const ip=request.headers.get("CF-Connecting-IP");if(!ip)return respond({error:"Community browsing unavailable"},503);
@@ -322,6 +343,15 @@ export default {
           if(entry && method === "DELETE")return json(await globalOf(env).forumRemove(actor,entry[1]!,await body<unknown>(),!auth.viaToken&&(env.OPERATOR_ACCOUNTS??"").split(",").map(x=>x.trim()).includes(accountKey)));
           return text("Not found",404);
         }catch(error){if(error instanceof RequestBodyError)throw error;return text("Community change was not saved; check confirmation, content, ownership and version before retrying",409);}
+      }
+      if(discussionRoute){
+        const project=projectOf(env,discussionRoute[1]!);if(!await project.publicGrant())return text("Not found",404);
+        const profile=await account.getProfile(),actor={userId,accountKey,displayName:profile.displayName||"Contributor"};
+        try{
+          if(discussionRoute[2]==="permissions"&&method==="GET"){const id=url.searchParams.get("topic")??"";if(!/^discussion_[a-f0-9-]{36}$/.test(id))return text("Invalid discussion",400);return json(await project.discussionPermissions(actor,id,true,!auth.viaToken||auth.tokenScope==="full"));}
+          const operation=!discussionRoute[2]&&method==="POST"?"create":discussionRoute[3]==="replies"&&method==="POST"?"reply":discussionRoute[3]==="control"&&method==="POST"?"control":!discussionRoute[3]&&method==="PATCH"?"edit":!discussionRoute[3]&&method==="DELETE"?"remove":null;
+          if(!operation)return text("Not found",404);const input=await body<Record<string,unknown>>(),admin=!auth.viaToken||auth.tokenScope==="full";if(!admin&&(operation==="control"&&input.locked!==undefined||operation==="create"&&input.category==="announcements"))return text("Owner account administration required",403);return json(await project.discussionMutate(actor,operation,input,discussionRoute[2],true,admin),operation==="create"||operation==="reply"?201:200);
+        }catch(error){if(error instanceof RequestBodyError)throw error;return text("Discussion change was not saved; check access, confirmation and current version",409);}
       }
       if (publicParticipationRoute) {
         const project = projectOf(env, publicParticipationRoute[1]!);
@@ -665,6 +695,17 @@ export default {
           return Response.json({ instanceId: operation.instanceId, head: operation.head, status: handle?.status ?? "handle-unavailable", receipt }, { headers: { "Cache-Control": "no-store" } });
         }
 
+        if (sub === "/directory" && method === "GET") {
+          if (!isOwner) return text("Only the owner can manage directory listings",403);
+          return json(await project.directoryState());
+        }
+        if (sub === "/directory" && method === "PUT") {
+          if (!isOwner) return text("Only the owner can manage directory listings",403);
+          const value = directoryUpdateSchema.safeParse(await body<unknown>());
+          if (!value.success) return text("Explicit publication confirmation and current settings version are required",400);
+          try { return json(await project.configureDirectory(value.data,userId)); }
+          catch { return text("Directory settings changed or the repository is private; reload before saving",409); }
+        }
         if (sub === "/visibility" && method === "POST") {
           if (!isOwner) return text("Only the owner can change visibility", 403);
           const value = await body<{ visibility?: string; confirmed?: boolean }>();
@@ -682,6 +723,18 @@ export default {
         }
 
         if (sub === "/activity" && method === "GET") return json(await project.listActivity(60));
+        const privateDiscussion=/^\/discussions(?:\/(settings|permissions|discussion_[a-f0-9-]{36})(?:\/(replies|control))?)?$/.exec(sub);
+        if(privateDiscussion){
+          const profile=await account.getProfile(),actor={userId,accountKey,displayName:profile.displayName||"Contributor"};
+          try{
+            if(privateDiscussion[1]==="settings"&&method==="PUT"&&!isOwner)return text("Owner account administration required",403);
+            if(privateDiscussion[1]==="settings"&&(method==="GET"||method==="PUT"))return json(await project.discussionSettings(actor,method==="PUT"?await body<unknown>():undefined));
+            if(privateDiscussion[1]==="permissions"&&method==="GET"){const id=url.searchParams.get("topic")??"";if(!/^discussion_[a-f0-9-]{36}$/.test(id))return text("Invalid discussion",400);return json(await project.discussionPermissions(actor,id,false,canAdminister));}
+            if(method==="GET")return json(privateDiscussion[1]?await project.discussionTopic(privateDiscussion[1],false,actor):await project.discussionList(false,actor));
+            const operation=!privateDiscussion[1]&&method==="POST"?"create":privateDiscussion[2]==="replies"&&method==="POST"?"reply":privateDiscussion[2]==="control"&&method==="POST"?"control":!privateDiscussion[2]&&method==="PATCH"?"edit":!privateDiscussion[2]&&method==="DELETE"?"remove":null;
+            if(!operation)return text("Not found",404);const input=await body<Record<string,unknown>>();if(!canAdminister&&(operation==="control"&&input.locked!==undefined||operation==="create"&&input.category==="announcements"))return text("Owner account administration required",403);return json(await project.discussionMutate(actor,operation,input,privateDiscussion[1],false,canAdminister),operation==="create"||operation==="reply"?201:200);
+          }catch(error){if(error instanceof RequestBodyError)throw error;return text("Discussion change was not saved; check repository access and current version",409);}
+        }
         if (sub === "/community" && method === "GET") {
           if (!isOwner) return text("Only the owner can configure public participation", 403);
           return json(await project.publicCommunity());

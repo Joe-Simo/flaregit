@@ -13,6 +13,7 @@ import { ActivityTab } from "../tabs/Activity";
 import { ReviewTab } from "../tabs/Review";
 import { IssuesTab } from "../tabs/Issues";
 import { PeopleTab } from "../tabs/People";
+import { RepositoryDiscussionsTab } from "./Community";
 import { SettingsTab } from "../tabs/Settings";
 import type { FlareGitProjectState } from "@/core/types";
 
@@ -22,6 +23,7 @@ type State = FlareGitProjectState & { role: string };
 const TABS = [
   ["code", "Code", "Files at the accepted version."],
   ["commits", "Commits", "History of accepted versions."],
+  ["discussions", "Discussions", "Repository-member questions and decisions; separate from public conversations."],
   ["issues", "Issues", "Problems and requests; a change can resolve one."],
   ["changes", "Changes", "Work in progress by people and agents, each in its own isolated copy. Mark one ready, then integrate."],
   ["integration", "Integration", "Ready changes being combined and verified: what needs your review, what is running, what landed, what failed."],
@@ -127,6 +129,7 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
       {tab === "changes" && <ChangesTab projectId={projectId} state={state} reload={reload} />}
       {tab === "integration" && <IntegrationTab isOwner={meta.role === "owner"} projectId={projectId} state={state} reload={reload} kind={meta.kind} />}
       {tab === "activity" && <ActivityTab projectId={projectId} />}
+      {tab === "discussions" && <RepositoryDiscussionsTab key={`${projectId}:${params.get("topic") ?? "list"}`} projectId={projectId} owner={meta.role === "owner"} topic={params.get("topic") ?? undefined} />}
       {tab === "issues" && <IssuesTab projectId={projectId} issue={params.get("n") ? Number(params.get("n")) : undefined} />}
       {tab === "people" && <PeopleTab projectId={projectId} />}
       {tab === "review" && <ReviewTab isOwner={meta.role === "owner"} projectId={projectId} task={params.get("task") ?? undefined} candidate={params.get("candidate") ? state.candidates[params.get("candidate")!] : undefined} evidence={state} reload={reload} />}

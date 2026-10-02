@@ -70,7 +70,7 @@ export function App() {
       <main id="workspace-content" tabIndex={-1} className="flex-1 min-w-0">
         {route.name === "home" && <Home />}
         {route.name === "participate" && <PublicParticipation key={route.projectId} projectId={route.projectId} />}
-        {route.name === "community-post" && <CommunityCompose key={route.params.get("topic") ?? "new"} topic={route.params.get("topic") ?? undefined} />}
+        {route.name === "community-post" && <CommunityCompose key={`${route.params.get("repo") ?? "help"}:${route.params.get("topic") ?? "new"}`} repository={route.params.get("repo") ?? undefined} topic={route.params.get("topic") ?? undefined} />}
         {route.name === "new" && <NewRepo />}
         {route.name === "account" && <Account />}
         {route.name === "inbox" && <Inbox onCount={setUnread} />}

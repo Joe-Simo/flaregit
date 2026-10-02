@@ -1,3 +1,5 @@
+import { PublicDirectory, type DirectoryState, type DirectoryRegistration } from "./public-directory.js";
+import { RepositoryDiscussions } from "./repository-discussions.js";
 import { ArtifactAllocationFence, type PendingArtifactAllocation } from "./allocation-fence.js";
 import { ArtifactStorageAdmission, type ArtifactKind, type StorageAdmissionPolicy, type StorageReservation } from "./storage-admission.js";
 import { CoreGitOperationLedger, type CoreGitBudget, type CoreGitAdmission } from "./core-git-budget.js";
@@ -8,7 +10,7 @@ import { DurableObject } from "cloudflare:workers";
 import { freezeCandidateGeneration } from "../core/pipeline/freeze.js";
 import { createProductDecision, detectContradiction } from "../core/decision/contradiction.js";
 import type { Env } from "./env.js";
-import { accountKeyFor, accountOf, projectOf } from "./projects.js";
+import { accountKeyFor, accountOf, projectOf, globalOf } from "./projects.js";
 import { isCommandPolicy, settingsFor } from "../core/command-policy.js";
 import { VERIFIER_IDENTITIES } from "../core/verification-identities.js";
 import { RepositoryDeployments,type AcceptedDeploymentTarget,type DeploymentRecord } from "./deployments.js";
@@ -191,6 +193,11 @@ export interface Ledger {
   acceptedDeploymentTargets():Promise<AcceptedDeploymentTarget[]>;
   listDeployments():Promise<DeploymentRecord[]>;
   requestDeployment(target:AcceptedDeploymentTarget,serviceId:string,environment:string,key:string,actorId:string):Promise<{kind:"created"|"duplicate";deployment:DeploymentRecord}>;
+  discussionList(publicOnly:boolean,actor?:PublicCommunityActor):Promise<ReturnType<RepositoryDiscussions["list"]>>;
+  discussionTopic(id:string,publicOnly:boolean,actor?:PublicCommunityActor):Promise<ReturnType<RepositoryDiscussions["topic"]>>;
+  discussionSettings(actor:PublicCommunityActor,input?:unknown):Promise<{enabled:boolean}>;
+  discussionPermissions(actor:PublicCommunityActor,id:string,publicOnly:boolean,canAdminister?:boolean):Promise<ReturnType<RepositoryDiscussions["permissions"]>>;
+  discussionMutate(actor:PublicCommunityActor,operation:"create"|"reply"|"edit"|"remove"|"control",input:unknown,id:string|undefined,publicOnly:boolean,canAdminister?:boolean):Promise<ReturnType<RepositoryDiscussions["create"]>>;
   publicCommunity(): Promise<{ policy: PublicCommunityPolicy; posts: PublicPost[] }>;
   configurePublicCommunity(policy: PublicCommunityPolicy, confirmed: boolean, actor: PublicCommunityActor): Promise<PublicCommunityPolicy>;
   createPublicPost(actor: PublicCommunityActor, input: Parameters<RepositoryPublicCommunity["createPost"]>[1]): Promise<PublicPost>;
@@ -215,6 +222,10 @@ export interface Ledger {
   checkpointAgentRun(runId: string, taskId: string, eventId: string, commit: string): Promise<boolean>;
   failAgentRun(runId: string, taskId: string): Promise<boolean>;
   publicGrant(): Promise<PublicGrantMetadata | null>;
+  directoryState(): Promise<DirectoryState>;
+  configureDirectory(input: unknown, actor: string): Promise<DirectoryState>;
+  registerDirectory(input: DirectoryRegistration): Promise<void>;
+  directoryPage(cursor?: string): Promise<{rows:DirectoryRegistration[];nextCursor:string|null}>;
   repositoryVisibility(): Promise<"public" | "private">;
   setRepositoryVisibility(visibility: "public" | "private", confirmed: boolean, by: string): Promise<void>;
   saveImportJob(job: ImportJob): Promise<void>;
@@ -384,6 +395,41 @@ export class RepositoryController extends DurableObject<Env> {
     return result;
   }
 
+  private discussions(publicOnly:boolean){return new RepositoryDiscussions(this.ctx.storage,publicOnly);}
+  private discussionEnabled(publicOnly:boolean):boolean {
+    if(this.repositoryDeleting())return false;
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS repository_discussion_settings(id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL)");
+    const published=this.community().policy();
+    if(publicOnly){this.requirePublicRepository();return published.enabled&&published.scopes.includes("discussions");}
+    return this.ctx.storage.sql.exec<{enabled:number}>("SELECT enabled FROM repository_discussion_settings WHERE id=1").toArray()[0]?.enabled===1;
+  }
+  private async assertDiscussionAccess(publicOnly:boolean,actor?:PublicCommunityActor){
+    if(!publicOnly&&(!actor||!await this.roleOf(actor.userId)))throw new Error("Repository membership required");
+    if(!this.discussionEnabled(publicOnly))throw new Error("Repository discussions are disabled");
+  }
+  async discussionSettings(actor:PublicCommunityActor,input?:unknown){
+    if(this.repositoryDeleting())throw new Error("Repository deletion is in progress");
+    const role=await this.roleOf(actor.userId);if(!role||input!==undefined&&role!=="owner")throw new Error("Repository membership required; only owner can configure discussions");
+    this.discussionEnabled(false);
+    if(input!==undefined){if(this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actor.userId).toArray()[0]?.role!=="owner")throw new Error("Owner access changed");if(typeof input!=="object"||input===null||Array.isArray(input))throw new Error("Invalid discussion settings");const value=input as Record<string,unknown>;if(Object.keys(value).some(k=>!["enabled","confirmed"].includes(k))||typeof value.enabled!=="boolean"||value.enabled&&value.confirmed!==true)throw new Error("Explicit owner confirmation required");this.ctx.storage.sql.exec("INSERT INTO repository_discussion_settings VALUES(1,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled",value.enabled?1:0);}
+    return {enabled:this.ctx.storage.sql.exec<{enabled:number}>("SELECT enabled FROM repository_discussion_settings WHERE id=1").toArray()[0]?.enabled===1};
+  }
+  async discussionList(publicOnly:boolean,actor?:PublicCommunityActor){await this.assertDiscussionAccess(publicOnly,actor);return this.discussions(publicOnly).list();}
+  async discussionTopic(id:string,publicOnly:boolean,actor?:PublicCommunityActor){await this.assertDiscussionAccess(publicOnly,actor);return this.discussions(publicOnly).topic(id);}
+  async discussionPermissions(actor:PublicCommunityActor,id:string,publicOnly:boolean,canAdminister=false){const owner=canAdminister&&await this.roleOf(actor.userId)==="owner";await this.assertDiscussionAccess(publicOnly,actor);return this.discussions(publicOnly).permissions(actor,id,owner);}
+  async discussionMutate(actor:PublicCommunityActor,operation:"create"|"reply"|"edit"|"remove"|"control",input:unknown,id:string|undefined,publicOnly:boolean,canAdminister=false){
+    await this.assertDiscussionAccess(publicOnly,actor);
+    return this.ctx.storage.transactionSync(()=>{
+      const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actor.userId).toArray()[0]?.role;const owner=canAdminister&&role==="owner";if(!publicOnly&&!role)throw new Error("Repository membership changed");
+      if(!this.discussionEnabled(publicOnly))throw new Error("Discussion access changed");const ledger=this.discussions(publicOnly);
+      if(operation==="create"){if(typeof input==="object"&&input!==null&&"category" in input&&input.category==="announcements"&&!owner)throw new Error("Announcements require maintainer");return ledger.create(actor,input);}
+      if(!id)throw new Error("Discussion id required");
+      if(operation==="reply")return ledger.create(actor,input,id);
+      if(operation==="edit")return ledger.edit(actor,id,input);
+      if(operation==="remove")return ledger.remove(actor,id,input,owner);
+      return ledger.control(actor,id,input,owner);
+    });
+  }
   private community() { return new RepositoryPublicCommunity(this.ctx.storage, this.load().projectId); }
   private requirePublicRepository(): void {
     this.visibilityTable();
@@ -566,6 +612,29 @@ export class RepositoryController extends DurableObject<Env> {
     } catch (error) { this.state = null; throw error; }
   }
 
+  async directoryState(): Promise<DirectoryState> { return new PublicDirectory(this.ctx.storage).state(); }
+  async registerDirectory(input: DirectoryRegistration): Promise<void> { new PublicDirectory(this.ctx.storage).register(input); }
+  async directoryPage(cursor?: string): Promise<{rows:DirectoryRegistration[];nextCursor:string|null}> { return new PublicDirectory(this.ctx.storage).page(cursor); }
+  async configureDirectory(input: unknown, actor: string): Promise<DirectoryState> {
+    if (await this.roleOf(actor) !== "owner") throw new Error("Only the owner can publish directory listings");
+    await this.ensureRecoveryAlarm();
+    if (this.repositoryDeleting()) throw new Error("Repository deletion is in progress");
+    this.visibilityTable();
+    const directory = new PublicDirectory(this.ctx.storage);
+    const visibility = this.ctx.storage.sql.exec<{visibility:string}>("SELECT visibility FROM repository_visibility WHERE id=1").toArray()[0];
+    directory.configure(input, visibility?.visibility === "public");
+    await this.reconcileDirectoryRegistration();
+    return directory.state();
+  }
+  private async reconcileDirectoryRegistration(): Promise<void> {
+    const directory = new PublicDirectory(this.ctx.storage);
+    if (!this.ctx.storage.sql.exec("SELECT 1 FROM project WHERE id=1").toArray()[0]) return;
+    const pending = directory.pending(this.load().projectId);
+    if (!pending) return;
+    try { await globalOf(this.env).registerDirectory(pending); directory.delivered(pending.version); }
+    catch { await this.ensureRecoveryAlarm(); }
+  }
+
   private visibilityTable(): void { this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS repository_visibility (id INTEGER PRIMARY KEY CHECK(id=1), visibility TEXT NOT NULL, version INTEGER NOT NULL, confirmed_by TEXT NOT NULL)"); }
   async repositoryVisibility(): Promise<"public" | "private"> {
     this.visibilityTable();
@@ -584,8 +653,12 @@ export class RepositoryController extends DurableObject<Env> {
     if (this.repositoryDeleting()) throw new Error("Repository deletion is in progress");
     if (!by || !["public", "private"].includes(visibility) || (visibility === "public" && confirmed !== true)) throw new Error("Explicit owner confirmation is required");
     if (await this.roleOf(by) !== "owner") throw new Error("Only the owner can change visibility");
+    await this.ensureRecoveryAlarm();
     this.visibilityTable();
+    const directory = new PublicDirectory(this.ctx.storage);
+    if (visibility === "private") { const current = directory.state(); if (current.enabled) directory.configure({enabled:false,confirmed:true,expectedVersion:current.version},false); }
     this.ctx.storage.sql.exec("INSERT INTO repository_visibility VALUES (1,?,1,?) ON CONFLICT(id) DO UPDATE SET visibility=excluded.visibility,version=version+1,confirmed_by=excluded.confirmed_by", visibility, by);
+    await this.reconcileDirectoryRegistration();
     await this.logActivity("Maintainer", "repository.visibility", `Repository is now ${visibility}`);
   }
 
@@ -943,6 +1016,7 @@ export class RepositoryController extends DurableObject<Env> {
 
   /** Recovery sweep: re-send deliveries whose queue message was never sent or was lost, until none are pending. */
   override async alarm(): Promise<void> {
+    await this.reconcileDirectoryRegistration();
     await this.reconcileContributorRegistrations();
     const now = Date.now();
     const stuck = this.ctx.storage.sql

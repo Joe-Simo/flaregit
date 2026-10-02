@@ -12,3 +12,10 @@ test("preserves validated private review locations and discards credential-beari
   expect(safeSignInReturn("/p/abcdef012345/review?task=change-1&signin=1")).toBe("/p/abcdef012345/review?task=change-1");
   expect(safeSignInReturn("/p/abcdef012345/review?token=secret")).toBeNull();
 });
+
+test("repository discussion sign-in preserves only validated local context", () => {
+ expect(safeSignInReturn("#/community-post?repo=pabcdef012345&topic=discussion_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee&signin=1")).toBe("/community-post?repo=pabcdef012345&topic=discussion_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+ for (const value of ["/community-post?repo=https://evil.example", "/community-post?repo=pabcdef012345&topic=forum_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "/community-post?topic=discussion_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "/community-post?repo=pabcdef012345&repo=pabcdef012346"]) expect(safeSignInReturn(value)).toBeNull();
+});
+
+test("private discussions keep local topic intent", () => { expect(safeSignInReturn("#/p/pabcdef012345/discussions?topic=discussion_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee&signin=1")).toBe("/p/pabcdef012345/discussions?topic=discussion_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"); expect(safeSignInReturn("#/p/pabcdef012345/discussions?topic=https://evil.example")).toBeNull(); });

@@ -1,6 +1,6 @@
 const projectId = /^p?[0-9a-f]{12}$/;
 const topicId = /^forum_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const repositoryTabs = new Set(["code", "commits", "issues", "changes", "integration", "people", "activity", "settings", "review", "commit"]);
+const repositoryTabs = new Set(["code", "commits", "discussions", "issues", "changes", "integration", "people", "activity", "settings", "review", "commit"]);
 /** Canonical app hashes only. Never use a supplied full URL as a Clerk destination. */
 export function safeSignInReturn(value: string): string | null {
   const input = value.startsWith("#") ? value.slice(1) : value;
@@ -14,11 +14,12 @@ export function safeSignInReturn(value: string): string | null {
   const allowed = new Set(["signin"]);
   if (["/", "/new", "/account", "/inbox", "/report", "/operator"].includes(path)) { /* Exact local routes need no parameters. */ }
   else if (path === "/community-post") {
-    allowed.add("topic"); const topic = query.get("topic");
-    if (topic !== null) { if (!topicId.test(topic)) return null; destination.set("topic", topic); }
+    allowed.add("topic"); allowed.add("repo"); const topic = query.get("topic"), repo = query.get("repo");
+    if (repo !== null) { if (!projectId.test(repo)) return null; destination.set("repo", repo); }
+    if (topic !== null) { const valid = repo ? /^discussion_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(topic) : topicId.test(topic); if (!valid) return null; destination.set("topic", topic); }
   } else if (segments[0] === "participate" && segments.length === 2 && projectId.test(segments[1] ?? "")) { /* Repository IDs carry no credentials. */ }
   else if (segments[0] === "p" && (segments.length === 2 || (segments.length === 3 && repositoryTabs.has(segments[2] ?? ""))) && projectId.test(segments[1] ?? "")) {
-    const rules: Record<string, RegExp> = { task: /^[a-z0-9-]{1,200}$/, candidate: /^[A-Za-z0-9_-]{1,200}$/, hash: /^[0-9a-f]{7,40}$/, n: /^[1-9][0-9]{0,9}$/ };
+    const rules: Record<string, RegExp> = { topic: /^discussion_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, task: /^[a-z0-9-]{1,200}$/, candidate: /^[A-Za-z0-9_-]{1,200}$/, hash: /^[0-9a-f]{7,40}$/, n: /^[1-9][0-9]{0,9}$/ };
     for (const [name, rule] of Object.entries(rules)) { allowed.add(name); const parameter = query.get(name); if (parameter !== null) { if (!rule.test(parameter)) return null; destination.set(name, parameter); } }
   } else return null;
   if ([...query.keys()].some((name) => !allowed.has(name))) return null;
