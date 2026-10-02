@@ -31,6 +31,7 @@ const server = Bun.serve({
     },
     "/api/*": proxy,
     "/auth-config": proxy,
+    "/pricing": proxy,
     "/status.json": proxy,
     "/status": proxy,
     "/terms": proxy,
