@@ -34,6 +34,10 @@ A Git collaboration platform on Cloudflare Workers and Artifacts for humans and 
 - CLI (`bun run build:cli` produces `dist-cli/flaregit`; JSON output, token auth). `bun cli/flaregit.ts --help` lists every command.
 - Optional Pro billing through Polar.
 
+### Abuse and impersonation reports
+
+Anyone signed in can file a report (footer → Report abuse). Reports go to a human queue at `#/operator` for the accounts listed in `OPERATOR_ACCOUNTS` (wrangler.jsonc); each is closed only with a written resolution that the reporter sees. The number of open reports and the age of the oldest are public on `/status`.
+
 ## Self-host on your Cloudflare account
 
 Requirements:
