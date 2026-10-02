@@ -74,7 +74,7 @@ export function App() {
         {route.name === "new" && <NewRepo />}
         {route.name === "account" && <Account />}
         {route.name === "inbox" && <Inbox onCount={setUnread} />}
-        {route.name === "report" && <ReportPage />}
+        {route.name === "report" && <ReportPage key={route.params.get("target") ?? "report"} initialTarget={route.params.get("target")} initialKind={route.params.get("kind")} />}
         {route.name === "operator" && <OperatorPage />}
         {route.name === "join" && <Join projectId={route.projectId} token={route.token} />}
         {route.name === "repo" && <Repo projectId={route.projectId} tab={route.tab} params={route.params} />}

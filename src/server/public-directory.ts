@@ -25,8 +25,10 @@ export class PublicDirectory {
     });
   }
   pending(projectId: string): DirectoryRegistration | null {
-    repositoryId.parse(projectId); const state = this.state();
-    return state.delivery === "pending" ? {projectId, enabled: state.enabled, version: state.version} : null;
+    const state = this.state();
+    if (state.delivery !== "pending") return null;
+    repositoryId.parse(projectId);
+    return {projectId, enabled: state.enabled, version: state.version};
   }
   delivered(version: number): void { this.storage.sql.exec("UPDATE public_directory_registration SET delivered_version=? WHERE id=1 AND version=?",version,version); }
   register(input: DirectoryRegistration): void {

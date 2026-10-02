@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useState } from "react";
+import { useAuth } from "@clerk/clerk-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { apiJson } from "../api";
+import { safeReportTarget } from "../report-target";
 import { timeAgo } from "../router";
 
 interface Report { id: string; at: string; kind: string; target: string; details: string; status: "open" | "resolved"; resolution: string | null; resolved_by: string | null; resolved_at: string | null }
@@ -24,10 +26,23 @@ function ReportList({ reports }: { reports: Report[] }) {
 }
 
 /** Anyone signed in can report; reports enter the operator queue, and its status stays visible to the reporter. */
-export function ReportPage() {
-  const [kind, setKind] = useState("impersonation");
-  const [target, setTarget] = useState(() => { const query = window.location.hash.split("?")[1] ?? ""; return new URLSearchParams(query).get("target")?.slice(0, 300) ?? ""; });
-  const [details, setDetails] = useState("");
+const reportDrafts = new Map<string, {kind:string;target:string;details:string}>();
+let draftActor: string | null = null;
+export function ReportPage({ initialTarget = null, initialKind = null }: { initialTarget?: string | null; initialKind?: string | null }) {
+  const { userId } = useAuth();
+  // Identity changes invalidate module-held private complaint details before hydration.
+  if (draftActor !== (userId ?? null)) { reportDrafts.clear(); draftActor = userId ?? null; }
+  if (!userId) return null;
+  return <ReportForm key={`${userId}:${safeReportTarget(initialTarget) ?? ""}`} actor={userId} initialTarget={initialTarget} initialKind={initialKind} />;
+}
+function ReportForm({ actor, initialTarget, initialKind }: { actor: string; initialTarget: string | null; initialKind: string | null }) {
+  const context = safeReportTarget(initialTarget) ?? "";
+  const cacheKey = JSON.stringify([actor, context]);
+  const savedDraft = reportDrafts.get(cacheKey);
+  const [kind, setKind] = useState(savedDraft?.kind ?? (KINDS.some(item => item[0] === initialKind) ? initialKind! : "impersonation"));
+  const [target, setTarget] = useState(savedDraft?.target ?? context);
+  const [details, setDetails] = useState(savedDraft?.details ?? "");
+  useEffect(() => { if (draftActor !== actor) return; if (reportDrafts.size >= 10 && !reportDrafts.has(cacheKey)) reportDrafts.delete(reportDrafts.keys().next().value ?? ""); reportDrafts.set(cacheKey, {kind,target:target.slice(0,300),details:details.slice(0,5000)}); }, [actor,cacheKey,kind,target,details]);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -41,7 +56,7 @@ export function ReportPage() {
     try {
       const r = await apiJson<{ id: string; note: string }>("/reports", { method: "POST", json: { kind, target, details } });
       setNotice(`Report ${r.id} filed. ${r.note}`);
-      setTarget(""); setDetails("");
+      reportDrafts.delete(cacheKey); setTarget(""); setDetails("");
       void load();
     } catch (err) { setError(err instanceof Error ? err.message : "Report not filed"); } finally { setSaving(false); }
   };

@@ -1,3 +1,4 @@
+import { safeReportTarget } from "./report-target";
 const projectId = /^p?[0-9a-f]{12}$/;
 const topicId = /^forum_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const repositoryTabs = new Set(["code", "commits", "discussions", "issues", "changes", "integration", "people", "activity", "settings", "review", "commit"]);
@@ -12,8 +13,13 @@ export function safeSignInReturn(value: string): string | null {
   const segments = path.split("/").slice(1);
   if (new Set([...query.keys()]).size !== [...query.keys()].length) return null;
   const allowed = new Set(["signin"]);
-  if (["/", "/new", "/account", "/inbox", "/report", "/operator"].includes(path)) { /* Exact local routes need no parameters. */ }
-  else if (path === "/community-post") {
+  if (["/", "/new", "/account", "/inbox", "/operator"].includes(path)) { /* Exact local routes need no parameters. */ }
+  else if (path === "/report") {
+    allowed.add("target"); allowed.add("kind");
+    const target = query.get("target"), kind = query.get("kind");
+    if (target !== null) { const safe = safeReportTarget(target); if (!safe) return null; destination.set("target", safe); }
+    if (kind !== null) { if (!["impersonation","namespace_squatting","malware","harassment","security","other"].includes(kind)) return null; destination.set("kind", kind); }
+  } else if (path === "/community-post") {
     allowed.add("topic"); allowed.add("repo"); const topic = query.get("topic"), repo = query.get("repo");
     if (repo !== null) { if (!projectId.test(repo)) return null; destination.set("repo", repo); }
     if (topic !== null) { const valid = repo ? /^discussion_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(topic) : topicId.test(topic); if (!valid) return null; destination.set("topic", topic); }
