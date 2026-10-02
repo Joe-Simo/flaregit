@@ -48,7 +48,7 @@ Use the [seven-minute recording runbook](DEMO.md). Capture real overlapping agen
 
 [https://github.com/Joe-Simo/flaregit](https://github.com/Joe-Simo/flaregit) — public, Apache-2.0, with a LICENSE file; visibility and GitHub's detected license were checked October 2.
 
-Release snapshot: [`f37d0c535d32ea98c0369c7f79d6ce34a2628af5`](https://github.com/Joe-Simo/flaregit/tree/f37d0c535d32ea98c0369c7f79d6ce34a2628af5), publicly retrievable. At this check, the default `main` still points to an older revision. Use the release branch and exact checkout instructions below; refresh these references if the final release changes.
+Verified implementation snapshot: [`ab695a3a1227443e9a02f96df180301afa00dbb1`](https://github.com/Joe-Simo/flaregit/tree/ab695a3a1227443e9a02f96df180301afa00dbb1). The commands below pin the implementation independently of later documentation updates. Refresh this reference if the final implementation changes.
 
 Public application: [https://flaregit.com](https://flaregit.com), HTTP 200 checked October 2. This confirms the URL responds, not every authenticated workflow. A browser session is required for owned repository work; private exercise repositories are not public demo data.
 
@@ -59,9 +59,9 @@ Visit https://flaregit.com and sign in with your own account. Create a repositor
 For the reproducible source snapshot, install Bun and Git, then:
 
 ```bash
-git clone --branch codex/concurrent-collaboration-integrity https://github.com/Joe-Simo/flaregit.git
+git clone https://github.com/Joe-Simo/flaregit.git
 cd flaregit
-git checkout f37d0c535d32ea98c0369c7f79d6ce34a2628af5
+git checkout ab695a3a1227443e9a02f96df180301afa00dbb1
 bun install --frozen-lockfile
 bun run lint
 bun run typecheck
@@ -78,7 +78,7 @@ To self-host, follow the README Cloudflare setup: Workers Paid, Artifacts namesp
 | Evidence | Status |
 |---|---|
 | Prior hosted concurrent contributions, conflict and saved issue/conversation context | Recorded in the owned exercise `pbd425298ee02`; accepted baseline began `69c59c2`, candidate began `2bb6` and awaited review. Recheck full IDs and state before filming; this does not establish accepted history. |
-| Public source and application URL | Verified as described above; default branch still needs the explicit release checkout. |
+| Public source and application URL | Verified as described above; use the pinned implementation checkout for reproducibility. |
 | New staged agent proposal/retry/resume and native external-CI safeguards | Implemented with native-Git and workerd/fixture verification. These checks are not proof that the latest hosted stages have been exercised. |
 | Human approval and fresh-clone verification for the hosted exercise | **TODO: obtain explicit human review and actual matching accepted/clone SHA receipts.** |
 | Hosted interruption/resume, external service callback, stale refusal, receiver retry/replay | **TODO: capture actual hosted receipts for each claimed behavior.** |
