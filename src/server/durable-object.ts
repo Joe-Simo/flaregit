@@ -16,8 +16,89 @@ export interface ClaimResult { candidate?: CandidateGeneration; decision?: Produ
 export interface PrepareResult { ok: boolean; journal?: PublicationJournalEntry; error?: string; stale?: boolean }
 
 /** Plain-typed view of the ledger RPC surface used by Workflows and Queues. */
+export interface ProjectRow {
+  id: string;
+  name: string;
+  role: "owner" | "member";
+  kind: string;
+  created_at: string;
+}
+export interface WebhookRow {
+  id: string;
+  url: string;
+  events: string;
+  active: number;
+  created_at: string;
+}
+export interface DeliveryRow {
+  id: string;
+  webhook_id: string;
+  event: string;
+  status: "pending" | "success" | "failed";
+  attempts: number;
+  last_status: number | null;
+  last_error: string | null;
+  latency_ms: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ComponentStatus {
+  component: string;
+  degradedNow: boolean;
+  lastCheckAt: number | null;
+  checks24h: number;
+  failed24h: number;
+  lastFailureAt: number | null;
+  lastFailureDetail: string | null;
+  degradedMinutes24h: number;
+}
+
+export const WEBHOOK_EVENTS = ["change.ready", "change.accepted", "change.blocked", "decision.needed"] as const;
+
+export interface ApiTokenRow {
+  id: string;
+  label: string;
+  created_at: string;
+  last_used: string | null;
+}
+
+export interface ActivityRow {
+  id: number;
+  at: string;
+  actor: string;
+  type: string;
+  summary: string;
+}
+
 export interface Ledger {
-  initialize(init: { projectId: string; projectName: string; canonicalRepoName: string; head: string; verificationPolicy: Record<string, unknown> }): Promise<FlareGitProjectState>;
+  listProjects(): Promise<ProjectRow[]>;
+  addProject(p: { id: string; name: string; role: "owner" | "member"; kind: string }): Promise<void>;
+  removeProject(id: string): Promise<void>;
+  roleOf(userId: string): Promise<"owner" | "member" | null>;
+  addMember(userId: string, role: "owner" | "member", label?: string): Promise<void>;
+  removeMember(userId: string): Promise<void>;
+  listMembers(): Promise<Array<{ user_id: string; role: string; label: string | null; added_at: string }>>;
+  createInvite(createdBy: string): Promise<string>;
+  acceptInvite(token: string, userId: string, label?: string): Promise<boolean>;
+  logActivity(actor: string, type: string, summary: string): Promise<void>;
+  createApiToken(userId: string, label: string, secret: string): Promise<{ id: string }>;
+  listApiTokens(): Promise<ApiTokenRow[]>;
+  revokeApiToken(id: string): Promise<void>;
+  verifyApiToken(secret: string): Promise<string | null>;
+  recordProbe(component: string, ok: boolean, latencyMs?: number, detail?: string): Promise<void>;
+  statusSummary(): Promise<ComponentStatus[]>;
+  addWebhook(url: string, events: string[]): Promise<{ id: string; secret: string }>;
+  listWebhooks(): Promise<WebhookRow[]>;
+  removeWebhook(id: string): Promise<void>;
+  listDeliveries(limit: number): Promise<DeliveryRow[]>;
+  getDelivery(id: string): Promise<{ delivery: DeliveryRow & { payload: string }; webhook: { url: string; secret: string; active: number } } | null>;
+  markDelivery(id: string, result: { ok: boolean; status?: number; error?: string; latencyMs?: number; final?: boolean }): Promise<number>;
+  redeliver(id: string): Promise<boolean>;
+  listActivity(limit: number): Promise<ActivityRow[]>;
+  setVerificationPolicy(policy: Record<string, unknown>): Promise<void>;
+  destroy(): Promise<void>;
+  initialize(init: { projectId: string; projectName: string; canonicalRepoName: string; head: string; verificationPolicy: Record<string, unknown>; kind?: "demo" | "import" | "empty"; defaultBranch?: string; ownerId?: string; source?: string }): Promise<FlareGitProjectState>;
   createTask(task: Task): Promise<Task>;
   resolveDecision(decisionId: string, selectedOptionId: string): Promise<{ taskIds: string[] }>;
   getState(): Promise<FlareGitProjectState>;
@@ -50,6 +131,15 @@ export class RepositoryController extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS project (id INTEGER PRIMARY KEY CHECK (id = 1), doc TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS billing (id INTEGER PRIMARY KEY CHECK (id = 1), doc TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, kind TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS members (user_id TEXT PRIMARY KEY, role TEXT NOT NULL, label TEXT, added_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS invites (token TEXT PRIMARY KEY, created_by TEXT NOT NULL, expires_at INTEGER NOT NULL, used_by TEXT);
+      CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, type TEXT NOT NULL, summary TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS webhooks (id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL, events TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS deliveries (id TEXT PRIMARY KEY, webhook_id TEXT NOT NULL, event TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_status INTEGER, last_error TEXT, latency_ms INTEGER, payload TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS probes (id INTEGER PRIMARY KEY AUTOINCREMENT, component TEXT NOT NULL, at INTEGER NOT NULL, ok INTEGER NOT NULL, latency_ms INTEGER, detail TEXT);
+      CREATE INDEX IF NOT EXISTS probes_component_at ON probes (component, at);
+      CREATE TABLE IF NOT EXISTS api_tokens (id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, label TEXT NOT NULL, created_at TEXT NOT NULL, last_used TEXT);
       CREATE TABLE IF NOT EXISTS runs (day TEXT PRIMARY KEY, n INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS lease (id INTEGER PRIMARY KEY CHECK (id = 1), holder TEXT NOT NULL, expires_at INTEGER NOT NULL);
     `);
@@ -68,7 +158,7 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   /** First-time setup with the real head of the canonical Artifacts repository. */
-  async initialize(init: { projectId: string; projectName: string; canonicalRepoName: string; head: string; verificationPolicy: Record<string, unknown> }): Promise<FlareGitProjectState> {
+  async initialize(init: { projectId: string; projectName: string; canonicalRepoName: string; head: string; verificationPolicy: Record<string, unknown>; kind?: "demo" | "import" | "empty"; defaultBranch?: string; ownerId?: string; source?: string }): Promise<FlareGitProjectState> {
     const existing = this.ctx.storage.sql.exec("SELECT 1 FROM project WHERE id = 1").toArray();
     if (existing.length > 0) return this.load();
     this.state = {
@@ -83,7 +173,13 @@ export class RepositoryController extends DurableObject<Env> {
       journal: [],
       policyVersion: 1,
       verificationPolicy: init.verificationPolicy,
+      kind: init.kind,
+      defaultBranch: init.defaultBranch ?? "main",
+      ownerId: init.ownerId,
+      source: init.source,
     };
+    if (init.ownerId) await this.addMember(init.ownerId, "owner");
+    await this.logActivity(init.ownerId ?? "system", "project.created", `Repository ${init.projectName} created`);
     this.save();
     return this.state;
   }
@@ -103,6 +199,7 @@ export class RepositoryController extends DurableObject<Env> {
     if (s.tasks[task.id]) return s.tasks[task.id]!;
     s.tasks[task.id] = task;
     this.save();
+    await this.logActivity(task.contributor.name, "task.created", `Change started: ${task.goal}`);
     return task;
   }
 
@@ -125,7 +222,191 @@ export class RepositoryController extends DurableObject<Env> {
     if (task.status !== "integrating" && task.status !== "verifying") task.status = ev.ready ? "ready" : "checkpointed";
     task.updatedAt = new Date().toISOString();
     this.save();
+    if (ev.ready) await this.emit("change.ready", { change: task.id, commit: ev.commit, goal: task.goal });
+    await this.logActivity(task.contributor.name, ev.ready ? "task.ready" : "task.pushed", `${task.id} ${ev.ready ? "is ready for integration" : "pushed a checkpoint"} (${ev.commit.slice(0, 7)})`);
     return { applied: true };
+  }
+
+  // ---- account registry (used on the per-account instance) ----
+  async listProjects(): Promise<ProjectRow[]> {
+    return this.ctx.storage.sql.exec("SELECT id, name, role, kind, created_at FROM projects ORDER BY created_at DESC").toArray() as unknown as ProjectRow[];
+  }
+  async addProject(p: { id: string; name: string; role: "owner" | "member"; kind: string }): Promise<void> {
+    this.ctx.storage.sql.exec("INSERT OR REPLACE INTO projects (id, name, role, kind, created_at) VALUES (?, ?, ?, ?, ?)", p.id, p.name, p.role, p.kind, new Date().toISOString());
+  }
+  async removeProject(id: string): Promise<void> {
+    this.ctx.storage.sql.exec("DELETE FROM projects WHERE id = ?", id);
+  }
+
+  // ---- membership and invites (per project) ----
+  async roleOf(userId: string): Promise<"owner" | "member" | null> {
+    const row = this.ctx.storage.sql.exec<{ role: string }>("SELECT role FROM members WHERE user_id = ?", userId).toArray()[0];
+    return (row?.role as "owner" | "member" | undefined) ?? null;
+  }
+  async addMember(userId: string, role: "owner" | "member", label?: string): Promise<void> {
+    this.ctx.storage.sql.exec("INSERT OR REPLACE INTO members (user_id, role, label, added_at) VALUES (?, ?, ?, ?)", userId, role, label ?? null, new Date().toISOString());
+  }
+  async removeMember(userId: string): Promise<void> {
+    const role = await this.roleOf(userId);
+    if (role === "owner") throw new Error("The owner cannot be removed");
+    this.ctx.storage.sql.exec("DELETE FROM members WHERE user_id = ?", userId);
+  }
+  async listMembers() {
+    return this.ctx.storage.sql.exec<{ user_id: string; role: string; label: string | null; added_at: string }>("SELECT user_id, role, label, added_at FROM members ORDER BY added_at").toArray();
+  }
+  async createInvite(createdBy: string): Promise<string> {
+    const bytes = crypto.getRandomValues(new Uint8Array(24));
+    const token = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+    this.ctx.storage.sql.exec("INSERT INTO invites (token, created_by, expires_at) VALUES (?, ?, ?)", token, createdBy, Date.now() + 7 * 86_400_000);
+    return token;
+  }
+  /** Single-use: the first signed-in user to present a valid token becomes a member. */
+  async acceptInvite(token: string, userId: string, label?: string): Promise<boolean> {
+    const row = this.ctx.storage.sql.exec<{ expires_at: number; used_by: string | null }>("SELECT expires_at, used_by FROM invites WHERE token = ?", token).toArray()[0];
+    if (!row || row.used_by || row.expires_at < Date.now()) return false;
+    this.ctx.storage.sql.exec("UPDATE invites SET used_by = ? WHERE token = ?", userId, token);
+    if (!(await this.roleOf(userId))) await this.addMember(userId, "member", label);
+    await this.logActivity(userId, "member.joined", `${label ?? "A collaborator"} joined the repository`);
+    return true;
+  }
+
+  // ---- outgoing webhooks: durable outbox, signed delivery through the queue, visible log ----
+  async addWebhook(url: string, events: string[]): Promise<{ id: string; secret: string }> {
+    const id = `wh_${crypto.randomUUID().slice(0, 8)}`;
+    const secret = `whsec_${btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(24))))}`;
+    const chosen = events.filter((e) => (WEBHOOK_EVENTS as readonly string[]).includes(e));
+    this.ctx.storage.sql.exec("INSERT INTO webhooks (id, url, secret, events, active, created_at) VALUES (?, ?, ?, ?, 1, ?)", id, url, secret, chosen.join(","), new Date().toISOString());
+    return { id, secret };
+  }
+  async listWebhooks(): Promise<WebhookRow[]> {
+    return this.ctx.storage.sql.exec("SELECT id, url, events, active, created_at FROM webhooks ORDER BY created_at").toArray() as unknown as WebhookRow[];
+  }
+  async removeWebhook(id: string): Promise<void> {
+    this.ctx.storage.sql.exec("DELETE FROM webhooks WHERE id = ?", id);
+  }
+  async listDeliveries(limit: number): Promise<DeliveryRow[]> {
+    return this.ctx.storage.sql
+      .exec("SELECT id, webhook_id, event, status, attempts, last_status, last_error, latency_ms, created_at, updated_at FROM deliveries ORDER BY created_at DESC LIMIT ?", Math.min(limit, 100))
+      .toArray() as unknown as DeliveryRow[];
+  }
+  async getDelivery(id: string) {
+    const d = this.ctx.storage.sql.exec("SELECT * FROM deliveries WHERE id = ?", id).toArray()[0] as unknown as (DeliveryRow & { payload: string }) | undefined;
+    if (!d) return null;
+    const w = this.ctx.storage.sql.exec("SELECT url, secret, active FROM webhooks WHERE id = ?", d.webhook_id).toArray()[0] as unknown as { url: string; secret: string; active: number } | undefined;
+    return w ? { delivery: d, webhook: w } : null;
+  }
+  /** Records an attempt. Returns the attempt count so the consumer can decide whether to back off or give up. */
+  async markDelivery(id: string, r: { ok: boolean; status?: number; error?: string; latencyMs?: number; final?: boolean }): Promise<number> {
+    const row = this.ctx.storage.sql.exec<{ attempts: number }>("SELECT attempts FROM deliveries WHERE id = ?", id).toArray()[0];
+    const attempts = (row?.attempts ?? 0) + 1;
+    const status = r.ok ? "success" : r.final ? "failed" : "pending";
+    this.ctx.storage.sql.exec(
+      "UPDATE deliveries SET status = ?, attempts = ?, last_status = ?, last_error = ?, latency_ms = ?, updated_at = ? WHERE id = ?",
+      status, attempts, r.status ?? null, r.error ? r.error.slice(0, 300) : null, r.latencyMs ?? null, new Date().toISOString(), id
+    );
+    return attempts;
+  }
+  async redeliver(id: string): Promise<boolean> {
+    const d = this.ctx.storage.sql.exec<{ id: string }>("SELECT id FROM deliveries WHERE id = ?", id).toArray()[0];
+    if (!d) return false;
+    this.ctx.storage.sql.exec("UPDATE deliveries SET status = 'pending', attempts = 0, last_error = NULL, updated_at = ? WHERE id = ?", new Date().toISOString(), id);
+    await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: this.load().projectId, deliveryId: id });
+    return true;
+  }
+  /** Write the event to the outbox (durable) before anything is sent; the queue only carries a pointer. */
+  private async emit(type: (typeof WEBHOOK_EVENTS)[number], data: Record<string, unknown>): Promise<void> {
+    const hooks = this.ctx.storage.sql.exec("SELECT id, events FROM webhooks WHERE active = 1").toArray() as unknown as Array<{ id: string; events: string }>;
+    if (hooks.length === 0) return;
+    const s = this.load();
+    const eventId = `evt_${crypto.randomUUID().slice(0, 12)}`;
+    const payload = JSON.stringify({ id: eventId, type, createdAt: new Date().toISOString(), project: { id: s.projectId, name: s.projectName }, data });
+    for (const h of hooks) {
+      if (!h.events.split(",").includes(type)) continue;
+      const deliveryId = `dlv_${crypto.randomUUID().slice(0, 10)}`;
+      const now = new Date().toISOString();
+      this.ctx.storage.sql.exec("INSERT INTO deliveries (id, webhook_id, event, status, attempts, payload, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)", deliveryId, h.id, type, payload, now, now);
+      await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: s.projectId, deliveryId }).catch(() => undefined); // row stays 'pending' and is visible/redeliverable
+    }
+    this.ctx.storage.sql.exec("DELETE FROM deliveries WHERE id IN (SELECT id FROM deliveries ORDER BY created_at DESC LIMIT -1 OFFSET 500)");
+  }
+
+  // ---- personal API tokens (stored as SHA-256 hashes; the secret is shown once) ----
+  private async sha256(value: string): Promise<string> {
+    const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+    return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  async createApiToken(userId: string, label: string, secret: string): Promise<{ id: string }> {
+    const count = this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM api_tokens").toArray()[0]?.n ?? 0;
+    if (count >= 20) throw new Error("Token limit reached (20). Revoke one first.");
+    const id = `tok_${crypto.randomUUID().slice(0, 8)}`;
+    this.ctx.storage.sql.exec("INSERT INTO api_tokens (id, hash, user_id, label, created_at) VALUES (?, ?, ?, ?, ?)", id, await this.sha256(secret), userId, label.slice(0, 60), new Date().toISOString());
+    return { id };
+  }
+  async listApiTokens(): Promise<ApiTokenRow[]> {
+    return this.ctx.storage.sql.exec("SELECT id, label, created_at, last_used FROM api_tokens ORDER BY created_at DESC").toArray() as unknown as ApiTokenRow[];
+  }
+  async revokeApiToken(id: string): Promise<void> {
+    this.ctx.storage.sql.exec("DELETE FROM api_tokens WHERE id = ?", id);
+  }
+  async verifyApiToken(secret: string): Promise<string | null> {
+    const row = this.ctx.storage.sql.exec<{ id: string; user_id: string }>("SELECT id, user_id FROM api_tokens WHERE hash = ?", await this.sha256(secret)).toArray()[0];
+    if (!row) return null;
+    this.ctx.storage.sql.exec("UPDATE api_tokens SET last_used = ? WHERE id = ?", new Date().toISOString(), row.id);
+    return row.user_id;
+  }
+
+  // ---- platform health (used on the global instance) ----
+  async recordProbe(component: string, ok: boolean, latencyMs?: number, detail?: string): Promise<void> {
+    this.ctx.storage.sql.exec("INSERT INTO probes (component, at, ok, latency_ms, detail) VALUES (?, ?, ?, ?, ?)", component, Date.now(), ok ? 1 : 0, latencyMs ?? null, detail ? detail.slice(0, 200) : null);
+    this.ctx.storage.sql.exec("DELETE FROM probes WHERE at < ?", Date.now() - 3 * 86_400_000);
+  }
+  /** Raw facts per component: was it degraded, how many checks failed, for how long. No averaged uptime percentage. */
+  async statusSummary(): Promise<ComponentStatus[]> {
+    const since = Date.now() - 86_400_000;
+    const rows = this.ctx.storage.sql.exec("SELECT component, at, ok, detail FROM probes WHERE at >= ? ORDER BY at", since).toArray() as unknown as Array<{ component: string; at: number; ok: number; detail: string | null }>;
+    const by = new Map<string, typeof rows>();
+    for (const r of rows) by.set(r.component, [...(by.get(r.component) ?? []), r]);
+    return [...by.entries()].map(([component, list]) => {
+      const failures = list.filter((r) => !r.ok);
+      let degradedMs = 0;
+      for (let i = 0; i < list.length; i++) {
+        if (!list[i]!.ok) degradedMs += (list[i + 1]?.at ?? Date.now()) - list[i]!.at;
+      }
+      const last = list[list.length - 1];
+      return {
+        component,
+        degradedNow: last ? !last.ok : false,
+        lastCheckAt: last?.at ?? null,
+        checks24h: list.length,
+        failed24h: failures.length,
+        lastFailureAt: failures[failures.length - 1]?.at ?? null,
+        lastFailureDetail: failures[failures.length - 1]?.detail ?? null,
+        degradedMinutes24h: Math.round(degradedMs / 60_000),
+      };
+    });
+  }
+
+  // ---- activity feed ----
+  async logActivity(actor: string, type: string, summary: string): Promise<void> {
+    this.ctx.storage.sql.exec("INSERT INTO activity (at, actor, type, summary) VALUES (?, ?, ?, ?)", new Date().toISOString(), actor, type, summary.slice(0, 300));
+    this.ctx.storage.sql.exec("DELETE FROM activity WHERE id <= (SELECT MAX(id) FROM activity) - 500");
+  }
+  async listActivity(limit: number): Promise<ActivityRow[]> {
+    return this.ctx.storage.sql.exec("SELECT id, at, actor, type, summary FROM activity ORDER BY id DESC LIMIT ?", Math.min(limit, 200)).toArray() as unknown as ActivityRow[];
+  }
+
+  async setVerificationPolicy(policy: Record<string, unknown>): Promise<void> {
+    const s = this.load();
+    s.verificationPolicy = policy;
+    s.policyVersion += 1;
+    this.save();
+    await this.logActivity("owner", "config.updated", "Verification settings changed");
+  }
+
+  /** Delete everything this project stores (account deletion / repository deletion). */
+  async destroy(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+    this.state = null;
   }
 
   async getBilling(): Promise<{ plan: "free" | "pro"; status: string; subscriptionId?: string; updatedAt: string }> {
@@ -180,6 +461,7 @@ export class RepositoryController extends DurableObject<Env> {
         s.decisions[decision.id] = decision;
         a.status = b.status = "needs_decision";
         this.save();
+        await this.emit("decision.needed", { decision: decision.id, question: decision.question });
         return { decision };
       }
     }
@@ -265,6 +547,8 @@ export class RepositoryController extends DurableObject<Env> {
     }
     this.releaseLease();
     this.save();
+    await this.emit("change.accepted", { commit: j.newHead, changes: c.participatingTaskIds, tree: j.candidateTree ?? null });
+    await this.logActivity("FlareGit", "integration.accepted", `Accepted ${j.newHead.slice(0, 7)} (${c.participatingTaskIds.join(" + ")})`);
   }
 
   async abortPublish(candidateId: string, journalId: string | undefined, reason: string, outcome: "failed" | "stale"): Promise<void> {
@@ -283,6 +567,8 @@ export class RepositoryController extends DurableObject<Env> {
     }
     this.releaseLease();
     this.save();
+    if (outcome === "failed") await this.emit("change.blocked", { changes: c.participatingTaskIds, reason: reason.slice(0, 280) });
+    await this.logActivity("FlareGit", outcome === "stale" ? "integration.stale" : "integration.blocked", outcome === "stale" ? "Base moved; will recompose" : `Blocked: ${reason}`.slice(0, 280));
   }
 
   async resolveDecision(decisionId: string, selectedOptionId: string): Promise<{ taskIds: string[] }> {

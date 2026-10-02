@@ -1,7 +1,7 @@
 import type { Task } from "../core/types.js";
 
 const matches = (file: string, patterns: readonly string[]) =>
-  patterns.some((p) => (p.endsWith("/") ? file.startsWith(p) : p.endsWith("/**/*") ? file.startsWith(p.slice(0, -4)) : file === p));
+  patterns.some((p) => p === "*" || (p.endsWith("/") ? file.startsWith(p) : p.endsWith("/**/*") ? file.startsWith(p.slice(0, -4)) : file === p));
 
 export function inAgentScope(task: Pick<Task, "allowedScope">, file: string): boolean {
   return matches(file, task.allowedScope);
@@ -12,7 +12,7 @@ export function isProtectedPath(file: string, protectedPaths: readonly string[])
 }
 
 /** Prompt shared by the local and cloud agents. `files` are the current in-scope source files. */
-export function buildAgentPrompt(task: Task, agentName: string, files: Record<string, string>): string {
+export function buildAgentPrompt(task: Task, agentName: string, files: Record<string, string>, checkCommand?: string): string {
   const requirements = task.requirements.map((r) => `- ${r.title}: ${r.description}`).join("\n");
   const context = Object.entries(files)
     .map(([f, c]) => `<current path="${f}">\n${c}\n</current>`)
@@ -21,7 +21,8 @@ export function buildAgentPrompt(task: Task, agentName: string, files: Record<st
     `You are ${agentName}, a coding agent working in an isolated git workspace.`,
     `Task: ${task.goal}`,
     requirements ? `Requirements:\n${requirements}` : "",
-    `You may only change: ${task.allowedScope.join(", ")}.`,
+    `You may only change: ${task.allowedScope.map((x) => (x === "*" ? "any source file" : x)).join(", ")}.`,
+    checkCommand ? `Your change is only accepted if the project's protected check passes: ${checkCommand}` : "",
     "Implement the task by rewriting whole files. Keep every existing behavior that the task does not change.",
     "Do not touch tests, CI, package manifests or verification config. Import every type you use; do not invent types or exports.",
     "",

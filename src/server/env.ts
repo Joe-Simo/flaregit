@@ -6,6 +6,7 @@ export interface Env {
   INTEGRATOR: DurableObjectNamespace<import("./integrator.js").IntegratorSandbox>;
   AGENT: DurableObjectNamespace<import("./integrator.js").AgentSandbox>;
   SCENARIO_WORKFLOW: Workflow;
+  AGENT_WORKFLOW: Workflow;
   INTEGRATION_WORKFLOW: Workflow;
   INTEGRATION_QUEUE: Queue<QueueMessage>;
   EVIDENCE_BUCKET: R2Bucket;
@@ -24,6 +25,10 @@ export interface Env {
   PREVIEW_ORIGIN: string;
   AI_GATEWAY_ID?: string;
   /** Daily model-backed run allowance per plan (spend control). */
+  /** Platform-wide ceiling on model-backed runs per UTC day, across all customers (spend control). */
+  GLOBAL_RUNS_PER_DAY?: string;
+  /** Set to "false" to stop all model-backed runs immediately (kill switch). */
+  RUNS_ENABLED?: string;
   FREE_RUNS_PER_DAY?: string;
   PRO_RUNS_PER_DAY?: string;
   /** Polar billing: product for the Pro plan, API environment, and secrets set with `wrangler secret put`. */
@@ -36,4 +41,6 @@ export interface Env {
 
 export type QueueMessage =
   | { type: "git.push"; projectId: string; taskId: string; commit: string; ready: boolean; eventId: string }
-  | { type: "integration.requested"; projectId: string; taskIds: [string, string]; eventId: string };
+  | { type: "integration.requested"; projectId: string; taskIds: [string, string]; eventId: string }
+  | { type: "webhook.deliver"; projectId: string; deliveryId: string }
+  | { type: "probe"; sentAt: number };

@@ -15,7 +15,7 @@ export interface ArtifactsBinding {
   delete(name: string): Promise<boolean>;
 }
 
-interface ArtifactsRepoCapability {
+export interface ArtifactsRepoCapability {
   info(): Promise<Record<string, any>>;
   createToken(scope?: "read" | "write", ttl?: number): Promise<{ plaintext: string; expiresAt?: string }>;
   revokeToken(tokenOrId: string): Promise<boolean>;
@@ -23,6 +23,8 @@ interface ArtifactsRepoCapability {
   log(opts?: Record<string, unknown>): Promise<Array<Record<string, any>>>;
   readCommit(hash: string): Promise<Record<string, any> | null>;
   readFile(args: { ref: string; path: string }): Promise<Blob | null>;
+  readTree(hash: string): Promise<Array<{ name: string; mode: string; hash: string; type: "blob" | "tree" | string }> | null>;
+  readBlob(hash: string): Promise<Blob | null>;
 }
 
 const toCommit = (c: Record<string, any>): ArtifactsCommit => ({

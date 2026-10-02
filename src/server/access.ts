@@ -1,5 +1,6 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import type { Env } from "./env.js";
+import { accountOf } from "./projects.js";
 
 const jwks = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
@@ -16,6 +17,8 @@ export interface Identity {
   /** Stable, unique subject (Clerk user id or Access subject); the tenant key is derived from it. */
   id: string;
   email?: string;
+  /** True when the request used a personal API token (such requests cannot create or manage tokens). */
+  viaToken?: boolean;
 }
 
 /**
@@ -23,6 +26,15 @@ export interface Identity {
  * issuer, expiry and authorized party. Fails closed when Clerk is not configured.
  */
 export async function authenticate(request: Request, env: Env): Promise<Identity | Response> {
+  const bearer = request.headers.get("Authorization");
+  const raw = bearer?.startsWith("Bearer ") ? bearer.slice(7) : undefined;
+  // Personal API token: fgt_<accountKey>_<secret>. The account instance holds the hash and the owning user id.
+  if (raw?.startsWith("fgt_")) {
+    const m = /^fgt_([0-9a-f]{12})_([A-Za-z0-9]{32,64})$/.exec(raw);
+    if (!m) return new Response("Unauthorized", { status: 401 });
+    const userId = await accountOf(env, m[1]!).verifyApiToken(raw).catch(() => null);
+    return userId ? { id: userId, viaToken: true } : new Response("Unauthorized", { status: 401 });
+  }
   if (!env.CLERK_ISSUER) return new Response("Authentication is not configured", { status: 503 });
   const header = request.headers.get("Authorization");
   const token = header?.startsWith("Bearer ") ? header.slice(7) : undefined;

@@ -18,9 +18,11 @@ export function DecisionModal({
   onDismiss,
   isResolving,
 }: DecisionModalProps) {
-  const [selectedId, setSelectedId] = useState<string>("discount_tickets_only");
+  const [chosen, setChosen] = useState<string>("");
 
   if (!decision) return null;
+  const selectedId = chosen || decision.options[0]?.id || "";
+  const setSelectedId = setChosen;
 
   return (
     <Dialog open={true} onOpenChange={() => onDismiss()}>
@@ -59,11 +61,7 @@ export function DecisionModal({
                     <span className="text-sm font-bold text-foreground">
                       {opt.label}
                     </span>
-                    {opt.id === "discount_tickets_only" && (
-                      <Badge variant="outline" className="text-[10px] text-primary border-primary/30">
-                        Recommended
-                      </Badge>
-                    )}
+                    
                   </div>
                   <p className="text-xs text-muted-foreground mt-1">
                     {opt.description}

@@ -1,210 +1,64 @@
-import { RepositoryController } from "./durable-object.js";
+import { RepositoryController, type Ledger } from "./durable-object.js";
 import { FlareGitIntegrationWorkflow } from "./workflow.js";
+import { FlareGitScenarioWorkflow } from "./scenario-workflow.js";
+import { FlareGitAgentWorkflow } from "./agent-workflow.js";
 import { handleQueueBatch } from "./queue.js";
 import { authenticate } from "./access.js";
-import { FlareGitScenarioWorkflow, ledgerOf } from "./scenario-workflow.js";
-import { PROTECTED_PATHS, gitAuthEnv, projectIdFor, q } from "./shell.js";
+import { gitAuthEnv, q } from "./shell.js";
 import { ensureBuild } from "./build.js";
 import { billingFromEvent, createCheckout, planLimits, reportUsage, verifyPolarWebhook } from "./polar.js";
 import { TICKET_BOOKING_POLICY } from "../fixtures/ticket-booking/policy.js";
+import { DEFAULT_PROTECTED_PATHS, isCommandPolicy, settingsFor, type CommandPolicy } from "../core/command-policy.js";
+import { currentStatus, runProbes, statusPage } from "./status.js";
+import { diffTrees, listCommits, listDirectory, readBlobByHash, readFileText, resolveCommit } from "./browse.js";
+import { validateWebhookUrl } from "./webhooks.js";
+import { PROJECT_ID, accountKeyFor, accountOf, admitRun, canonicalNameFor, newProjectId, projectOf, taskRepoName } from "./projects.js";
 import type { Env, QueueMessage } from "./env.js";
+import type { Task } from "../core/types.js";
 
-export { RepositoryController, FlareGitIntegrationWorkflow, FlareGitScenarioWorkflow };
+export { RepositoryController, FlareGitIntegrationWorkflow, FlareGitScenarioWorkflow, FlareGitAgentWorkflow };
 export { IntegratorSandbox, AgentSandbox } from "./integrator.js";
 
-const COMMIT = /^[0-9a-f]{40}$/;
+const TASK_ID = /^[a-z0-9][a-z0-9-]{2,40}$/;
+const json = (data: unknown, status = 200) => Response.json(data, { status });
+const text = (message: string, status: number) => new Response(message, { status });
+const clean = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    // The publishable key is public by design; the SPA needs it before the user can sign in.
-    if (url.pathname === "/auth-config" && request.method === "GET") {
-      return Response.json({ publishableKey: env.CLERK_PUBLISHABLE_KEY ?? null });
+    if (url.pathname === "/health") return json({ ok: true });
+    if (url.pathname === "/status.json") {
+      const rows = await currentStatus(env);
+      return Response.json({ degraded: rows.filter((r) => r.degradedNow).map((r) => r.label), components: rows }, { headers: { "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" } });
     }
+    if (url.pathname === "/status") return new Response(statusPage(await currentStatus(env)), { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
 
-    // Polar webhooks are not behind login (Polar cannot log in); the HMAC signature is the authentication.
+    // The publishable key is public by design; the SPA needs it before the user can sign in.
+    if (url.pathname === "/auth-config" && request.method === "GET") return json({ publishableKey: env.CLERK_PUBLISHABLE_KEY ?? null });
+
+    // Polar webhooks cannot log in; the HMAC signature is the authentication.
     if (url.pathname === "/webhooks/polar" && request.method === "POST") {
       const body = await request.text();
       let event: unknown;
       try {
         event = await verifyPolarWebhook(body, request.headers, env.POLAR_WEBHOOK_SECRET);
       } catch {
-        return new Response("Invalid signature", { status: 401 });
+        return text("Invalid signature", 401);
       }
       const change = billingFromEvent(event, env.POLAR_PRODUCT_ID);
-      if (change) await ledgerOf(env, change.projectId).setBilling(change.billing);
+      if (change) await accountOf(env, change.projectId).setBilling(change.billing);
       return new Response(null, { status: 202 });
     }
 
-    if (url.pathname.startsWith("/api/")) {
-      const auth = await authenticate(request, env);
-      if (auth instanceof Response) return auth;
-      const projectId = await projectIdFor(auth.id);
-      const { success: withinLimit } = await env.API_LIMITER.limit({ key: projectId });
-      if (!withinLimit) return new Response("Too many requests. Please slow down.", { status: 429, headers: { "Retry-After": "60" } });
-      const ledger = ledgerOf(env, projectId);
-
-      if (url.pathname === "/api/config" && request.method === "GET") return Response.json({ aiConfigured: true, previewBase: env.PREVIEW_ORIGIN });
-      // Create the canonical Artifacts repo, seed it from the fixture inside the integrator container,
-      // and initialize the ledger with the real head. Idempotent.
-      if (url.pathname === "/api/projects/bootstrap" && request.method === "POST") {
-        try {
-          return Response.json(await bootstrap(env, projectId));
-        } catch (err) {
-          return new Response(err instanceof Error ? err.message : "bootstrap failed", { status: 500 });
-        }
-      }
-
-      if (url.pathname === "/api/scenarios/run" && request.method === "POST") {
-        const body = (await request.json().catch(() => ({}))) as { act?: string };
-        if (body.act !== "act1" && body.act !== "act2" && body.act !== "act3") return new Response("act must be act1, act2 or act3", { status: 400 });
-        const { plan } = await ledger.getBilling();
-        const limit = planLimits(env)[plan];
-        const quota = await ledger.consumeRun(limit);
-        if (!quota.allowed) {
-          return new Response(`Daily run limit reached on the ${plan} plan (${quota.used}/${limit}). Upgrade at /api/billing/checkout.`, { status: 429 });
-        }
-        const runId = Date.now().toString(36);
-        ctx.waitUntil(reportUsage(env, projectId, "scenario_run", `${projectId}-${runId}`, { act: body.act ?? "", plan }));
-        const instance = await env.SCENARIO_WORKFLOW.create({ id: `scn-${projectId}-${runId}`, params: { projectId, act: body.act, runId } });
-        return Response.json({ instanceId: instance.id }, { status: 202 });
-      }
-
-      // Humans (or any git client) participate with plain git: create a task, push to its fork, mark it ready.
-      if (url.pathname === "/api/tasks" && request.method === "POST") {
-        const body = (await request.json().catch(() => ({}))) as { taskId?: string; goal?: string; allowedScope?: string[] };
-        if (!body.taskId || !/^[a-z0-9][a-z0-9-]{2,40}$/.test(body.taskId) || !body.goal) {
-          return new Response("taskId (3-41 chars: a-z, 0-9, -) and goal are required", { status: 400 });
-        }
-        try {
-          const state = await ledger.getState();
-          const canonical = await env.ARTIFACTS.get(state.canonicalRepoName);
-          const repoName = `task-${projectId}-${body.taskId}`;
-          const fork = await canonical.fork(repoName, { description: body.goal });
-          const forkRepo = await env.ARTIFACTS.get(repoName);
-          const token = (await forkRepo.createToken("write", 3600)).plaintext;
-          const now = new Date().toISOString();
-          await ledger.createTask({
-            id: body.taskId,
-            goal: body.goal,
-            contributor: { id: `human-${await projectIdFor(auth.id)}`, name: auth.email ?? `user-${auth.id.slice(-6)}`, type: "human" },
-            baseCommit: state.acceptedState.currentCommit,
-            allowedScope: body.allowedScope ?? ["src/"],
-            status: "working",
-            requirements: [],
-            workspace: { repoName, remote: fork.remote, branch: `task/${body.taskId}` },
-            checkpoints: [],
-            currentCommit: state.acceptedState.currentCommit,
-            createdAt: now,
-            updatedAt: now,
-          });
-          return Response.json({
-            remote: fork.remote,
-            branch: `task/${body.taskId}`,
-            token,
-            howTo: `git -c http.extraHeader="Authorization: Bearer <token>" clone ${fork.remote} && git checkout -b task/${body.taskId} && (edit, commit) && git -c http.extraHeader="Authorization: Bearer <token>" push origin task/${body.taskId}`,
-          });
-        } catch (err) {
-          return new Response(err instanceof Error ? err.message : "could not create task", { status: 500 });
-        }
-      }
-
-      const ready = /^\/api\/tasks\/([a-z0-9-]+)\/ready$/.exec(url.pathname);
-      if (ready && request.method === "POST") {
-        const state = await ledger.getState();
-        const task = state.tasks[ready[1]!];
-        if (!task) return new Response("Unknown task", { status: 404 });
-        const repo = await env.ARTIFACTS.get(task.workspace.repoName);
-        const head = (await repo.log({ ref: `refs/heads/${task.workspace.branch}`, limit: 1 }))[0]?.hash ?? (await repo.log({ ref: task.workspace.branch, limit: 1 }))[0]?.hash;
-        if (!head) return new Response(`Nothing pushed to ${task.workspace.branch} yet`, { status: 409 });
-        const { applied } = await ledger.ingestCheckpoint({ eventId: `ready-${task.id}-${head}`, taskId: task.id, commit: head, ready: true });
-        return Response.json({ task: task.id, commit: head, applied });
-      }
-
-      if (url.pathname === "/api/integrations" && request.method === "POST") {
-        const body = (await request.json().catch(() => ({}))) as { taskIds?: string[] };
-        if (!Array.isArray(body.taskIds) || body.taskIds.length !== 2) return new Response("taskIds must list exactly two tasks", { status: 400 });
-        const { plan } = await ledger.getBilling();
-        const quota = await ledger.consumeRun(planLimits(env)[plan]);
-        if (!quota.allowed) return new Response("Daily run limit reached", { status: 429 });
-        const eventId = `integ-${projectId}-${Date.now().toString(36)}`;
-        await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds: body.taskIds as [string, string], eventId } satisfies QueueMessage);
-        return Response.json({ queued: eventId }, { status: 202 });
-      }
-
-      const cancel = /^\/api\/tasks\/([\w-]+)\/cancel$/.exec(url.pathname);
-      if (cancel && request.method === "POST") {
-        try {
-          await ledger.cancelTask(cancel[1]!);
-          return Response.json({ cancelled: cancel[1] });
-        } catch (err) {
-          return new Response(err instanceof Error ? err.message : "cannot cancel", { status: 409 });
-        }
-      }
-
-      if (url.pathname.startsWith("/api/workflows/") && request.method === "GET") {
-        const id = decodeURIComponent(url.pathname.split("/")[3] ?? "");
-        if (!id.includes(projectId)) return new Response("Not found", { status: 404 });
-        const wf = id.startsWith("scn-") ? env.SCENARIO_WORKFLOW : env.INTEGRATION_WORKFLOW;
-        return Response.json(await (await wf.get(id)).status());
-      }
-
-      if (url.pathname === "/api/billing" && request.method === "GET") {
-        const billing = await ledger.getBilling();
-        const limit = planLimits(env)[billing.plan];
-        return Response.json({ ...billing, runsToday: await ledger.usageToday(), runsPerDay: limit, checkoutConfigured: Boolean(env.POLAR_PRODUCT_ID && env.POLAR_ACCESS_TOKEN) });
-      }
-
-      if (url.pathname === "/api/billing/checkout" && request.method === "POST") {
-        try {
-          const checkoutUrl = await createCheckout(env, { projectId, email: auth.email ?? "", successUrl: `${url.origin}/?checkout=success` });
-          return Response.json({ url: checkoutUrl });
-        } catch (err) {
-          return new Response(err instanceof Error ? err.message : "checkout failed", { status: 503 });
-        }
-      }
-
-      if (url.pathname === "/api/state" && request.method === "GET") {
-        try {
-          const state = await ledger.getState();
-          // Make sure the accepted commit has a stored preview build (seed commits have none until built once).
-          ctx.waitUntil(ensureBuild(env, projectId, state.acceptedState.currentCommit, state.canonicalRepoName).catch((e) => console.error("preview build failed", String(e))));
-          return Response.json(state);
-        } catch {
-          return Response.json({ error: "not_initialized" }, { status: 404 });
-        }
-      }
-
-      if (url.pathname === "/api/decisions/resolve" && request.method === "POST") {
-        const body = (await request.json()) as { decisionId?: string; selectedOptionId?: string };
-        if (!body.decisionId || !body.selectedOptionId) return new Response("decisionId and selectedOptionId required", { status: 400 });
-        const { taskIds } = await ledger.resolveDecision(body.decisionId, body.selectedOptionId);
-        if (taskIds.length === 2) {
-          const eventId = `decision-${projectId}-${body.decisionId}`;
-          await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds: taskIds as [string, string], eventId } satisfies QueueMessage);
-        }
-        return Response.json({ resolved: true });
-      }
-
-      // Git push notifications (from Artifacts hooks or the contributor tooling) become queue events.
-      if (url.pathname === "/api/events/push" && request.method === "POST") {
-        const body = (await request.json()) as Partial<Extract<QueueMessage, { type: "git.push" }>>;
-        if (!body.taskId || !body.commit || !COMMIT.test(body.commit) || !body.eventId) return new Response("taskId, 40-hex commit and eventId required", { status: 400 });
-        await env.INTEGRATION_QUEUE.send({ type: "git.push", projectId, taskId: body.taskId, commit: body.commit, ready: Boolean(body.ready), eventId: body.eventId });
-        return new Response(null, { status: 202 });
-      }
-      return new Response("Not found", { status: 404 });
-    }
-
-    // Preview of the exact accepted build: served only from builds stored against a verified commit.
     const preview = /^\/preview\/([0-9a-f]{40})(\/.*)?$/.exec(url.pathname);
     if (url.pathname.startsWith("/preview/")) {
-      if (!preview) return new Response("Not found", { status: 404 });
+      if (!preview) return text("Not found", 404);
       const rel = (preview[2] ?? "/").replace(/^\/+/, "") || "index.html";
-      if (rel.split("/").includes("..")) return new Response("Not found", { status: 404 });
+      if (rel.split("/").includes("..")) return text("Not found", 404);
       const object = await env.EVIDENCE_BUCKET.get(`builds/${preview[1]}/${rel}`);
-      if (!object) return new Response("No verified build stored for this commit", { status: 404 });
+      if (!object) return text("No verified build stored for this commit", 404);
       return new Response(object.body, {
         headers: {
           "Content-Type": object.httpMetadata?.contentType ?? "application/octet-stream",
@@ -216,7 +70,374 @@ export default {
       });
     }
 
-    return env.ASSETS.fetch(request);
+    if (!url.pathname.startsWith("/api/")) return env.ASSETS.fetch(request);
+
+    const auth = await authenticate(request, env);
+    if (auth instanceof Response) return auth;
+    const userId = auth.id;
+    const accountKey = await accountKeyFor(userId);
+    const { success: withinLimit } = await env.API_LIMITER.limit({ key: accountKey });
+    if (!withinLimit) return new Response("Too many requests. Please slow down.", { status: 429, headers: { "Retry-After": "60" } });
+    const account = accountOf(env, accountKey);
+    const path = url.pathname.slice(4); // strip "/api"
+    const method = request.method;
+    const body = async <T>() => ((await request.json().catch(() => ({}))) as T) ?? ({} as T);
+
+    try {
+      // ---------- account level ----------
+      if (path === "/config" && method === "GET") return json({ previewBase: env.PREVIEW_ORIGIN });
+
+      if (path === "/account" && method === "GET") {
+        let projects = await account.listProjects();
+        if (projects.length === 0) projects = await adoptLegacyProject(env, account, accountKey, userId);
+        // Hide repositories this user no longer belongs to (deleted, or removed as a member).
+        const visible = [];
+        for (const p of projects) {
+          const role = await projectOf(env, p.id).roleOf(userId).catch(() => null);
+          if (role) visible.push({ ...p, role });
+          else await account.removeProject(p.id);
+        }
+        const billing = await account.getBilling();
+        return json({
+          userId: accountKey,
+          projects: visible,
+          plan: billing.plan,
+          runsToday: await account.usageToday(),
+          runsPerDay: planLimits(env)[billing.plan],
+          checkoutConfigured: Boolean(env.POLAR_PRODUCT_ID && env.POLAR_ACCESS_TOKEN),
+        });
+      }
+
+      if (path === "/billing" && method === "GET") {
+        const billing = await account.getBilling();
+        return json({ ...billing, runsToday: await account.usageToday(), runsPerDay: planLimits(env)[billing.plan], checkoutConfigured: Boolean(env.POLAR_PRODUCT_ID && env.POLAR_ACCESS_TOKEN) });
+      }
+      if (path === "/billing/checkout" && method === "POST") {
+        return json({ url: await createCheckout(env, { projectId: accountKey, email: auth.email ?? "", successUrl: `${url.origin}/?checkout=success` }) });
+      }
+
+      // ----- personal API tokens (Clerk session only: a token cannot mint or list tokens) -----
+      if (path === "/tokens" || path.startsWith("/tokens/")) {
+        if (auth.viaToken) return text("Manage tokens from the web app", 403);
+        if (path === "/tokens" && method === "GET") return json(await account.listApiTokens());
+        if (path === "/tokens" && method === "POST") {
+          const b = await body<{ label?: string }>();
+          const secret = [...crypto.getRandomValues(new Uint8Array(24))].map((x) => x.toString(16).padStart(2, "0")).join("");
+          const token = `fgt_${accountKey}_${secret}`;
+          const created = await account.createApiToken(userId, clean(b.label, 60) || "CLI", token);
+          return json({ id: created.id, token, note: "Copy this token now; it is not shown again." }, 201);
+        }
+        const tokRoute = /^\/tokens\/(tok_[a-z0-9-]+)$/.exec(path);
+        if (tokRoute && method === "DELETE") {
+          await account.revokeApiToken(tokRoute[1]!);
+          return json({ revoked: tokRoute[1] });
+        }
+      }
+
+      if (path === "/projects" && method === "POST") {
+        const b = await body<{ kind?: string; name?: string; url?: string; branch?: string; install?: string; build?: string; test?: string }>();
+        const existing = await account.listProjects();
+        if (existing.length >= 10) return text("Repository limit reached (10).", 409);
+        const name = clean(b.name, 60) || "my-repo";
+        if (!/^[A-Za-z0-9._ -]{1,60}$/.test(name)) return text("Use letters, numbers, spaces, '.', '_' and '-' in the name.", 400);
+        const projectId = newProjectId();
+        if (b.kind === "import") {
+          const created = await importRepository(env, { projectId, name, userId, url: clean(b.url, 300), branch: clean(b.branch, 80), install: clean(b.install, 300), build: clean(b.build, 300), test: clean(b.test, 300) });
+          await account.addProject({ id: projectId, name, role: "owner", kind: "import" });
+          return json({ id: projectId, ...created }, 201);
+        }
+        const created = await createDemoRepository(env, projectId, name, userId);
+        await account.addProject({ id: projectId, name, role: "owner", kind: "demo" });
+        return json({ id: projectId, ...created }, 201);
+      }
+
+      if (path === "/join" && method === "POST") {
+        const b = await body<{ projectId?: string; token?: string; name?: string }>();
+        if (!b.projectId || !PROJECT_ID.test(b.projectId) || !b.token) return text("Invalid invite", 400);
+        const project = projectOf(env, b.projectId);
+        const ok = await project.acceptInvite(b.token, userId, clean(b.name, 60) || `member-${userId.slice(-6)}`);
+        if (!ok) return text("This invite is invalid, expired or already used.", 410);
+        const state = await project.getState();
+        await account.addProject({ id: b.projectId, name: state.projectName, role: "member", kind: state.kind ?? "demo" });
+        return json({ id: b.projectId });
+      }
+
+      // ---------- project level: /p/:id/... ----------
+      const m = /^\/p\/([a-z0-9]{12,16})(\/.*)?$/.exec(path);
+      if (m) {
+        const projectId = m[1]!;
+        const sub = m[2] ?? "";
+        const project = projectOf(env, projectId);
+        const role = await project.roleOf(userId).catch(() => null);
+        if (!role) return text("Not found", 404);
+        const state = await project.getState().catch(() => null);
+        if (!state) return text("Not found", 404);
+        const settings = settingsFor(state.verificationPolicy);
+        const isOwner = role === "owner";
+
+        if (sub === "" && method === "GET") return json({ id: projectId, role, kind: state.kind ?? "demo", name: state.projectName, source: state.source ?? null, verification: state.verificationPolicy, protectedPaths: settings.protectedPaths });
+
+        if (sub === "/state" && method === "GET") {
+          if (settings.fixture === "ticket-booking") {
+            ctx.waitUntil(ensureBuild(env, projectId, state.acceptedState.currentCommit, state.canonicalRepoName).catch((e) => console.error("preview build failed", String(e))));
+          }
+          return json({ ...state, role });
+        }
+
+        if (sub === "/activity" && method === "GET") return json(await project.listActivity(60));
+
+        // ----- code browser -----
+        if (sub === "/commits" && method === "GET") {
+          const repo = await env.ARTIFACTS.get(state.canonicalRepoName);
+          return json(await listCommits(repo, url.searchParams.get("ref") ?? undefined, Number(url.searchParams.get("limit") ?? 30), Number(url.searchParams.get("offset") ?? 0)));
+        }
+        if ((sub === "/tree" || sub === "/blob") && method === "GET") {
+          const repo = await env.ARTIFACTS.get(state.canonicalRepoName);
+          const commit = await resolveCommit(repo, url.searchParams.get("ref") ?? undefined);
+          if (!commit) return text("Nothing here yet", 404);
+          const p = url.searchParams.get("path") ?? "";
+          try {
+            return json(sub === "/tree" ? { commit, entries: await listDirectory(repo, commit, p) } : { commit, path: p, ...(await readFileText(repo, commit, p)) });
+          } catch (e) {
+            return text(e instanceof Error ? e.message : "Not found", 404);
+          }
+        }
+
+        // ----- diffs: a commit against its parent, or a change against the commit it started from -----
+        if (sub === "/diff" && method === "GET") {
+          const commitParam = url.searchParams.get("commit");
+          const taskParam = url.searchParams.get("task");
+          let repoName = state.canonicalRepoName;
+          let baseCommit: string | undefined;
+          let headCommit: string | undefined;
+          if (taskParam) {
+            const task = state.tasks[taskParam];
+            if (!task) return text("Unknown change", 404);
+            repoName = task.workspace.repoName;
+            baseCommit = task.baseCommit;
+            headCommit = task.currentCommit;
+          } else if (commitParam && /^[0-9a-f]{40}$/.test(commitParam)) {
+            headCommit = commitParam;
+          } else {
+            return text("Pass ?commit=<sha> or ?task=<id>", 400);
+          }
+          const repo = await env.ARTIFACTS.get(repoName);
+          const head = await resolveCommit(repo, headCommit);
+          if (!head) return text("Commit not found", 404);
+          const base = baseCommit ? await resolveCommit(repo, baseCommit) : head.parents[0] ? await resolveCommit(repo, head.parents[0]) : null;
+          const files = await diffTrees(repo, base?.treeHash, head.treeHash);
+          return json({ repo: taskParam ? `task:${taskParam}` : "canonical", base: base?.hash ?? null, head, files });
+        }
+        if (sub === "/blob-by-hash" && method === "GET") {
+          const hash = url.searchParams.get("hash") ?? "";
+          const taskParam = url.searchParams.get("task");
+          if (!/^[0-9a-f]{40}$/.test(hash)) return text("Invalid hash", 400);
+          const repoName = taskParam ? state.tasks[taskParam]?.workspace.repoName : state.canonicalRepoName;
+          if (!repoName) return text("Unknown change", 404);
+          const repo = await env.ARTIFACTS.get(repoName);
+          return json(await readBlobByHash(repo, hash));
+        }
+
+        // ----- clone credentials (read-only, short-lived) -----
+        if (sub === "/clone" && method === "POST") {
+          const repo = await env.ARTIFACTS.get(state.canonicalRepoName);
+          const remote = String((await repo.info()).remote);
+          const token = (await repo.createToken("read", 3600)).plaintext;
+          return json({ remote, token, expiresInSeconds: 3600, command: `git -c http.extraHeader="Authorization: Bearer ${token}" clone ${remote}` });
+        }
+
+        // ----- changes (tasks) -----
+        if (sub === "/tasks" && method === "POST") {
+          const b = await body<{ taskId?: string; goal?: string; name?: string }>();
+          const goal = clean(b.goal, 300);
+          if (!b.taskId || !TASK_ID.test(b.taskId) || !goal) return text("taskId (3-41 chars: a-z, 0-9, -) and goal are required", 400);
+          if (state.tasks[b.taskId]) return text("A change with that id already exists", 409);
+          const canonical = await env.ARTIFACTS.get(state.canonicalRepoName);
+          const repoName = taskRepoName(projectId, b.taskId);
+          const fork = await canonical.fork(repoName, { description: goal });
+          const forkRepo = await env.ARTIFACTS.get(repoName);
+          const token = (await forkRepo.createToken("write", 3600)).plaintext;
+          const now = new Date().toISOString();
+          const task: Task = {
+            id: b.taskId,
+            goal,
+            contributor: { id: userId.slice(-12), name: clean(b.name, 60) || `member-${userId.slice(-6)}`, type: "human" },
+            baseCommit: state.acceptedState.currentCommit,
+            allowedScope: settings.allowedScope,
+            status: "working",
+            requirements: [],
+            workspace: { repoName, remote: fork.remote, branch: `task/${b.taskId}` },
+            checkpoints: [],
+            currentCommit: state.acceptedState.currentCommit,
+            createdAt: now,
+            updatedAt: now,
+          };
+          await project.createTask(task);
+          return json({
+            task: b.taskId,
+            remote: fork.remote,
+            branch: task.workspace.branch,
+            token,
+            expiresInSeconds: 3600,
+            commands: [
+              `git -c http.extraHeader="Authorization: Bearer ${token}" clone ${fork.remote} ${b.taskId} && cd ${b.taskId}`,
+              `git checkout -b ${task.workspace.branch}   # edit, then commit`,
+              `git -c http.extraHeader="Authorization: Bearer ${token}" push origin ${task.workspace.branch}`,
+            ],
+          }, 201);
+        }
+
+        const tokenRoute = /^\/tasks\/([a-z0-9-]+)\/token$/.exec(sub);
+        if (tokenRoute && method === "POST") {
+          const task = state.tasks[tokenRoute[1]!];
+          if (!task || task.status === "accepted" || task.status === "cancelled") return text("Change is not open", 404);
+          const token = (await (await env.ARTIFACTS.get(task.workspace.repoName)).createToken("write", 3600)).plaintext;
+          return json({ remote: task.workspace.remote, branch: task.workspace.branch, token, expiresInSeconds: 3600 });
+        }
+
+        const taskRoute = /^\/tasks\/([a-z0-9-]+)\/(ready|cancel|agent)$/.exec(sub);
+        if (taskRoute && method === "POST") {
+          const task = state.tasks[taskRoute[1]!];
+          if (!task) return text("Unknown change", 404);
+          const action = taskRoute[2];
+          if (action === "cancel") {
+            await project.cancelTask(task.id);
+            ctx.waitUntil(env.ARTIFACTS.delete(task.workspace.repoName).catch(() => false));
+            return json({ cancelled: task.id });
+          }
+          if (action === "ready") {
+            const repo = await env.ARTIFACTS.get(task.workspace.repoName);
+            const head = (await repo.log({ ref: `refs/heads/${task.workspace.branch}`, limit: 1 }))[0]?.hash ?? (await repo.log({ ref: task.workspace.branch, limit: 1 }))[0]?.hash;
+            if (!head) return text(`Nothing pushed to ${task.workspace.branch} yet`, 409);
+            const { applied } = await project.ingestCheckpoint({ eventId: `ready-${task.id}-${head}`, taskId: task.id, commit: head, ready: true });
+            return json({ task: task.id, commit: head, applied });
+          }
+          // AI agent works on this change
+          const { plan } = await account.getBilling();
+          const denied = await admitRun(env, account, planLimits(env)[plan]);
+          if (denied) return denied;
+          const instance = await env.AGENT_WORKFLOW.create({ id: `agent-${projectId}-${task.id}-${Date.now().toString(36)}`, params: { projectId, taskId: task.id } });
+          ctx.waitUntil(reportUsage(env, accountKey, "agent_run", instance.id, { plan }));
+          return json({ instanceId: instance.id }, 202);
+        }
+
+        if (sub === "/integrations" && method === "POST") {
+          const b = await body<{ taskIds?: string[] }>();
+          if (!Array.isArray(b.taskIds) || b.taskIds.length !== 2 || b.taskIds[0] === b.taskIds[1]) return text("taskIds must list exactly two different changes", 400);
+          const { plan } = await account.getBilling();
+          const denied = await admitRun(env, account, planLimits(env)[plan]);
+          if (denied) return denied;
+          const eventId = `integ-${projectId}-${Date.now().toString(36)}`;
+          await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds: b.taskIds as [string, string], eventId } satisfies QueueMessage);
+          return json({ queued: eventId }, 202);
+        }
+
+        if (sub === "/decisions/resolve" && method === "POST") {
+          const b = await body<{ decisionId?: string; selectedOptionId?: string }>();
+          if (!b.decisionId || !b.selectedOptionId) return text("decisionId and selectedOptionId required", 400);
+          const { taskIds } = await project.resolveDecision(b.decisionId, b.selectedOptionId);
+          if (taskIds.length === 2) await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds: taskIds as [string, string], eventId: `decision-${projectId}-${b.decisionId}` } satisfies QueueMessage);
+          return json({ resolved: true });
+        }
+
+        if (sub === "/scenarios/run" && method === "POST") {
+          if (state.kind === "import") return text("Scenarios run only on the demo repository", 400);
+          const b = await body<{ act?: string }>();
+          if (b.act !== "act1" && b.act !== "act2" && b.act !== "act3") return text("act must be act1, act2 or act3", 400);
+          const { plan } = await account.getBilling();
+          const denied = await admitRun(env, account, planLimits(env)[plan]);
+          if (denied) return denied;
+          const runId = Date.now().toString(36);
+          const instance = await env.SCENARIO_WORKFLOW.create({ id: `scn-${projectId}-${runId}`, params: { projectId, act: b.act, runId } });
+          ctx.waitUntil(reportUsage(env, accountKey, "scenario_run", `${projectId}-${runId}`, { act: b.act, plan }));
+          return json({ instanceId: instance.id }, 202);
+        }
+
+        const wf = /^\/workflows\/([\w-]+)$/.exec(sub);
+        if (wf && method === "GET") {
+          const id = wf[1]!;
+          if (!id.includes(projectId)) return text("Not found", 404);
+          const flow = id.startsWith("scn-") ? env.SCENARIO_WORKFLOW : id.startsWith("agent-") ? env.AGENT_WORKFLOW : env.INTEGRATION_WORKFLOW;
+          return json(await (await flow.get(id)).status());
+        }
+
+        // ----- collaborators -----
+        if (sub === "/members" && method === "GET") return json(await project.listMembers());
+        if (sub === "/invites" && method === "POST") {
+          if (!isOwner) return text("Only the owner can invite", 403);
+          const token = await project.createInvite(userId);
+          return json({ url: `${url.origin}/#/join/${projectId}/${token}`, expiresInDays: 7 });
+        }
+        const memberRoute = /^\/members\/([\w-]+)$/.exec(sub);
+        if (memberRoute && method === "DELETE") {
+          if (!isOwner && memberRoute[1] !== userId) return text("Only the owner can remove members", 403);
+          await project.removeMember(memberRoute[1]!);
+          return json({ removed: memberRoute[1] });
+        }
+
+        // ----- outgoing webhooks -----
+        if (sub === "/webhooks" && method === "GET") return json(await project.listWebhooks());
+        if (sub === "/webhooks" && method === "POST") {
+          if (!isOwner) return text("Only the owner can add webhooks", 403);
+          const b = await body<{ url?: string; events?: string[] }>();
+          let target: URL;
+          try {
+            target = validateWebhookUrl(clean(b.url, 300));
+          } catch (e) {
+            return text(e instanceof Error ? e.message : "Invalid URL", 400);
+          }
+          if ((await project.listWebhooks()).length >= 10) return text("Webhook limit reached (10).", 409);
+          const created = await project.addWebhook(target.toString(), Array.isArray(b.events) && b.events.length > 0 ? b.events : ["change.accepted", "change.blocked"]);
+          return json({ ...created, note: "Store this signing secret now; it is not shown again." }, 201);
+        }
+        const hookRoute = /^\/webhooks\/(wh_[a-z0-9-]+)$/.exec(sub);
+        if (hookRoute && method === "DELETE") {
+          if (!isOwner) return text("Only the owner can remove webhooks", 403);
+          await project.removeWebhook(hookRoute[1]!);
+          return json({ removed: hookRoute[1] });
+        }
+        if (sub === "/deliveries" && method === "GET") return json(await project.listDeliveries(50));
+        const redeliverRoute = /^\/deliveries\/(dlv_[a-z0-9-]+)\/redeliver$/.exec(sub);
+        if (redeliverRoute && method === "POST") {
+          if (!isOwner) return text("Only the owner can redeliver", 403);
+          return (await project.redeliver(redeliverRoute[1]!)) ? json({ queued: redeliverRoute[1] }) : text("Unknown delivery", 404);
+        }
+
+        // ----- settings -----
+        if (sub === "/config" && method === "PATCH") {
+          if (!isOwner) return text("Only the owner can change settings", 403);
+          if (!isCommandPolicy(state.verificationPolicy)) return text("The demo repository's checks are fixed", 400);
+          const b = await body<Partial<CommandPolicy>>();
+          const next: CommandPolicy = {
+            ...state.verificationPolicy,
+            install: clean(b.install ?? state.verificationPolicy.install, 300) || undefined,
+            build: clean(b.build ?? state.verificationPolicy.build, 300) || undefined,
+            test: clean(b.test ?? state.verificationPolicy.test, 300) || state.verificationPolicy.test,
+            protectedPaths: Array.isArray(b.protectedPaths) ? b.protectedPaths.map((x) => clean(x, 120)).filter(Boolean).slice(0, 60) : state.verificationPolicy.protectedPaths,
+          };
+          await project.setVerificationPolicy(next as unknown as Record<string, unknown>);
+          return json({ ok: true });
+        }
+
+        if (sub === "" && method === "DELETE") {
+          if (!isOwner) return text("Only the owner can delete a repository", 403);
+          for (const t of Object.values(state.tasks)) await env.ARTIFACTS.delete(t.workspace.repoName).catch(() => false);
+          await env.ARTIFACTS.delete(state.canonicalRepoName).catch(() => false);
+          await project.destroy();
+          await account.removeProject(projectId);
+          return json({ deleted: projectId });
+        }
+      }
+
+      return text("Not found", 404);
+    } catch (err) {
+      console.error("api error", method, path, err instanceof Error ? err.message : String(err));
+      return text(err instanceof Error ? err.message : "Internal error", 500);
+    }
+  },
+
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(runProbes(env));
   },
 
   async queue(batch: MessageBatch<QueueMessage>, env: Env): Promise<void> {
@@ -224,47 +445,87 @@ export default {
   },
 };
 
-async function bootstrap(env: Env, projectId: string) {
-  const ledger = ledgerOf(env, projectId);
-  const canonicalName = `${env.CANONICAL_REPO}-${projectId}`;
+/** Existing customers had a single hash-keyed project before multi-repo support; keep it as their first repository. */
+async function adoptLegacyProject(env: Env, account: Ledger, accountKey: string, userId: string) {
   try {
-    const existing = await ledger.getState();
-    return { status: "already_initialized", head: existing.acceptedState.currentCommit };
+    const legacy = projectOf(env, accountKey);
+    const state = await legacy.getState();
+    if (!(await legacy.roleOf(userId))) await legacy.addMember(userId, "owner");
+    await account.addProject({ id: accountKey, name: state.projectName || "demo", role: "owner", kind: state.kind ?? "demo" });
+    return account.listProjects();
   } catch {
-    /* not initialized yet */
+    return [];
   }
-  // Resumable: the repo may exist from an interrupted earlier attempt.
-  let remote: string;
-  let token: string;
-  try {
-    const created = await env.ARTIFACTS.create(canonicalName, { description: "FlareGit canonical repository" });
-    remote = created.remote;
-    token = created.token ?? "";
-  } catch {
-    const repo = await env.ARTIFACTS.get(canonicalName);
-    remote = String((await repo.info()).remote);
-    token = (await repo.createToken("write", 1800)).plaintext;
-  }
+}
+
+async function createDemoRepository(env: Env, projectId: string, name: string, userId: string) {
+  const ledger = projectOf(env, projectId);
+  const canonicalName = canonicalNameFor(projectId);
+  const created = await env.ARTIFACTS.create(canonicalName, { description: `FlareGit demo repository for ${name}` });
   const sb = env.INTEGRATOR.getByName(`bootstrap-${projectId}`);
   const run = (cmd: string, e?: Record<string, string>) => sb.exec(["sh", "-c", cmd], { env: e });
   const seed = "/workspace/seed";
-  const auth = gitAuthEnv(token);
-  let head = (await run(`git ls-remote ${q(remote)} refs/heads/main`, auth)).stdout.split("\t")[0]?.trim() ?? "";
-  if (!head) {
+  try {
     const r = await run(
-      `rm -rf ${seed} && mkdir -p ${seed} && cp -r /opt/flaregit/src/fixtures/ticket-booking/template/. ${seed}/ && cd ${seed} && git init -q -b main && git add -A && git -c user.name=FlareGit -c user.email=system@flaregit.com commit -q -m ${q("Initial accepted version")} && git push -q ${q(remote)} main:main`,
-      auth
+      `rm -rf ${seed} && mkdir -p ${seed} && cp -r /opt/flaregit/src/fixtures/ticket-booking/template/. ${seed}/ && cd ${seed} && git init -q -b main && git add -A && git -c user.name=FlareGit -c user.email=system@flaregit.com commit -q -m ${q("Initial accepted version")} && git push -q ${q(created.remote)} main:main`,
+      gitAuthEnv(created.token ?? "")
     );
     if (!r.success) throw new Error(`seed failed: ${r.stderr.slice(-400)}`);
-    head = (await run(`git -C ${seed} rev-parse HEAD`)).stdout.trim();
+    const head = (await run(`git -C ${seed} rev-parse HEAD`)).stdout.trim();
+    await ledger.initialize({ projectId, projectName: name, canonicalRepoName: canonicalName, head, verificationPolicy: { ...TICKET_BOOKING_POLICY }, kind: "demo", defaultBranch: "main", ownerId: userId });
+    return { head, kind: "demo" };
+  } catch (e) {
+    await env.ARTIFACTS.delete(canonicalName).catch(() => false);
+    throw e;
+  } finally {
+    await sb.destroy().catch(() => undefined);
   }
-  await sb.destroy();
-  await ledger.initialize({
-    projectId,
-    projectName: "Ticket checkout",
-    canonicalRepoName: canonicalName,
-    head,
-    verificationPolicy: { ...TICKET_BOOKING_POLICY },
+}
+
+async function importRepository(
+  env: Env,
+  o: { projectId: string; name: string; userId: string; url: string; branch: string; install: string; build: string; test: string }
+) {
+  let source: URL;
+  try {
+    source = new URL(o.url);
+  } catch {
+    throw new Error("Enter a valid repository URL, for example https://github.com/owner/repo");
+  }
+  if (source.protocol !== "https:" || source.username || source.password) throw new Error("Only public https:// repository URLs are supported (no embedded credentials).");
+  if (!o.test) throw new Error("A test command is required: it is the protected check every change must pass.");
+  const canonicalName = canonicalNameFor(o.projectId);
+  const imported = await env.ARTIFACTS.import({
+    source: { url: source.toString(), ...(o.branch ? { branch: o.branch } : {}), depth: 200 },
+    target: { name: canonicalName, opts: { description: `Imported from ${source.host}${source.pathname}` } },
   });
-  return { status: "initialized", head, protectedPaths: PROTECTED_PATHS };
+  try {
+    const repo = await env.ARTIFACTS.get(canonicalName);
+    const head = (await repo.log({ limit: 1 }))[0]?.hash;
+    if (!head) throw new Error("The imported repository has no commits.");
+    const defaultBranch = String((await repo.info()).defaultBranch ?? "main");
+    const policy: CommandPolicy = {
+      kind: "command",
+      ...(o.install ? { install: o.install } : {}),
+      ...(o.build ? { build: o.build } : {}),
+      test: o.test,
+      allowedScope: ["*"],
+      protectedPaths: DEFAULT_PROTECTED_PATHS,
+    };
+    await projectOf(env, o.projectId).initialize({
+      projectId: o.projectId,
+      projectName: o.name,
+      canonicalRepoName: canonicalName,
+      head,
+      verificationPolicy: policy as unknown as Record<string, unknown>,
+      kind: "import",
+      defaultBranch,
+      ownerId: o.userId,
+      source: source.toString(),
+    });
+    return { head, kind: "import", remote: imported.remote };
+  } catch (e) {
+    await env.ARTIFACTS.delete(canonicalName).catch(() => false);
+    throw e;
+  }
 }

@@ -6,12 +6,12 @@ import type { Env } from "./env.js";
 import type { ClaimResult, Ledger, PrepareResult } from "./durable-object.js";
 import { gitAuthEnv, q } from "./shell.js";
 import { ledgerOf } from "./scenario-workflow.js";
+import { settingsFor } from "../core/command-policy.js";
+import { inAgentScope, isProtectedPath } from "../agents/prompt.js";
 
 export interface IntegrationParams {
   projectId: string;
   taskIds: [string, string];
-  fixture: "ticket-booking" | "shipping-calculator";
-  protectedPaths: string[];
 }
 
 const WORK = "/workspace/integration";
@@ -44,12 +44,21 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       return { status: prepared.stale ? "stale" : "blocked", error: prepared.error };
     }
 
-    const pushed = await step.do("cas-push-to-artifacts", { retries: { limit: 2, delay: "5 seconds", backoff: "exponential" } }, async () => this.casPush(candidate, integrated.commit, stub));
+    const pushed = await step.do("cas-push-to-artifacts", { retries: { limit: 2, delay: "5 seconds", backoff: "exponential" } }, async () => this.casPush(candidate, integrated.commit, stub, integrated.branch));
     if (!pushed.ok) {
       await step.do("abort-push", async () => stub.abortPublish(candidate.id, prepared.journal!.id, pushed.error, pushed.stale ? "stale" : "failed"));
       return { status: pushed.stale ? "stale" : "blocked", error: pushed.error };
     }
     await step.do("complete-publish", async () => stub.completePublish(prepared.journal!.id));
+    // The accepted commits now live in the canonical repository; the task forks are no longer needed.
+    await step.do("cleanup-forks", async () => {
+      const st = await stub.getState();
+      for (const id of candidate.participatingTaskIds) {
+        const t = st.tasks[id];
+        if (t && t.status === "accepted") await this.env.ARTIFACTS.delete(t.workspace.repoName).catch(() => false);
+      }
+      return { cleaned: true };
+    });
     return { status: "accepted", commit: integrated.commit, evidenceId: integrated.evidenceId };
   }
 
@@ -72,7 +81,8 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     candidate: CandidateGeneration,
     params: IntegrationParams,
     stub: Stub
-  ): Promise<{ ok: true; commit: string; evidenceId: string } | { ok: false; error: string }> {
+  ): Promise<{ ok: true; commit: string; evidenceId: string; branch: string } | { ok: false; error: string }> {
+    const settings = settingsFor(candidate.frozenVerificationPolicy);
     const sb = this.sandbox(`integrate-${candidate.id}`);
     const run = async (cmd: string, env?: Record<string, string>) => sb.exec(cmd, env);
     const state = await stub.getState();
@@ -81,6 +91,8 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
 
     let r = await run(`rm -rf ${WORK} && git clone --quiet ${q(canonical.remote)} ${WORK}`, gitAuthEnv(canonical.token));
     if (!r.success) return { ok: false, error: "Could not clone canonical repository" };
+    // The clone's HEAD names the remote's real default branch (Artifacts metadata can differ for imported repos).
+    const branch = (await run(`git -C ${WORK} symbolic-ref --short HEAD`)).stdout.trim() || state.defaultBranch || "main";
     await run(`git -C ${WORK} config user.name FlareGit && git -C ${WORK} config user.email integrator@flaregit.com && git -C ${WORK} checkout --quiet --detach ${q(candidate.expectedAcceptedBase)}`);
 
     for (const t of tasks) {
@@ -91,7 +103,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       const head = (await run(`git -C ${WORK} rev-parse refs/flaregit/tasks/${t.id}`)).stdout.trim();
       if (!r.success || head !== candidate.participatingCommits[t.id]) return { ok: false, error: `Task ${t.id} head does not match the frozen checkpoint` };
       const touched = (await run(`git -C ${WORK} diff --name-only ${q(candidate.expectedAcceptedBase)} ${head}`)).stdout.split("\n").filter(Boolean);
-      const bad = touched.filter((f) => params.protectedPaths.some((p) => (p.endsWith("/") ? f.startsWith(p) : f === p)) || !f.startsWith("src/"));
+      const bad = touched.filter((f) => isProtectedPath(f, settings.protectedPaths) || !inAgentScope({ allowedScope: settings.allowedScope }, f));
       if (bad.length) return { ok: false, error: `Contributor change rejected: ${bad.join(", ")}` };
     }
 
@@ -104,7 +116,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       for (const f of files) contents[f] = (await sb.readFile(`${WORK}/${f}`)).content;
       const prompt = buildRepairPrompt({
         repoDir: WORK, candidate, taskA: tasks[0], taskB: tasks[1], round, conflictType: type,
-        editableFiles: files, fileContents: contents, failureEvidence: evidence, protectedPaths: params.protectedPaths, model: ai.asModel(),
+        editableFiles: files, fileContents: contents, failureEvidence: evidence, protectedPaths: settings.protectedPaths, model: ai.asModel(),
       });
       const proposed = parseRepairResponse(await ai.complete(prompt));
       if (proposed.size === 0) return false;
@@ -125,40 +137,47 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     for (;;) {
       const commit = (await run(`git -C ${WORK} rev-parse HEAD`)).stdout.trim();
       const v = await run(
-        `cd /opt/flaregit && bun src/core/verification/cli.ts ${params.fixture} ${WORK} ${commit} ${candidate.expectedAcceptedBase} ${candidate.frozenPolicyVersion} ${q(JSON.stringify(candidate.frozenVerificationPolicy))}`
+        `cd /opt/flaregit && bun src/core/verification/cli.ts ${settings.fixture} ${WORK} ${commit} ${candidate.expectedAcceptedBase} ${candidate.frozenPolicyVersion} ${q(JSON.stringify(candidate.frozenVerificationPolicy))}`
       );
       if (!v.success) return { ok: false, error: `Verifier crashed: ${v.stderr.slice(-500)}` };
       const evidence = JSON.parse(v.stdout.trim().split("\n").at(-1)!) as VerificationEvidence;
       await stub.recordVerification(candidate.id, commit, evidence);
       if (evidence.status === "passed") {
         // Build the exact verified commit and store it under that commit hash for immutable previews.
-        const built = await run(`cd ${WORK} && ln -sfn /opt/flaregit/node_modules node_modules && rm -rf /tmp/build-out && bun build index.html --outdir /tmp/build-out --minify`);
+        // Only web apps with an index.html get a stored preview; other repositories are verified and accepted without one.
+        const hasPage = (await run(`test -f ${WORK}/index.html`)).success && settings.fixture === "ticket-booking";
+        const built = hasPage
+          ? await run(`cd ${WORK} && ln -sfn /opt/flaregit/node_modules node_modules && rm -rf /tmp/build-out && bun build index.html --outdir /tmp/build-out --minify`)
+          : { success: true, stderr: "" };
         if (!built.success) return { ok: false, error: `Build failed: ${built.stderr.slice(-400)}` };
-        const files = (await run("cd /tmp/build-out && find . -type f")).stdout.split("\n").filter(Boolean);
+        const files = hasPage ? (await run("cd /tmp/build-out && find . -type f")).stdout.split("\n").filter(Boolean) : [];
         for (const f of files) {
           const rel = f.replace(/^\.\//, "");
           const type = rel.endsWith(".html") ? "text/html; charset=utf-8" : rel.endsWith(".js") ? "text/javascript" : rel.endsWith(".css") ? "text/css" : "application/octet-stream";
           await this.env.EVIDENCE_BUCKET.put(`builds/${commit}/${rel}`, (await sb.readFile(`/tmp/build-out/${rel}`)).content, { httpMetadata: { contentType: type } });
         }
         await this.env.EVIDENCE_BUCKET.put(`evidence/${evidence.id}.json`, JSON.stringify(evidence), { httpMetadata: { contentType: "application/json" }, customMetadata: { commit, tree: evidence.candidateTree } });
-        return { ok: true, commit, evidenceId: evidence.id };
+        return { ok: true, commit, evidenceId: evidence.id, branch };
       }
-      const editable = (await run(`git -C ${WORK} ls-files src`)).stdout.split("\n").filter((f) => /\.(ts|tsx|css|json|html)$/.test(f));
+      const editable = (await run(`git -C ${WORK} ls-files`)).stdout
+        .split("\n")
+        .filter((f) => f && inAgentScope({ allowedScope: settings.allowedScope }, f) && !isProtectedPath(f, settings.protectedPaths) && /\.(ts|tsx|js|jsx|mjs|css|json|html|md|py|go|rs|rb|java|c|h|cpp|sh)$/.test(f))
+        .slice(0, 40);
       if (!(await repair("behavior_failure", editable, evidence))) return { ok: false, error: "Protected verification failed and repair did not fix it" };
     }
   }
 
   /** Compare-and-swap: only moves main if it still equals the verified base. */
-  private async casPush(candidate: CandidateGeneration, commit: string, stub: Stub): Promise<{ ok: true } | { ok: false; error: string; stale?: boolean }> {
+  private async casPush(candidate: CandidateGeneration, commit: string, stub: Stub, branch: string): Promise<{ ok: true } | { ok: false; error: string; stale?: boolean }> {
     const sb = this.sandbox(`integrate-${candidate.id}`);
     const canonical = await this.canonicalRemote(stub);
     const head = (await sb.exec(`git -C ${WORK} rev-parse HEAD`)).stdout.trim();
     if (head !== commit) return { ok: false, error: "Workspace head differs from the verified commit" };
     const res = await sb.exec(
-      `git -C ${WORK} push --quiet --force-with-lease=refs/heads/main:${q(candidate.expectedAcceptedBase)} ${q(canonical.remote)} ${commit}:refs/heads/main`,
+      `git -C ${WORK} push --quiet --force-with-lease=refs/heads/${branch}:${q(candidate.expectedAcceptedBase)} ${q(canonical.remote)} ${commit}:refs/heads/${branch}`,
       gitAuthEnv(canonical.token)
     );
     if (res.success) return { ok: true };
-    return { ok: false, error: "Canonical ref update refused", stale: /stale info|rejected/i.test(res.stderr) };
+    return { ok: false, error: `Canonical ref update refused: ${res.stderr.replace(/Bearer [^\s"]+/g, "Bearer ***").slice(-300).trim()}`, stale: /stale info/i.test(res.stderr) };
   }
 }
