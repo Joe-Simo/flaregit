@@ -182,3 +182,15 @@ Cloudflare's [official rules](https://www.cloudflare.com/documents/build-next-ge
 The [human submission form](https://www.cloudflare.com/git-competition/submit/) requires the project vision, Cloudflare usage, repository URL, run instructions, team/contact details, and video upload (MP4, WebM, or MOV, maximum 2 GiB). No entry has been submitted by these instructions.
 
 A live read of GitHub metadata on October 2 returned [Joe-Simo/flaregit](https://github.com/Joe-Simo/flaregit) as **PRIVATE**, with Apache-2.0 detected. Public open-source access remains a delivery gate; recheck visibility before using that URL in the submission. A private repository with a LICENSE is not evidence of public publication.
+
+## Observed local AI run — October 2, 2026
+
+`bun run demo` ran two Workers AI coding agents concurrently through `Promise.all` in separate real Git workspaces for each act, using `@cf/openai/gpt-oss-120b`. These are local controller results with a live Cloudflare model; they do not verify hosted Artifacts containers or the hosted human-review gate. The local scenario controller accepts verified candidates automatically.
+
+| Act | Observed result | Recoverable accepted commit |
+|---|---|---|
+| Overlapping edits | Native text conflict; two repair rounds; protected verification passed | `4baf67b933b84299be1cb638c40fbd7d2ddfaa0f` |
+| Clean merge, broken behavior | Protected verification detected failure; two repair rounds; verification passed | `7dc4e11e4d36c99403bbdedc658ad090a5ed5cea` |
+| Contradictory requirements | Paused: “Should the group discount apply to the refund fee?” | Accepted head remained `7dc4e11e4d36c99403bbdedc658ad090a5ed5cea` |
+
+Local receipts and repositories were retained at `.flaregit-storage/demo-run-0mcEuC/`, including `controller/flaregit-local.state.json` with six agent commits, five verification records, and two accepted publication journal entries. This ignored directory belongs to the observed workstation run; use `bun run demo` with your Cloudflare credentials to produce your own receipts. The competition recording and hosted acceptance gates remain pending.

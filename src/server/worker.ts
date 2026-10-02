@@ -1,4 +1,4 @@
-import { RepositoryController, type Ledger } from "./durable-object.js";
+import { RepositoryController } from "./durable-object.js";
 import { FlareGitIntegrationWorkflow } from "./workflow.js";
 import { FlareGitScenarioWorkflow } from "./scenario-workflow.js";
 import { FlareGitAgentWorkflow } from "./agent-workflow.js";
@@ -16,7 +16,7 @@ import { lookupTxt, normalizeDomain, txtHost, txtValue } from "./dns.js";
 import { isSafeRef } from "../core/sanitize.js";
 import { diffTrees, listCommits, listDirectory, readBlobByHash, readFileText, resolveCommit } from "./browse.js";
 import { validateWebhookUrl } from "./webhooks.js";
-import { PROJECT_ID, accountKeyFor, accountOf, admitRun, canonicalNameFor, globalOf, newProjectId, projectOf, taskRepoName } from "./projects.js";
+import { PROJECT_ID, accountKeyFor, accountOf, admitRun, adoptLegacyProject, canonicalNameFor, globalOf, newProjectId, projectOf, taskRepoName } from "./projects.js";
 import type { Env, QueueMessage } from "./env.js";
 import type { Task } from "../core/types.js";
 import { redactSecrets } from "../agents/prompt.js";
@@ -775,21 +775,6 @@ export default {
     await handleQueueBatch(batch, env);
   },
 };
-
-/** Existing customers had a single hash-keyed project before multi-repo support; keep it as their first repository. */
-async function adoptLegacyProject(env: Env, account: Ledger, accountKey: string, userId: string) {
-  try {
-    const legacy = projectOf(env, accountKey);
-    const state = await legacy.getState();
-    // An old namespace is not permission to restore ownership or revoked membership.
-    const role = await legacy.roleOf(userId);
-    if (!role) return [];
-    await account.addProject({ id: accountKey, name: state.projectName || "demo", role, kind: state.kind ?? "demo" });
-    return account.listProjects();
-  } catch {
-    return [];
-  }
-}
 
 async function createDemoRepository(env: Env, projectId: string, name: string, userId: string) {
   const ledger = projectOf(env, projectId);
