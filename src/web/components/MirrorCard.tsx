@@ -9,91 +9,119 @@ import { timeAgo } from "../router";
 type RunStatus = "ok" | "diverged" | "auth_failed" | "error" | "pending";
 interface MirrorRun { id: string; commit: string; status: RunStatus; detail: string; at: string }
 interface MirrorInfo { target: string | null; enabled: boolean; hasToken: boolean; runs: MirrorRun[] }
+type Busy = null | "save" | "toggle" | "remove" | "retry";
 
 const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm";
+const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive";
+const okCls = "rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200";
+const errText = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback);
 const LABEL: Record<RunStatus, string> = { ok: "Mirrored", diverged: "GitHub diverged", auth_failed: "Token rejected", error: "Failed", pending: "Queued" };
 const VARIANT: Record<RunStatus, "success" | "warning" | "destructive" | "secondary"> = { ok: "success", diverged: "warning", auth_failed: "destructive", error: "destructive", pending: "secondary" };
 
 export function MirrorCard({ projectId, isOwner }: { projectId: string; isOwner: boolean }) {
   const [info, setInfo] = useState<MirrorInfo | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [target, setTarget] = useState("");
   const [token, setToken] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState<Busy>(null);
 
-  const load = useCallback(() => {
-    apiJson<MirrorInfo>(`/p/${projectId}/mirror`).then(setInfo).catch(() => undefined);
+  const load = useCallback(async () => {
+    try {
+      setInfo(await apiJson<MirrorInfo>(`/p/${projectId}/mirror`));
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(errText(e, "Could not load mirror status"));
+    }
   }, [projectId]);
   useEffect(() => {
-    load();
-    const t = setInterval(load, 10000);
+    void load();
+    const t = setInterval(() => void load(), 10000);
     return () => clearInterval(t);
   }, [load]);
 
-  const guard = async (fn: () => Promise<void>) => {
-    setBusy(true);
+  const guard = async (label: Exclude<Busy, null>, done: string, fn: () => Promise<void>) => {
+    setBusy(label);
     setError(null);
+    setNotice(null);
     try {
       await fn();
-      load();
+      setNotice(done);
+      await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Something went wrong");
+      setError(errText(e, "Something went wrong"));
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
-  const save = () => guard(async () => {
+  const save = () => guard("save", "Mirror settings saved.", async () => {
     await apiJson(`/p/${projectId}/mirror`, { method: "PUT", json: { target: target || info?.target, token: token || undefined, enabled: true } });
     setToken("");
     setTarget("");
   });
-  const toggle = () => guard(async () => { await apiJson(`/p/${projectId}/mirror`, { method: "PUT", json: { enabled: !info?.enabled } }); });
-  const remove = () => guard(async () => { await apiJson(`/p/${projectId}/mirror`, { method: "DELETE" }); });
-  const retry = () => guard(async () => { await apiJson(`/p/${projectId}/mirror/run`, { method: "POST" }); });
+  const toggle = () => guard("toggle", info?.enabled ? "Mirror paused." : "Mirror resumed.", async () => { await apiJson(`/p/${projectId}/mirror`, { method: "PUT", json: { enabled: !info?.enabled } }); });
+  const remove = () => guard("remove", "Mirror removed.", async () => { await apiJson(`/p/${projectId}/mirror`, { method: "DELETE" }); });
+  const retry = () => guard("retry", "Mirror run queued.", async () => { await apiJson(`/p/${projectId}/mirror/run`, { method: "POST" }); });
 
   const last = info?.runs[0];
 
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-sm flex items-center gap-2">
+        <CardTitle className="text-sm flex flex-wrap items-center gap-2">
           Mirror to GitHub
           {info?.target && <Badge variant={info.enabled ? "secondary" : "outline"}>{info.enabled ? "On" : "Paused"}</Badge>}
           {last && last.status !== "ok" && <Badge variant={VARIANT[last.status]}>{LABEL[last.status]}</Badge>}
         </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-3 text-sm">
+      <CardContent className="space-y-3 text-sm min-w-0">
         <p className="text-muted-foreground">
           FlareGit stays the source of truth; GitHub is a copy. If GitHub is down or has diverged, nothing here is affected. Accepted work is pushed after it lands, never forced.
         </p>
+        {loadError && (
+          <div role="alert" className={`${alertCls} flex flex-wrap items-center justify-between gap-2`}>
+            <span>{loadError}</span>
+            <Button size="sm" variant="outline" onClick={() => void load()}>Retry</Button>
+          </div>
+        )}
+        {!info && !loadError && <p role="status" className="text-muted-foreground">Loading mirror status…</p>}
+        {info && !info.target && <p className="text-muted-foreground">No mirror configured.</p>}
         {info?.target && (
           <div className="flex flex-wrap items-center gap-2">
             <code className="text-xs break-all">{info.target}</code>
             {isOwner && (
               <>
-                <Button size="sm" variant="outline" disabled={busy} onClick={toggle}>{info.enabled ? "Pause" : "Resume"}</Button>
-                <Button size="sm" variant="outline" disabled={busy || !info.enabled} onClick={retry}><RotateCw className="h-3.5 w-3.5 mr-1" />Retry now</Button>
-                <Button size="sm" variant="ghost" disabled={busy} onClick={remove}>Remove</Button>
+                <Button size="sm" variant="outline" disabled={busy !== null} onClick={toggle}>{busy === "toggle" ? (info.enabled ? "Pausing…" : "Resuming…") : info.enabled ? "Pause" : "Resume"}</Button>
+                <Button size="sm" variant="outline" disabled={busy !== null || !info.enabled} onClick={retry}><RotateCw className="h-3.5 w-3.5 mr-1" />{busy === "retry" ? "Queuing…" : "Retry now"}</Button>
+                <Button size="sm" variant="ghost" disabled={busy !== null} onClick={remove}>{busy === "remove" ? "Removing…" : "Remove"}</Button>
               </>
             )}
           </div>
         )}
-        {isOwner && (
+        {isOwner && info && (
           <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); void save(); }}>
-            <input className={field} placeholder={info?.target ?? "https://github.com/owner/repo"} value={target} onChange={(e) => setTarget(e.target.value)} />
-            <input className={field} type="password" autoComplete="off" placeholder={info?.hasToken ? "Token saved — enter a new one to replace it" : "GitHub fine-grained token (Contents: read and write)"} value={token} onChange={(e) => setToken(e.target.value)} />
-            <Button size="sm" type="submit" disabled={busy || (!target && !info?.target) || (!token && !info?.hasToken)}>Save</Button>
+            <label className="block">
+              <span className="font-medium">GitHub repository URL</span>
+              <input className={field} placeholder={info.target ?? "https://github.com/owner/repo"} value={target} onChange={(e) => setTarget(e.target.value)} />
+            </label>
+            <label className="block">
+              <span className="font-medium">GitHub token</span>
+              <input className={field} type="password" autoComplete="off" placeholder={info.hasToken ? "Token saved — enter a new one to replace it" : "Fine-grained token (Contents: read and write)"} value={token} onChange={(e) => setToken(e.target.value)} />
+            </label>
+            <Button size="sm" type="submit" disabled={busy !== null || (!target && !info.target) || (!token && !info.hasToken)}>{busy === "save" ? "Saving…" : "Save"}</Button>
           </form>
         )}
-        {error && <p className="text-destructive">{error}</p>}
+        {error && <div role="alert" className={alertCls}>{error}</div>}
+        {notice && <div role="status" className={okCls}>{notice}</div>}
         {info && info.runs.length > 0 && (
           <ul className="divide-y divide-border">
             {info.runs.slice(0, 10).map((r) => (
               <li key={r.id} className="py-2 flex flex-col gap-1">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <Badge variant={VARIANT[r.status]}>{LABEL[r.status]}</Badge>
-                  <code className="text-xs">{r.commit.slice(0, 12)}</code>
+                  <code className="text-xs break-all">{r.commit.slice(0, 12)}</code>
                   <span className="text-xs text-muted-foreground ml-auto">{timeAgo(r.at)}</span>
                 </div>
                 {r.status !== "ok" && r.detail && <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-all">{r.detail}</pre>}

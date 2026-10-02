@@ -18,6 +18,8 @@ export function NewRepo() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const disabled = busy || (mode === "import" && (!url || !test || !name));
+
   const submit = async () => {
     setBusy(true);
     setError(null);
@@ -32,7 +34,7 @@ export function NewRepo() {
   };
 
   return (
-    <div className="max-w-2xl mx-auto px-6 py-8">
+    <div className="max-w-2xl mx-auto px-4 sm:px-6 py-8 min-w-0">
       <h1 className="text-xl font-bold mb-1">New repository</h1>
       <p className="text-sm text-muted-foreground mb-6">Changes are combined, repaired and verified automatically, and only changes that pass your checks are accepted.</p>
       <Card>
@@ -47,6 +49,7 @@ export function NewRepo() {
           </Tabs>
         </CardHeader>
         <CardContent className="space-y-4">
+          <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); if (!disabled) void submit(); }}>
           <label className="block text-sm">
             <span className="font-medium">Repository name</span>
             <input className={field} value={name} onChange={(e) => setName(e.target.value)} placeholder={mode === "import" ? "my-project" : "Ticket checkout"} maxLength={60} />
@@ -55,7 +58,7 @@ export function NewRepo() {
             <>
               <label className="block text-sm">
                 <span className="font-medium">Repository URL</span>
-                <input className={field} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://github.com/owner/repo" />
+                <input className={field} type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://github.com/owner/repo" />
                 <span className="text-xs text-muted-foreground">Public repositories only for now.</span>
               </label>
               <label className="block text-sm">
@@ -64,7 +67,7 @@ export function NewRepo() {
               </label>
               <div className="rounded-md border border-border p-3 space-y-3">
                 <div>
-                  <div className="text-sm font-semibold">Protected checks</div>
+                  <h2 className="text-sm font-semibold">Protected checks</h2>
                   <p className="text-xs text-muted-foreground">Commands FlareGit runs on every candidate. Contributors cannot change them, and tests and dependency files are protected from edits.</p>
                 </div>
                 <label className="block text-sm">
@@ -85,12 +88,14 @@ export function NewRepo() {
             <p className="text-sm text-muted-foreground">A ready-made ticket-checkout app with protected checks, for trying out parallel agents, conflicts and decisions.</p>
           )}
           {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>}
-          <div className="flex gap-2">
-            <Button variant="orange" disabled={busy || (mode === "import" && (!url || !test || !name))} onClick={submit}>
+          {busy && <p role="status" className="text-sm text-muted-foreground">{mode === "import" ? "Importing the repository. Large repositories can take a minute…" : "Creating the demo repository…"}</p>}
+          <div className="flex flex-wrap gap-2">
+            <Button type="submit" variant="orange" disabled={disabled}>
               {busy ? "Creating…" : mode === "import" ? "Import repository" : "Create demo repository"}
             </Button>
-            <Button variant="outline" onClick={() => navigate("/")} disabled={busy}>Cancel</Button>
+            <Button type="button" variant="outline" onClick={() => navigate("/")} disabled={busy}>Cancel</Button>
           </div>
+          </form>
         </CardContent>
       </Card>
     </div>

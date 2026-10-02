@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Bot, User } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { apiJson } from "../api";
 import { navigate, timeAgo } from "../router";
 
@@ -11,20 +12,40 @@ interface Person { kind: "human" | "agent"; name: string; handle?: string | null
 export function PeopleTab({ projectId }: { projectId: string }) {
   const [data, setData] = useState<{ humans: Person[]; agents: Person[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => { apiJson<{ humans: Person[]; agents: Person[] }>(`/p/${projectId}/people`).then(setData).catch((e: Error) => setError(e.message)); }, [projectId]);
+  const [loading, setLoading] = useState(false);
 
-  if (error) return <p role="alert" className="text-sm text-destructive">{error}</p>;
-  if (!data) return <p className="text-sm text-muted-foreground">Loading people…</p>;
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setData(await apiJson<{ humans: Person[]; agents: Person[] }>(`/p/${projectId}/people`));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load people");
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId]);
+  useEffect(() => { void load(); }, [load]);
+
+  if (error) {
+    return (
+      <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex flex-wrap items-center justify-between gap-2">
+        <span>{error}</span>
+        <Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? "Retrying…" : "Retry"}</Button>
+      </div>
+    );
+  }
+  if (!data) return <p role="status" className="text-sm text-muted-foreground">Loading people…</p>;
   const card = (p: Person) => (
-    <li key={`${p.kind}:${p.name}`} className="rounded-lg border border-border p-4 space-y-2">
-      <div className="flex items-center gap-2">
+    <li key={`${p.kind}:${p.name}`} className="rounded-lg border border-border p-4 space-y-2 min-w-0">
+      <div className="flex flex-wrap items-center gap-2">
         {p.kind === "agent" ? <Bot className="h-4 w-4 text-sky-400" aria-hidden /> : <User className="h-4 w-4" aria-hidden />}
-        <span className="font-semibold">{p.name}</span>
-        {p.handle && <span className="text-xs text-muted-foreground">@{p.handle}</span>}
+        <h3 className="font-semibold break-all">{p.name}</h3>
+        {p.handle && <span className="text-xs text-muted-foreground break-all">@{p.handle}</span>}
         {p.role && <Badge variant="outline">{p.role}</Badge>}
         {p.kind === "agent" && <Badge variant="info">AI agent</Badge>}
       </div>
-      {p.bio && <p className="text-sm text-muted-foreground">{p.bio}</p>}
+      {p.bio && <p className="text-sm text-muted-foreground break-words">{p.bio}</p>}
       <p className="text-xs text-muted-foreground">{p.accepted} accepted · {p.open} open · {p.changes} total{p.joinedAt ? ` · joined ${timeAgo(p.joinedAt)}` : ""}</p>
       {p.recent.length > 0 && (
         <ul className="text-sm space-y-1">
@@ -40,7 +61,10 @@ export function PeopleTab({ projectId }: { projectId: string }) {
   );
   return (
     <div className="space-y-6">
-      <section aria-labelledby="people-h"><h2 id="people-h" className="text-sm font-semibold mb-2">People</h2><ul className="grid gap-3 md:grid-cols-2">{data.humans.map(card)}</ul></section>
+      <section aria-labelledby="people-h">
+        <h2 id="people-h" className="text-sm font-semibold mb-2">People</h2>
+        {data.humans.length === 0 ? <p className="text-sm text-muted-foreground">No people yet.</p> : <ul className="grid gap-3 md:grid-cols-2">{data.humans.map(card)}</ul>}
+      </section>
       {data.agents.length > 0 && <section aria-labelledby="agents-h"><h2 id="agents-h" className="text-sm font-semibold mb-2">Agents</h2><ul className="grid gap-3 md:grid-cols-2">{data.agents.map(card)}</ul></section>}
     </div>
   );

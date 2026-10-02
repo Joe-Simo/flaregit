@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { GitBranch, Plus, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -14,39 +14,53 @@ export function Home() {
   const [account, setAccount] = useState<Account | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    apiJson<Account>("/account").then(setAccount).catch((e: Error) => setError(e.message));
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      setAccount(await apiJson<Account>("/account"));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load your repositories");
+    }
   }, []);
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
         <h1 className="text-xl font-bold">Your repositories</h1>
         <Button variant="orange" onClick={() => navigate("/new")}>
           <Plus className="h-4 w-4 mr-1.5" /> New repository
         </Button>
       </div>
-      {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-2 text-sm text-destructive mb-4">{error}</div>}
-      {!account && !error && <p className="text-sm text-muted-foreground">Loading…</p>}
+      {error && (
+        <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-2 text-sm text-destructive mb-4 flex flex-wrap items-center justify-between gap-2">
+          <span>{error}</span>
+          <Button size="sm" variant="outline" onClick={() => void load()}>Retry</Button>
+        </div>
+      )}
+      {!account && !error && <p role="status" className="text-sm text-muted-foreground">Loading repositories…</p>}
       {account && account.projects.length === 0 && (
         <Card>
           <CardContent className="py-12 text-center">
-            <GitBranch className="h-8 w-8 mx-auto mb-3 opacity-40" />
-            <p className="font-medium">No repositories yet</p>
+            <GitBranch className="h-8 w-8 mx-auto mb-3 opacity-40" aria-hidden />
+            <h2 className="font-medium">No repositories yet</h2>
             <p className="text-sm text-muted-foreground mt-1">Import a project from GitHub or start with the demo repository.</p>
             <Button className="mt-4" variant="orange" onClick={() => navigate("/new")}>Create your first repository</Button>
           </CardContent>
         </Card>
       )}
-      <div className="grid gap-3">
+      <ul className="grid gap-3">
         {account?.projects.map((p) => (
-          <button key={p.id} onClick={() => navigate(`/p/${p.id}`)} className="text-left">
+          <li key={p.id}>
+          <button type="button" onClick={() => navigate(`/p/${p.id}`)} className="w-full text-left rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
             <Card className="hover:border-primary/60 transition-colors">
-              <CardContent className="py-4 flex items-center justify-between gap-4">
+              <CardContent className="py-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
                 <div className="flex items-center gap-3 min-w-0">
-                  <Lock className="h-4 w-4 text-muted-foreground shrink-0" />
+                  <Lock className="h-4 w-4 text-muted-foreground shrink-0" aria-label="Private" />
                   <div className="min-w-0">
-                    <div className="font-semibold truncate">{p.name}</div>
+                    <h2 className="font-semibold truncate">{p.name}</h2>
                     <div className="text-xs text-muted-foreground">Created {timeAgo(p.created_at)}</div>
                   </div>
                 </div>
@@ -57,8 +71,9 @@ export function Home() {
               </CardContent>
             </Card>
           </button>
+          </li>
         ))}
-      </div>
+      </ul>
     </div>
   );
 }
