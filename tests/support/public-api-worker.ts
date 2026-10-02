@@ -15,6 +15,7 @@ export class PublicApiFixture extends DurableObject {
         calls++;
         return name !== "project:abcdef123456" || mode === "private" || (mode === "revoke" && calls > 1) ? null : grant;
       } }) },
+      LOOKUP_LIMITER: { limit: async ({ key }: { key: string }) => { if (key !== "flaregit:credential/lookups:192.0.2.1") throw new Error("Wrong lookup limiter identity"); return { success: true }; } },
       API_LIMITER: { limit: async ({ key }: { key: string }) => { if (key !== "public:abcdef123456:192.0.2.1") throw new Error("Wrong limiter identity"); return { success: mode !== "limit" }; } },
       ARTIFACTS: { get: async (name: string) => {
         if (name !== grant.canonicalRepoName) throw new Error("Wrong repository");
