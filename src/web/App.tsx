@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogHeader, DialogTitle, DialogClose } from "@/components/ui/dialog";
 import { BillingBar } from "./components/BillingBar";
 import { Home } from "./pages/Home";
+import { PublicParticipation } from "./pages/PublicParticipation";
 import { NewRepo } from "./pages/NewRepo";
 import { Repo } from "./pages/Repo";
 import { Join } from "./pages/Join";
@@ -72,7 +73,7 @@ export function App() {
     const check = () => fetch("/status.json").then((response) => response.json() as Promise<{ degraded: string[] }>).then((response) => setDegraded(response.degraded)).catch(() => undefined);
     void check(); const timer = setInterval(check, 60_000); return () => clearInterval(timer);
   }, []);
-  const section = route.name === "home" ? "Repositories" : route.name === "repo" ? "Repository" : route.name === "new" ? "New repository" : route.name === "inbox" ? "Inbox" : route.name === "account" ? "Account" : "Workspace";
+  const section = route.name === "home" ? "Repositories" : route.name === "repo" ? "Repository" : route.name === "new" ? "New repository" : route.name === "inbox" ? "Inbox" : route.name === "account" ? "Account" : route.name === "participate" ? "Public participation" : "Workspace";
   const nav = [{ name: "Repositories", path: "/", current: route.name === "home" || route.name === "repo", Icon: FolderGit2 }, { name: "Inbox", path: "/inbox", current: route.name === "inbox", Icon: InboxIcon }, { name: "Account", path: "/account", current: route.name === "account", Icon: Settings }];
   return (
     <div className="dashboard-shell min-h-screen bg-background text-foreground">
@@ -85,7 +86,7 @@ export function App() {
       <aside id="workspace-navigation" className={`dashboard-sidebar border-r border-border lg:fixed lg:inset-y-0 lg:left-0 lg:w-[240px] lg:flex flex-col ${sidebarOpen ? "flex border-b" : "hidden"}`}>
         <button className="h-14 px-5 flex items-center gap-2.5 border-b border-border font-semibold text-lg tracking-tight focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" onClick={() => { navigate("/"); setSidebarOpen(false); }} aria-label="FlareGit repositories"><span className="h-7 w-7 rounded-md bg-primary flex items-center justify-center text-primary-foreground"><GitBranch className="h-4 w-4" aria-hidden="true" /></span>FlareGit</button>
         <nav aria-label="Workspace" className="p-3 space-y-1">{nav.map(({ name, path, current, Icon }) => <Button key={path} variant="ghost" className="dashboard-nav w-full justify-start h-9 text-[13px] font-normal rounded-md" aria-current={current ? "page" : undefined} onClick={() => { navigate(path); setSidebarOpen(false); }}><Icon className="h-4 w-4 mr-2.5 text-muted-foreground" aria-hidden="true" />{name}{name === "Inbox" && unread > 0 && <span className="ml-auto text-[11px] rounded bg-primary/10 text-primary px-1.5">{unread}</span>}</Button>)}<Button variant="ghost" className="w-full justify-start h-9 text-[13px] font-normal text-muted-foreground" onClick={() => { navigate("/new"); setSidebarOpen(false); }}><Plus className="h-4 w-4 mr-2.5" aria-hidden="true" />New repository</Button></nav>
-        <div className="lg:mt-auto p-4 border-t border-border space-y-4"><div className="flex flex-wrap gap-x-3 gap-y-2 text-[11px] text-muted-foreground"><a href="/status" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Status</a><a href="#/report" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Report abuse</a><a href="mailto:support@flaregit.com" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Support</a></div></div>
+        <div className="lg:mt-auto p-4 border-t border-border space-y-4"><div className="flex flex-wrap gap-x-3 gap-y-2 text-[11px] text-muted-foreground"><a href="/docs" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Docs</a><a href="/status" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Status</a><a href="#/report" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Report abuse</a><a href="mailto:support@flaregit.com" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Support</a></div></div>
       </aside>
       <div className="lg:ml-[240px] min-w-0 flex flex-col min-h-[calc(100vh-3.5rem)]">
       {degraded.length > 0 && (
@@ -96,6 +97,7 @@ export function App() {
       <BillingBar refreshKey={0} />
       <main id="workspace-content" tabIndex={-1} className="flex-1 min-w-0">
         {route.name === "home" && <Home />}
+        {route.name === "participate" && <PublicParticipation key={route.projectId} projectId={route.projectId} />}
         {route.name === "new" && <NewRepo />}
         {route.name === "account" && <Account />}
         {route.name === "inbox" && <Inbox onCount={setUnread} />}

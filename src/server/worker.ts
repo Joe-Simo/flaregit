@@ -2,6 +2,7 @@ import { RepositoryController, WEBHOOK_EVENTS } from "./durable-object.js";
 import { FlareGitIntegrationWorkflow } from "./workflow.js";
 import { FlareGitScenarioWorkflow } from "./scenario-workflow.js";
 import { FlareGitAgentWorkflow } from "./agent-workflow.js";
+import { FlareGitImportHistoryWorkflow, importHistoryReceiptKey } from "./import-history-workflow.js";
 import { handleQueueBatch } from "./queue.js";
 import { authenticate } from "./access.js";
 import { gitAuthEnv, q } from "./shell.js";
@@ -22,7 +23,10 @@ import type { Task } from "../core/types.js";
 import { assertAgentWrites, redactSecrets } from "../agents/prompt.js";
 import { assertWorkflowControlPermission, controlWorkflow, WorkflowControlError } from "./workflow-control.js";
 import { inspectImport, startImport, type ImportJob, type ImportReadiness } from "./import-job.js";
+import { retainDeploymentTarget } from "./retain-deployment.js";
+import { deploymentRequestParametersSchema } from "./deployments.js";
 import { readPublicPlanPrice } from "./plan-price.js";
+import type { PublicCommunityPolicy } from "./public-community.js";
 import type { Ledger } from "./durable-object.js";
 import { validateImportSource, validateRepositoryCommand } from "./import-source.js";
 import { integrationCapabilities, verifyIntegrationCallback } from "./integration-auth.js";
@@ -30,7 +34,7 @@ import type { ExternalCheckPolicy } from "../core/external-checks.js";
 import { verifyServiceRead } from "./service-read-auth.js";
 import { parsePublicBrowseRequest, readPublicRepository } from "./public-repositories.js";
 
-export { RepositoryController, FlareGitIntegrationWorkflow, FlareGitScenarioWorkflow, FlareGitAgentWorkflow };
+export { RepositoryController, FlareGitIntegrationWorkflow, FlareGitScenarioWorkflow, FlareGitAgentWorkflow, FlareGitImportHistoryWorkflow };
 export { IntegratorSandbox, AgentSandbox } from "./integrator.js";
 
 const TASK_ID = /^[a-z0-9][a-z0-9-]{2,40}$/;
@@ -105,11 +109,25 @@ export default {
 
     if (!url.pathname.startsWith("/api/")) return env.ASSETS.fetch(request);
 
-    const publicRoute = /^\/api\/public\/(p?[0-9a-f]{12})\/(meta|history|tree|file|diff)$/.exec(url.pathname);
-    if (url.pathname.startsWith("/api/public/")) {
+    const publicRoute = /^\/api\/public\/(p?[0-9a-f]{12})\/(meta|history|tree|file|diff|community)$/.exec(url.pathname);
+    const publicParticipationRoute = /^\/api\/public\/(p?[0-9a-f]{12})\/community\/(posts|requests)(?:\/(post_[a-f0-9-]{36}))?$/.exec(url.pathname);
+    if (url.pathname.startsWith("/api/public/") && !publicParticipationRoute) {
       const publicResponse = (data: unknown, status = 200) => Response.json(data, { status, headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
       if (!publicRoute || request.method !== "GET") return publicResponse({ error: "Not found" }, 404);
       const projectId = publicRoute[1]!;
+      if (publicRoute[2] === "community") {
+        const project = projectOf(env, projectId);
+        const grant = await project.publicGrant().catch(() => null);
+        if (!grant) return publicResponse({ error: "Not found" }, 404);
+        const ip = request.headers.get("CF-Connecting-IP");
+        if (!ip) return publicResponse({ error: "Public browsing unavailable" }, 503);
+        const limited = await env.API_LIMITER.limit({ key: `public:${projectId}:${ip}` });
+        if (!limited.success) return publicResponse({ error: "Too many requests" }, 429);
+        const community = await project.publicCommunity();
+        const current = await project.publicGrant().catch(() => null);
+        if (!current || current.version !== grant.version) return publicResponse({ error: "Published state changed; retry" }, 409);
+        return publicResponse(community);
+      }
       const ip = request.headers.get("CF-Connecting-IP");
       if (!ip) return publicResponse({ error: "Public browsing unavailable" }, 503);
       const limited = await env.API_LIMITER.limit({ key: `public:${projectId}:${ip}` });
@@ -211,6 +229,45 @@ export default {
     };
 
     try {
+      if (publicParticipationRoute) {
+        const project = projectOf(env, publicParticipationRoute[1]!);
+        const participationGrant = await project.publicGrant().catch(() => null);
+        if (!participationGrant) return text("Not found", 404);
+        const profile = await account.getProfile();
+        const actor = { userId, accountKey, displayName: profile.displayName || "Contributor" };
+        const postId = publicParticipationRoute[3];
+        if (postId && publicParticipationRoute[2] !== "posts") return text("Not found", 404);
+        if (publicParticipationRoute[2] === "posts" && !postId && method === "GET") {
+          const posts = await project.signedPublicPosts(actor);
+          const current = await project.publicGrant().catch(() => null);
+          if (!current || current.version !== participationGrant.version) return text("Published state changed; reload", 409);
+          return Response.json(posts, {headers:{"Cache-Control":"no-store"}});
+        }
+        if (postId && method === "PATCH") {
+          try { return json(await project.editPublicPost(actor, postId, await body<{ title: string; body: string; expectedVersion: number }>())); }
+          catch (error) { if (error instanceof RequestBodyError) throw error; return text("Post was not changed; only its author or maintainer may edit public content", 409); }
+        }
+        if (postId && method === "DELETE") {
+          try { const value = await body<{expectedVersion:number}>(); await project.removePublicPost(actor, postId, value.expectedVersion); return json({ removed: true }); }
+          catch (error) { if (error instanceof RequestBodyError) throw error; return text("Post was not removed; check permission and reload the latest version", 409); }
+        }
+        if (publicParticipationRoute[2] === "posts" && !postId && method === "POST") {
+          try { return json(await project.createPublicPost(actor, await body<Parameters<typeof project.createPublicPost>[1]>()), 201); }
+          catch (error) { if (error instanceof RequestBodyError) throw error; return text("Public post was not saved; check enabled scopes, content and the retry key", 409); }
+        }
+        if (publicParticipationRoute[2] === "requests" && method === "POST") {
+          try { return json(await project.requestPublicContribution(actor, await body<Parameters<typeof project.requestPublicContribution>[1]>()), 201); }
+          catch (error) { if (error instanceof RequestBodyError) throw error; return text("Contribution request was not saved; check enabled scopes and content", 409); }
+        }
+        if (publicParticipationRoute[2] === "requests" && method === "GET") {
+          const requests = await project.publicContributionRequests(actor);
+          const currentRole = await project.roleOf(userId);
+          const current = await project.publicGrant().catch(() => null);
+          if (!current || current.version !== participationGrant.version) return text("Published state changed; reload", 409);
+          return Response.json({requests:currentRole === "owner" ? requests : requests.filter((item)=>item.requesterUserId===userId),accessActive:currentRole!==null},{headers:{"Cache-Control":"no-store"}});
+        }
+        return text("Not found", 404);
+      }
       // ---------- account level ----------
       if (path === "/config" && method === "GET") return json({ previewBase: env.PREVIEW_ORIGIN });
 
@@ -408,6 +465,43 @@ export default {
         const isOwner = role === "owner" && canAdminister;
 
         if (sub === "" && method === "GET") return json({ id: projectId, role, kind: state.kind ?? "demo", name: state.projectName, source: state.source ?? null, verification: state.verificationPolicy, protectedPaths: settings.protectedPaths, visibility: await project.repositoryVisibility() });
+        if (sub === "/import-history" && method === "POST") {
+          if (!isOwner) return text("Only the owner can inspect import history", 403);
+          const job = await account.getImportJob(projectId);
+          if (!job || job.ownerId !== userId || job.status !== "ready" || job.canonicalRepoName !== state.canonicalRepoName) return text("Ready owned import required", 409);
+          const requestBody = request.body ? await body<{ instanceId?: string }>() : {};
+          if (Object.keys(requestBody).some((key) => key !== "instanceId") || (requestBody.instanceId !== undefined && !/^import-history-[a-f0-9-]{36}$/.test(requestBody.instanceId))) return text("Invalid import inspection retry", 400);
+          const operation = requestBody.instanceId
+            ? await account.getImportHistoryOperation(requestBody.instanceId)
+            : await account.claimImportHistoryOperation({ projectId, head: state.acceptedState.currentCommit, canonicalRepoName: state.canonicalRepoName, ownerId: userId, instanceId: `import-history-${crypto.randomUUID()}` });
+          if (!operation || operation.ownerId !== userId || operation.projectId !== projectId || operation.canonicalRepoName !== state.canonicalRepoName) return text("Saved inspection operation not found", 404);
+          if (Date.now() - Date.parse(operation.createdAt) > 30 * 86400_000) return text("Inspection retry window expired; contact support", 410);
+          const existing = await env.IMPORT_HISTORY_WORKFLOW.get(operation.instanceId).then(async (handle) => ({ handle, status: await handle.status() })).catch(() => null);
+          if (existing) return json({ instanceId: operation.instanceId, head: operation.head, status: existing.status.status }, 202);
+          const { plan } = await account.getBilling();
+          const denied = await admitRun(env, account, planLimits(env)[plan], operation.instanceId);
+          if (denied) return denied;
+          try {
+            const handle = await env.IMPORT_HISTORY_WORKFLOW.create({ id: operation.instanceId, params: { accountKey, projectId, expectedHead: operation.head } });
+            return json({ instanceId: handle.id, head: operation.head, status: "queued" }, 202);
+          } catch { return json({ instanceId: operation.instanceId, head: operation.head, status: "dispatch-unknown", detail: "Operation is saved. Check its status or retry to dispatch this exact operation." }, 202); }
+        }
+        const historyOperationRoute = /^\/import-history\/(import-history-[a-f0-9-]{36})$/.exec(sub);
+        if (historyOperationRoute && method === "GET") {
+          if (!isOwner) return text("Only the owner can read import receipts", 403);
+          const operation = await account.getImportHistoryOperation(historyOperationRoute[1]!);
+          if (!operation || operation.ownerId !== userId || operation.projectId !== projectId || operation.canonicalRepoName !== state.canonicalRepoName) return text("Not found", 404);
+          const handle = await env.IMPORT_HISTORY_WORKFLOW.get(operation.instanceId).then(async (value) => value.status()).catch(() => null);
+          const object = await env.EVIDENCE_BUCKET.get(importHistoryReceiptKey(projectId, operation.head, operation.instanceId));
+          let receipt: unknown = null;
+          if (object) {
+            const saved = await object.json<{ projectId: string; canonicalRepoName: string; expectedHead: string; workflowInstanceId: string; result: unknown; inspectedAt: string }>();
+            if (saved.projectId !== projectId || saved.canonicalRepoName !== operation.canonicalRepoName || saved.expectedHead !== operation.head || saved.workflowInstanceId !== operation.instanceId) return text("Receipt provenance does not match this operation", 409);
+            receipt = { head: saved.expectedHead, inspectedAt: saved.inspectedAt, result: saved.result };
+          }
+          return Response.json({ instanceId: operation.instanceId, head: operation.head, status: handle?.status ?? "handle-unavailable", receipt }, { headers: { "Cache-Control": "no-store" } });
+        }
+
         if (sub === "/visibility" && method === "POST") {
           if (!isOwner) return text("Only the owner can change visibility", 403);
           const value = await body<{ visibility?: string; confirmed?: boolean }>();
@@ -425,6 +519,60 @@ export default {
         }
 
         if (sub === "/activity" && method === "GET") return json(await project.listActivity(60));
+        if (sub === "/community" && method === "GET") {
+          if (!isOwner) return text("Only the owner can configure public participation", 403);
+          return json(await project.publicCommunity());
+        }
+        if (sub === "/community" && method === "PUT") {
+          if (!isOwner) return text("Only the owner can configure public participation", 403);
+          const value = await body<{ policy: PublicCommunityPolicy; confirmed?: boolean }>();
+          const profile = await account.getProfile();
+          try { return json({ policy: await project.configurePublicCommunity(value.policy, value.confirmed === true, { userId, accountKey, displayName: profile.displayName || "Maintainer" }) }); }
+          catch { return text("Public participation requires explicit owner confirmation and a public repository", 409); }
+        }
+        if (sub === "/community/requests" && method === "GET") {
+          if (!isOwner) return text("Only the owner can review contribution requests", 403);
+          const profile = await account.getProfile();
+          return json({ requests: await project.publicContributionRequests({ userId, accountKey, displayName: profile.displayName || "Maintainer" }) });
+        }
+        const contributionDecision = /^\/community\/requests\/(request_[a-f0-9-]{36})\/decision$/.exec(sub);
+        if (contributionDecision && method === "POST") {
+          if (!isOwner) return text("Only the owner can decide contribution access", 403);
+          const value = await body<{ decision?: string; confirmedPrivateAccess?: boolean }>();
+          if (value.decision !== "approved" && value.decision !== "rejected") return text("Invalid contribution decision", 400);
+          const profile = await account.getProfile();
+          const actor = { userId, accountKey, displayName: profile.displayName || "Maintainer" };
+          let request;
+          try { request = await project.decidePublicContribution(actor, contributionDecision[1]!, value.decision, value.confirmedPrivateAccess === true); }
+          catch { return text("Access was not changed; approval requires explicit acknowledgment of private repository context", 409); }
+          if (request.status === "approved") ctx.waitUntil((async () => {
+            const role = await project.roleOf(request.requesterUserId);
+            if (!role) return;
+            await accountOf(env, request.requesterAccountKey).addProject({ id: projectId, name: state.projectName, role: role === "owner" ? "owner" : "member", kind: state.kind ?? "demo" });
+          })().catch(() => console.error("Contributor navigation registration unavailable; repository access remains recorded")));
+          return json({ request });
+        }
+
+        if(sub==="/deployments"&&method==="GET")return json({deployments:await project.listDeployments()});
+        if(sub==="/deployment-targets"&&method==="GET"){
+          if(!isOwner)return text("Only the owner can select deployment targets",403);
+          return json({targets:await project.acceptedDeploymentTargets()});
+        }
+        if(sub==="/deployments"&&method==="POST"){
+          if(!isOwner)return text("Only the owner can request deployment delivery",403);
+          const parsed=deploymentRequestParametersSchema.safeParse(await body<unknown>());
+          if(!parsed.success)return text("Valid accepted journal, service, environment and stable request key are required",400);
+          const input=parsed.data;
+          const accepted=await project.acceptedDeploymentTarget(input.journalId);
+          if(!accepted)return text("Only recoverable accepted publication journals can be deployment targets",409);
+          try{
+            const service=await project.connectionSigningConfig(input.serviceId);
+            if(!service?.capabilities.includes("report-deployment"))return text("Register an active deployment reporting service first",409);
+            if(!(await project.listWebhooks()).some(hook=>hook.active&&hook.events.split(",").includes("deployment.requested")))return text("Configure an active deployment.requested webhook first",409);
+            await retainDeploymentTarget(env,accepted.canonicalRepoName,accepted.target);
+            return json(await project.requestDeployment(accepted.target,input.serviceId,input.environment,input.idempotencyKey,userId),201);
+          }catch{return text("Deployment request was not dispatched; inspect the accepted journal, retained ref and configured service before retrying the same key",409);}
+        }
 
         if (sub === "/connections" && method === "GET") {
           if (!isOwner) return text("Only the owner can configure connections", 403);

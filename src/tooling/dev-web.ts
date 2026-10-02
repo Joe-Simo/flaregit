@@ -13,7 +13,13 @@ const proxy = async (request: BunRequest) => {
   const headers = new Headers(request.headers);
   for (const name of ["host", "connection", "transfer-encoding", "content-length"]) headers.delete(name);
   try {
-    return await fetch(new URL(url.pathname + url.search, backend), { method: request.method, headers, body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body, redirect: "manual" });
+    const response = await fetch(new URL(url.pathname + url.search, backend), { method: request.method, headers, body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body, redirect: "manual" });
+    // Fetch decodes the upstream body; forwarding its compression/length headers
+    // makes the browser try to decode the already-decoded authentication JSON.
+    const responseHeaders = new Headers(response.headers);
+    responseHeaders.delete("content-encoding");
+    responseHeaders.delete("content-length");
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers: responseHeaders });
   } catch {
     return new Response("The FlareGit Worker could not be reached. Start wrangler dev or set FLAREGIT_API.", { status: 502 });
   }
@@ -24,6 +30,8 @@ const server = Bun.serve({
   development: { hmr: true, console: false },
   routes: {
     "/": page,
+    "/docs": page,
+    "/docs/*": page,
     "/diff.worker.js": async () => {
       const result = await Bun.build({ entrypoints: ["./src/web/diff.worker.ts"], target: "browser", env: "disable" });
       if (!result.success || !result.outputs[0]) return new Response("Could not compile the diff worker", { status: 500 });

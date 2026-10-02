@@ -40,11 +40,11 @@ export async function adoptLegacyProject(env: Env, account: Ledger, accountKey: 
 }
 
 /** Spend control shared by every model-backed action: kill switch, per-account plan quota, platform-wide ceiling. */
-export async function admitRun(env: Env, account: Ledger, planLimit: number): Promise<Response | null> {
+export async function admitRun(env: Env, account: Ledger, planLimit: number, admissionKey?: string): Promise<Response | null> {
   if (env.RUNS_ENABLED === "false") return new Response("Managed runs are temporarily paused. Please try again later.", { status: 503 });
-  const mine = await account.consumeRun(planLimit);
+  const mine = await account.consumeRun(planLimit, admissionKey);
   if (!mine.allowed) return new Response(`Daily run limit reached (${mine.used}/${planLimit}). Upgrade for more.`, { status: 429 });
-  const global = await globalOf(env).consumeRun(Number(env.GLOBAL_RUNS_PER_DAY ?? "300"));
+  const global = await globalOf(env).consumeRun(Number(env.GLOBAL_RUNS_PER_DAY ?? "300"), admissionKey);
   if (!global.allowed) return new Response("FlareGit is at capacity for today. Please try again tomorrow.", { status: 503 });
   return null;
 }

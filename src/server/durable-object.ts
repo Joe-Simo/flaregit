@@ -5,12 +5,14 @@ import type { Env } from "./env.js";
 import { accountKeyFor, accountOf } from "./projects.js";
 import { isCommandPolicy, settingsFor } from "../core/command-policy.js";
 import { VERIFIER_IDENTITIES } from "../core/verification-identities.js";
+import { RepositoryDeployments,type AcceptedDeploymentTarget,type DeploymentRecord } from "./deployments.js";
 import { RepositoryConnections, type ConnectionMetadata, type CallbackReceipt } from "./connections.js";
 import type { IntegrationCallback, IntegrationCapability } from "./integration-auth.js";
 import { externalCheckGate, type ExternalCheckPolicy, type ExternalCheckState } from "../core/external-checks.js";
 import type { ImportJob } from "./import-job.js";
 import type { PublicRepositoryGrant } from "./public-repositories.js";
 import { AgentRunLedger, type AgentRunInput, type AgentRunRecord, type AgentRunClaim } from "./agent-run-ledger.js";
+import { actorName, RepositoryPublicCommunity, type PublicCommunityActor, type PublicCommunityPolicy, type PublicPost, type ContributionRequest } from "./public-community.js";
 export type PublicGrantMetadata = PublicRepositoryGrant & { name: string; version: number; canonicalRepoName: string };
 import type {
   CandidateGeneration,
@@ -72,7 +74,7 @@ export type WorkflowKind = "agent" | "integration";
 export type WorkflowOutcome = "started" | "completed" | "skipped" | "accepted" | "needs_decision" | "not_started" | "blocked" | "stale" | "rejected" | "failed";
 export interface WorkflowCount { kind: WorkflowKind; status: WorkflowOutcome; count: number }
 
-export const WEBHOOK_EVENTS = ["change.ready", "change.accepted", "change.blocked", "decision.needed"] as const;
+export const WEBHOOK_EVENTS = ["change.ready", "change.accepted", "change.blocked", "decision.needed", "deployment.requested"] as const;
 
 /** Limits on a token: `full` acts as the user; `read`/`write` are narrower; `repo` pins it to one repository; `expiresAt` (ms) makes it short-lived. */
 export interface TokenScope {
@@ -161,7 +163,22 @@ export interface ActivityRow {
   summary: string;
 }
 
+export interface ImportHistoryOperation { projectId: string; head: string; canonicalRepoName: string; ownerId: string; instanceId: string; createdAt: string }
+
 export interface Ledger {
+  acceptedDeploymentTarget(journalId:string):Promise<{canonicalRepoName:string;target:AcceptedDeploymentTarget}|null>;
+  acceptedDeploymentTargets():Promise<AcceptedDeploymentTarget[]>;
+  listDeployments():Promise<DeploymentRecord[]>;
+  requestDeployment(target:AcceptedDeploymentTarget,serviceId:string,environment:string,key:string,actorId:string):Promise<{kind:"created"|"duplicate";deployment:DeploymentRecord}>;
+  publicCommunity(): Promise<{ policy: PublicCommunityPolicy; posts: PublicPost[] }>;
+  configurePublicCommunity(policy: PublicCommunityPolicy, confirmed: boolean, actor: PublicCommunityActor): Promise<PublicCommunityPolicy>;
+  createPublicPost(actor: PublicCommunityActor, input: Parameters<RepositoryPublicCommunity["createPost"]>[1]): Promise<PublicPost>;
+  signedPublicPosts(actor: PublicCommunityActor): Promise<{ posts: Array<PublicPost & { canEdit: boolean; canRemove: boolean }>; authorDisplayName: string }>;
+  editPublicPost(actor: PublicCommunityActor, postId: string, input: { title: string; body: string; expectedVersion: number }): Promise<PublicPost>;
+  removePublicPost(actor: PublicCommunityActor, postId: string, expectedVersion: number): Promise<void>;
+  requestPublicContribution(actor: PublicCommunityActor, input: Parameters<RepositoryPublicCommunity["requestContribution"]>[1]): Promise<ContributionRequest>;
+  publicContributionRequests(actor: PublicCommunityActor): Promise<ContributionRequest[]>;
+  decidePublicContribution(actor: PublicCommunityActor, requestId: string, decision: "approved" | "rejected", confirmedPrivateAccess: boolean): Promise<ContributionRequest>;
   getAgentRun(runId: string): Promise<AgentRunRecord | null>;
   claimAgentRun(input: AgentRunInput): Promise<AgentRunClaim>;
   resumeAgentRun(runId: string, taskId: string, previousRunId: string): Promise<AgentRunClaim>;
@@ -175,6 +192,8 @@ export interface Ledger {
   saveImportJob(job: ImportJob): Promise<void>;
   getImportJob(id: string): Promise<ImportJob | null>;
   listImportJobs(): Promise<ImportJob[]>;
+  claimImportHistoryOperation(input: { projectId: string; head: string; canonicalRepoName: string; ownerId: string; instanceId: string }): Promise<ImportHistoryOperation>;
+  getImportHistoryOperation(instanceId: string): Promise<ImportHistoryOperation | null>;
   externalCheckReports(candidateId: string): Promise<ReturnType<RepositoryConnections["reports"]>>;
   serviceCandidateSnapshot(serviceId: string, candidateId: string, commit: string, nonce: string): Promise<ReturnType<RepositoryConnections["serviceCandidateSnapshot"]>>;
   listConnections(): Promise<{ connections: ConnectionMetadata[]; policy: ExternalCheckPolicy }>;
@@ -265,7 +284,7 @@ export interface Ledger {
   getBilling(): Promise<{ plan: "free" | "pro"; status: string; subscriptionId?: string; updatedAt: string }>;
   setBilling(b: { plan: "free" | "pro"; status: string; subscriptionId?: string; updatedAt: string }): Promise<void>;
   usageToday(): Promise<number>;
-  consumeRun(limit: number): Promise<{ allowed: boolean; used: number }>;
+  consumeRun(limit: number, admissionKey?: string): Promise<{ allowed: boolean; used: number }>;
   ingestCheckpoint(ev: { eventId: string; taskId: string; commit: string; ready: boolean; filesChanged?: string[] }): Promise<{ applied: boolean }>;
 }
 
@@ -278,6 +297,95 @@ const LEASE_MS = 20 * 60_000;
  */
 export class RepositoryController extends DurableObject<Env> {
   private state: FlareGitProjectState | null = null;
+
+  async acceptedDeploymentTarget(journalId:string):Promise<{canonicalRepoName:string;target:AcceptedDeploymentTarget}|null>{
+    const state=this.load(),journal=state.journal.find(item=>item.id===journalId&&item.state==="ACCEPTED");
+    if(!journal?.candidateTree)return null;
+    const accepted=state.acceptedState.history.find(item=>item.commit===journal.newHead&&item.candidateId===journal.candidateId);
+    if(!accepted)return null;
+    return {canonicalRepoName:state.canonicalRepoName,target:{journalId,candidateId:journal.candidateId,commit:journal.newHead,tree:journal.candidateTree,acceptedAt:accepted.acceptedAt,recoverableRef:`refs/flaregit/deployments/${journalId}`}};
+  }
+  async listDeployments():Promise<DeploymentRecord[]>{return new RepositoryDeployments(this.ctx.storage,this.load().projectId).list();}
+  async acceptedDeploymentTargets():Promise<AcceptedDeploymentTarget[]>{
+    const targets=await Promise.all(this.load().journal.filter(entry=>entry.state==="ACCEPTED").slice(-100).map(entry=>this.acceptedDeploymentTarget(entry.id)));
+    return targets.filter((entry):entry is NonNullable<typeof entry>=>entry!==null).map(entry=>entry.target);
+  }
+  async requestDeployment(target:AcceptedDeploymentTarget,serviceId:string,environment:string,key:string,actorId:string){
+    if(await this.roleOf(actorId)!=="owner")throw new Error("Only the owner can request a deployment");
+    const accepted=await this.acceptedDeploymentTarget(target.journalId);
+    if(!accepted||JSON.stringify(accepted.target)!==JSON.stringify(target))throw new Error("Deployment target must match an accepted publication journal");
+    const service=this.connections().signingConfig(serviceId);
+    if(!service?.capabilities.includes("report-deployment"))throw new Error("Deployment reporting service unavailable");
+    if(!(await this.listWebhooks()).some(hook=>hook.active&&hook.events.split(",").includes("deployment.requested")))throw new Error("Configure an active deployment.requested webhook before requesting delivery");
+    await this.ensureRecoveryAlarm();
+    let deliveryIds:string[]=[];
+    const result=new RepositoryDeployments(this.ctx.storage,this.load().projectId).request(target,serviceId,environment,key,actorId,event=>{deliveryIds=this.stageEvent(event.type,event.data,{id:event.id,createdAt:event.createdAt});});
+    await Promise.allSettled(deliveryIds.map(deliveryId=>this.env.INTEGRATION_QUEUE.send({type:"webhook.deliver",projectId:this.load().projectId,deliveryId})));
+    return result;
+  }
+
+  private community() { return new RepositoryPublicCommunity(this.ctx.storage, this.load().projectId); }
+  private requirePublicRepository(): void {
+    this.visibilityTable();
+    const row = this.ctx.storage.sql.exec<{ visibility: string }>("SELECT visibility FROM repository_visibility WHERE id=1").toArray()[0];
+    if (row?.visibility !== "public") throw new Error("Repository is not public");
+  }
+  async publicCommunity(): Promise<{ policy: PublicCommunityPolicy; posts: PublicPost[] }> {
+    const community = this.community();
+    return { policy: community.policy(), posts: community.listPublic() };
+  }
+  async configurePublicCommunity(policy: PublicCommunityPolicy, confirmed: boolean, actor: PublicCommunityActor): Promise<PublicCommunityPolicy> {
+    if (await this.roleOf(actor.userId) !== "owner") throw new Error("Only the owner can configure public participation");
+    if (policy.enabled) this.requirePublicRepository();
+    this.visibilityTable();
+    return this.ctx.storage.transactionSync(() => {
+      const configured = this.community().configure(policy, confirmed, actor, actor.userId);
+      this.ctx.storage.sql.exec("UPDATE repository_visibility SET version=version+1 WHERE id=1");
+      return configured;
+    });
+  }
+  async createPublicPost(actor: PublicCommunityActor, input: Parameters<RepositoryPublicCommunity["createPost"]>[1]): Promise<PublicPost> {
+    this.requirePublicRepository();
+    return this.community().createPost(actor, input);
+  }
+  async signedPublicPosts(actor: PublicCommunityActor) {
+    const owner = await this.roleOf(actor.userId) === "owner";
+    this.requirePublicRepository();
+    const posts = this.community().listPublic();
+    const authors = new Map(this.ctx.storage.sql.exec<{ id: string; author_id: string }>("SELECT id,author_id FROM public_community_posts WHERE removed=0").toArray().map((row) => [row.id, row.author_id]));
+    return { posts: posts.map((post) => ({ ...post, canEdit: owner || authors.get(post.id) === actor.userId, canRemove: owner || authors.get(post.id) === actor.userId })), authorDisplayName: actorName(actor) };
+  }
+  async editPublicPost(actor: PublicCommunityActor, postId: string, input: { title: string; body: string; expectedVersion: number }): Promise<PublicPost> {
+    const ownerId = await this.roleOf(actor.userId) === "owner" ? actor.userId : "";
+    this.requirePublicRepository();
+    return this.community().editPost(actor, postId, input, ownerId);
+  }
+  async removePublicPost(actor: PublicCommunityActor, postId: string, expectedVersion: number): Promise<void> {
+    const ownerId = await this.roleOf(actor.userId) === "owner" ? actor.userId : "";
+    this.requirePublicRepository();
+    this.community().removePost(actor, postId, ownerId, expectedVersion);
+  }
+  async requestPublicContribution(actor: PublicCommunityActor, input: Parameters<RepositoryPublicCommunity["requestContribution"]>[1]): Promise<ContributionRequest> {
+    this.requirePublicRepository();
+    return this.community().requestContribution(actor, input);
+  }
+  async publicContributionRequests(actor: PublicCommunityActor): Promise<ContributionRequest[]> {
+    this.requirePublicRepository();
+    const ownerId = await this.roleOf(actor.userId) === "owner" ? actor.userId : "";
+    this.requirePublicRepository();
+    return this.community().requestsFor(actor, ownerId);
+  }
+  async decidePublicContribution(actor: PublicCommunityActor, requestId: string, decision: "approved" | "rejected", confirmedPrivateAccess: boolean): Promise<ContributionRequest> {
+    if (await this.roleOf(actor.userId) !== "owner") throw new Error("Only the owner can decide contribution access");
+    this.requirePublicRepository();
+    return this.ctx.storage.transactionSync(() => {
+      const community = this.community();
+      const previous = community.requestsFor(actor, actor.userId).find((request) => request.id === requestId);
+      const request = community.decideRequest(actor, requestId, decision, confirmedPrivateAccess, actor.userId);
+      if (previous?.status === "requested" && request.status === "approved") this.ctx.storage.sql.exec("INSERT OR IGNORE INTO members (user_id,role,label,added_at) VALUES (?,'member',?,?)", request.requesterUserId, request.requesterName, new Date().toISOString());
+      return request;
+    });
+  }
 
   private agentRuns() { return new AgentRunLedger(this.ctx.storage); }
   private agentScope(task: Task, projectScope: string[]): string[] {
@@ -388,6 +496,26 @@ export class RepositoryController extends DurableObject<Env> {
       }
       this.ctx.storage.sql.exec("INSERT INTO import_jobs VALUES (?,?) ON CONFLICT(id) DO UPDATE SET doc=excluded.doc", job.id, JSON.stringify(job));
     });
+  }
+
+  async claimImportHistoryOperation(input: Omit<ImportHistoryOperation, "createdAt">): Promise<ImportHistoryOperation> {
+    if (!/^[a-z0-9]{12,16}$/.test(input.projectId) || !/^[a-f0-9]{40}$/.test(input.head) || !/^import-history-[A-Za-z0-9_-]{1,90}$/.test(input.instanceId)) throw new Error("Invalid history operation");
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS import_history_operations(instance TEXT PRIMARY KEY,scope TEXT UNIQUE,doc TEXT)");
+    return this.ctx.storage.transactionSync(() => {
+      const scope = `${input.projectId}:${input.head}:${input.ownerId}`;
+      const previous = this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM import_history_operations WHERE scope=?", scope).toArray()[0];
+      if (previous) return JSON.parse(previous.doc) as ImportHistoryOperation;
+      const count = this.ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) AS n FROM import_history_operations").toArray()[0]!.n;
+      if (count >= 1000) throw new Error("Import inspection operation limit reached");
+      const operation = { ...input, createdAt: new Date().toISOString() };
+      this.ctx.storage.sql.exec("INSERT INTO import_history_operations VALUES(?,?,?)", input.instanceId, scope, JSON.stringify(operation));
+      return operation;
+    });
+  }
+  async getImportHistoryOperation(instanceId: string): Promise<ImportHistoryOperation | null> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS import_history_operations(instance TEXT PRIMARY KEY,scope TEXT UNIQUE,doc TEXT)");
+    const row = this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM import_history_operations WHERE instance=?", instanceId).toArray()[0];
+    return row ? JSON.parse(row.doc) as ImportHistoryOperation : null;
   }
 
   private connections() { return new RepositoryConnections(this.ctx.storage, this.load().projectId); }
@@ -661,11 +789,11 @@ export class RepositoryController extends DurableObject<Env> {
     await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: this.load().projectId, deliveryId: id });
     return true;
   }
-  private stageEvent(type: (typeof WEBHOOK_EVENTS)[number], data: Record<string, unknown>): string[] {
+  private stageEvent(type: (typeof WEBHOOK_EVENTS)[number], data: Record<string, unknown>, identity?:{id:string;createdAt:string}): string[] {
     const hooks = this.ctx.storage.sql.exec("SELECT id, events FROM webhooks WHERE active = 1").toArray() as unknown as Array<{ id: string; events: string }>;
     const s = this.load();
-    const eventId = `evt_${crypto.randomUUID()}`;
-    const payload = JSON.stringify({ id: eventId, type, createdAt: new Date().toISOString(), project: { id: s.projectId, name: s.projectName }, data });
+    const eventId = identity?.id ?? `evt_${crypto.randomUUID()}`;
+    const payload = JSON.stringify({ id: eventId, type, createdAt: identity?.createdAt ?? new Date().toISOString(), project: { id: s.projectId, name: s.projectName }, data });
     const ids: string[] = [];
     for (const h of hooks) {
       if (!h.events.split(",").includes(type)) continue;
@@ -1035,13 +1163,20 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   /** Spend guard: atomically count a model-backed run against today's per-project allowance. */
-  async consumeRun(limit: number): Promise<{ allowed: boolean; used: number }> {
+  async consumeRun(limit: number, admissionKey?: string): Promise<{ allowed: boolean; used: number }> {
+    if (admissionKey && !/^[A-Za-z0-9:_-]{1,200}$/.test(admissionKey)) throw new Error("Invalid admission key");
     const day = new Date().toISOString().slice(0, 10);
-    const row = this.ctx.storage.sql.exec<{ n: number }>("SELECT n FROM runs WHERE day = ?", day).toArray()[0];
-    const used = row?.n ?? 0;
-    if (used >= limit) return { allowed: false, used };
-    this.ctx.storage.sql.exec("INSERT INTO runs (day, n) VALUES (?, 1) ON CONFLICT(day) DO UPDATE SET n = n + 1", day);
-    return { allowed: true, used: used + 1 };
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS run_admissions(key TEXT PRIMARY KEY,day TEXT)");
+    return this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("DELETE FROM run_admissions WHERE day < ?", new Date(Date.now() - 30 * 86400_000).toISOString().slice(0,10));
+      const used = this.ctx.storage.sql.exec<{n:number}>("SELECT n FROM runs WHERE day=?", day).toArray()[0]?.n ?? 0;
+      if (admissionKey && this.ctx.storage.sql.exec("SELECT key FROM run_admissions WHERE key=?", admissionKey).toArray().length) return { allowed: true, used };
+      if (used >= limit) return { allowed: false, used };
+      if (admissionKey && this.ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) AS n FROM run_admissions").toArray()[0]!.n >= 10000) return { allowed: false, used };
+      this.ctx.storage.sql.exec("INSERT INTO runs(day,n) VALUES(?,1) ON CONFLICT(day) DO UPDATE SET n=n+1", day);
+      if (admissionKey) this.ctx.storage.sql.exec("INSERT INTO run_admissions VALUES(?,?)", admissionKey, day);
+      return { allowed: true, used: used + 1 };
+    });
   }
 
   async cancelTask(taskId: string): Promise<void> {

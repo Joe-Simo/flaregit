@@ -8,12 +8,14 @@ export type Route =
   | { name: "report" }
   | { name: "operator" }
   | { name: "join"; projectId: string; token: string }
+  | { name: "participate"; projectId: string }
   | { name: "public"; projectId: string; params: URLSearchParams }
   | { name: "repo"; projectId: string; tab: string; params: URLSearchParams };
 
 export function parseHash(hash: string): Route {
   const [pathPart, query = ""] = hash.replace(/^#/, "").split("?");
   const parts = (pathPart ?? "").split("/").filter(Boolean);
+  if (parts[0] === "participate" && parts[1] && /^p?[0-9a-f]{12}$/.test(parts[1])) return { name: "participate", projectId: parts[1] };
   if (parts[0] === "public" && parts[1] && /^[a-z0-9]{12,16}$/.test(parts[1])) return { name: "public", projectId: parts[1], params: new URLSearchParams(query) };
   if (parts[0] === "new") return { name: "new" };
   if (parts[0] === "account") return { name: "account" };

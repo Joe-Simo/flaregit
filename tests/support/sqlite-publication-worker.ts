@@ -1,5 +1,7 @@
 import { RepositoryController } from "../../src/server/durable-object.js";
 import { RepositoryConnections } from "../../src/server/connections";
+import type { PublicCommunityActor,PublicCommunityPolicy } from "../../src/server/public-community";
+import type {AcceptedDeploymentTarget} from "../../src/server/deployments";
 import type { AgentRunInput } from "../../src/server/agent-run-ledger";
 import type { ExternalCheckState, ExternalCheckPolicy } from "../../src/core/external-checks";
 import type { FlareGitProjectState } from "../../src/core/types.js";
@@ -11,7 +13,9 @@ export class PublicationFixture extends RepositoryController {
     this.ctx.storage.sql.exec("INSERT INTO lease (id, holder, expires_at) VALUES (1, ?, ?)", holder, Date.now() + 60_000);
     this.ctx.storage.sql.exec("INSERT INTO webhooks (id,url,secret,events,active,created_at) VALUES ('hook','https://example.com/hook','test-secret','change.accepted,change.ready,change.blocked,decision.needed',1,'now')");
   }
+  failMembership(enabled:boolean) { if(enabled)this.ctx.storage.sql.exec("CREATE TRIGGER fail_member BEFORE INSERT ON members BEGIN SELECT RAISE(ABORT,'synthetic membership failure'); END"); else this.ctx.storage.sql.exec("DROP TRIGGER fail_member"); }
   async visibilitySnapshot() { return { visibility: await this.repositoryVisibility(), grant: await this.publicGrant(), rows: this.ctx.storage.sql.exec("SELECT version FROM repository_visibility WHERE id=1").toArray() }; }
+  fixtureDeploymentService(){return new RepositoryConnections(this.ctx.storage,"test").create("Deployment provider",["report-deployment"]);}
   fixtureConnection() { return new RepositoryConnections(this.ctx.storage, "test").create("External test provider", ["report-check"]); }
   fixturePolicy(policy: ExternalCheckPolicy) { new RepositoryConnections(this.ctx.storage, "test").setPolicy(policy); }
   injectExternal(state: ExternalCheckState) {
@@ -48,6 +52,24 @@ export default {
       if (url.pathname === "/subscribe") await stub.addWebhook("https://example.com/hook", await request.json() as string[]);
       if (url.pathname === "/expire") await stub.expireLease();
       if (url.pathname === "/claim") await stub.claimLanding({ holder: "claim-holder", taskIds: (url.searchParams.get("tasks") ?? "task").split(",") });
+      const communityActors:Record<string,PublicCommunityActor>={owner:{userId:"community-owner",accountKey:"owner-key",displayName:"Maintainer"},author:{userId:"community-author",accountKey:"author-key",displayName:"Public author"},other:{userId:"community-other",accountKey:"other-key",displayName:"Other author"}};
+      const actor=communityActors[url.searchParams.get("actor")??"author"]!;
+      if(url.pathname==="/community-configure"){const value=await request.json() as {policy:PublicCommunityPolicy;confirmed:boolean};return Response.json(await stub.configurePublicCommunity(value.policy,value.confirmed,actor));}
+      if(url.pathname==="/community-post")return Response.json(await stub.createPublicPost(actor,await request.json() as Parameters<typeof stub.createPublicPost>[1]));
+      if(url.pathname==="/community-signed-posts")return Response.json(await stub.signedPublicPosts(actor));
+      if(url.pathname==="/community-edit"){const value=await request.json() as {id:string;title:string;body:string;expectedVersion:number};return Response.json(await stub.editPublicPost(actor,value.id,{title:value.title,body:value.body,expectedVersion:value.expectedVersion}));}
+      if(url.pathname==="/community-remove"){const value=await request.json() as {id:string;expectedVersion:number};await stub.removePublicPost(actor,value.id,value.expectedVersion);return Response.json({removed:true});}
+      if(url.pathname==="/community-request")return Response.json(await stub.requestPublicContribution(actor,await request.json() as Parameters<typeof stub.requestPublicContribution>[1]));
+      if(url.pathname==="/community-requests")return Response.json(await stub.publicContributionRequests(actor));
+      if(url.pathname==="/community-public")return Response.json(await stub.publicCommunity());
+      if(url.pathname==="/community-decide"){const value=await request.json() as {id:string;decision:"approved"|"rejected";confirmed:boolean};return Response.json(await stub.decidePublicContribution(actor,value.id,value.decision,value.confirmed));}
+      if(url.pathname==="/remove-member")await stub.removeMember(url.searchParams.get("user")!);
+      if(url.pathname==="/member-role")return Response.json(await stub.roleOf(url.searchParams.get("user")!));
+      if(url.pathname==="/fail-membership")await stub.failMembership(url.searchParams.get("enabled")==="true");
+      if(url.pathname==="/deployment-service")return Response.json(await stub.fixtureDeploymentService());
+      if(url.pathname==="/deployment-target")return Response.json(await stub.acceptedDeploymentTarget(url.searchParams.get("journal")??"accepted-journal"));
+      if(url.pathname==="/deployment-request"){const input=await request.json() as {target:AcceptedDeploymentTarget;serviceId:string;environment:string;key:string;actorId:string};return Response.json(await stub.requestDeployment(input.target,input.serviceId,input.environment,input.key,input.actorId));}
+      if(url.pathname==="/deployment-list")return Response.json(await stub.listDeployments());
       if (url.pathname === "/agent-resume") { const input = await request.json() as { runId:string;taskId:string;previousRunId:string }; return Response.json(await stub.resumeAgentRun(input.runId,input.taskId,input.previousRunId)); }
       if (url.pathname === "/verification-policy") await stub.setVerificationPolicy(await request.json() as Record<string,unknown>);
       if (url.pathname === "/agent-claim") return Response.json(await stub.claimAgentRun(await request.json() as AgentRunInput));

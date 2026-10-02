@@ -12,6 +12,9 @@ test("production public Worker routes deny private state and revoked reads witho
     expect((await request(`${prefix}/file?path=README.md`)).status).toBe(404);
     expect(await (await request("/stats")).json()).toEqual({ reads: 0 });
     await request("/mode?value=public");
+    const missingIp = await (await mf.getWorker("public-api-test")).fetch(`http://test${prefix}/community`);
+    expect(missingIp.status).toBe(503);
+    expect((await request(`${prefix}/community`)).status).toBe(200);
     const meta = await request(`${prefix}/meta`);
     expect(meta.status).toBe(200);
     expect(meta.headers.get("Cache-Control")).toBe("no-store");

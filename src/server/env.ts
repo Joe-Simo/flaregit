@@ -8,6 +8,7 @@ export interface Env {
   SCENARIO_WORKFLOW: Workflow;
   AGENT_WORKFLOW: Workflow;
   INTEGRATION_WORKFLOW: Workflow;
+  IMPORT_HISTORY_WORKFLOW: Workflow;
   INTEGRATION_QUEUE: Queue<QueueMessage>;
   EVIDENCE_BUCKET: R2Bucket;
   ARTIFACTS: ArtifactsBinding;

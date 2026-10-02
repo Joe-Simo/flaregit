@@ -11,7 +11,7 @@ export class PublicApiFixture extends DurableObject {
     const hash = "a".repeat(40), tree = "b".repeat(40);
     const grant = { visibility: "public" as const, confirmedByOwner: true as const, acceptedCommit: hash, name: "Owner confirmed fixture", version: 1, canonicalRepoName: "server-private-canonical" };
     const env = {
-      REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: (name: string) => ({ publicGrant: async () => {
+      REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: (name: string) => ({ publicCommunity: async () => ({policy:{enabled:false,scopes:[]},posts:[]}), publicGrant: async () => {
         calls++;
         return name !== "project:abcdef123456" || mode === "private" || (mode === "revoke" && calls > 1) ? null : grant;
       } }) },

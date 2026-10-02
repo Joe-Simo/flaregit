@@ -27,7 +27,7 @@ export function Landing({ onSignIn }: { onSignIn: () => void }) {
     <header className="border-b border-border/60">
       <div className="mx-auto flex min-h-[60px] max-w-[1100px] flex-wrap items-center justify-between gap-3 px-6 py-2.5 lg:px-0">
         <a href="#/" className="flex items-center gap-2 text-base font-semibold tracking-tight" aria-label="FlareGit home"><GitBranch className="h-5 w-5 text-[#d04400]" aria-hidden />FlareGit</a>
-        <nav aria-label="Primary" className="flex items-center gap-3 sm:gap-6"><a href="#how-it-works" className="hidden text-xs text-muted-foreground hover:text-foreground sm:block">How it works</a><ThemeSelector compact /><Button variant="ghost" size="sm" onClick={onSignIn}>Sign in <ArrowUpRight className="ml-1 h-3 w-3" aria-hidden /></Button></nav>
+        <nav aria-label="Primary" className="flex items-center gap-3 sm:gap-6"><a href="#how-it-works" className="hidden text-xs text-muted-foreground hover:text-foreground sm:block">How it works</a><a href="/docs" className="text-xs text-muted-foreground hover:text-foreground">Docs</a><ThemeSelector compact /><Button variant="ghost" size="sm" onClick={onSignIn}>Sign in <ArrowUpRight className="ml-1 h-3 w-3" aria-hidden /></Button></nav>
       </div>
     </header>
     <main className="relative">

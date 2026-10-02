@@ -1,6 +1,7 @@
 import type { ArtifactsBinding } from "../artifacts/cloudflare.js";
 import type { CommandPolicy } from "../core/command-policy.js";
 import { validateImportSource } from "./import-source.js";
+import type { ImportHistoryResult } from "./import-history.js";
 
 export interface ImportJob {
   id: string; ownerId: string; name: string; canonicalRepoName: string; source: string; branch: string;
@@ -19,14 +20,14 @@ async function bounded<T>(operation: Promise<T>): Promise<T> {
   try { return await Promise.race([operation, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Provider response timed out")), 5000); })]); }
   finally { if (timer !== undefined) clearTimeout(timer); }
 }
-export type ImportReadiness = { status: "failed"; detail: string } | { status: "pending"; detail: string } | { status: "ready"; head: string; defaultBranch: string; remote: string };
+export type ImportReadiness = { status: "failed"; detail: string } | { status: "pending"; detail: string } | { status: "ready"; head: string; defaultBranch: string; remote: string; history?: ImportHistoryResult };
 /** One bounded provider lookup per resume. No deletion or second import request.
  * Artifacts documents IMPORT_IN_PROGRESS; other ambiguous errors also preserve
  * the job and canonical name for inspection rather than assuming work was lost.
  */
-export async function inspectImport(binding: ImportInspector, name: string): Promise<ImportReadiness> {
+export async function inspectImport(binding: ImportInspector, name: string, verifyHistory?: (head: string, branch: string) => Promise<ImportHistoryResult>): Promise<ImportReadiness> {
   try {
-    return await bounded((async (): Promise<ImportReadiness> => {
+    const readable = await bounded((async (): Promise<ImportReadiness> => {
     using repository = await binding.get(name);
     const [info, commits] = await Promise.all([repository.info(), repository.log({ limit: 1 })]);
     const head = commits[0]?.hash;
@@ -34,6 +35,9 @@ export async function inspectImport(binding: ImportInspector, name: string): Pro
     if (!/^[0-9a-f]{40}$/.test(head)) return { status: "pending", detail: "The imported commit could not be verified; retry this saved import" };
     return { status: "ready", head, defaultBranch: info.defaultBranch, remote: info.remote };
     })());
+    if (readable.status !== "ready" || !verifyHistory) return readable;
+    try { return { ...readable, history: await bounded(verifyHistory(readable.head, readable.defaultBranch)) }; }
+    catch { return { ...readable, history: { status: "unavailable", detail: "History verification is unavailable; imported browsing remains ready." } }; }
   } catch (error) {
     const importing = typeof error === "object" && error !== null && "code" in error && error.code === "IMPORT_IN_PROGRESS";
     return { status: "pending", detail: importing ? "Artifacts is still importing this repository; retry this saved import" : "Import readiness is unavailable; the saved import and repository have been preserved" };

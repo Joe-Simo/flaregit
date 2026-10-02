@@ -1,7 +1,8 @@
 import { z } from "zod";
+import { deploymentReportSchema } from "./deployments.js";
 import { redactSecrets } from "../agents/prompt.js";
 
-export const integrationCapabilities = ["read-candidate", "report-check", "comment"] as const;
+export const integrationCapabilities = ["read-candidate", "report-check", "comment", "report-deployment"] as const;
 export type IntegrationCapability = typeof integrationCapabilities[number];
 const identifier = z.string().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/);
 const sha = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
@@ -27,7 +28,7 @@ export const automatedReviewSchema = z.object({
 }).strict().refine((value) => value.line === undefined || value.path !== undefined);
 export const integrationCallbackSchema = z.object({
   serviceId: identifier, repositoryId: identifier, eventId: identifier, timestamp: z.number().int().nonnegative(),
-  report: z.discriminatedUnion("type", [externalCheckSchema, automatedReviewSchema]),
+  report: z.discriminatedUnion("type", [externalCheckSchema, automatedReviewSchema, deploymentReportSchema]),
 }).strict();
 export type IntegrationCallback = z.infer<typeof integrationCallbackSchema>;
 
@@ -55,6 +56,6 @@ export async function verifyIntegrationCallback(input: { secret: string; raw: st
   if (!result.success) return null;
   const callback = result.data;
   if (callback.serviceId !== input.serviceId || callback.repositoryId !== input.repositoryId || Math.abs(Math.floor((input.now ?? Date.now()) / 1000) - callback.timestamp) > 300) return null;
-  if (!input.capabilities.includes(callback.report.type === "check" ? "report-check" : "comment")) return null;
+  if (!input.capabilities.includes(callback.report.type === "check" ? "report-check" : callback.report.type === "deployment" ? "report-deployment" : "comment")) return null;
   return callback;
 }

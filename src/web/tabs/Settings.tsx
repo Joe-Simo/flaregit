@@ -4,10 +4,13 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { WebhooksCard } from "../components/WebhooksCard";
+import { DeploymentCard } from "../components/DeploymentCard";
 import { DomainsCard } from "../components/DomainsCard";
 import { isCommandPolicy } from "@/core/command-policy";
+import { PublicCommunityCard } from "../components/PublicCommunityCard";
 import { VisibilityCard } from "../components/VisibilityCard";
 import { ConnectionsCard } from "../components/ConnectionsCard";
+import { ImportHistoryCard } from "../components/ImportHistoryCard";
 import { MirrorCard } from "../components/MirrorCard";
 import { apiJson } from "../api";
 import { navigate } from "../router";
@@ -155,9 +158,12 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
       </Card>
 
       {isOwner && <VisibilityCard key={meta.id} projectId={meta.id} visibility={meta.visibility ?? "private"} reload={reload} />}
+      {isOwner && <PublicCommunityCard key={`community:${meta.id}`} projectId={meta.id} isPublic={meta.visibility === "public"} />}
       {isOwner && <ConnectionsCard key={meta.id} projectId={meta.id} isOwner={isOwner} isCustom={meta.kind === "import" && isCommandPolicy(meta.verification)} />}
-      <WebhooksCard projectId={meta.id} isOwner={isOwner} />
+      {isOwner && <DeploymentCard key={`deployments:${meta.id}`} projectId={meta.id} />}
+      <div id="deployment-deliveries"><WebhooksCard projectId={meta.id} isOwner={isOwner} /></div>
       <DomainsCard projectId={meta.id} isOwner={isOwner} />
+      {isOwner && meta.kind === "import" && <ImportHistoryCard key={meta.id} projectId={meta.id} />}
       {isOwner && <MirrorCard projectId={meta.id} isOwner={isOwner} />}
 
       {isOwner && (
