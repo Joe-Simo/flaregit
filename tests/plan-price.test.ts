@@ -24,11 +24,11 @@ test("configured product GET keeps authentication and all private vendor fields 
 test("redirect and provider errors never expose error bodies or tokens", async () => {
   const request: PriceRequest = async () => new Response("server-only-secret", { status: 302, headers: { Location: "https://attacker.example" } });
   expect(await readPublicPlanPrice(env, request)).toEqual({ status: "unavailable", reason: "provider_unavailable" });
-  expect(await readPublicPlanPrice(env, async () => { throw new Error("server-only-secret"); })).toEqual({ status: "unavailable", reason: "provider_unavailable" });
+  expect(await readPublicPlanPrice(env, async () => { throw new Error("server-only-secret"); })).toEqual({ status: "unavailable", reason: "provider_transport_unavailable" });
 });
 test.each([
   [401, "provider_access_denied"], [403, "provider_access_denied"], [404, "provider_not_found"],
-  [429, "provider_rate_limited"], [400, "provider_rejected_request"], [500, "provider_unavailable"],
+  [429, "provider_rate_limited"], [400, "provider_rejected_request"], [500, "provider_server_error"],
 ] as const)("HTTP %s projects a safe classification %s without vendor details", async (status, reason) => {
   const result = await readPublicPlanPrice(env, async () => new Response("server-only-secret and private provider URL", { status: Number(status) }));
   expect(result).toEqual({ status: "unavailable", reason });
