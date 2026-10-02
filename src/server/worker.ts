@@ -1,3 +1,4 @@
+import {admitCredentialLookup} from "./lookup-admission.js";
 import { directoryQuerySchema, directoryUpdateSchema, projectPublicDirectory } from "./public-directory.js";
 import { recoverNativeCompute, claimNativeCompute, admitNativeCompute, NativeComputeAdmissionError } from "./native-compute.js";
 import { allocateArtifact } from "./storage-allocation.js";
@@ -58,11 +59,13 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
+    if(url.pathname.startsWith("/api/")||url.pathname.startsWith("/git/")){const denied=await admitCredentialLookup(request,env);if(denied)return denied;}
+
     if (url.pathname === "/health") return json({ ok: true });
     if (url.pathname.startsWith("/git/")) return handleGitGateway(request, env, async (_account, userId, _route, operationId) => {
       const admission = await admitGitOperation(env, userId, operationId);
       return admission instanceof Response ? admission : { finish: admission.finish ?? (async () => {}) };
-    });
+    },true);
     if (url.pathname === "/pricing" && request.method === "GET" && request.headers.get("Accept")?.includes("text/html")) return env.ASSETS.fetch(request);
     if (["/pricing", "/plan-price"].includes(url.pathname) && request.method === "GET") {
       const ip = request.headers.get("CF-Connecting-IP");

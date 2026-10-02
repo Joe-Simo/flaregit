@@ -1,0 +1,13 @@
+import{expect,test}from"bun:test";import{Miniflare,convertV4MiniflareOptions}from"miniflare";import{workerdChild}from"./support/workerd-child";
+test("Worker fixed-IP lookup admission rejects varying credentials and repo IDs before any actor lookup",async()=>{
+ if(await workerdChild("tests/lookup-admission.test.ts"))return;const file=`/tmp/lookup-gate-${crypto.randomUUID()}.js`,build=Bun.spawn([process.execPath,"build","tests/support/lookup-admission-worker.ts","--target=browser","--external=cloudflare:workers","--external=node:*",`--outfile=${file}`],{stdout:"ignore",stderr:"pipe"});const[error,code]=await Promise.all([new Response(build.stderr).text(),build.exited]);if(code)throw new Error(error);const script=await Bun.file(file).text();await Bun.file(file).delete();
+ const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:"lookup-gate",modules:true,script,compatibilityDate:"2026-10-02",compatibilityFlags:["nodejs_compat"]}]}));const call=async(path:string,credential?:string,ip:string|undefined="198.51.100.60")=>(await mf.getWorker("lookup-gate")).fetch(`http://fixture${path}`,{headers:{...(credential?{Authorization:`Bearer ${credential}`}:{ }),...(ip?{"CF-Connecting-IP":ip}:{})}});
+ try{
+  await call("/fixture/reset");
+  for(let index=1;index<=3;index++){const id=String(index).padStart(12,"0");expect((await call("/api/account",`fgt_${id}_${"x".repeat(32)}`)).status).toBe(429);expect((await call(`/git/p${id}/canonical.git/info/refs?service=git-upload-pack`,`fgg_p${id}_${"x".repeat(64)}`)).status).toBe(429);expect((await call(`/api/public/p${id}/meta`)).status).toBe(429);}
+  expect((await call("/fixture/direct-git",`fgg_p123456789abc_${"x".repeat(64)}`)).status).toBe(429);
+  const denied=await(await call("/fixture/stats")).json() as{lookupKeys:string[];actorNames:string[];postAuthCalls:number};expect(denied.actorNames).toEqual([]);expect(denied.postAuthCalls).toBe(0);expect(new Set(denied.lookupKeys)).toEqual(new Set(["flaregit:credential/lookups:198.51.100.60"]));
+  const before=denied.lookupKeys.length;expect((await call("/docs")).status).toBe(200);expect((await call("/auth-config")).status).toBe(200);expect((await call("/health")).status).toBe(200);expect((await(await call("/fixture/stats")).json() as{lookupKeys:string[]}).lookupKeys.length).toBe(before);
+  await call("/fixture/allow");expect((await call("/api/account")).status).toBe(503);expect((await call("/git/p123456789abc/canonical.git/info/refs?service=git-upload-pack")).status).toBe(401);const admitted=await(await call("/fixture/stats")).json() as{actorNames:string[];lookupKeys:string[]};expect(admitted.actorNames).toEqual([]);expect(admitted.lookupKeys.length).toBe(before+2);
+ }finally{await mf.dispose();}
+},30000);

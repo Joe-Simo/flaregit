@@ -21,6 +21,8 @@ export interface Env {
   /** Comma-separated account keys of the people who handle abuse and impersonation reports (var). */
   OPERATOR_ACCOUNTS?: string;
   /** Per-user API rate limit (Workers Rate Limiting binding). */
+  /** Fixed per-IP credential/repository lookup admission, before any DO lookup. */
+  LOOKUP_LIMITER?: { limit(opts: { key: string }): Promise<{ success: boolean }> };
   API_LIMITER: { limit(opts: { key: string }): Promise<{ success: boolean }> };
   /** Clerk frontend API URL (the JWT issuer), e.g. https://example.clerk.accounts.dev (var). */
   CLERK_ISSUER?: string;

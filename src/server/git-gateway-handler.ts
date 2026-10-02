@@ -1,3 +1,4 @@
+import {admitCredentialLookup} from "./lookup-admission.js";
 import { authenticate } from "./access.js";
 import { accountKeyFor, accountOf, projectOf, PROJECT_ID } from "./projects.js";
 import { gitHttpCredential, parseGitHttpRoute, proxyGitHttp, type GitHttpRoute } from "./git-http-gateway.js";
@@ -9,8 +10,9 @@ export async function gitParentTokenHash(request:Request):Promise<string|undefin
   const hash=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(token));return [...new Uint8Array(hash)].map(x=>x.toString(16).padStart(2,"0")).join("");
 }
 export type GitAdmission = (account:Ledger,userId:string,route:GitHttpRoute,operationId:string)=>Promise<Response|{finish:()=>Promise<void>}>;
-export async function handleGitGateway(request:Request,env:Env,admit:GitAdmission):Promise<Response>{
+export async function handleGitGateway(request:Request,env:Env,admit:GitAdmission,lookupAlreadyAdmitted=false):Promise<Response>{
   const respond=(message:string,status:number)=>new Response(message,{status,headers:{"Cache-Control":"no-store",...(status===401?{"WWW-Authenticate":'Basic realm="FlareGit", charset="UTF-8"'}:{})}});
+  if(!lookupAlreadyAdmitted){const denied=await admitCredentialLookup(request,env);if(denied)return denied;}
   let route:GitHttpRoute|null;try{route=parseGitHttpRoute(request);}catch{return respond("Invalid Git request",400);}
   if(!route||!PROJECT_ID.test(route.projectId))return respond("Not found",404);
   const secret=gitHttpCredential(request);if(!secret)return respond("Git credential required",401);
