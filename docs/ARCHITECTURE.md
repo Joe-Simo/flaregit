@@ -10,6 +10,20 @@
 ## Production flow (Cloudflare)
 Queue (`git.push`, deduplicated by event id in the DO) → Durable Object ledger → Workflow: `claim-landing` (lease + frozen candidate) → `compose-repair-verify` (integrator container) → `prepare-publish` (DO validates invariants, journals PREPARED) → `cas-push-to-artifacts` → `complete-publish`. Builds of the verified commit are stored in R2 under the commit hash and served from `PREVIEW_ORIGIN`.
 
+## Multi-repository platform
+
+- One Durable Object per account (`account:<key>`: project list, billing, usage, API tokens), one per project (`project:<id>`: ledger, members, invites, activity, webhooks, deliveries), and one `global` (probes, global run cap).
+- The Worker checks membership on every project route. API tokens (`fgt_...`) are stored hashed and cannot manage tokens or delete the account.
+- Webhooks are written to the delivery log in the same transaction as the event, then delivered by a Queue consumer, so a failed ref update never emits and a delivered event is never lost. Targets must be public https hostnames.
+- Stacked changes fork the parent change's fork; readiness is gated on the parent being accepted.
+- Builds in R2 expire after 30 days (lifecycle rule `expire-builds`); task forks are deleted after accept or cancel.
+
+## Known gaps
+
+- No AI-provider health probe (a probe would cost model calls every 5 minutes).
+- Syntax highlighting in the diff viewer is plain text; a WASM highlighter is roadmap.
+- Namespace ownership is per-account; DNS-based verification is roadmap.
+
 ## Known limits
 - Candidate code and the checks share one process during verification; a hostile candidate can crash or time out the run (fails closed) and, in theory, tamper with in-process state. The container boundary in production is the real defense; run verification in a dedicated, network-restricted container for hostile contributors.
 - Integrator containers have outbound internet (needed for git to Artifacts). They hold no secrets at the time candidate code runs, but candidate code could exfiltrate the candidate source.

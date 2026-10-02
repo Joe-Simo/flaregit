@@ -18,6 +18,17 @@ A Git-compatible platform for humans and AI agents working concurrently. Contrib
 
 Cloudflare mapping (`wrangler.jsonc`): Worker (API + Clerk session-token auth), Durable Object + SQLite ledger (`durable-object.ts`), Workflow (`workflow.ts`), Queue (`queue.ts`), Container-backed integrator DO (`integrator.ts`), Artifacts binding (`artifacts/cloudflare.ts`), R2 (evidence, immutable per-commit builds), Workers AI through AI Gateway. Customer sign-in is Clerk (Cloudflare has no customer-identity product; Access is a workforce tool).
 
+## Platform
+
+- **Repositories:** create a demo, or import any public Git URL into Artifacts. Private by default; owners invite members with single-use links.
+- **Changes and stacks:** each change is its own Artifacts fork. A change can be stacked on another (`flaregit work <repo> "<goal>" --on <change>`) and cannot be marked ready until its parent is accepted.
+- **Integration:** two ready changes are composed, repaired if needed, verified (platform checks for the demo, your own command for imported repos), and only the exact verified commit lands, via compare-and-swap with a journal.
+- **Review:** virtualized, Web Worker diff viewer with keyboard navigation (`j`/`k` files, `n`/`p` hunks, `c` collapse, `?` help).
+- **Webhooks:** signed (Standard Webhooks), sent only after the ref update commits, retried with backoff, with a delivery log and manual redelivery.
+- **CLI:** `bun run build:cli` produces `dist-cli/flaregit`. JSON output, no prompts, token auth. Create a token under Account → API tokens.
+- **Status:** `/status` and `/status.json` show per-component raw check counts and failures (api, ledger, git, storage, workflows, auth, queue), probed every 5 minutes. The app shows a banner when a component is degraded.
+- **Account:** plan and usage, API tokens, and full account deletion.
+
 ## Run locally
 
 ```bash

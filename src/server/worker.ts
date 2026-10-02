@@ -108,6 +108,30 @@ export default {
         });
       }
 
+      if (path === "/account" && method === "DELETE") {
+        if (auth.viaToken) return text("Delete your account from the web app", 403);
+        const b = await body<{ confirm?: string }>();
+        if (b.confirm !== "delete my account") return text('Send {"confirm":"delete my account"} to confirm', 400);
+        const billing = await account.getBilling();
+        if (billing.plan === "pro" && billing.status === "active") return text("Cancel your Pro subscription first (Account → Billing), then delete your account", 409);
+        for (const p of await account.listProjects()) {
+          const ledger = projectOf(env, p.id);
+          const role = await ledger.roleOf(userId).catch(() => null);
+          if (role === "owner") {
+            const st = await ledger.getState().catch(() => null);
+            if (st) {
+              for (const t of Object.values(st.tasks)) await env.ARTIFACTS.delete(t.workspace.repoName).catch(() => false);
+              await env.ARTIFACTS.delete(st.canonicalRepoName).catch(() => false);
+            }
+            await ledger.destroy();
+          } else if (role) {
+            await ledger.removeMember(userId).catch(() => undefined);
+          }
+        }
+        await account.destroy();
+        return json({ deleted: true });
+      }
+
       if (path === "/billing" && method === "GET") {
         const billing = await account.getBilling();
         return json({ ...billing, runsToday: await account.usageToday(), runsPerDay: planLimits(env)[billing.plan], checkoutConfigured: Boolean(env.POLAR_PRODUCT_ID && env.POLAR_ACCESS_TOKEN) });
@@ -248,13 +272,15 @@ export default {
 
         // ----- changes (tasks) -----
         if (sub === "/tasks" && method === "POST") {
-          const b = await body<{ taskId?: string; goal?: string; name?: string }>();
+          const b = await body<{ taskId?: string; goal?: string; name?: string; dependsOn?: string }>();
           const goal = clean(b.goal, 300);
           if (!b.taskId || !TASK_ID.test(b.taskId) || !goal) return text("taskId (3-41 chars: a-z, 0-9, -) and goal are required", 400);
           if (state.tasks[b.taskId]) return text("A change with that id already exists", 409);
-          const canonical = await env.ARTIFACTS.get(state.canonicalRepoName);
+          const parent = b.dependsOn ? state.tasks[b.dependsOn] : undefined;
+          if (b.dependsOn && (!parent || parent.status === "cancelled")) return text("dependsOn must name an existing, uncancelled change", 400);
+          const source = await env.ARTIFACTS.get(parent ? parent.workspace.repoName : state.canonicalRepoName);
           const repoName = taskRepoName(projectId, b.taskId);
-          const fork = await canonical.fork(repoName, { description: goal });
+          const fork = await source.fork(repoName, { description: goal });
           const forkRepo = await env.ARTIFACTS.get(repoName);
           const token = (await forkRepo.createToken("write", 3600)).plaintext;
           const now = new Date().toISOString();
@@ -262,7 +288,8 @@ export default {
             id: b.taskId,
             goal,
             contributor: { id: userId.slice(-12), name: clean(b.name, 60) || `member-${userId.slice(-6)}`, type: "human" },
-            baseCommit: state.acceptedState.currentCommit,
+            baseCommit: parent ? parent.currentCommit : state.acceptedState.currentCommit,
+            ...(parent ? { dependsOn: parent.id } : {}),
             allowedScope: settings.allowedScope,
             status: "working",
             requirements: [],
@@ -281,6 +308,7 @@ export default {
             expiresInSeconds: 3600,
             commands: [
               `git -c http.extraHeader="Authorization: Bearer ${token}" clone ${fork.remote} ${b.taskId} && cd ${b.taskId}`,
+              ...(parent ? [`git checkout ${parent.workspace.branch}   # stacked: start from the parent change`] : []),
               `git checkout -b ${task.workspace.branch}   # edit, then commit`,
               `git -c http.extraHeader="Authorization: Bearer ${token}" push origin ${task.workspace.branch}`,
             ],
@@ -306,6 +334,8 @@ export default {
             return json({ cancelled: task.id });
           }
           if (action === "ready") {
+            const parent = task.dependsOn ? state.tasks[task.dependsOn] : undefined;
+            if (parent && parent.status !== "accepted") return text(`Stacked on "${parent.id}", which is ${parent.status}; it must be accepted first`, 409);
             const repo = await env.ARTIFACTS.get(task.workspace.repoName);
             const head = (await repo.log({ ref: `refs/heads/${task.workspace.branch}`, limit: 1 }))[0]?.hash ?? (await repo.log({ ref: task.workspace.branch, limit: 1 }))[0]?.hash;
             if (!head) return text(`Nothing pushed to ${task.workspace.branch} yet`, 409);

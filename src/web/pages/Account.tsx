@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Copy, Trash2 } from "lucide-react";
+import { useUser } from "@clerk/clerk-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -16,6 +17,8 @@ export function Account() {
   const [label, setLabel] = useState("");
   const [created, setCreated] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState("");
+  const { user } = useUser();
 
   const load = () => {
     apiJson<Token[]>("/tokens").then(setTokens).catch((e: Error) => setError(e.message));
@@ -64,6 +67,26 @@ export function Account() {
           <div className="flex gap-2">
             <input className={field} value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Label, e.g. laptop" maxLength={60} aria-label="Token label" />
             <Button variant="orange" onClick={async () => { const r = await apiJson<{ token: string }>("/tokens", { method: "POST", json: { label } }); setCreated(r.token); setLabel(""); load(); }}>Create token</Button>
+          </div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle className="text-base text-destructive">Delete account</CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-sm text-muted-foreground">Permanently deletes every repository you own (code, changes, webhooks), removes you from shared repositories, revokes all tokens, and deletes your sign-in. This cannot be undone. Cancel an active Pro subscription first.</p>
+          <div className="flex gap-2">
+            <input className={field} value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder='Type "delete my account"' aria-label="Confirm account deletion" />
+            <Button
+              variant="destructive"
+              disabled={confirm !== "delete my account"}
+              onClick={async () => {
+                try {
+                  await apiJson("/account", { method: "DELETE", json: { confirm } });
+                  await user?.delete();
+                  window.location.href = "/";
+                } catch (e) { setError((e as Error).message); }
+              }}
+            >Delete everything</Button>
           </div>
         </CardContent>
       </Card>

@@ -63,6 +63,8 @@ export interface Task {
   goal: string;
   contributor: Contributor;
   baseCommit: string;
+  /** Stacked change: id of the change this one builds on. It cannot be marked ready until that change is accepted. */
+  dependsOn?: string;
   allowedScope: string[];
   status: TaskStatus;
   requirements: Requirement[];

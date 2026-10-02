@@ -100,7 +100,7 @@ const HELP = `flaregit — JSON by default (--pretty for humans)
   repo delete <repo> --confirm <name>
   changes <repo>
   change new <repo> "<goal>" [--agent]
-  work <repo> "<goal>" [--dir D]        create a change, clone it and check out its branch
+  work <repo> "<goal>" [--dir D] [--on CHANGE]   create a change (stacked on CHANGE if given), clone it and check out its branch
   push                                   push the current change branch (fresh credential)
   ready <repo> <change> | cancel <repo> <change>
   integrate <repo> <changeA> <changeB>
@@ -168,9 +168,11 @@ async function main() {
     const id = await repo(sub);
     const goal = rest[0] ?? fail('Usage: flaregit work <repo> "<goal>"');
     const taskId = `${goal.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 24) || "change"}-${Math.random().toString(36).slice(2, 6)}`;
-    const created = await api<{ task: string; remote: string; branch: string; token: string }>("POST", `/p/${id}/tasks`, { taskId, goal });
+    const on = flag("on");
+    const created = await api<{ task: string; remote: string; branch: string; token: string }>("POST", `/p/${id}/tasks`, { taskId, goal, ...(on ? { dependsOn: on } : {}) });
     const dir = flag("dir") ?? taskId;
     git(["clone", "--quiet", created.remote, dir], created.token);
+    if (on) git(["checkout", "--quiet", `task/${on}`], undefined, dir);
     git(["checkout", "--quiet", "-b", created.branch], undefined, dir);
     git(["config", "flaregit.repo", id], undefined, dir);
     git(["config", "flaregit.change", created.task], undefined, dir);
