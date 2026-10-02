@@ -10,10 +10,11 @@ import { billingFromEvent, createCheckout, planLimits, reportUsage, verifyPolarW
 import { TICKET_BOOKING_POLICY } from "../fixtures/ticket-booking/policy.js";
 import { DEFAULT_PROTECTED_PATHS, isCommandPolicy, settingsFor, type CommandPolicy } from "../core/command-policy.js";
 import { currentStatus, runProbes, statusPage } from "./status.js";
+import { lookupTxt, normalizeDomain, txtHost, txtValue } from "./dns.js";
 import { isSafeRef } from "../core/sanitize.js";
 import { diffTrees, listCommits, listDirectory, readBlobByHash, readFileText, resolveCommit } from "./browse.js";
 import { validateWebhookUrl } from "./webhooks.js";
-import { PROJECT_ID, accountKeyFor, accountOf, admitRun, canonicalNameFor, newProjectId, projectOf, taskRepoName } from "./projects.js";
+import { PROJECT_ID, accountKeyFor, accountOf, admitRun, canonicalNameFor, globalOf, newProjectId, projectOf, taskRepoName } from "./projects.js";
 import type { Env, QueueMessage } from "./env.js";
 import type { Task } from "../core/types.js";
 
@@ -443,6 +444,40 @@ export default {
         }
 
         // ----- outgoing webhooks -----
+        // ----- domain verification (DNS TXT) -----
+        if (sub === "/domains" && method === "GET") {
+          const rows = await globalOf(env).domainsFor(projectId);
+          return json(rows.map((r) => ({ domain: r.domain, verified: r.verified_at !== null, verifiedAt: r.verified_at, host: txtHost(r.domain), value: txtValue(r.token) })));
+        }
+        if (sub === "/domains" && method === "POST") {
+          if (!isOwner) return text("Only the owner can claim a domain", 403);
+          const b = await body<{ domain?: string }>();
+          const domain = normalizeDomain(b.domain ?? "");
+          if (!domain) return text("Enter a valid domain, e.g. example.com", 400);
+          if ((await globalOf(env).domainsFor(projectId)).length >= 5) return text("Domain limit reached (5)", 409);
+          const row = await globalOf(env).claimDomain(domain, projectId);
+          return json({ domain, verified: row.verified_at !== null, host: txtHost(domain), value: txtValue(row.token) }, 201);
+        }
+        const domainRoute = /^\/domains\/([a-z0-9.-]+)\/(verify)$/.exec(sub);
+        if (domainRoute && method === "POST") {
+          if (!isOwner) return text("Only the owner can verify a domain", 403);
+          const domain = normalizeDomain(domainRoute[1]!);
+          const row = domain ? (await globalOf(env).domainsFor(projectId)).find((r) => r.domain === domain) : undefined;
+          if (!domain || !row) return text("Claim the domain first", 404);
+          const records = await lookupTxt(txtHost(domain)).catch((e: Error) => { throw new Error(`Could not check DNS: ${e.message}`); });
+          if (!records.includes(txtValue(row.token))) return json({ verified: false, expected: { host: txtHost(domain), value: txtValue(row.token) }, found: records }, 200);
+          const { lostBy } = await globalOf(env).verifyDomain(domain, projectId);
+          for (const other of lostBy) await projectOf(env, other).logActivity("FlareGit", "domain.lost", `${domain} is now verified by another repository whose owner controls its DNS; this repository no longer holds it`).catch(() => undefined);
+          await project.logActivity("FlareGit", "domain.verified", `${domain} verified by DNS`);
+          return json({ verified: true, displaced: lostBy.length });
+        }
+        const domainDelete = /^\/domains\/([a-z0-9.-]+)$/.exec(sub);
+        if (domainDelete && method === "DELETE") {
+          if (!isOwner) return text("Only the owner can release a domain", 403);
+          await globalOf(env).releaseDomain(domainDelete[1]!, projectId);
+          return json({ released: domainDelete[1] });
+        }
+
         if (sub === "/webhooks" && method === "GET") return json(await project.listWebhooks());
         if (sub === "/webhooks" && method === "POST") {
           if (!isOwner) return text("Only the owner can add webhooks", 403);

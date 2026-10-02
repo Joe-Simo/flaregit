@@ -68,6 +68,13 @@ export interface TokenScope {
   expiresAt?: number;
 }
 
+export interface DomainRow {
+  domain: string;
+  project_id: string;
+  token: string;
+  verified_at: string | null;
+}
+
 export interface InboxRow {
   id: number;
   project_id: string;
@@ -112,6 +119,10 @@ export interface Ledger {
   listInbox(filter: "direct" | "activity" | "snoozed" | "archived"): Promise<InboxRow[]>;
   setInboxState(id: number, state: "unread" | "archived" | "snoozed"): Promise<void>;
   inboxUnread(): Promise<{ direct: number; activity: number }>;
+  domainsFor(projectId: string): Promise<DomainRow[]>;
+  claimDomain(domain: string, projectId: string): Promise<DomainRow>;
+  verifyDomain(domain: string, projectId: string): Promise<{ lostBy: string[] }>;
+  releaseDomain(domain: string, projectId: string): Promise<void>;
   createApiToken(userId: string, label: string, secret: string, opts?: TokenScope): Promise<{ id: string }>;
   listApiTokens(): Promise<ApiTokenRow[]>;
   revokeApiToken(id: string): Promise<void>;
@@ -170,6 +181,7 @@ export class RepositoryController extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS webhooks (id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL, events TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS deliveries (id TEXT PRIMARY KEY, seq INTEGER NOT NULL DEFAULT 0, queue_ms INTEGER, webhook_id TEXT NOT NULL, event TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_status INTEGER, last_error TEXT, latency_ms INTEGER, payload TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS inbox (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, project_name TEXT NOT NULL, kind TEXT NOT NULL, type TEXT NOT NULL, title TEXT NOT NULL, created_at TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'unread');
+      CREATE TABLE IF NOT EXISTS domains (domain TEXT NOT NULL, project_id TEXT NOT NULL, token TEXT NOT NULL, verified_at TEXT, PRIMARY KEY (domain, project_id));
       CREATE TABLE IF NOT EXISTS probes (id INTEGER PRIMARY KEY AUTOINCREMENT, component TEXT NOT NULL, at INTEGER NOT NULL, ok INTEGER NOT NULL, latency_ms INTEGER, detail TEXT);
       CREATE INDEX IF NOT EXISTS probes_component_at ON probes (component, at);
       CREATE TABLE IF NOT EXISTS api_tokens (id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, label TEXT NOT NULL, created_at TEXT NOT NULL, last_used TEXT);
@@ -488,6 +500,32 @@ export class RepositoryController extends DurableObject<Env> {
           await account.addInbox({ projectId: s.projectId, projectName: s.projectName, kind: DIRECT.has(type) ? "direct" : "activity", type, title: summary.slice(0, 200) }).catch(() => undefined);
         })
     );
+  }
+
+  // ---- domain ownership (used on the global instance) ----
+  /** Anyone may claim a name; a claim confers nothing until DNS proves control. */
+  async claimDomain(domain: string, projectId: string): Promise<DomainRow> {
+    const existing = (this.ctx.storage.sql.exec("SELECT * FROM domains WHERE domain = ? AND project_id = ?", domain, projectId).toArray()[0] as unknown as DomainRow | undefined);
+    if (existing) return existing;
+    const token = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
+    this.ctx.storage.sql.exec("INSERT INTO domains (domain, project_id, token, verified_at) VALUES (?, ?, ?, NULL)", domain, projectId, token);
+    return { domain, project_id: projectId, token, verified_at: null };
+  }
+  async domainsFor(projectId: string): Promise<DomainRow[]> {
+    return this.ctx.storage.sql.exec("SELECT * FROM domains WHERE project_id = ? ORDER BY domain", projectId).toArray() as unknown as DomainRow[];
+  }
+  /**
+   * Called only after DNS proved control for this project. Control of the DNS zone is the authority, so any other
+   * project holding the same verified name loses it at once (an impostor cannot keep a name its owner can reclaim).
+   */
+  async verifyDomain(domain: string, projectId: string): Promise<{ lostBy: string[] }> {
+    const lost = this.ctx.storage.sql.exec<{ project_id: string }>("SELECT project_id FROM domains WHERE domain = ? AND project_id != ? AND verified_at IS NOT NULL", domain, projectId).toArray().map((r) => r.project_id);
+    this.ctx.storage.sql.exec("UPDATE domains SET verified_at = NULL WHERE domain = ? AND project_id != ?", domain, projectId);
+    this.ctx.storage.sql.exec("UPDATE domains SET verified_at = ? WHERE domain = ? AND project_id = ?", new Date().toISOString(), domain, projectId);
+    return { lostBy: lost };
+  }
+  async releaseDomain(domain: string, projectId: string): Promise<void> {
+    this.ctx.storage.sql.exec("DELETE FROM domains WHERE domain = ? AND project_id = ?", domain, projectId);
   }
 
   // ---- notification inbox (used on the account instance) ----
