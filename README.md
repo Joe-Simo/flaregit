@@ -1,74 +1,121 @@
 # FlareGit
 
-> Work in parallel. Integration happens automatically. — [flaregit.com](https://flaregit.com)
+A Git collaboration platform on Cloudflare Workers and Artifacts for humans and AI agents working at the same time. Each change lives in its own Artifacts fork and is pushed with ordinary `git`. FlareGit composes ready changes onto the accepted head, repairs what it safely can, verifies the exact candidate commit, waits for a human to accept that commit, and lands only that commit with a compare-and-swap ref update.
 
-A Git-compatible platform for humans and AI agents working concurrently. Contributors push to their own task repositories; FlareGit composes their work on top of the accepted version with native Git, repairs what it safely can, verifies the exact candidate with platform-owned checks, and publishes only that verified commit with a compare-and-swap ref update. Contradictory requirements pause integration, keep the last accepted version live, and ask one product question.
+## Workflow
 
-## How it works
+1. **Changes.** `flaregit work <repo> "<goal>"` (or the web app) creates a change: a fork of the canonical repo with its own branch. Humans push to it; agents (`change new --agent`) run in an agent container and push to the same kind of fork.
+2. **Integration.** One to eight ready changes are integrated together. The Workflow claims the landing lease, freezes a candidate against the current accepted head, and composes the changes with native `git merge` in an integrator container.
+3. **Verification.** The candidate is checked (platform checks for the demo repo, your own test command for imported repos). Model repairs are confined to the change scope and cannot touch protected paths.
+4. **Human review.** The verified candidate is pushed to `refs/flaregit/candidates/<id>` and the Workflow waits for an accept or reject (`flaregit accept|reject <repo> <candidate>` or the UI). What is reviewed is the exact commit that will land.
+5. **Durable landing.** On accept, the Durable Object validates the candidate (evidence, commit, tree, base, policy) and journals PREPARED; a fresh workspace fetches the stored candidate ref and pushes it with `--force-with-lease` against the expected base; the ledger is completed.
+6. **Webhooks.** Events are emitted only after the ref update commits.
 
-| Stage | Implementation |
-|---|---|
-| Isolate | Each task is a fork of the canonical repo (`src/core/pipeline/isolate.ts`); contributors use ordinary `git clone/push`. |
-| Detect | `git merge-tree` finds real text conflicts; clean merges are trial-verified so behavioral/interface conflicts are found by execution (`detect.ts`). |
-| Compose | Native `git merge` of task A then B onto the exact accepted head (`compose.ts`). |
-| Repair | Workers AI proposes whole-file fixes; the platform confines them to scope, rejects protected paths and leftover conflict markers, caps at 2 rounds (`repair.ts`). |
-| Verify | Type-check + platform-owned behavioral checks run in a scrubbed child process against a fresh checkout of the candidate commit (`core/verification`). Evidence binds commit **and tree**. |
-| Accept | `publishAcceptedCandidate` re-checks evidence↔commit↔tree↔base↔policy and moves the ref with CAS (`update-ref old` locally, `push --force-with-lease` to Artifacts). Journal: PREPARED → REF_UPDATED → ACCEPTED. |
-| Decide | Requirements whose assertions give different outputs for the same input are contradictions (`decision/contradiction.ts`); the chosen requirement's `policyPatch` updates the verifier policy and integration re-runs. |
+**Conflicts.** Text conflicts are found by `git merge-tree` and repaired. Clean merges that break behavior are caught by verification and repaired or blocked; nothing failing is published. Requirements that contradict each other pause integration with one product question; the accepted head does not move until it is answered.
 
-Cloudflare mapping (`wrangler.jsonc`): Worker (API + Clerk session-token auth), Durable Object + SQLite ledger (`durable-object.ts`), Workflow (`workflow.ts`), Queue (`queue.ts`), Container-backed integrator DO (`integrator.ts`), Artifacts binding (`artifacts/cloudflare.ts`), R2 (evidence, immutable per-commit builds), Workers AI through AI Gateway. Customer sign-in is Clerk (Cloudflare has no customer-identity product; Access is a workforce tool).
+**Stale bases.** If the branch moved since the candidate was frozen, the CAS push is refused; the candidate is marked stale and the integration must be re-run.
 
-## Platform
+**Stacks.** A change can be stacked on another (`work ... --on <change>`). It cannot be marked ready until its parent is accepted; after a landing, downstream changes are rebased automatically.
 
-- **Repositories:** create a demo, or import any public Git URL into Artifacts. Private by default; owners invite members with single-use links.
-- **Changes and stacks:** each change is its own Artifacts fork. A change can be stacked on another (`flaregit work <repo> "<goal>" --on <change>`) and cannot be marked ready until its parent is accepted.
-- **Integration:** two ready changes are composed, repaired if needed, verified (platform checks for the demo, your own command for imported repos), and only the exact verified commit lands, via compare-and-swap with a journal.
-- **Review:** virtualized, Web Worker diff viewer with keyboard navigation (`j`/`k` files, `n`/`p` hunks, `c` collapse, `?` help).
-- **Webhooks:** signed (Standard Webhooks), sent only after the ref update commits, retried with backoff, with a delivery log and manual redelivery.
-- **Terminal review:** `flaregit review <repo> --change ID` (or `--commit SHA`) opens a full-screen reviewer: `j`/`k` files, `n`/`p` hunks, `c` collapse, `a` mark the change ready, `q` quit.
-- **CLI:** `bun run build:cli` produces `dist-cli/flaregit`. JSON output, no prompts, token auth. Create a token under Account → API tokens.
-- **Status:** `/status` and `/status.json` show per-component raw check counts and failures (api, ledger, git, storage, workflows, auth, queue), probed every 5 minutes. The app shows a banner when a component is degraded.
-- **Account:** plan and usage, API tokens, and full account deletion.
+**Recovery.** Agents resume from their already pushed branch. Publication rehydrates from the stored candidate ref, so a crashed step does not need the original workspace. Webhook deliveries are written in the same transaction as the event (transactional outbox) and a Durable Object alarm re-sends anything not yet queued.
 
-## Run locally
+## Platform features
+
+- Issues, with changes linkable to an issue (`work --issue N`).
+- Review conversations on changes and candidates, including line comments (`comment ... --path P --line N`).
+- Profiles and a people tab; namespace handles.
+- Notification inbox.
+- API tokens: `full`, `read` or `write` scope, optionally pinned to one repo and expiring. A token can mint narrower tokens (read/write, TTL up to 24 h) via `flaregit auth token`.
+- Signed private previews: builds of accepted commits in R2, opened through HMAC-signed, expiring links on a separate origin.
+- Webhooks: Standard Webhooks signature, ordered per project, retried with backoff, manual replay, `webhook-sequence` and a stable `webhook-id` for de-duplication.
+- Status page: `/status` and `/status.json`, probed by a 5-minute cron.
+- Custom domain verification through a DNS TXT record at `_flaregit.<domain>`; a verified claim displaces unverified ones.
+- Diff viewer (virtualized, keyboard driven) and a terminal reviewer (`flaregit review`).
+- CLI (`bun run build:cli` produces `dist-cli/flaregit`; JSON output, token auth). `bun cli/flaregit.ts --help` lists every command.
+- Optional Pro billing through Polar.
+
+## Self-host on your Cloudflare account
+
+Requirements:
+- Workers Paid plan (Containers, Durable Objects with SQLite, Workflows, Queues).
+- Access to Cloudflare Artifacts (binding namespace `flaregit-default`).
+- An AI Gateway (id goes in `AI_GATEWAY_ID`; default `default`). Workers AI is used through the `AI` binding.
+- A Clerk application (issuer URL and publishable key).
+- Docker running locally: `wrangler deploy` builds the container image from `./Dockerfile`.
+- Bun.
+
+Steps:
 
 ```bash
 bun install
-bun run typecheck && bun run lint && bun test && bun run build
-CLOUDFLARE_ACCOUNT_ID=… CLOUDFLARE_API_TOKEN=… bun run server   # Workers AI drives agents and repairs
-bun run dev                                                     # UI on :5173
-bun run demo                                                    # runs all three scenarios, prints measured results
+bunx wrangler login
+bunx wrangler r2 bucket create flaregit-evidence
+bunx wrangler queues create flaregit-integration-events
 ```
 
-Without Workers AI credentials the server and `demo` refuse to run scenarios (there is no mock fallback). The test suite uses a scripted stand-in for the **model only**; Git, verification, CAS and state are real.
+Edit `wrangler.jsonc`:
+- `vars`: `CLERK_ISSUER`, `CLERK_PUBLISHABLE_KEY`, `CLERK_AUTHORIZED_PARTIES` (comma separated; must include the exact origin you serve the UI from, e.g. your `workers.dev` URL or custom domain), `PREVIEW_ORIGIN` (a separate hostname that serves previews), `AI_GATEWAY_ID`, `CANONICAL_REPO`, run caps (`GLOBAL_RUNS_PER_DAY`, `FREE_RUNS_PER_DAY`, `PRO_RUNS_PER_DAY`, `RUNS_ENABLED`). For billing: `POLAR_SERVER` (`sandbox` or `production`) and `POLAR_PRODUCT_ID`.
+- `routes`: replace `flaregit.com` / `preview.flaregit.com` with your own zones, or remove them and use `workers.dev`.
+- `artifacts[0].namespace` if you use a different Artifacts namespace.
 
-## Verification status
+Secrets:
 
-**Local** (`bun test`, 16 tests, real Git/verification/CAS, model stubbed): text-conflict repair, clean-merge-but-broken detection and repair, contradiction → decision → implementation, protected-path and secret containment, forged verifier output, stale-base and evidence-mismatch refusal, duplicate/concurrent landings, cancellation, crash recovery, a second repository domain.
+```bash
+bunx wrangler secret put PREVIEW_SIGNING_KEY    # required: random string, HMAC key for preview links
+bunx wrangler secret put POLAR_ACCESS_TOKEN     # optional: Polar billing
+bunx wrangler secret put POLAR_WEBHOOK_SECRET   # optional: Polar webhook at /webhooks/polar
+```
 
-**Live on Cloudflare** (staging at flaregit.com behind Access, run on 2026-10-01 with `@cf/openai/gpt-oss-120b`):
-- Bootstrap seeded a real Artifacts repo from an integrator container and initialized the Durable Object ledger.
-- Act I: two agents in separate agent containers pushed to their own Artifacts forks; the integration Workflow found the Git conflict, the first candidate failed protected verification, a repair passed, the ref moved by compare-and-swap, the journal reads ACCEPTED and the exact build is served from `preview.flaregit.com`.
-- Act II: the clean merge was detected as broken, repaired and accepted.
-- Act III: paused with one question; the accepted head did not move.
-- `/api` returns 401 without a valid Clerk session token (forged tokens too).
-- A decision resolved through the cloud API triggered FlareGit to re-run, verify and accept the chosen behavior (third landing, journal ACCEPTED).
-- Cancelling a task mid-run: the integration Workflow returned `not_started` and the accepted head did not move.
-- Tenant isolation: each Access identity gets its own Durable Object ledger, Artifacts canonical repo and daily run quota (`MAX_SCENARIO_RUNS_PER_DAY`); a new identity starts uninitialized.
+Deploy:
 
-**Not yet exercised:** crash recovery of an interrupted cloud run (the landing lease expires after 20 minutes), AI Gateway rate limits (the `default` gateway is wired in; set its limit in the dashboard), billing/metering per tenant, and any real load.
+```bash
+bun run build && bunx wrangler deploy
+```
 
-Local run: `bun run demo` needs `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`; without them it refuses to run (no mock fallback).
+## Develop locally
 
-## Billing (Polar)
+```bash
+bun install
+bun run typecheck && bun run lint && bun test
+```
 
-Pro-plan subscriptions are billed through Polar; Cloudflare has no subscription-billing product (Monetization Gateway is a closed-beta, per-request x402 service). FlareGit shares a Polar organization with other projects, so it is namespaced: customers are `flaregit:<projectId>`, usage events are `flaregit.*`, and the webhook ignores any event whose product is not `POLAR_PRODUCT_ID`.
+UI: `bun run dev` starts Vite on :5173 and proxies `/api`, `/auth-config`, `/status.json` and `/webhooks` to a real Worker at `FLAREGIT_API` (default `http://127.0.0.1:8787`, i.e. `bunx wrangler dev`; see `vite.config.ts`).
 
-Setup (secrets are never committed or put in the browser):
-1. In Polar, create a **FlareGit Pro** subscription product and an Organization Access Token (`checkouts:write`, `events:write`); add a webhook endpoint `https://preview.flaregit.com/webhooks/polar` for subscription events.
-2. Set `POLAR_PRODUCT_ID` in `wrangler.jsonc`, then `wrangler secret put POLAR_ACCESS_TOKEN` and `wrangler secret put POLAR_WEBHOOK_SECRET`. Set `POLAR_SERVER=sandbox` (and a sandbox product/token/webhook) to test without real charges; `production` is live.
-3. Free plan: 3 model-backed runs/day per project; Pro: 100 (`FREE_RUNS_PER_DAY`, `PRO_RUNS_PER_DAY`).
+Core engine without the cloud: `bun test` runs the integration engine with real Git, verification and CAS, with a scripted stand-in for the model only. `bun run demo` runs the three ticket-booking scenarios (text conflict, clean-but-broken merge, contradiction) against a local runtime with Workers AI as the model; it requires `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (optional `CLOUDFLARE_AI_GATEWAY`, `FLAREGIT_AI_MODEL`) and refuses to run without them.
+
+`bun run server` (`src/server/local.ts`) is a separate single-project scenario server on port 3000; it does not serve the multi-repository API the UI uses.
+
+## Testing
+
+| File | Covers |
+|---|---|
+| `tests/platform.test.ts` | Act I text conflict repair, Act II clean-merge-but-broken detection and repair (and blocking when repair fails), Act III contradiction and decision, protected-path containment, forged verifier output, publication safety (stale base, evidence mismatch, duplicate landings, crash recovery). |
+| `tests/custom-repo.test.ts` | Imported repos verified by the customer's own test command; contributors cannot weaken protected tests. |
+| `tests/second-repo.test.ts` | A second domain repo with conflicting agents and protected checks. |
+| `tests/landing-race.test.ts` | Concurrent landings onto one branch: no lost refs, orphan commits or desync. |
+| `tests/platform-units.test.ts` | Webhook URL validation, repo policy settings, tree diffing. |
+| `tests/sanitize.test.ts` | Git ref, refspec and header sanitization, including a 20,000-string fuzz. |
+| `tests/dns.test.ts` | Domain normalization, TXT record construction and parsing, resolver failures. |
+| `tests/artifacts.test.ts` | Local Artifacts client: repo creation, tokens, forks. |
+
+The race test runs 20 contending branches by default (4 workers). Full run:
+
+```bash
+RACE_BRANCHES=500 RACE_TIMEOUT_MS=7200000 bun test tests/landing-race.test.ts
+```
+
+## Known limits
+
+- Imports are public HTTPS Git URLs, cloned once with depth 200; there is no ongoing sync from GitHub. Mirroring the other way (FlareGit to GitHub, one-way, after each landing, never force-pushed) is optional per repository under Settings; FlareGit stays the source of truth.
+- One landing at a time per project; the landing lease is 20 minutes.
+- A candidate waits up to 7 days for review, then goes stale and must be re-run.
+- At most 8 changes per integration.
+- Diff time-to-interactive is network and auth bound: about 0.8 to 1 s measured in Safari; scrolling holds 60 fps at 3,000 to 8,000 px/s, with at most about 100 DOM rows rendered for a 12k-line diff.
+- Syntax highlighting is per line, so multi-line constructs can be colored incorrectly.
+- Contradiction detection needs structured assertions on requirements.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for trust boundaries and the landing protocol.
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md). Copyright 2026 Joe Simo.
+Apache-2.0. See [LICENSE](LICENSE).

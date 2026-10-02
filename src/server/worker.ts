@@ -10,7 +10,8 @@ import { buildPrefix, signPreview, verifyPreview } from "./preview-access.js";
 import { billingFromEvent, createCheckout, planLimits, reportUsage, verifyPolarWebhook } from "./polar.js";
 import { TICKET_BOOKING_POLICY } from "../fixtures/ticket-booking/policy.js";
 import { DEFAULT_PROTECTED_PATHS, isCommandPolicy, settingsFor, type CommandPolicy } from "../core/command-policy.js";
-import { currentStatus, runProbes, statusPage } from "./status.js";
+import { currentStatus, runProbes, statusIncidents, statusPage } from "./status.js";
+import { isPlausibleGithubToken, pushMirror, validateMirrorTarget } from "./mirror.js";
 import { lookupTxt, normalizeDomain, txtHost, txtValue } from "./dns.js";
 import { isSafeRef } from "../core/sanitize.js";
 import { diffTrees, listCommits, listDirectory, readBlobByHash, readFileText, resolveCommit } from "./browse.js";
@@ -33,10 +34,10 @@ export default {
 
     if (url.pathname === "/health") return json({ ok: true });
     if (url.pathname === "/status.json") {
-      const rows = await currentStatus(env);
-      return Response.json({ degraded: rows.filter((r) => r.degradedNow).map((r) => r.label), components: rows }, { headers: { "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" } });
+      const [rows, incidents] = await Promise.all([currentStatus(env), statusIncidents(env)]);
+      return Response.json({ degraded: rows.filter((r) => r.degradedNow).map((r) => r.label), components: rows, incidents }, { headers: { "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" } });
     }
-    if (url.pathname === "/status") return new Response(statusPage(await currentStatus(env)), { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+    if (url.pathname === "/status") return new Response(statusPage(...(await Promise.all([currentStatus(env), statusIncidents(env)]))), { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
 
     // The publishable key is public by design; the SPA needs it before the user can sign in.
     if (url.pathname === "/auth-config" && request.method === "GET") return json({ publishableKey: env.CLERK_PUBLISHABLE_KEY ?? null });
@@ -616,6 +617,48 @@ export default {
           if (!isOwner) return text("Only the owner can release a domain", 403);
           await globalOf(env).releaseDomain(domainDelete[1]!, projectId);
           return json({ released: domainDelete[1] });
+        }
+
+        // ----- one-way mirror to GitHub (FlareGit stays the source of truth) -----
+        if (sub === "/mirror" && method === "GET") {
+          if (!isOwner) return text("Only the owner can view mirroring", 403);
+          return json(await project.getMirror());
+        }
+        if (sub === "/mirror" && method === "PUT") {
+          if (!isOwner) return text("Only the owner can configure mirroring", 403);
+          const b = await body<{ target?: string; token?: string; enabled?: boolean }>();
+          const target = b.target === undefined ? undefined : validateMirrorTarget(b.target);
+          if (target === null) return text("Target must be https://github.com/<owner>/<repo>", 400);
+          if (b.token !== undefined && !isPlausibleGithubToken(b.token)) return text("That does not look like a GitHub token", 400);
+          try {
+            await project.setMirror({ target, token: b.token, enabled: typeof b.enabled === "boolean" ? b.enabled : undefined });
+          } catch (e) {
+            return text(e instanceof Error ? e.message : "Invalid mirror settings", 400);
+          }
+          return json({ saved: true });
+        }
+        if (sub === "/mirror" && method === "DELETE") {
+          if (!isOwner) return text("Only the owner can remove mirroring", 403);
+          await project.deleteMirror();
+          return json({ removed: true });
+        }
+        if (sub === "/mirror/run" && method === "POST") {
+          if (!isOwner) return text("Only the owner can retry mirroring", 403);
+          const cfg = await project.mirrorSecret();
+          if (!cfg) return text("Mirroring is not enabled", 409);
+          const repo = await env.ARTIFACTS.get(state.canonicalRepoName);
+          const remote = String((await repo.info()).remote);
+          const canonicalToken = (await repo.createToken("read", 900)).plaintext;
+          const sb = env.INTEGRATOR.getByName(`${projectId}-mirror-retry`);
+          const exec = (cmd: string, e?: Record<string, string>) => sb.exec(["sh", "-c", cmd], { env: e });
+          const branch = (await exec(`git ls-remote --symref ${q(remote)} HEAD`, gitAuthEnv(canonicalToken))).stdout.match(/ref: refs\/heads\/(\S+)\s+HEAD/)?.[1] ?? state.defaultBranch ?? "main";
+          const commit = state.acceptedState.currentCommit;
+          ctx.waitUntil(
+            pushMirror({ exec }, { canonicalRemote: remote, canonicalToken, target: cfg.target, githubToken: cfg.token, branch, commit })
+              .then((r) => project.recordMirrorRun(commit, r.status, r.detail))
+              .catch(() => project.recordMirrorRun(commit, "error", "Mirror run failed to start"))
+          );
+          return json({ queued: true }, 202);
         }
 
         if (sub === "/webhooks" && method === "GET") return json(await project.listWebhooks());

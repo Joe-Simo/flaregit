@@ -1,9 +1,10 @@
 import { isSafeRef } from "../core/sanitize.js";
 import { buildPrefix } from "./preview-access.js";
+import { pushMirror } from "./mirror.js";
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { WorkersAIClient } from "../ai/workers-ai.js";
 import { buildRepairPrompt, parseRepairResponse, MAX_REPAIR_ROUNDS } from "../core/pipeline/repair.js";
-import type { CandidateGeneration, Task, VerificationEvidence } from "../core/types.js";
+import type { CandidateGeneration, VerificationEvidence } from "../core/types.js";
 import type { Env } from "./env.js";
 import type { ClaimResult, Ledger, PrepareResult } from "./durable-object.js";
 import { gitAuthEnv, q } from "./shell.js";
@@ -27,8 +28,18 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     this.projectId = event.payload.projectId;
     const holder = event.instanceId;
 
-    const claim = await step.do("claim-landing", async () => (await stub.claimLanding({ holder, taskIds: event.payload.taskIds })) as never) as ClaimResult;
-    if (!claim.candidate) return { status: claim.decision ? "needs_decision" : "not_started", reason: claim.reason, decision: claim.decision };
+    // Merge queue: landings are serialized by the ledger lease. A busy lease means "wait your turn" (durably, via
+    // Workflow sleeps), never a silently dropped request. Other refusals are final and reported.
+    let claim: ClaimResult = { reason: "not attempted" };
+    for (let turn = 0; turn < 72; turn++) {
+      claim = (await step.do(`claim-landing-${turn}`, async () => (await stub.claimLanding({ holder, taskIds: event.payload.taskIds })) as never)) as ClaimResult;
+      if (claim.candidate || claim.decision || claim.reason !== "Another landing holds the lease") break;
+      await step.sleep(`queued-${turn}`, "30 seconds");
+    }
+    if (!claim.candidate) {
+      if (!claim.decision) await step.do("report-not-started", async () => stub.logActivity("FlareGit", "integration.not_started", `Integration of ${event.payload.taskIds.join(" + ")} did not start: ${claim.reason}`));
+      return { status: claim.decision ? "needs_decision" : "not_started", reason: claim.reason, decision: claim.decision };
+    }
     const candidate = claim.candidate;
 
     const integrated = await step.do(
@@ -78,6 +89,21 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
         if (t && t.status === "accepted") await this.env.ARTIFACTS.delete(t.workspace.repoName).catch(() => false);
       }
       return { cleaned: true };
+    });
+    // One-way copy to GitHub, only after the landing is fully committed. It never throws: GitHub being down or
+    // diverged is recorded for the owner and changes nothing here.
+    await step.do("mirror-to-github", async () => {
+      const cfg = await stub.mirrorSecret();
+      if (!cfg) return { skipped: true };
+      try {
+        const canonical = await this.canonicalRemote(stub);
+        const r = await pushMirror({ exec: this.sandbox(`mirror-${candidate.id}`).exec }, { target: cfg.target, githubToken: cfg.token, canonicalRemote: canonical.remote, canonicalToken: canonical.token, branch: integrated.branch, commit: integrated.commit });
+        await stub.recordMirrorRun(integrated.commit, r.status, r.detail);
+        return { status: r.status };
+      } catch {
+        await stub.recordMirrorRun(integrated.commit, "error", "Mirror workspace unavailable; use Retry now");
+        return { status: "error" };
+      }
     });
     return { status: "accepted", commit: integrated.commit, evidenceId: integrated.evidenceId };
   }

@@ -107,7 +107,7 @@ const HELP = `flaregit — JSON by default (--pretty for humans)
   work <repo> "<goal>" [--dir D] [--on CHANGE] [--issue N]   create a change (stacked on CHANGE if given), clone it and check out its branch
   push                                   push the current change branch (fresh credential)
   ready <repo> <change> | cancel <repo> <change>
-  integrate <repo> <changeA> <changeB>
+  integrate <repo> <change> [<change> ...]       compose, verify and queue 1-8 changes for review
   log <repo> [--limit N] | tree <repo> [path] | cat <repo> <path>
   issues <repo> [--state closed] | issue new <repo> "<title>" [--body T] | issue view|close|reopen <repo> <n>
   comment <repo> "<text>" (--issue N | --change ID | --candidate ID) [--path P --line N]
@@ -226,7 +226,7 @@ async function main() {
   if (cmd === "accept" || cmd === "reject") {
     return out(await api("POST", `/p/${await repo(sub)}/candidates/${rest[0] ?? fail(`Usage: flaregit ${cmd} <repo> <candidate> [--note TEXT]`)}/review`, { approved: cmd === "accept", note: flag("note") ?? "" }));
   }
-  if (cmd === "integrate") return out(await api("POST", `/p/${await repo(sub)}/integrations`, { taskIds: [rest[0], rest[1]] }));
+  if (cmd === "integrate") return out(await api("POST", `/p/${await repo(sub)}/integrations`, { taskIds: rest.length > 0 ? rest : fail("Usage: flaregit integrate <repo> <change> [<change> ...] (1-8)") }));
   if (cmd === "activity") return out(await api("GET", `/p/${await repo(sub)}/activity`));
   if (cmd === "log") return out(await api("GET", `/p/${await repo(sub)}/commits?limit=${flag("limit") ?? 20}`));
   if (cmd === "tree") return out(await api("GET", `/p/${await repo(sub)}/tree?path=${encodeURIComponent(rest[0] ?? "")}`));

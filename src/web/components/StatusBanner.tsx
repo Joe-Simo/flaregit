@@ -31,7 +31,7 @@ export function StatusBanner({
       case "analyzing":
       case "composing":
         return {
-          icon: <RefreshCw className="h-4 w-4 animate-spin text-amber-400" />,
+          icon: <RefreshCw className="h-4 w-4 animate-spin text-amber-400" aria-hidden="true" />,
           badgeVariant: "warning" as const,
           badgeText: "INTEGRATING",
           bg: "bg-amber-950/20 border-amber-500/30",

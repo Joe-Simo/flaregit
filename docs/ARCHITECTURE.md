@@ -1,33 +1,58 @@
-# Architecture and known limits
+# Architecture
+
+## Components
+
+Worker (`src/server/worker.ts`: API, auth, previews, status, Polar webhook) · `RepositoryController` Durable Object with SQLite (`durable-object.ts`) · Workflows: integration (`workflow.ts`), agent (`agent-workflow.ts`), scenario · Queue `flaregit-integration-events` (`queue.ts`) · container-backed `IntegratorSandbox` and `AgentSandbox` · Artifacts (Git storage) · R2 `flaregit-evidence` (evidence and builds) · Workers AI via AI Gateway · Clerk (customer sign-in) · 5-minute cron (status probes).
 
 ## Trust boundaries
-- **Contributors / agents** write only to their task repository (scope `src/`). Protected paths (`.flaregit/`, `tests/`, `package.json`, …) are rejected in contributor commits and in model repairs.
-- **Verifier** lives in platform code (`src/fixtures/*/checks.ts`), never in the candidate repo. Candidate code runs only in a child process with a scrubbed environment (`PATH`, `HOME`, `TMPDIR`, `NODE_ENV`), a 30 s timeout and an output cap. Results are returned on a line prefixed with a per-run nonce delivered over stdin before any candidate code is imported.
-- **Acceptance** is deterministic code: evidence must be `passed`, match candidate commit and tree, accepted base, and policy version; the ref moves only if it still equals the verified base.
-- **Customer auth**: Clerk session tokens (`Authorization: Bearer`) are verified in the Worker (signature via the instance JWKS, issuer, expiry, authorized party `azp`). The verified Clerk user id, hashed, is the tenant key. Production runs on `clerk.flaregit.com`; mail is sent from the verified domain (SPF/DKIM via the `clkmail`/`clk._domainkey` CNAMEs).
-- **Secrets**: Artifacts tokens are short-lived and passed as `Authorization: Bearer` (`http.extraHeader` / `GIT_CONFIG_*` env), never in URLs. Workers AI is called from the Worker binding; the browser holds no credentials.
 
-## Production flow (Cloudflare)
-Queue (`git.push`, deduplicated by event id in the DO) → Durable Object ledger → Workflow: `claim-landing` (lease + frozen candidate) → `compose-repair-verify` (integrator container) → `prepare-publish` (DO validates invariants, journals PREPARED) → `cas-push-to-artifacts` → `complete-publish`. Builds of the verified commit are stored in R2 under the commit hash and served from `PREVIEW_ORIGIN`.
+- **Browser and CLI** hold only a Clerk session token or a FlareGit API token. Clerk tokens are verified in the Worker (JWKS signature, issuer, expiry, `azp` in `CLERK_AUTHORIZED_PARTIES`). No Cloudflare or model credentials leave the Worker.
+- **Contributors and agents** write only to their own change fork, using short-lived Artifacts tokens passed as an `Authorization` header, never in URLs. Protected paths are rejected in contributor commits and model repairs.
+- **Verifier** checks live in platform code, not in the candidate repo. Candidate code runs in a scrubbed child process with a timeout and output cap; results are tagged with a per-run nonce.
+- **Acceptance** is deterministic code in the Durable Object, after a human accepts the candidate.
+- **Previews** are served from `PREVIEW_ORIGIN`, a different origin from the app, so a build cannot read app cookies.
+- **Git inputs** (refs, refspecs, header values) pass a whitelist sanitizer before reaching a shell.
 
-## Multi-repository platform
+## Data model (Durable Object instances)
 
-- One Durable Object per account (`account:<key>`: project list, billing, usage, API tokens), one per project (`project:<id>`: ledger, members, invites, activity, webhooks, deliveries), and one `global` (probes, global run cap).
-- The Worker checks membership on every project route. API tokens (`fgt_...`) are stored hashed and cannot manage tokens or delete the account.
-- Webhooks are written to the delivery log in the same transaction as the event, then delivered by a Queue consumer, so a failed ref update never emits and a delivered event is never lost. Targets must be public https hostnames.
-- Stacked changes fork the parent change's fork; readiness is gated on the parent being accepted.
-- The AI probe sends one tiny embedding request per tick, well inside the free Workers AI allowance.
-- Builds in R2 expire after 30 days (lifecycle rule `expire-builds`); task forks are deleted after accept or cancel.
+- `account:<key>`: projects, plan and usage, API tokens (hashed), profile/handle, notification inbox.
+- `project:<id>`: landing ledger (tasks, candidates, evidence, journal, lease), members and invites, issues, comments, activity, webhooks with outbox and delivery log, domain claims.
+- `global`: status probes, global run cap, handle and domain registries.
 
-## Known gaps
+## Landing protocol
 
-- Diff highlighting is per line (highlight.js in the worker), so multi-line constructs such as block comments can be coloured incorrectly; a Tree-sitter WASM highlighter would fix that.
-- Namespace ownership is per-account; DNS-based verification is roadmap.
+1. `claim-landing`: acquire the single project lease (20 min) and freeze a candidate against the accepted head (1–8 changes).
+2. `compose-repair-verify` in the integrator container; the candidate commit is pushed to `refs/flaregit/candidates/<id>`.
+3. `waitForEvent("human-review")`, timeout 7 days. Reject → failed; timeout → stale.
+4. `prepare-publish`: DO checks evidence is `passed` and matches candidate commit, tree, expected base and policy version; journals PREPARED.
+5. CAS push from a fresh workspace that fetches the stored candidate ref: `git push --force-with-lease=<branch>:<expectedBase>`.
+6. `complete-publish`: journal ACCEPTED, release lease, write webhook outbox rows; then rebase stacked children.
+
+Invariants: only a commit that was verified and human-accepted can become the branch head; the branch moves only if it still equals the verified base (otherwise the candidate goes stale); one landing per project at a time; duplicate events and replays are idempotent in the ledger; publication can be resumed from the stored candidate ref alone.
+
+## Outbox and alarm
+
+Webhook delivery rows are written in the same storage transaction as the state change, so an event cannot exist without its deliveries and vice versa. Rows are then sent to the Queue; the DO arms an alarm that re-sends anything still pending (2 min after write, then every 5 min while pending). Deliveries carry `webhook-id` (stable across retries), `webhook-sequence` and a Standard Webhooks signature. Targets must be public HTTPS hostnames.
+
+## Preview isolation
+
+Builds are stored in R2 under `builds/<projectId>/<commit>`. A preview link is `HMAC-SHA256(projectId.commit.exp)` with the `PREVIEW_SIGNING_KEY` secret; only members can mint it, it expires (default 1 h), and a commit hash alone opens nothing.
+
+## Token scopes
+
+- `full`: everything a member can do via API, including minting tokens; account management and token listing stay in the web app.
+- `write`: read and write project routes; no administration.
+- `read`: `GET` only, plus `clone`.
+- A token may be pinned to one repo and may expire. Tokens minted from a token must be `read` or `write` with a TTL of at most 24 h.
+
+## Container naming
+
+Containers are addressed by name, so state never crosses repositories: `bootstrap-<projectId>` for imports and seeding, `<projectId>-<id>` for integration runs, `agent-<projectId>-<taskId>` for agents.
 
 ## Known limits
-- Candidate code and the checks share one process during verification; a hostile candidate can crash or time out the run (fails closed) and, in theory, tamper with in-process state. The container boundary in production is the real defense; run verification in a dedicated, network-restricted container for hostile contributors.
-- Integrator containers have outbound internet (needed for git to Artifacts). They hold no secrets at the time candidate code runs, but candidate code could exfiltrate the candidate source.
-- Contradiction detection needs structured assertions (`input` + `expectedOutput`) on requirements; free-text requirements are not compared.
-- Only two-task landings are implemented.
-- Container images must be digest-pinned and bound to the container application in `wrangler.jsonc` (`image: ./Dockerfile`); `deploy` builds and pushes them.
-- Previews are served from a separate origin (`PREVIEW_ORIGIN`) so builds cannot reach the app origin or its cookies.
+
+- Verification runs candidate code and checks in one process inside the container; a hostile candidate can fail the run (fails closed). Containers have outbound internet for Git, so candidate code could exfiltrate candidate source.
+- Imports: public HTTPS URLs, depth 200, no ongoing mirror.
+- Landing lease 20 min; review wait 7 days; at most 8 changes per integration.
+- Contradiction detection needs structured assertions (`input` + `expectedOutput`).
+- Per-line syntax highlighting.

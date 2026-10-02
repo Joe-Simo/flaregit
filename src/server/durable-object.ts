@@ -171,6 +171,13 @@ export interface Ledger {
   verifyApiToken(secret: string): Promise<{ userId: string; scope: TokenScope["scope"]; repo: string | null } | null>;
   recordProbe(component: string, ok: boolean, latencyMs?: number, detail?: string): Promise<void>;
   statusSummary(): Promise<ComponentStatus[]>;
+  getMirror(): Promise<{ target: string | null; enabled: boolean; hasToken: boolean; runs: Array<{ id: string; commit: string; status: string; detail: string; at: string }> }>;
+  /** Server-side only (workflow and mirror route); never returned to clients. */
+  mirrorSecret(): Promise<{ target: string; token: string } | null>;
+  setMirror(p: { target?: string; token?: string; enabled?: boolean }): Promise<void>;
+  deleteMirror(): Promise<void>;
+  recordMirrorRun(commit: string, status: string, detail: string): Promise<void>;
+  listProbes(sinceMs: number): Promise<Array<{ component: string; at: number; ok: number; latency_ms: number | null; detail: string | null }>>;
   addWebhook(url: string, events: string[]): Promise<{ id: string; secret: string }>;
   listWebhooks(): Promise<WebhookRow[]>;
   removeWebhook(id: string): Promise<void>;
@@ -231,6 +238,8 @@ export class RepositoryController extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS issues (number INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', author TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, closed_by TEXT);
       CREATE TABLE IF NOT EXISTS comments (id INTEGER PRIMARY KEY AUTOINCREMENT, subject TEXT NOT NULL, author TEXT NOT NULL, body TEXT NOT NULL, path TEXT, line INTEGER, "commit" TEXT, created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS comments_subject ON comments (subject, id);
+      CREATE TABLE IF NOT EXISTS mirror (id INTEGER PRIMARY KEY CHECK (id = 1), target TEXT NOT NULL, token TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS mirror_runs (id TEXT PRIMARY KEY, commit_sha TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL, at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS probes (id INTEGER PRIMARY KEY AUTOINCREMENT, component TEXT NOT NULL, at INTEGER NOT NULL, ok INTEGER NOT NULL, latency_ms INTEGER, detail TEXT);
       CREATE INDEX IF NOT EXISTS probes_component_at ON probes (component, at);
       CREATE TABLE IF NOT EXISTS api_tokens (id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, label TEXT NOT NULL, created_at TEXT NOT NULL, last_used TEXT);
@@ -532,6 +541,10 @@ export class RepositoryController extends DurableObject<Env> {
     this.ctx.storage.sql.exec("DELETE FROM probes WHERE at < ?", Date.now() - 3 * 86_400_000);
   }
   /** Raw facts per component: was it degraded, how many checks failed, for how long. No averaged uptime percentage. */
+  /** Raw probe rows (newest last) so incidents can be derived from evidence rather than written by hand. */
+  async listProbes(sinceMs: number): Promise<Array<{ component: string; at: number; ok: number; latency_ms: number | null; detail: string | null }>> {
+    return this.ctx.storage.sql.exec("SELECT component, at, ok, latency_ms, detail FROM probes WHERE at >= ? ORDER BY at", sinceMs).toArray() as unknown as Array<{ component: string; at: number; ok: number; latency_ms: number | null; detail: string | null }>;
+  }
   async statusSummary(): Promise<ComponentStatus[]> {
     const since = Date.now() - 86_400_000;
     const rows = this.ctx.storage.sql.exec("SELECT component, at, ok, detail FROM probes WHERE at >= ? ORDER BY at", since).toArray() as unknown as Array<{ component: string; at: number; ok: number; detail: string | null }>;
@@ -569,7 +582,7 @@ export class RepositoryController extends DurableObject<Env> {
    * a blocked landing or stack) are "direct"; everything else is repository chatter kept apart from them.
    */
   private async notifyMembers(type: string, summary: string, exceptUser?: string): Promise<void> {
-    const DIRECT = new Set(["review.requested", "task.ready", "decision.needed", "integration.blocked", "integration.stale", "stack.rebase_blocked"]);
+    const DIRECT = new Set(["integration.not_started", "mirror.failed", "review.requested", "task.ready", "decision.needed", "integration.blocked", "integration.stale", "stack.rebase_blocked"]);
     const CHATTER = new Set(["issue.opened", "issue.closed", "comment.added", "review.approved", "review.rejected", "integration.accepted", "stack.rebased", "member.joined", "task.created"]);
     if (!DIRECT.has(type) && !CHATTER.has(type)) return;
     const s = this.state ?? (() => { try { return this.load(); } catch { return null; } })();
@@ -622,6 +635,36 @@ export class RepositoryController extends DurableObject<Env> {
     if (c.subject.startsWith("issue:")) this.ctx.storage.sql.exec("UPDATE issues SET updated_at = ? WHERE number = ?", new Date().toISOString(), Number(c.subject.slice(6)));
     await this.logActivity(c.author, "comment.added", `${c.author} commented on ${c.subject.replace(":", " ")}${c.path ? ` (${c.path}${c.line ? `:${c.line}` : ""})` : ""}`);
     return this.ctx.storage.sql.exec('SELECT id, subject, author, body, path, line, "commit", created_at FROM comments WHERE id = ?', id).toArray()[0] as unknown as CommentRow;
+  }
+
+  // ---- GitHub mirror (per project) ----
+  async getMirror() {
+    const row = this.ctx.storage.sql.exec<{ target: string; enabled: number }>("SELECT target, enabled FROM mirror WHERE id = 1").toArray()[0];
+    const runs = this.ctx.storage.sql
+      .exec<{ id: string; commit_sha: string; status: string; detail: string; at: string }>("SELECT * FROM mirror_runs ORDER BY at DESC LIMIT 50")
+      .toArray()
+      .map((r) => ({ id: r.id, commit: r.commit_sha, status: r.status, detail: r.detail, at: r.at }));
+    return { target: row?.target ?? null, enabled: Boolean(row?.enabled), hasToken: Boolean(row), runs };
+  }
+  async mirrorSecret(): Promise<{ target: string; token: string } | null> {
+    const row = this.ctx.storage.sql.exec<{ target: string; token: string; enabled: number }>("SELECT target, token, enabled FROM mirror WHERE id = 1").toArray()[0];
+    return row && row.enabled ? { target: row.target, token: row.token } : null;
+  }
+  async setMirror(p: { target?: string; token?: string; enabled?: boolean }): Promise<void> {
+    const cur = this.ctx.storage.sql.exec<{ target: string; token: string; enabled: number }>("SELECT target, token, enabled FROM mirror WHERE id = 1").toArray()[0];
+    const target = p.target ?? cur?.target;
+    const token = p.token ?? cur?.token;
+    if (!target || !token) throw new Error("Target and token are required");
+    const enabled = p.enabled ?? (cur ? Boolean(cur.enabled) : true);
+    this.ctx.storage.sql.exec("INSERT OR REPLACE INTO mirror (id, target, token, enabled, created_at) VALUES (1, ?, ?, ?, ?)", target, token, enabled ? 1 : 0, new Date().toISOString());
+  }
+  async deleteMirror(): Promise<void> {
+    this.ctx.storage.sql.exec("DELETE FROM mirror");
+  }
+  async recordMirrorRun(commit: string, status: string, detail: string): Promise<void> {
+    this.ctx.storage.sql.exec("INSERT INTO mirror_runs (id, commit_sha, status, detail, at) VALUES (?, ?, ?, ?, ?)", crypto.randomUUID(), commit, status, detail.slice(0, 500), new Date().toISOString());
+    this.ctx.storage.sql.exec("DELETE FROM mirror_runs WHERE id NOT IN (SELECT id FROM mirror_runs ORDER BY at DESC LIMIT 50)");
+    if (status !== "ok") await this.logActivity("FlareGit", "mirror.failed", `GitHub mirror ${status} for ${commit.slice(0, 7)}: ${detail.slice(0, 160)}`);
   }
 
   // ---- identity (profile on the account instance; handle registry on the global instance) ----

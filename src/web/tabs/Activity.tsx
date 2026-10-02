@@ -7,8 +7,9 @@ interface Row { id: number; at: string; actor: string; type: string; summary: st
 
 export function ActivityTab({ projectId }: { projectId: string }) {
   const [rows, setRows] = useState<Row[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    const load = () => apiJson<Row[]>(`/p/${projectId}/activity`).then(setRows).catch(() => undefined);
+    const load = () => apiJson<Row[]>(`/p/${projectId}/activity`).then((r) => { setRows(r); setError(null); }).catch((e: Error) => setError(e.message));
     void load();
     const t = setInterval(load, 8000);
     return () => clearInterval(t);
@@ -16,11 +17,12 @@ export function ActivityTab({ projectId }: { projectId: string }) {
   return (
     <Card>
       <CardContent className="p-0 divide-y divide-border">
-        {rows === null && <p className="p-4 text-sm text-muted-foreground">Loading…</p>}
-        {rows?.length === 0 && <p className="p-4 text-sm text-muted-foreground">Nothing has happened yet</p>}
+        {error && <p role="alert" className="p-4 text-sm text-destructive">Could not load activity: {error}</p>}
+        {rows === null && !error && <p role="status" className="p-4 text-sm text-muted-foreground">Loading activity…</p>}
+        {rows?.length === 0 && <p className="p-4 text-sm text-muted-foreground">Nothing has happened yet.</p>}
         {rows?.map((r) => (
           <div key={r.id} className="px-4 py-2.5 flex justify-between gap-4 text-sm">
-            <span>{r.summary}</span>
+            <span className="min-w-0 break-words">{r.summary}</span>
             <span className="text-xs text-muted-foreground shrink-0">{timeAgo(r.at)}</span>
           </div>
         ))}

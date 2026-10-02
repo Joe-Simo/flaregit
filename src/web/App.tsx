@@ -12,7 +12,6 @@ import { navigate, useRoute } from "./router";
 
 export function App() {
   const route = useRoute();
-  const [previewBase, setPreviewBase] = useState("");
   const [degraded, setDegraded] = useState<string[]>([]);
   const [unread, setUnread] = useState(0);
   useEffect(() => {
@@ -20,10 +19,6 @@ export function App() {
     void poll();
     const t = setInterval(poll, 60_000);
     return () => clearInterval(t);
-  }, []);
-
-  useEffect(() => {
-    apiJson<{ previewBase: string }>("/config").then((c) => setPreviewBase(c.previewBase)).catch(() => undefined);
   }, []);
 
   // Warn people before they hit "integrate" if a subsystem they depend on is currently failing.
@@ -40,34 +35,34 @@ export function App() {
 
   return (
     <div className="min-h-screen flex flex-col bg-background text-foreground font-sans">
-      <header className="border-b border-border bg-card/60 px-4 sm:px-6 py-3 flex items-center justify-between gap-4">
-        <button className="flex items-center gap-2 font-bold" onClick={() => navigate("/")} aria-label="FlareGit home">
-          <span className="h-8 w-8 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center text-white"><GitBranch className="h-5 w-5" /></span>
+      <header className="border-b border-border bg-card/60 px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <button className="flex items-center gap-2 font-bold rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => navigate("/")} aria-label="FlareGit home">
+          <span className="h-8 w-8 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center text-white" aria-hidden="true"><GitBranch className="h-5 w-5" /></span>
           FlareGit
         </button>
         <span className="hidden md:block text-xs text-muted-foreground">Work in parallel. Integration happens automatically.</span>
-        <div className="flex items-center gap-4 mr-14">
-          <button className="text-sm text-muted-foreground hover:text-foreground" onClick={() => navigate("/inbox")}>
-            Inbox{unread > 0 && <span className="ml-1 rounded-full bg-orange-500 px-1.5 text-xs text-white" aria-label={`${unread} need you`}>{unread}</span>}
+        <nav aria-label="Account" className="flex items-center gap-4 sm:mr-14">
+          <button className="text-sm text-muted-foreground hover:text-foreground rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => navigate("/inbox")} aria-label={unread > 0 ? `Inbox, ${unread} need you` : "Inbox"}>
+            Inbox{unread > 0 && <span className="ml-1 rounded-full bg-orange-500 px-1.5 text-xs text-white" aria-hidden="true">{unread}</span>}
           </button>
-          <button className="text-sm text-muted-foreground hover:text-foreground" onClick={() => navigate("/account")}>Account</button>
-        </div>
+          <button className="text-sm text-muted-foreground hover:text-foreground rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => navigate("/account")}>Account</button>
+        </nav>
       </header>
       {degraded.length > 0 && (
-        <div role="status" className="px-6 py-2 text-sm bg-amber-500/15 border-b border-amber-500/30 text-amber-200">
+        <div role="status" className="px-4 sm:px-6 py-2 text-sm bg-amber-500/15 border-b border-amber-500/30 text-amber-200">
           Degraded right now: {degraded.join(", ")}. Integrations may be delayed. <a className="underline" href="/status">Details</a>
         </div>
       )}
       <BillingBar refreshKey={0} />
-      <main className="flex-1">
+      <main className="flex-1 min-w-0 overflow-x-clip">
         {route.name === "home" && <Home />}
         {route.name === "new" && <NewRepo />}
         {route.name === "account" && <Account />}
         {route.name === "inbox" && <Inbox onCount={setUnread} />}
         {route.name === "join" && <Join projectId={route.projectId} token={route.token} />}
-        {route.name === "repo" && <Repo projectId={route.projectId} tab={route.tab} previewBase={previewBase} params={route.params} />}
+        {route.name === "repo" && <Repo projectId={route.projectId} tab={route.tab} params={route.params} />}
       </main>
-      <footer className="px-6 py-3 text-xs text-muted-foreground flex gap-4 border-t border-border">
+      <footer className="px-4 sm:px-6 py-3 text-xs text-muted-foreground flex flex-wrap gap-x-4 gap-y-1 border-t border-border">
         <a href="/terms" className="hover:underline">Terms</a>
         <a href="/privacy" className="hover:underline">Privacy</a>
         <a href="/status" className="hover:underline">Status</a>
