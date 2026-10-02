@@ -56,10 +56,10 @@ export function DiffViewer({ files, loadBlob }: { files: FileChange[]; loadBlob:
       pending.get(e.data.id)?.(e.data.rows);
       pending.delete(e.data.id);
     };
-    const diffInWorker = (id: number, a: string, b: string) =>
+    const diffInWorker = (id: number, a: string, b: string, path: string) =>
       new Promise<DiffRow[]>((resolve) => {
         pending.set(id, resolve);
-        worker.postMessage({ id, a, b } satisfies DiffRequest);
+        worker.postMessage({ id, a, b, path } satisfies DiffRequest);
       });
 
     const queue = files.map((_, i) => i);
@@ -75,7 +75,7 @@ export function DiffViewer({ files, loadBlob }: { files: FileChange[]; loadBlob:
           if (a.binary || b.binary) setState((s) => ({ ...s, [i]: { collapsed: false, note: "Binary file not shown" } }));
           else if (a.truncated || b.truncated) setState((s) => ({ ...s, [i]: { collapsed: false, note: "File too large to display" } }));
           else {
-            const rows = await diffInWorker(i, a.content, b.content);
+            const rows = await diffInWorker(i, a.content, b.content, f.path);
             if (!cancelled) setState((s) => ({ ...s, [i]: { collapsed: false, rows } }));
           }
         } catch (err) {
@@ -169,7 +169,7 @@ export function DiffViewer({ files, loadBlob }: { files: FileChange[]; loadBlob:
                 <span className="w-10 shrink-0 text-right pr-2 text-muted-foreground select-none">{row.a ?? ""}</span>
                 <span className="w-10 shrink-0 text-right pr-2 text-muted-foreground select-none">{row.b ?? ""}</span>
                 <span className="w-4 shrink-0 select-none">{row.t === "h" ? "" : row.t}</span>
-                <span>{row.text}</span>
+                {row.html ? <span className="hljs-line" dangerouslySetInnerHTML={{ __html: row.html }} /> : <span>{row.text}</span>}
               </div>
             );
           })}

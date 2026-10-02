@@ -10,6 +10,7 @@ const LABELS: Record<string, string> = {
   queue: "Event queue and webhook delivery",
   workflows: "Workflows (agents and integration)",
   auth: "Sign-in (Clerk)",
+  ai: "AI models (Workers AI)",
 };
 
 async function timed(fn: () => Promise<unknown>): Promise<{ ok: boolean; ms: number; detail?: string }> {
@@ -36,6 +37,11 @@ export async function runProbes(env: Env): Promise<void> {
       } catch (e) {
         if (!/not.?found|unknown|does not exist/i.test(String(e))) throw e; // "no such instance" proves the service answered
       }
+    },
+    // One tiny embedding (a few tokens, a fraction of a neuron): proves the model service answers without spending real budget.
+    ai: async () => {
+      const out = (await env.AI.run("@cf/baai/bge-small-en-v1.5", { text: ["ok"] })) as { data?: unknown[] };
+      if (!out?.data?.length) throw new Error("model returned no embedding");
     },
     auth: async () => {
       if (!env.CLERK_ISSUER) throw new Error("not configured");

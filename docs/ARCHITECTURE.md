@@ -16,12 +16,12 @@ Queue (`git.push`, deduplicated by event id in the DO) → Durable Object ledger
 - The Worker checks membership on every project route. API tokens (`fgt_...`) are stored hashed and cannot manage tokens or delete the account.
 - Webhooks are written to the delivery log in the same transaction as the event, then delivered by a Queue consumer, so a failed ref update never emits and a delivered event is never lost. Targets must be public https hostnames.
 - Stacked changes fork the parent change's fork; readiness is gated on the parent being accepted.
+- The AI probe sends one tiny embedding request per tick, well inside the free Workers AI allowance.
 - Builds in R2 expire after 30 days (lifecycle rule `expire-builds`); task forks are deleted after accept or cancel.
 
 ## Known gaps
 
-- No AI-provider health probe (a probe would cost model calls every 5 minutes).
-- Syntax highlighting in the diff viewer is plain text; a WASM highlighter is roadmap.
+- Diff highlighting is per line (highlight.js in the worker), so multi-line constructs such as block comments can be coloured incorrectly; a Tree-sitter WASM highlighter would fix that.
 - Namespace ownership is per-account; DNS-based verification is roadmap.
 
 ## Known limits
