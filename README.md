@@ -25,6 +25,7 @@ Cloudflare mapping (`wrangler.jsonc`): Worker (API + Clerk session-token auth), 
 - **Integration:** two ready changes are composed, repaired if needed, verified (platform checks for the demo, your own command for imported repos), and only the exact verified commit lands, via compare-and-swap with a journal.
 - **Review:** virtualized, Web Worker diff viewer with keyboard navigation (`j`/`k` files, `n`/`p` hunks, `c` collapse, `?` help).
 - **Webhooks:** signed (Standard Webhooks), sent only after the ref update commits, retried with backoff, with a delivery log and manual redelivery.
+- **Terminal review:** `flaregit review <repo> --change ID` (or `--commit SHA`) opens a full-screen reviewer: `j`/`k` files, `n`/`p` hunks, `c` collapse, `a` mark the change ready, `q` quit.
 - **CLI:** `bun run build:cli` produces `dist-cli/flaregit`. JSON output, no prompts, token auth. Create a token under Account → API tokens.
 - **Status:** `/status` and `/status.json` show per-component raw check counts and failures (api, ledger, git, storage, workflows, auth, queue), probed every 5 minutes. The app shows a banner when a component is degraded.
 - **Account:** plan and usage, API tokens, and full account deletion.

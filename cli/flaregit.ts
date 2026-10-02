@@ -89,7 +89,7 @@ function git(args: string[], token?: string, cwd?: string) {
   return r.stdout.trim();
 }
 
-const color = { red: (s: string) => `\x1b[31m${s}\x1b[0m`, green: (s: string) => `\x1b[32m${s}\x1b[0m`, cyan: (s: string) => `\x1b[36m${s}\x1b[0m`, bold: (s: string) => `\x1b[1m${s}\x1b[0m` };
+const color = { red: (s: string) => `\x1b[31m${s}\x1b[0m`, green: (s: string) => `\x1b[32m${s}\x1b[0m`, cyan: (s: string) => `\x1b[36m${s}\x1b[0m`, bold: (s: string) => `\x1b[1m${s}\x1b[0m`, dim: (s: string) => `\x1b[2m${s}\x1b[0m` };
 
 const HELP = `flaregit — JSON by default (--pretty for humans)
 
@@ -106,6 +106,7 @@ const HELP = `flaregit — JSON by default (--pretty for humans)
   integrate <repo> <changeA> <changeB>
   log <repo> [--limit N] | tree <repo> [path] | cat <repo> <path>
   diff <repo> (--change ID | --commit SHA)
+  review <repo> (--change ID | --commit SHA)   interactive terminal reviewer (j/k n/p c a q)
   clone <repo> [dir] | activity <repo> | status
 `;
 
@@ -217,6 +218,90 @@ async function main() {
         for (const l of h.lines) console.log(l[0] === "+" ? color.green(l) : l[0] === "-" ? color.red(l) : l);
       }
     }
+    return;
+  }
+
+  if (cmd === "review") {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) fail("review is interactive and needs a terminal; use `flaregit diff` for scripts");
+    const id = await repo(sub);
+    const change = flag("change");
+    const q = change ? `task=${change}` : flag("commit") ? `commit=${flag("commit")}` : fail("Pass --change ID or --commit SHA");
+    const d = await api<{ files: Array<{ path: string; status: string; aHash?: string; bHash?: string }> }>("GET", `/p/${id}/diff?${q}`);
+    const blob = async (hash?: string) => (hash ? (await api<{ content: string; binary?: boolean }>("GET", `/p/${id}/blob-by-hash?hash=${hash}${change ? `&task=${change}` : ""}`)) : { content: "", binary: false });
+    type Line = { text: string; hunk?: boolean; file?: number };
+    const lines: Line[] = [];
+    const fileStart: number[] = [];
+    const collapsed = new Set<number>();
+    const perFile: Line[][] = [];
+    await Promise.all(
+      d.files.map(async (f, i) => {
+        const [a, b] = await Promise.all([blob(f.aHash), blob(f.bHash)]);
+        const rows: Line[] = [{ text: color.bold(`${f.status.toUpperCase()}  ${f.path}`), file: i }];
+        if (a.binary || b.binary) rows.push({ text: color.dim("  binary file not shown") });
+        else {
+          for (const h of structuredPatch(f.path, f.path, a.content, b.content, "", "", { context: 3 }).hunks) {
+            rows.push({ text: color.cyan(`@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@`), hunk: true });
+            for (const l of h.lines) rows.push({ text: l[0] === "+" ? color.green(l) : l[0] === "-" ? color.red(l) : l });
+          }
+        }
+        perFile[i] = rows;
+      })
+    );
+    const rebuild = () => {
+      lines.length = 0;
+      fileStart.length = 0;
+      perFile.forEach((rows, i) => {
+        fileStart.push(lines.length);
+        lines.push(...(collapsed.has(i) ? [rows[0]!] : rows));
+      });
+    };
+    rebuild();
+    let top = 0;
+    let note = "";
+    const term = process.stdout;
+    const draw = () => {
+      const h = term.rows - 1;
+      term.write("\x1b[H\x1b[2J" + lines.slice(top, top + h).map((l) => l.text.slice(0, 400)).join("\n"));
+      term.write(`\x1b[${term.rows};1H\x1b[7m ${d.files.length} files · j/k file  n/p hunk  c collapse  g/G ends  ${change ? "a mark ready  " : ""}q quit ${note}\x1b[0m`);
+    };
+    const clamp = () => { top = Math.max(0, Math.min(top, Math.max(0, lines.length - 1))); };
+    const jump = (idxs: number[], dir: 1 | -1) => {
+      const next = dir === 1 ? idxs.find((i) => i > top) : [...idxs].reverse().find((i) => i < top);
+      if (next !== undefined) top = next;
+    };
+    term.write("\x1b[?1049h\x1b[?25l");
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    draw();
+    await new Promise<void>((resolve) => {
+      process.stdin.on("data", async (buf) => {
+        const k = buf.toString();
+        const page = term.rows - 2;
+        note = "";
+        if (k === "q" || k === "\u0003") return resolve();
+        else if (k === "j") jump(fileStart, 1);
+        else if (k === "k") jump(fileStart, -1);
+        else if (k === "n") jump(lines.flatMap((l, i) => (l.hunk ? [i] : [])), 1);
+        else if (k === "p") jump(lines.flatMap((l, i) => (l.hunk ? [i] : [])), -1);
+        else if (k === " " || k === "\x1b[6~") top += page;
+        else if (k === "b" || k === "\x1b[5~") top -= page;
+        else if (k === "g") top = 0;
+        else if (k === "G") top = lines.length - page;
+        else if (k === "c") {
+          const fi = fileStart.filter((s) => s <= top).length - 1;
+          if (collapsed.has(fi)) collapsed.delete(fi); else collapsed.add(fi);
+          rebuild();
+          top = fileStart[fi] ?? 0;
+        } else if (k === "a" && change) {
+          try { await api("POST", `/p/${id}/tasks/${change}/ready`); note = "· marked ready"; } catch (e) { note = `· ${(e as Error).message}`; }
+        }
+        clamp();
+        draw();
+      });
+    });
+    term.write("\x1b[?25h\x1b[?1049l");
+    process.stdin.setRawMode(false);
+    process.stdin.pause();
     return;
   }
 

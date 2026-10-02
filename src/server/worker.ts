@@ -242,6 +242,12 @@ export default {
             headCommit = task.currentCommit;
           } else if (commitParam && /^[0-9a-f]{40}$/.test(commitParam)) {
             headCommit = commitParam;
+          } else if (commitParam && /^[0-9a-f]{7,39}$/.test(commitParam)) {
+            // Abbreviated hash, as `git log --oneline` prints it: resolve against recent history.
+            const recent = await listCommits(await env.ARTIFACTS.get(state.canonicalRepoName), undefined, 500, 0);
+            const matches = recent.filter((c) => c.hash.startsWith(commitParam));
+            if (matches.length !== 1) return text(matches.length ? "Abbreviated hash is ambiguous" : "No recent commit matches that hash", matches.length ? 400 : 404);
+            headCommit = matches[0]!.hash;
           } else {
             return text("Pass ?commit=<sha> or ?task=<id>", 400);
           }
