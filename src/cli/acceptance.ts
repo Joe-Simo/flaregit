@@ -7,14 +7,14 @@ import { gitAuthEnv } from "../server/shell.js";
 
 const sha = z.string().regex(/^[0-9a-f]{40}$/);
 const receiptSchema = z.object({
-  version: z.literal(1), origin: z.string().url(), createdAt: z.string(), projectId: z.string().optional(), base: sha.optional(),
+  version: z.literal(1), exercise: z.enum(["functional-ticket-booking", "comment-only-hosted-diagnostic"]).optional(), origin: z.string().url(), createdAt: z.string(), projectId: z.string().optional(), base: sha.optional(),
   issue: z.number().optional(), tasks: z.array(z.string()), agentRuns: z.array(z.object({ taskId: z.string(), instanceId: z.string(), requestedAt: z.string() })),
-  pendingAction: z.string().optional(), pendingAgents: z.array(z.string()).optional(), integration: z.string().optional(), observations: z.array(z.unknown()), verification: z.object({ commit: sha, cloneHead: sha, verifiedAt: z.string() }).optional(),
+  contextComments: z.array(z.object({ subject: z.string(), id: z.number() })).optional(), pendingAction: z.string().optional(), pendingAgents: z.array(z.string()).optional(), integration: z.string().optional(), observations: z.array(z.unknown()), verification: z.object({ commit: sha, cloneHead: sha, verifiedAt: z.string() }).optional(),
 });
 type Receipt = z.infer<typeof receiptSchema>;
 const stateSchema = z.object({
   acceptedState: z.object({ currentCommit: sha }),
-  tasks: z.record(z.string(), z.object({ status: z.string(), baseCommit: sha, currentCommit: sha, checkpoints: z.array(z.object({ commitHash: sha, timestamp: z.string(), filesChanged: z.array(z.string()) })) })),
+  tasks: z.record(z.string(), z.object({ status: z.string(), agentWorkflowInstanceId: z.string().optional(), baseCommit: sha, currentCommit: sha, checkpoints: z.array(z.object({ commitHash: sha, timestamp: z.string(), filesChanged: z.array(z.string()) })) })),
   candidates: z.record(z.string(), z.object({ status: z.string(), candidateCommit: sha.optional(), expectedAcceptedBase: sha, evidenceId: z.string().optional(), workflowInstanceId: z.string().optional(), compositionMethod: z.string().optional(), repairAttempts: z.array(z.object({ round: z.number(), affectedContracts: z.array(z.string()), timestamp: z.string(), durationMs: z.number() })), review: z.object({ approved: z.boolean(), at: z.string(), commit: sha }).optional() })),
   evidence: z.record(z.string(), z.object({ status: z.string() })), decisions: z.record(z.string(), z.unknown()),
 });
@@ -40,6 +40,15 @@ export function pendingAgentTasks(receipt: Pick<Receipt, "tasks" | "agentRuns">)
   return receipt.tasks.filter((taskId) => !receipt.agentRuns.some((run) => run.taskId === taskId));
 }
 
+export function observedAgentInstances(receipt: Pick<Receipt, "tasks" | "agentRuns">, tasks: Record<string, { agentWorkflowInstanceId?: string }>) {
+  const instances = new Set(receipt.agentRuns.map((run) => run.instanceId));
+  for (const taskId of receipt.tasks) {
+    const registered = tasks[taskId]?.agentWorkflowInstanceId;
+    if (registered) instances.add(registered);
+  }
+  return [...instances];
+}
+
 async function main() {
   const phase = process.argv[2];
   if (!["prepare", "status", "integrate", "verify"].includes(phase ?? "")) throw new AcceptanceError("Usage: bun run src/cli/acceptance.ts prepare|status|integrate|verify [receipt.json]. Set FLAREGIT_TOKEN and optionally FLAREGIT_ORIGIN.");
@@ -51,7 +60,7 @@ async function main() {
   try { receipt = receiptSchema.parse(JSON.parse(await readFile(file, "utf8"))); }
   catch (error) {
     if (phase !== "prepare" || !(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-    receipt = { version: 1, origin: configuredOrigin, createdAt: new Date().toISOString(), tasks: [], agentRuns: [], observations: [] };
+    receipt = { version: 1, exercise: "functional-ticket-booking", origin: configuredOrigin, createdAt: new Date().toISOString(), tasks: [], agentRuns: [], observations: [] };
     assertReceiptOrigin(receipt.origin, configuredOrigin);
     await saveReceipt(file, receipt);
   }
@@ -76,16 +85,33 @@ async function main() {
     const issue = await api(`${prefix}/issues`, z.object({ number: z.number() }), { title: "Hosted concurrent-agent acceptance exercise", body: "Explicit test repository owned by this entrant. Two actual coding agents change the same existing source file. Human review is required; observed conflicts or failures are recorded without claims of success." });
     receipt.issue = issue.number; delete receipt.pendingAction; await saveReceipt(file, receipt);
     }
-    for (const [index, goal] of [
+    const goals = receipt.exercise === "functional-ticket-booking" ? [
+      "In src/pricing.ts implement a 15% group discount for orders of four or more tickets. Four $40 nonrefundable tickets must total $136; three remain $120. Keep the existing public types and exports, and do not modify any other file. Another contributor will implement refundable fees; leave that feature for their change.",
+      "In src/pricing.ts implement optional refundable tickets with a $5 per-ticket surcharge and the isRefundable flag. Two $40 refundable tickets must total $90. Keep existing public types and exports, and do not modify any other file. Another contributor will implement group discounts; leave that feature for their change.",
+    ] : [
       "In src/pricing.ts add one concise header comment explaining that prices are quoted before payment. Preserve every behavior and export; do not modify any other file.",
       "In src/pricing.ts add one concise header comment explaining that refunds follow the booking policy. Preserve every behavior and export; do not modify any other file.",
-    ].entries()) {
+    ];
+    for (const [index, goal] of goals.entries()) {
       if (receipt.tasks[index]) continue;
       const taskId = `acceptance-${index + 1}-${crypto.randomUUID().slice(0, 8)}`;
       receipt.pendingAction = `create-task:${taskId}`; await saveReceipt(file, receipt);
       await api(`${prefix}/tasks`, z.object({ task: z.string() }), { taskId, goal, issue: receipt.issue });
       receipt.tasks.push(taskId); delete receipt.pendingAction; await saveReceipt(file, receipt);
     }
+    // Shared context is persisted before dispatch so interruptions do not depend on a terminal prompt.
+    for (const taskId of receipt.tasks) {
+      const subject = `change:${taskId}`;
+      if (receipt.contextComments?.some((comment) => comment.subject === subject)) continue;
+      receipt.pendingAction = `create-context-comment:${taskId}`; await saveReceipt(file, receipt);
+      const comment = await api(`${prefix}/comments`, z.object({ id: z.number() }), {
+        subject,
+        body: receipt.exercise === "functional-ticket-booking" ? "Shared approved policy: 15% group discount starts at four tickets; refundable tickets add $5 each. Discount applies to ticket subtotal, not the refund fee, so four refundable $40 tickets total $156. Preserve both contributors' features in the final integration. This is shared task context, not approval." : "Hosted diagnostic: another contributor is editing the same pricing file. Preserve existing exports and every checkout behavior. Keep this task's purpose visible and review any combined repair explicitly; this comment is shared task context, not approval.",
+      });
+      receipt.contextComments ??= []; receipt.contextComments.push({ subject, id: comment.id });
+      delete receipt.pendingAction; await saveReceipt(file, receipt);
+    }
+    console.log(receipt.exercise === "functional-ticket-booking" ? "Functional exercise requests independent discount and refundable-ticket features. Actual concurrent execution, conflict, correct combined behavior, and human review still require observed evidence." : "Diagnostic exercise: comment-only edits do not demonstrate meaningful functional contributions or satisfy the full competition demo.");
     let saving = Promise.resolve();
     const toStart = pendingAgentTasks(receipt);
     receipt.pendingAgents = toStart; await saveReceipt(file, receipt);
@@ -114,7 +140,8 @@ async function main() {
     console.log(`Queued actual integration ${result.queued}. Run status. Human review must be completed explicitly in the app.`); return;
   }
   if (phase === "status") {
-    const runs = await Promise.all([...receipt.agentRuns.map((r) => r.instanceId), ...(receipt.integration ? [receipt.integration] : [])].map(async (id) => {
+    const recordedInstances = observedAgentInstances(receipt, state.tasks);
+    const runs = await Promise.all([...recordedInstances, ...(receipt.integration ? [receipt.integration] : [])].map(async (id) => {
       try { const result = await api(`${prefix}/workflows/${id}`, z.object({ status: z.string() })); return { instanceId: id, status: result.status }; }
       catch { return { instanceId: id, status: "unavailable" }; }
     }));
@@ -123,7 +150,7 @@ async function main() {
       try { const comments = await api(`${prefix}/comments?subject=${encodeURIComponent(subject)}`, z.array(z.object({ id: z.number() }))); return { subject, commentIds: comments.map((comment) => comment.id), count: comments.length }; }
       catch { return { subject, commentIds: [], count: null }; }
     }));
-    const observation = { context, at: new Date().toISOString(), acceptedCommit: state.acceptedState.currentCommit,
+    const observation = { exercise: receipt.exercise ?? "comment-only-hosted-diagnostic", pendingAction: receipt.pendingAction ?? null, pendingAgents: receipt.pendingAgents ?? [], recordedContextComments: receipt.contextComments ?? [], context, at: new Date().toISOString(), acceptedCommit: state.acceptedState.currentCommit,
       tasks: receipt.tasks.map((id) => ({ id, ...state.tasks[id] })), candidates: state.candidates,
       checks: Object.entries(state.evidence).map(([id, evidence]) => ({ id, status: evidence.status })), decisionIds: Object.keys(state.decisions), runs };
     receipt.observations.push(observation); await saveReceipt(file, receipt);

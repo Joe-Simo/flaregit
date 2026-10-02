@@ -36,12 +36,12 @@ export function NewRepo() {
   return (
     <div className="max-w-2xl mx-auto px-4 sm:px-6 py-8 min-w-0">
       <h1 className="text-xl font-bold mb-1">New repository</h1>
-      <p className="text-sm text-muted-foreground mb-6">Changes are combined, repaired and verified automatically, and only changes that pass your checks are accepted.</p>
+      <p className="text-sm text-muted-foreground mb-6">Each contribution has an isolated Git workspace. Verified candidates wait for your review before acceptance.</p>
       <Card>
         <CardHeader className="pb-2">
           <Tabs value={mode} onValueChange={setMode}>
             <TabsList className="grid grid-cols-2 w-full">
-              <TabsTrigger value="import">Import from GitHub</TabsTrigger>
+              <TabsTrigger value="import">Import Git repository</TabsTrigger>
               <TabsTrigger value="demo">Demo repository</TabsTrigger>
             </TabsList>
             <TabsContent value="import">{null}</TabsContent>

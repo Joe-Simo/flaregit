@@ -3,6 +3,7 @@ import { freezeCandidateGeneration } from "../core/pipeline/freeze.js";
 import { createProductDecision, detectContradiction } from "../core/decision/contradiction.js";
 import type { Env } from "./env.js";
 import { accountKeyFor, accountOf } from "./projects.js";
+import { isCommandPolicy } from "../core/command-policy.js";
 import type {
   CandidateGeneration,
   FlareGitProjectState,
@@ -336,6 +337,12 @@ export class RepositoryController extends DurableObject<Env> {
     return res.rowsWritten > 0;
   }
 
+  private async ensureRecoveryAlarm(delayMs = 2 * 60_000): Promise<void> {
+    const deadline = Date.now() + delayMs;
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || current > deadline) await this.ctx.storage.setAlarm(deadline);
+  }
+
   async createTask(task: Task): Promise<Task> {
     const s = this.load();
     if (s.tasks[task.id]) return s.tasks[task.id]!;
@@ -346,25 +353,35 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   async ingestCheckpoint(ev: { eventId: string; taskId: string; commit: string; ready: boolean; filesChanged?: string[] }): Promise<{ applied: boolean }> {
-    if (!this.firstDelivery(ev.eventId)) return { applied: false };
+    await this.ensureRecoveryAlarm();
     const s = this.load();
     const task = s.tasks[ev.taskId];
     if (!task || task.status === "cancelled" || task.status === "accepted") return { applied: false };
-    // A push that arrives while the task is being integrated is newer work; it applies after the landing.
-    task.currentCommit = ev.commit;
-    task.checkpoints.push({
-      id: `chk_${ev.eventId.slice(0, 8)}`,
-      commitHash: ev.commit,
-      author: task.contributor.name,
-      message: ev.ready ? "Ready for integration" : "Work in progress",
-      timestamp: new Date().toISOString(),
-      isReadyForIntegration: ev.ready,
-      filesChanged: ev.filesChanged ?? [],
-    });
-    if (task.status !== "integrating" && task.status !== "verifying") task.status = ev.ready ? "ready" : "checkpointed";
-    task.updatedAt = new Date().toISOString();
-    this.save();
-    if (ev.ready) await this.emit("change.ready", { change: task.id, commit: ev.commit, goal: task.goal });
+    let deliveries: string[] = [];
+    let applied = false;
+    try {
+      this.ctx.storage.transactionSync(() => {
+        if (!this.firstDelivery(ev.eventId)) return;
+        // A push that arrives while the task is being integrated is newer work; it applies after the landing.
+        task.currentCommit = ev.commit;
+        task.checkpoints.push({
+          id: `chk_${crypto.randomUUID()}`,
+          commitHash: ev.commit,
+          author: task.contributor.name,
+          message: ev.ready ? "Ready for integration" : "Work in progress",
+          timestamp: new Date().toISOString(),
+          isReadyForIntegration: ev.ready,
+          filesChanged: ev.filesChanged ?? [],
+        });
+        if (task.status !== "integrating" && task.status !== "verifying") task.status = ev.ready ? "ready" : "checkpointed";
+        task.updatedAt = new Date().toISOString();
+        if (ev.ready) deliveries = this.stageEvent("change.ready", { change: task.id, commit: ev.commit, goal: task.goal });
+        this.save();
+        applied = true;
+      });
+    } catch (error) { this.state = null; throw error; }
+    if (!applied) return { applied: false };
+    for (const deliveryId of deliveries) await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: s.projectId, deliveryId }).catch(() => undefined);
     await this.logActivity(task.contributor.name, ev.ready ? "task.ready" : "task.pushed", `${task.id} ${ev.ready ? "is ready for integration" : "pushed a checkpoint"} (${ev.commit.slice(0, 7)})`, { exceptUser: task.contributor.id });
     return { applied: true };
   }
@@ -414,9 +431,10 @@ export class RepositoryController extends DurableObject<Env> {
 
   // ---- outgoing webhooks: durable outbox, signed delivery through the queue, visible log ----
   async addWebhook(url: string, events: string[]): Promise<{ id: string; secret: string }> {
-    const id = `wh_${crypto.randomUUID().slice(0, 8)}`;
+    if (!Array.isArray(events) || events.length === 0 || events.some((event) => !(WEBHOOK_EVENTS as readonly string[]).includes(event))) throw new Error("Choose supported webhook events");
+    const id = `wh_${crypto.randomUUID()}`;
     const secret = `whsec_${btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(24))))}`;
-    const chosen = events.filter((e) => (WEBHOOK_EVENTS as readonly string[]).includes(e));
+    const chosen = [...new Set(events)];
     this.ctx.storage.sql.exec("INSERT INTO webhooks (id, url, secret, events, active, created_at) VALUES (?, ?, ?, ?, 1, ?)", id, url, secret, chosen.join(","), new Date().toISOString());
     return { id, secret };
   }
@@ -485,28 +503,15 @@ export class RepositoryController extends DurableObject<Env> {
     await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: this.load().projectId, deliveryId: id });
     return true;
   }
-  /**
-   * Transactional outbox. Delivery rows are written synchronously, in the same storage transaction as the state
-   * change that caused them (callers save() and emit() with no await in between), so an accepted landing can never
-   * exist without its event. Sending to the queue happens afterwards; anything not sent is picked up by alarm().
-   */
-  private async emit(type: (typeof WEBHOOK_EVENTS)[number], data: Record<string, unknown>): Promise<void> {
-    const ids = this.stageEvent(type, data);
-    const s = this.load();
-    for (const deliveryId of ids) {
-      await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: s.projectId, deliveryId }).catch(() => undefined);
-    }
-  }
-
   private stageEvent(type: (typeof WEBHOOK_EVENTS)[number], data: Record<string, unknown>): string[] {
     const hooks = this.ctx.storage.sql.exec("SELECT id, events FROM webhooks WHERE active = 1").toArray() as unknown as Array<{ id: string; events: string }>;
     const s = this.load();
-    const eventId = `evt_${crypto.randomUUID().slice(0, 12)}`;
+    const eventId = `evt_${crypto.randomUUID()}`;
     const payload = JSON.stringify({ id: eventId, type, createdAt: new Date().toISOString(), project: { id: s.projectId, name: s.projectName }, data });
     const ids: string[] = [];
     for (const h of hooks) {
       if (!h.events.split(",").includes(type)) continue;
-      const deliveryId = `dlv_${crypto.randomUUID().slice(0, 10)}`;
+      const deliveryId = `dlv_${crypto.randomUUID()}`;
       const now = new Date().toISOString();
       const seq = this.ctx.storage.sql.exec<{ n: number }>("SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM deliveries WHERE webhook_id = ?", h.id).toArray()[0]?.n ?? 1;
       this.ctx.storage.sql.exec("INSERT INTO deliveries (id, seq, webhook_id, event, status, attempts, payload, created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?)", deliveryId, seq, h.id, type, payload, now, now);
@@ -514,7 +519,6 @@ export class RepositoryController extends DurableObject<Env> {
     }
     // Retention never touches undelivered events: only finished rows beyond the newest 500 are pruned.
     this.ctx.storage.sql.exec("DELETE FROM deliveries WHERE status != 'pending' AND id IN (SELECT id FROM deliveries WHERE status != 'pending' ORDER BY created_at DESC LIMIT -1 OFFSET 500)");
-    if (ids.length > 0) void this.ctx.storage.setAlarm(Date.now() + 2 * 60_000);
     return ids;
   }
 
@@ -533,7 +537,7 @@ export class RepositoryController extends DurableObject<Env> {
       }
     }
     const pending = this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries WHERE status = 'pending'").toArray()[0]?.n ?? 0;
-    if (pending > 0) await this.ctx.storage.setAlarm(Date.now() + 5 * 60_000);
+    if (pending > 0) await this.ensureRecoveryAlarm(5 * 60_000);
   }
 
 
@@ -898,6 +902,7 @@ export class RepositoryController extends DurableObject<Env> {
 
   /** Acquire the single landing lease and freeze a candidate against the current accepted head. */
   async claimLanding(req: { holder: string; taskIds: string[] }): Promise<ClaimResult> {
+    await this.ensureRecoveryAlarm();
     const s = this.load();
     const now = Date.now();
     const lease = this.ctx.storage.sql.exec<{ holder: string; expires_at: number }>("SELECT holder, expires_at FROM lease WHERE id = 1").toArray()[0];
@@ -923,10 +928,16 @@ export class RepositoryController extends DurableObject<Env> {
           for (const rb of approved(b)) {
             if (!detectContradiction(ra, rb)) continue;
             const decision = createProductDecision(ra, rb);
-            s.decisions[decision.id] = decision;
-            a.status = b.status = "needs_decision";
-            this.save();
-            await this.emit("decision.needed", { decision: decision.id, question: decision.question });
+            let deliveries: string[] = [];
+            try {
+                this.ctx.storage.transactionSync(() => {
+                    s.decisions[decision.id] = decision;
+                    a.status = b.status = "needs_decision";
+                    deliveries = this.stageEvent("decision.needed", { decision: decision.id, question: decision.question });
+                    this.save();
+                    });
+            } catch (error) { this.state = null; throw error; }
+            for (const deliveryId of deliveries) await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: s.projectId, deliveryId }).catch(() => undefined);
             return { decision };
           }
         }
@@ -939,18 +950,19 @@ export class RepositoryController extends DurableObject<Env> {
       verificationPolicy: s.verificationPolicy,
       approvedRequirements: [...s.acceptedState.activeRequirements, ...tasks.flatMap((t) => t.requirements)].filter((r: Requirement) => r.status === "approved"),
     });
-    s.candidates[candidate.id] = candidate;
-    for (const t of tasks) {
-      t.status = "integrating";
-      t.activeCandidateId = candidate.id;
-    }
-    this.ctx.storage.sql.exec("INSERT INTO lease (id, holder, expires_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET holder = excluded.holder, expires_at = excluded.expires_at", req.holder, now + LEASE_MS);
-    this.save();
+    try {
+      this.ctx.storage.transactionSync(() => {
+        candidate.workflowInstanceId = req.holder;
+        s.candidates[candidate.id] = candidate;
+        for (const t of tasks) {
+          t.status = "integrating";
+          t.activeCandidateId = candidate.id;
+        }
+        this.ctx.storage.sql.exec("INSERT INTO lease (id, holder, expires_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET holder = excluded.holder, expires_at = excluded.expires_at", req.holder, now + LEASE_MS);
+        this.save();
+      });
+    } catch (error) { this.state = null; throw error; }
     return { candidate };
-  }
-
-  private releaseLease(): void {
-    this.ctx.storage.sql.exec("DELETE FROM lease WHERE id = 1");
   }
 
   async recordComposition(candidateId: string, attempts: RepairAttempt[]): Promise<void> {
@@ -981,6 +993,8 @@ export class RepositoryController extends DurableObject<Env> {
     // Nothing becomes accepted history without a human approving this exact commit.
     if (!c.review?.approved || c.review.commit !== c.candidateCommit) return { ok: false, error: "No human approval for this candidate commit" };
     if (ev.status !== "passed" || ev.candidateCommit !== c.candidateCommit) return { ok: false, error: "Evidence does not match candidate" };
+    const verifierIdentity = isCommandPolicy(c.frozenVerificationPolicy) ? "flaregit-command-verifier-v2" : "flaregit-ticket-booking-protected-verifier-v2";
+    if (ev.verifierIdentity !== verifierIdentity) return { ok: false, error: "Candidate needs verification with the current isolated verifier before publication" };
     if (ev.expectedAcceptedBase !== c.expectedAcceptedBase || ev.requirementsVersion !== c.frozenPolicyVersion) return { ok: false, error: "Evidence was produced for different inputs" };
     const cancelled = c.participatingTaskIds.filter((id) => s.tasks[id]?.status === "cancelled");
     if (cancelled.length > 0) return { ok: false, error: `Task ${cancelled[0]} was cancelled before publication` };
@@ -1007,33 +1021,56 @@ export class RepositoryController extends DurableObject<Env> {
 
   /** Ledger step 2: the Artifacts ref update succeeded (or was found already applied). */
   async completePublish(journalId: string): Promise<void> {
+    // Arm recovery before loading state or committing the outbox; no async boundary
+    // separates the ledger snapshot from its atomic update.
+    await this.ensureRecoveryAlarm();
     const s = this.load();
     const j = s.journal.find((e) => e.id === journalId);
     if (!j) throw new Error("Unknown journal entry");
-    if (j.state === "ACCEPTED") return; // idempotent
+    if (j.state === "ABORTED") throw new Error("Aborted publication cannot be accepted");
+    const alreadyAccepted = j.state === "ACCEPTED";
     const c = s.candidates[j.candidateId]!;
-    j.state = "ACCEPTED";
-    j.timestamp = new Date().toISOString();
-    c.status = "accepted";
-    s.acceptedState.currentCommit = j.newHead;
-    s.acceptedState.buildDigest = j.outputDigest;
-    s.acceptedState.acceptedAt = j.timestamp;
-    s.acceptedState.history.push({ commit: j.newHead, candidateId: c.id, acceptedAt: j.timestamp, participatingTasks: c.participatingTaskIds, evidenceId: c.evidenceId!, outputDigest: j.outputDigest });
-    for (const id of c.participatingTaskIds) {
-      const t = s.tasks[id]!;
-      t.status = t.currentCommit === c.participatingCommits[id] ? "accepted" : "ready";
-      for (const r of t.requirements) if (r.status === "approved" && !s.acceptedState.activeRequirements.some((x) => x.id === r.id)) s.acceptedState.activeRequirements.push(r);
+    const advanceHead = s.acceptedState.currentCommit === j.expectedHead || s.acceptedState.currentCommit === j.newHead;
+    let deliveries: string[] = [];
+    try {
+      if (!alreadyAccepted) this.ctx.storage.transactionSync(() => {
+        j.state = "ACCEPTED";
+        j.timestamp = new Date().toISOString();
+        c.status = "accepted";
+        if (advanceHead) {
+          s.acceptedState.currentCommit = j.newHead;
+          s.acceptedState.buildDigest = j.outputDigest;
+          s.acceptedState.acceptedAt = j.timestamp;
+        }
+        s.acceptedState.history.push({ commit: j.newHead, candidateId: c.id, acceptedAt: j.timestamp, participatingTasks: c.participatingTaskIds, evidenceId: c.evidenceId!, outputDigest: j.outputDigest });
+        for (const id of c.participatingTaskIds) {
+          const t = s.tasks[id]!;
+          if (!t.activeCandidateId || t.activeCandidateId === c.id) t.status = t.currentCommit === c.participatingCommits[id] ? "accepted" : "ready";
+        }
+        if (advanceHead && s.policyVersion === c.frozenPolicyVersion) {
+          for (const requirement of c.frozenRequirements) {
+            if (requirement.status === "approved" && !s.acceptedState.activeRequirements.some((active) => active.id === requirement.id)) s.acceptedState.activeRequirements.push(requirement);
+          }
+        }
+        if (c.workflowInstanceId) this.ctx.storage.sql.exec("DELETE FROM lease WHERE id = 1 AND holder = ?", c.workflowInstanceId);
+        deliveries = this.stageEvent("change.accepted", { commit: j.newHead, changes: c.participatingTaskIds, tree: j.candidateTree ?? null });
+        this.save();
+        });
+    } catch (error) {
+      // SQL rolled back, so discard the mutated cache before the next RPC retries.
+      this.state = null;
+      throw error;
     }
-    this.releaseLease();
-    this.save();
-    await this.emit("change.accepted", { commit: j.newHead, changes: c.participatingTaskIds, tree: j.candidateTree ?? null });
+    for (const deliveryId of deliveries) await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: s.projectId, deliveryId }).catch(() => undefined);
     // Issues resolved by accepted changes close with a pointer to the commit that is now in history.
     for (const id of c.participatingTaskIds) {
       const t = s.tasks[id]!;
       if (t.status !== "accepted" || !t.issue) continue;
       const issue = this.issueRow(t.issue);
       if (!issue || issue.state === "closed") continue;
-      await this.addComment({ subject: `issue:${t.issue}`, author: "FlareGit", body: `Resolved by change ${t.id}, accepted as ${j.newHead.slice(0, 7)}.`, commit: j.newHead });
+      const subject = `issue:${t.issue}`;
+      const exists = this.ctx.storage.sql.exec('SELECT id FROM comments WHERE subject = ? AND author = ? AND "commit" = ? LIMIT 1', subject, "FlareGit", j.newHead).toArray().length > 0;
+      if (!exists) await this.addComment({ subject, author: "FlareGit", body: `Resolved by change ${t.id}, accepted as ${j.newHead.slice(0, 7)}.`, commit: j.newHead });
       await this.setIssueState(t.issue, "closed", `change ${t.id}`);
     }
     await this.logActivity("FlareGit", "integration.accepted", `Accepted ${j.newHead.slice(0, 7)} (${c.participatingTaskIds.join(" + ")})`);
@@ -1068,22 +1105,31 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   async abortPublish(candidateId: string, journalId: string | undefined, reason: string, outcome: "failed" | "stale"): Promise<void> {
+    await this.ensureRecoveryAlarm();
     const s = this.load();
     const c = s.candidates[candidateId];
     if (!c) return;
     const j = journalId ? s.journal.find((e) => e.id === journalId) : undefined;
-    if (j && j.state !== "ACCEPTED") Object.assign(j, { state: "ABORTED", error: reason, timestamp: new Date().toISOString() });
-    c.status = outcome;
-    c.failureBlocker = outcome === "failed" ? reason : undefined;
-    for (const id of c.participatingTaskIds) {
-      const t = s.tasks[id]!;
-      if (t.status === "cancelled") continue;
-      t.status = outcome === "stale" ? "ready" : "blocked";
-      t.blockedReason = outcome === "failed" ? reason : undefined;
-    }
-    this.releaseLease();
-    this.save();
-    if (outcome === "failed") await this.emit("change.blocked", { changes: c.participatingTaskIds, reason: reason.slice(0, 280) });
+    if (c.status === "accepted" || j?.state === "ACCEPTED") return;
+    if (c.status === outcome && (!j || j.state === "ABORTED")) return;
+    let deliveries: string[] = [];
+    try {
+      this.ctx.storage.transactionSync(() => {
+        if (j) Object.assign(j, { state: "ABORTED", error: reason, timestamp: new Date().toISOString() });
+        c.status = outcome;
+        c.failureBlocker = outcome === "failed" ? reason : undefined;
+        for (const id of c.participatingTaskIds) {
+          const t = s.tasks[id]!;
+          if (t.status === "cancelled" || (t.activeCandidateId && t.activeCandidateId !== c.id)) continue;
+          t.status = outcome === "stale" ? "ready" : "blocked";
+          t.blockedReason = outcome === "failed" ? reason : undefined;
+        }
+        if (c.workflowInstanceId) this.ctx.storage.sql.exec("DELETE FROM lease WHERE id = 1 AND holder = ?", c.workflowInstanceId);
+        if (outcome === "failed") deliveries = this.stageEvent("change.blocked", { changes: c.participatingTaskIds, reason: reason.slice(0, 280) });
+        this.save();
+      });
+    } catch (error) { this.state = null; throw error; }
+    for (const deliveryId of deliveries) await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: s.projectId, deliveryId }).catch(() => undefined);
     await this.logActivity("FlareGit", outcome === "stale" ? "integration.stale" : "integration.blocked", outcome === "stale" ? "Base moved; will recompose" : `Blocked: ${reason}`.slice(0, 280));
   }
 

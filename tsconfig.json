@@ -1,6 +1,10 @@
 {
   "compilerOptions": {
-    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ESNext",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "target": "ESNext",
     "module": "ESNext",
     "moduleDetection": "force",
@@ -14,10 +18,20 @@
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
     "baseUrl": ".",
-    "types": ["@cloudflare/workers-types", "bun", "node"],
+    "types": [
+      "@cloudflare/workers-types",
+      "bun",
+      "node"
+    ],
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": [
+        "./src/*"
+      ]
     }
   },
-  "include": ["src/**/*", "tests/**/*", "fixtures/**/*", "vite.config.ts"]
+  "include": [
+    "src/**/*",
+    "tests/**/*",
+    "fixtures/**/*"
+  ]
 }

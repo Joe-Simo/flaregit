@@ -2,9 +2,6 @@
  * Platform-owned protected checks for the ticket-booking fixture. This module lives outside any
  * contributor repository and is executed by the isolated runner against a candidate checkout.
  */
-import * as path from "node:path";
-import { renderToStaticMarkup } from "react-dom/server";
-import { createElement } from "react";
 import type { TestResultItem } from "../../core/types.js";
 
 interface Policy {
@@ -14,7 +11,7 @@ interface Policy {
   discountAppliesToRefundFee?: boolean;
 }
 
-type Quote = {
+export type Quote = {
   ticketTotal: number;
   discountAmount: number;
   refundFeeTotal: number;
@@ -22,7 +19,9 @@ type Quote = {
   isRefundable: boolean;
   receiptItems?: Array<{ description: string; amount: number; isDiscount?: boolean }>;
 };
-type Params = { ticketCount: number; basePrice: number; isRefundable?: boolean };
+export type Params = { ticketCount: number; basePrice: number; isRefundable?: boolean };
+export interface TicketObservations { quotes: Record<string, Quote>; catalogExists: boolean; html: string }
+export function quoteKey(params: Params): string { return `${params.ticketCount}:${params.basePrice}:${params.isRefundable === true}`; }
 
 async function check(
   items: TestResultItem[],
@@ -51,13 +50,10 @@ function near(actual: number, expected: number, label: string): void {
   }
 }
 
-export async function runChecks(dir: string, policy: Policy): Promise<TestResultItem[]> {
+export async function runChecks(_dir: string, policy: Policy, observed: TicketObservations): Promise<TestResultItem[]> {
   const items: TestResultItem[] = [];
-  const pricing = (await import(path.join(dir, "src", "pricing.ts"))) as { calculateQuote: (p: Params) => Quote };
-  const catalog = (await import(path.join(dir, "src", "catalog.ts"))) as {
-    EVENT_CATALOG: Array<{ id: string; price: number }>;
-  };
-  const { calculateQuote } = pricing;
+  if (!observed || typeof observed.html !== "string" || typeof observed.catalogExists !== "boolean" || !observed.quotes || typeof observed.quotes !== "object") throw new Error("Candidate observations are malformed");
+  const calculateQuote = (params: Params) => observed.quotes[quoteKey(params)]!;
   const pct = policy.groupDiscountPercent;
   const minTickets = policy.minTicketsForDiscount;
   const fee = policy.refundFeePerTicket;
@@ -108,10 +104,8 @@ export async function runChecks(dir: string, policy: Policy): Promise<TestResult
   });
 
   await check(items, "REQ-CATALOG-TO-CHECKOUT-DOLLARS", "Catalog price flows through checkout as $40.00 per ticket", async () => {
-    const event = catalog.EVENT_CATALOG.find((e) => e.id === "cf-connect-2026");
-    if (!event) throw new Error("cf-connect-2026 missing from catalog");
-    const { App } = (await import(path.join(dir, "src", "App.tsx"))) as { App: () => unknown };
-    const html = renderToStaticMarkup(createElement(App as never));
+    if (!observed.catalogExists) throw new Error("cf-connect-2026 missing from catalog");
+    const html = observed.html;
     if (!html.includes("Base price: $40.00 each")) {
       const shown = /Base price: \$([^<]*?) each/.exec(html.replace(/<!--.*?-->/g, ""));
       throw new Error(`Checkout shows base price "$${shown?.[1] ?? "?"}" instead of "$40.00" for the $40 event`);

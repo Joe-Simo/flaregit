@@ -16,6 +16,7 @@ export const ticketBookingVerifier: ProtectedVerifier = {
         identity: "flaregit-ticket-booking-protected-verifier-v2",
         suite: "TicketBookingProtectedSuite",
         checksModule: path.join(import.meta.dirname, "checks.ts"),
+        observationModule: path.join(import.meta.dirname, "observe.ts"),
       },
       ctx
     ),

@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env.js";
+import { fileBytes, MAX_FILE_BYTES } from "./file-bytes.js";
 
 const DEC = new TextDecoder();
 
@@ -58,6 +59,12 @@ export class IntegratorSandbox extends DurableObject<Env> {
     const r = await this.exec(["cat", path]);
     if (!r.success) throw new Error(`read ${path} failed`);
     return r.stdout;
+  }
+
+  /** Binary-safe RPC read. Bound the container output before collecting it in Worker memory. */
+  async readFileBytes(path: string): Promise<Uint8Array> {
+    const proc = await this.execWhenReady(["head", "-c", String(MAX_FILE_BYTES + 1), "--", path], { signal: AbortSignal.timeout(30_000) });
+    return fileBytes(await proc.output(), path);
   }
 
   async writeFile(path: string, content: string): Promise<void> {

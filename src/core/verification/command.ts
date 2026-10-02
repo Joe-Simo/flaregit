@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { TestResultItem, VerificationEvidence } from "../types.js";
 import type { ProtectedVerifier, VerifierContext } from "../verifier.js";
-import { scrubbedEnv } from "./isolated.js";
+import { createExecutionBoundary, executionEnv, type ExecutionBoundary } from "./execution.js";
 
 import { DEFAULT_PROTECTED_PATHS, isCommandPolicy, type CommandPolicy } from "../command-policy.js";
 
@@ -13,10 +13,11 @@ export { DEFAULT_PROTECTED_PATHS, isCommandPolicy, type CommandPolicy };
 
 const MAX_OUTPUT = 4000;
 
-function runStep(id: string, description: string, command: string, cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<TestResultItem> {
+function runStep(id: string, description: string, command: string, cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number, boundary: ExecutionBoundary): Promise<TestResultItem> {
   const started = performance.now();
   return new Promise((resolve) => {
-    const child = spawn("sh", ["-c", command], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    const invocation = boundary.command("sh", ["-c", command]);
+    const child = spawn(invocation.executable, invocation.args, { ...boundary.options(env), cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     const take = (d: Buffer) => {
       out = (out + d.toString()).slice(-MAX_OUTPUT * 4);
@@ -43,7 +44,7 @@ function runStep(id: string, description: string, command: string, cwd: string, 
 }
 
 export function createCommandVerifier(policy: CommandPolicy): ProtectedVerifier {
-  const identity = "flaregit-command-verifier-v1";
+  const identity = "flaregit-command-verifier-v2";
   return {
     identity,
     protectedPaths: policy.protectedPaths ?? DEFAULT_PROTECTED_PATHS,
@@ -54,6 +55,7 @@ export function createCommandVerifier(policy: CommandPolicy): ProtectedVerifier 
       const dir = path.join(work, "candidate");
       const home = path.join(work, "home");
       fs.mkdirSync(home);
+      let boundary: ExecutionBoundary | undefined;
       try {
         const clone = spawnSync("git", ["clone", "--quiet", "--no-hardlinks", ctx.repoDir, dir], { encoding: "utf-8" });
         if (clone.status !== 0) throw new Error(`Verification clone failed: ${clone.stderr}`);
@@ -63,7 +65,8 @@ export function createCommandVerifier(policy: CommandPolicy): ProtectedVerifier 
         if (head !== ctx.candidateCommit) throw new Error(`Checkout ${head} does not match candidate ${ctx.candidateCommit}`);
         const tree = spawnSync("git", ["-C", dir, "rev-parse", "HEAD^{tree}"], { encoding: "utf-8" }).stdout.trim();
 
-        const env = { ...scrubbedEnv(home), CI: "1" };
+        boundary = createExecutionBoundary(work, [dir, home], ctx.repoDir);
+        const env = executionEnv(home);
         const timeoutMs = Math.min(Math.max(p.timeoutSec ?? 300, 10), 900) * 1000;
         const items: TestResultItem[] = [];
         const steps: Array<[string, string, string | undefined]> = [
@@ -73,7 +76,7 @@ export function createCommandVerifier(policy: CommandPolicy): ProtectedVerifier 
         ];
         for (const [id, description, command] of steps) {
           if (!command) continue;
-          const item = await runStep(id, `${description}: ${command}`, command, dir, env, timeoutMs);
+          const item = await runStep(id, `${description}: ${command}`, command, dir, env, timeoutMs, boundary);
           items.push(item);
           if (!item.passed) break; // later steps would only add noise
         }
@@ -88,13 +91,14 @@ export function createCommandVerifier(policy: CommandPolicy): ProtectedVerifier 
           testBundleDigest: crypto.createHash("sha256").update(JSON.stringify({ i: p.install, b: p.build, t: p.test })).digest("hex"),
           toolchainDigest: `command-${process.versions.bun ? `bun-${process.versions.bun}` : `node-${process.version}`}`,
           builtOutputDigest: crypto.createHash("sha256").update(`tree:${tree}:cmd:${p.test}`).digest("hex"),
-          verifierIdentity: identity,
+          verifierIdentity: boundary.isolated ? identity : `${identity}-local-unprivileged-boundary-unverified`,
           policy: ctx.policy,
           testResults: [{ suite: "CustomerProtectedSuite", passed: failed === 0, passedCount: items.length - failed, failedCount: failed, items }],
           timestamp: new Date().toISOString(),
           status: failed === 0 && items.length > 0 ? "passed" : "failed",
         };
       } finally {
+        boundary?.dispose();
         fs.rmSync(work, { recursive: true, force: true });
       }
     },

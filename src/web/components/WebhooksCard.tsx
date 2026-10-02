@@ -15,7 +15,7 @@ const EVENTS: Array<[string, string]> = [
   ["change.blocked", "Integration was blocked"],
   ["decision.needed", "A decision is needed"],
 ];
-const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm";
+const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive";
 const okCls = "rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200";
 const errText = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback);
@@ -33,13 +33,14 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
 
   const load = useCallback(async () => {
     try {
-      const [h, d] = await Promise.all([
+      const [h, d] = await Promise.allSettled([
         apiJson<Hook[]>(`/p/${projectId}/webhooks`),
         apiJson<Delivery[]>(`/p/${projectId}/deliveries`),
       ]);
-      setHooks(h);
-      setDeliveries(d);
-      setLoadError(null);
+      if (h.status === "fulfilled") setHooks(h.value);
+      if (d.status === "fulfilled") setDeliveries(d.value);
+      const failures = [h.status === "rejected" ? `Webhook settings: ${errText(h.reason, "Unavailable")}` : null, d.status === "rejected" ? `Delivery log: ${errText(d.reason, "Unavailable")}` : null].filter(Boolean);
+      setLoadError(failures.length > 0 ? `${failures.join(". ")}. Previously loaded rows may be outdated.` : null);
     } catch (e) {
       setLoadError(errText(e, "Could not load webhooks"));
     }
@@ -76,7 +77,7 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
       </CardHeader>
       <CardContent className="space-y-3 min-w-0">
         <p className="text-xs text-muted-foreground">
-          Events are saved first, then delivered with a signature (<code>webhook-signature</code>) and retried with backoff. Receivers should de-duplicate on <code>webhook-id</code>.
+          Events are saved first, then delivered with a signature (<code>webhook-signature</code>) and retried with backoff. Receivers should de-duplicate on <code>webhook-id</code>. Replay keeps that same ID; sequence numbers apply within each webhook.
         </p>
         {loadError && (
           <div role="alert" className={`${alertCls} flex flex-wrap items-center justify-between gap-2`}>
@@ -89,6 +90,7 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
         {secret && (
           <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs">
             Signing secret (shown once): <code className="break-all">{secret}</code>
+            <Button size="sm" variant="ghost" className="mt-2" onClick={() => setSecret(null)}>Hide secret</Button>
           </div>
         )}
         {hooks === null && !loadError && <p role="status" className="text-sm text-muted-foreground">Loading webhooks…</p>}
@@ -99,7 +101,8 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
               <div key={h.id} className="px-3 py-2 flex items-center justify-between gap-3 text-sm">
                 <div className="min-w-0">
                   <div className="break-all">{h.url}</div>
-                  <div className="text-xs text-muted-foreground">{h.events.split(",").join(" · ")}</div>
+                  <div className="text-xs text-muted-foreground break-words">{h.events.split(",").join(" · ")}</div>
+                  {!h.active && <Badge variant="outline">Inactive</Badge>}
                 </div>
                 {isOwner && (
                   <Button size="sm" variant="ghost" aria-label={`Remove webhook ${h.url}`} disabled={busy !== null} onClick={() => guard(`del:${h.id}`, "Webhook removed.", async () => { await apiJson(`/p/${projectId}/webhooks/${h.id}`, { method: "DELETE" }); })}>
@@ -121,13 +124,13 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
           }}>
             <label className="block text-sm">
               <span className="font-medium">Webhook URL</span>
-              <input className={field} type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/hooks/flaregit" />
+              <input className={field} type="url" required disabled={busy === "add"} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/hooks/flaregit" />
             </label>
             <fieldset className="flex flex-wrap gap-x-4 gap-y-1">
               <legend className="sr-only">Events to deliver</legend>
               {EVENTS.map(([key, label]) => (
                 <label key={key} className="flex items-center gap-1.5 text-xs">
-                  <input type="checkbox" checked={events.includes(key)} onChange={() => setEvents((cur) => (cur.includes(key) ? cur.filter((x) => x !== key) : [...cur, key]))} /> {label}
+                  <input type="checkbox" disabled={busy === "add"} checked={events.includes(key)} onChange={() => setEvents((cur) => (cur.includes(key) ? cur.filter((x) => x !== key) : [...cur, key]))} /> {label}
                 </label>
               ))}
             </fieldset>
@@ -136,20 +139,21 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
         )}
         {deliveries && deliveries.length > 0 && (
           <div>
-            <h4 className="text-xs font-semibold mb-1">Delivery log</h4>
+            <h4 className="text-xs font-semibold mb-1">Delivery log · latest 50 events</h4>
             <div className="divide-y divide-border rounded-md border border-border text-xs">
               {deliveries.map((d) => (
                 <div key={d.id} className="px-3 py-2 flex flex-wrap items-center justify-between gap-3">
                   <div className="min-w-0">
                     <span className="font-medium break-all">{d.event}</span>
-                    <span className="text-muted-foreground"> · #{d.seq} · {timeAgo(d.updated_at)} · {d.attempts} attempt{d.attempts === 1 ? "" : "s"}{d.queue_ms !== null ? ` · queued ${d.queue_ms} ms` : ""}{d.latency_ms !== null ? ` · ${d.latency_ms} ms` : ""}{d.last_status ? ` · HTTP ${d.last_status}` : ""}</span>
+                    <span className="text-muted-foreground"> · #{d.seq} · {timeAgo(d.updated_at)} · {d.attempts} attempt{d.attempts === 1 ? "" : "s"}{d.queue_ms !== null ? ` · queued ${d.queue_ms} ms` : ""}{d.latency_ms !== null ? ` · ${d.latency_ms} ms` : ""}{d.last_status ? ` · last HTTP ${d.last_status}` : ""}</span>
+                    <div className="mt-1 text-muted-foreground break-all">Delivery <code>{d.id}</code> · webhook <code>{d.webhook_id}</code></div>
                     {d.last_error && d.status !== "success" && <div className="text-destructive break-all">{d.last_error}</div>}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    <Badge variant={d.status === "success" ? "success" : d.status === "failed" ? "destructive" : "warning"}>{d.status === "pending" ? "retrying" : d.status}</Badge>
-                    {isOwner && d.status !== "success" && (
-                      <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => guard(`re:${d.id}`, "Redelivery queued.", async () => { await apiJson(`/p/${projectId}/deliveries/${d.id}/redeliver`, { method: "POST" }); })}>
-                        <RotateCw className="h-3 w-3 mr-1" /> {busy === `re:${d.id}` ? "Queuing…" : "Redeliver"}
+                    <Badge variant={d.status === "success" ? "success" : d.status === "failed" ? "destructive" : "warning"}>{d.status === "pending" ? "Pending" : d.status === "success" ? "Delivered" : "Failed"}</Badge>
+                    {isOwner && (
+                      <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => guard(`re:${d.id}`, "Replay queued with the same delivery ID. Check the log for receiver confirmation.", async () => { await apiJson(`/p/${projectId}/deliveries/${d.id}/redeliver`, { method: "POST" }); })}>
+                        <RotateCw className="h-3 w-3 mr-1" aria-hidden="true" /> {busy === `re:${d.id}` ? "Queuing…" : "Replay"}
                       </Button>
                     )}
                   </div>

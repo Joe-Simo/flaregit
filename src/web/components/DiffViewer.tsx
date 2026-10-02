@@ -60,7 +60,7 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented }: {
 
   // Compute each file's diff in the worker, three at a time.
   useEffect(() => {
-    const worker = new Worker(new URL("../diff.worker.ts", import.meta.url), { type: "module" });
+    const worker = new Worker("/diff.worker.js", { type: "module" });
     workerRef.current = worker;
     let cancelled = false;
     const pending = new Map<number, (rows: DiffRow[]) => void>();

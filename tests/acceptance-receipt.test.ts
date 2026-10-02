@@ -30,3 +30,10 @@ test("resuming prepare preserves known agent starts rather than launching duplic
   expect(pendingAgentTasks({ tasks: ["a", "b"], agentRuns: [{ taskId: "a", instanceId: "saved-instance", requestedAt: "2026-10-02" }] })).toEqual(["b"]);
   expect(pendingAgentTasks({ tasks: ["a"], agentRuns: [{ taskId: "a", instanceId: "saved-instance", requestedAt: "2026-10-02" }] })).toEqual([]);
 });
+
+ test("unknown dispatch response can be observed through persisted task ownership without duplicate launch", async () => {
+  const { observedAgentInstances } = await import("../src/cli/acceptance.js");
+  expect(observedAgentInstances({ tasks: ["a", "b"], agentRuns: [{ taskId: "a", instanceId: "saved-a", requestedAt: "2026-10-02" }] }, {
+    a: { agentWorkflowInstanceId: "saved-a" }, b: { agentWorkflowInstanceId: "persisted-b" }, unrelated: { agentWorkflowInstanceId: "foreign-run" },
+  })).toEqual(["saved-a", "persisted-b"]);
+});

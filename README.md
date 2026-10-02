@@ -97,9 +97,9 @@ bun install
 bun run typecheck && bun run lint && bun test
 ```
 
-UI: `bun run dev` starts Vite on :5173 and proxies `/api`, `/auth-config`, `/status.json` and `/webhooks` to a real Worker at `FLAREGIT_API` (default `http://127.0.0.1:8787`, i.e. `bunx wrangler dev`; see `vite.config.ts`).
+UI: `bun run dev` uses Bun HTML imports and `Bun.serve` on loopback port 5173. It proxies the API, auth configuration, status and webhook requests to a real Worker at `FLAREGIT_API` (default `http://127.0.0.1:8787`, i.e. `bunx wrangler dev`; see `src/tooling/dev-web.ts`). `bun run build` emits the production HTML, styles, JavaScript, legal pages, and a separate compiled diff worker into `dist`. Tailwind 3 styling is preserved through PostCSS; client environment inlining is disabled.
 
-Core engine without the cloud: `bun test` runs the integration engine with real Git, verification and CAS, with a scripted stand-in for the model only. `bun run demo` runs the three ticket-booking scenarios (text conflict, clean-but-broken merge, contradiction) against a local runtime with Workers AI as the model; it requires `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (optional `CLOUDFLARE_AI_GATEWAY`, `FLAREGIT_AI_MODEL`) and refuses to run without them.
+Core engine without the cloud: `bun test` runs the integration engine with real Git, verification and CAS, with a scripted stand-in for the model only. `bun run demo` runs the three ticket-booking scenarios (text conflict, clean-but-broken merge, contradiction) against a local runtime with Workers AI as the model; it requires `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (optional `CLOUDFLARE_AI_GATEWAY`, `FLAREGIT_AI_MODEL`) and refuses to run without them. Contributor verification and preview builds additionally require secure Linux UID isolation (the supplied cloud container); the local live-model demo fails closed on an ordinary macOS process. Do not use the trusted test-harness mode for real model output or imported repositories.
 
 `bun run demo:proof` runs a standalone real-Git protocol illustration with deterministic scripted contributors, no model or cloud credentials, and retained commit/journal receipts. It demonstrates parallel isolated clones, conflict, stale push refusal, and reconstruction after workspace deletion; it does not exercise the hosted product or represent real AI agents.
 
@@ -120,7 +120,7 @@ The local demo is a scenario harness, not the hosted multi-repository product. I
 | `tests/dns.test.ts` | Domain normalization, TXT record construction and parsing, resolver failures. |
 | `tests/artifacts.test.ts` | Local Artifacts client: repo creation, tokens, forks. |
 
-The race test runs 20 contending branches by default (4 workers). The 500-branch run passed on an Apple-silicon laptop in about 14 minutes (local bare repository, real `git push --force-with-lease`; it tests the landing protocol, not Artifacts throughput). Full run:
+The race test runs 20 contending branches by default (4 workers), using a local bare repository and real `git push --force-with-lease`. It tests the landing protocol, not Artifacts throughput. An optional larger run is available; this release does not claim a measured production throughput or timing result:
 
 ```bash
 RACE_BRANCHES=500 RACE_TIMEOUT_MS=7200000 bun test tests/landing-race.test.ts
@@ -133,7 +133,8 @@ RACE_BRANCHES=500 RACE_TIMEOUT_MS=7200000 bun test tests/landing-race.test.ts
 - A candidate waits up to 7 days for review, then goes stale and must be re-run.
 - At most 8 changes per integration.
 - Tree diffs currently support at most 5,000 changed files. Larger diffs fail explicitly rather than presenting incomplete coordination evidence as complete.
-- Diff time-to-interactive is network and auth bound: about 0.8 to 1 s measured in Safari; scrolling holds 60 fps at 3,000 to 8,000 px/s, with at most about 100 DOM rows rendered for a 12k-line diff.
+- Individual preview assets are limited to 16 MiB. Binary images and fonts are preserved as bytes; oversized or linked output assets fail explicitly.
+- The diff renderer virtualizes visible rows and computes diffs in a separate browser worker. Current release verification covers worker execution and responsive signed-out layouts; authenticated large-repository latency and frame-rate measurements remain an acceptance gate.
 - Syntax highlighting is per line, so multi-line constructs can be colored incorrectly.
 - Contradiction detection needs structured assertions on requirements.
 
@@ -144,3 +145,5 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for trust boundaries and the la
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+Hosted checks and previews execute contributor code under a separate Linux UID. `NODE_ENV=test` permits same-user execution only for explicitly trusted fixtures; those receipts are not production isolation evidence. Earlier recorded local AI results describe that historical run and do not prove the newer isolation boundary. An authenticated browser can exercise owned repositories without a CLI token; command-line acceptance still requires its own account token.

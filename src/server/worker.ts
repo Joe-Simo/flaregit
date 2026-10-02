@@ -1,4 +1,4 @@
-import { RepositoryController } from "./durable-object.js";
+import { RepositoryController, WEBHOOK_EVENTS } from "./durable-object.js";
 import { FlareGitIntegrationWorkflow } from "./workflow.js";
 import { FlareGitScenarioWorkflow } from "./scenario-workflow.js";
 import { FlareGitAgentWorkflow } from "./agent-workflow.js";
@@ -21,6 +21,7 @@ import type { Env, QueueMessage } from "./env.js";
 import type { Task } from "../core/types.js";
 import { redactSecrets } from "../agents/prompt.js";
 import { assertWorkflowControlPermission, controlWorkflow, WorkflowControlError } from "./workflow-control.js";
+import { validateImportSource, validateRepositoryCommand } from "./import-source.js";
 
 export { RepositoryController, FlareGitIntegrationWorkflow, FlareGitScenarioWorkflow, FlareGitAgentWorkflow };
 export { IntegratorSandbox, AgentSandbox } from "./integrator.js";
@@ -254,7 +255,13 @@ export default {
         if (!/^[A-Za-z0-9._ -]{1,60}$/.test(name)) return text("Use letters, numbers, spaces, '.', '_' and '-' in the name.", 400);
         const projectId = newProjectId();
         if (b.kind === "import") {
-          const created = await importRepository(env, { projectId, name, userId, url: clean(b.url, 300), branch: isSafeRef(clean(b.branch, 80)) ? clean(b.branch, 80) : "", install: clean(b.install, 300), build: clean(b.build, 300), test: clean(b.test, 300) });
+          let source: URL;
+          try { source = validateImportSource(b.url); }
+          catch (error) { return text(error instanceof Error ? error.message : "Invalid import URL", 400); }
+          if (b.branch !== undefined && (typeof b.branch !== "string" || (b.branch !== "" && !isSafeRef(b.branch)))) return text("Enter a valid Git branch name", 400);
+          try { for (const command of [b.install, b.build, b.test]) validateRepositoryCommand(command); }
+          catch (error) { return text(error instanceof Error ? error.message : "Invalid repository command", 400); }
+          const created = await importRepository(env, { projectId, name, userId, url: source.toString(), branch: b.branch ?? "", install: clean(b.install, 300), build: clean(b.build, 300), test: clean(b.test, 300) });
           await account.addProject({ id: projectId, name, role: "owner", kind: "import" });
           return json({ id: projectId, ...created }, 201);
         }
@@ -723,7 +730,11 @@ export default {
           return json({ queued: true }, 202);
         }
 
-        if (sub === "/webhooks" && method === "GET") return json(await project.listWebhooks());
+        if (sub === "/webhooks" && method === "GET") {
+          // Receiver URLs can themselves contain private routing credentials.
+          if (!isOwner) return text("Only the owner can view webhook settings; delivery history remains available", 403);
+          return json(await project.listWebhooks());
+        }
         if (sub === "/webhooks" && method === "POST") {
           if (!isOwner) return text("Only the owner can add webhooks", 403);
           const b = await body<{ url?: string; events?: string[] }>();
@@ -734,7 +745,8 @@ export default {
             return text(e instanceof Error ? e.message : "Invalid URL", 400);
           }
           if ((await project.listWebhooks()).length >= 10) return text("Webhook limit reached (10).", 409);
-          const created = await project.addWebhook(target.toString(), Array.isArray(b.events) && b.events.length > 0 ? b.events : ["change.accepted", "change.blocked"]);
+          if (b.events !== undefined && (!Array.isArray(b.events) || b.events.length === 0 || b.events.some((event) => !(WEBHOOK_EVENTS as readonly string[]).includes(event)))) return text("Choose supported webhook events", 400);
+          const created = await project.addWebhook(target.toString(), b.events ?? ["change.accepted", "change.blocked"]);
           return json({ ...created, note: "Store this signing secret now; it is not shown again." }, 201);
         }
         const hookRoute = /^\/webhooks\/(wh_[a-z0-9-]+)$/.exec(sub);
@@ -755,6 +767,8 @@ export default {
           if (!isOwner) return text("Only the owner can change settings", 403);
           if (!isCommandPolicy(state.verificationPolicy)) return text("The demo repository's checks are fixed", 400);
           const b = await body<Partial<CommandPolicy>>();
+          try { for (const command of [b.install, b.build, b.test]) validateRepositoryCommand(command); }
+          catch (error) { return text(error instanceof Error ? error.message : "Invalid repository command", 400); }
           const next: CommandPolicy = {
             ...state.verificationPolicy,
             install: clean(b.install ?? state.verificationPolicy.install, 300) || undefined,
@@ -822,13 +836,7 @@ async function importRepository(
   env: Env,
   o: { projectId: string; name: string; userId: string; url: string; branch: string; install: string; build: string; test: string }
 ) {
-  let source: URL;
-  try {
-    source = new URL(o.url);
-  } catch {
-    throw new Error("Enter a valid repository URL, for example https://github.com/owner/repo");
-  }
-  if (source.protocol !== "https:" || source.username || source.password) throw new Error("Only public https:// repository URLs are supported (no embedded credentials).");
+  const source = validateImportSource(o.url);
   if (!o.test) throw new Error("A test command is required: it is the protected check every change must pass.");
   const canonicalName = canonicalNameFor(o.projectId);
   const imported = await env.ARTIFACTS.import({

@@ -15,7 +15,7 @@ function fixture(failAsset = false) {
       names.push(name);
       return {
         exec: async (argv: string[]) => ({ success: true, stderr: "", stdout: argv[2]?.includes("find .") ? "./index.html\n./app.js\n" : "" }),
-        readFile: async () => "asset", destroy: async () => { destroyed++; },
+        readFile: async () => "asset", readFileBytes: async () => new TextEncoder().encode("asset"), destroy: async () => { destroyed++; },
       };
     } },
   } as unknown as Env;

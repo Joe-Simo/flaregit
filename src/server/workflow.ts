@@ -1,5 +1,6 @@
 import { isSafeRef } from "../core/sanitize.js";
 import { buildPrefix } from "./preview-access.js";
+import { publicationInHistory } from "./publication.js";
 import { pushMirror } from "./mirror.js";
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { WorkersAIClient } from "../ai/workers-ai.js";
@@ -183,6 +184,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     return {
       exec: (cmd: string, env?: Record<string, string>) => sb.exec(["sh", "-c", cmd], { env }),
       readFile: async (p: string) => ({ content: await sb.readFile(p) }),
+      readFileBytes: (p: string) => sb.readFileBytes(p),
       writeFile: (p: string, c: string) => sb.writeFile(p, c),
     };
   }
@@ -300,14 +302,15 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
         // Only web apps with an index.html get a stored preview; other repositories are verified and accepted without one.
         const hasPage = (await run(`test -f ${WORK}/index.html`)).success && settings.fixture === "ticket-booking";
         const built = hasPage
-          ? await run(`cd ${WORK} && ln -sfn /opt/flaregit/node_modules node_modules && rm -rf /tmp/build-out && bun build index.html --outdir /tmp/build-out --minify`)
+          ? await run(`bun /opt/flaregit/src/core/verification/build-preview.ts ${q(WORK)} /tmp/build-out`)
           : { success: true, stderr: "" };
         if (!built.success) return { ok: false, error: `Build failed: ${built.stderr.slice(-400)}` };
         const files = hasPage ? (await run("cd /tmp/build-out && find . -type f")).stdout.split("\n").filter(Boolean) : [];
         for (const f of files) {
           const rel = f.replace(/^\.\//, "");
-          const type = rel.endsWith(".html") ? "text/html; charset=utf-8" : rel.endsWith(".js") ? "text/javascript" : rel.endsWith(".css") ? "text/css" : "application/octet-stream";
-          await this.env.EVIDENCE_BUCKET.put(`${buildPrefix(params.projectId, commit)}/${rel}`, (await sb.readFile(`/tmp/build-out/${rel}`)).content, { httpMetadata: { contentType: type } });
+          const types: Record<string, string> = { html: "text/html; charset=utf-8", js: "text/javascript", css: "text/css", svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", avif: "image/avif", woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", otf: "font/otf" };
+          const type = types[rel.split(".").pop() ?? ""] ?? "application/octet-stream";
+          await this.env.EVIDENCE_BUCKET.put(`${buildPrefix(params.projectId, commit)}/${rel}`, await sb.readFileBytes(`/tmp/build-out/${rel}`), { httpMetadata: { contentType: type } });
         }
         await this.env.EVIDENCE_BUCKET.put(`evidence/${evidence.id}.json`, JSON.stringify(evidence), { httpMetadata: { contentType: "application/json" }, customMetadata: { commit, tree: evidence.candidateTree } });
         // Publish the candidate under a private ref so reviewers can read exactly what would land, and it survives restarts.
@@ -339,14 +342,17 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     if (!fetched.success) return { ok: false, error: "The stored candidate could not be read back; nothing was published" };
     const head = (await sb.exec(`git -C ${dir} rev-parse refs/flaregit/candidate`)).stdout.trim();
     if (head !== commit) return { ok: false, error: "Stored candidate differs from the reviewed commit; nothing was published" };
+    // A response can be lost after Git accepted the push. Prove ancestry from the real
+    // canonical branch before retrying, including when another contributor advanced it.
+    const alreadyLanded = () => publicationInHistory((command, env) => sb.exec(command, env), dir, canonical.remote, canonical.token, branch, commit);
+    if (await alreadyLanded()) return { ok: true };
     const res = await sb.exec(
       `git -C ${dir} push --quiet --force-with-lease=${q(`refs/heads/${branch}:${candidate.expectedAcceptedBase}`)} ${q(canonical.remote)} ${q(`${commit}:refs/heads/${branch}`)}`,
       gitAuthEnv(canonical.token)
     );
     if (res.success) return { ok: true };
     // A retried step may find its own earlier push already landed: that is success, not a conflict.
-    const now = (await sb.exec(`git -C ${dir} ls-remote ${q(canonical.remote)} ${q(`refs/heads/${branch}`)}`, gitAuthEnv(canonical.token))).stdout.split("\t")[0]?.trim();
-    if (now === commit) return { ok: true };
+    if (await alreadyLanded()) return { ok: true };
     return { ok: false, error: `Canonical ref update refused: ${res.stderr.replace(/Bearer [^\s"]+/g, "Bearer ***").slice(-300).trim()}`, stale: /stale info|rejected/i.test(res.stderr) };
   }
 

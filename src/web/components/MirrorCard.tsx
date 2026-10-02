@@ -11,7 +11,7 @@ interface MirrorRun { id: string; commit: string; status: RunStatus; detail: str
 interface MirrorInfo { target: string | null; enabled: boolean; hasToken: boolean; runs: MirrorRun[] }
 type Busy = null | "save" | "toggle" | "remove" | "retry";
 
-const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm";
+const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive";
 const okCls = "rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200";
 const errText = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback);
@@ -57,13 +57,13 @@ export function MirrorCard({ projectId, isOwner }: { projectId: string; isOwner:
   };
 
   const save = () => guard("save", "Mirror settings saved.", async () => {
-    await apiJson(`/p/${projectId}/mirror`, { method: "PUT", json: { target: target || info?.target, token: token || undefined, enabled: true } });
+    await apiJson(`/p/${projectId}/mirror`, { method: "PUT", json: { target: target || info?.target, token: token || undefined, enabled: info?.target ? info.enabled : true } });
     setToken("");
     setTarget("");
   });
   const toggle = () => guard("toggle", info?.enabled ? "Mirror paused." : "Mirror resumed.", async () => { await apiJson(`/p/${projectId}/mirror`, { method: "PUT", json: { enabled: !info?.enabled } }); });
-  const remove = () => guard("remove", "Mirror removed.", async () => { await apiJson(`/p/${projectId}/mirror`, { method: "DELETE" }); });
-  const retry = () => guard("retry", "Mirror run queued.", async () => { await apiJson(`/p/${projectId}/mirror/run`, { method: "POST" }); });
+  const remove = () => guard("remove", "Mirror removed.", async () => { await apiJson(`/p/${projectId}/mirror`, { method: "DELETE" }); setToken(""); setTarget(""); });
+  const retry = () => guard("retry", "Mirror run requested. Check the delivery log for the result; accepted repository history is unchanged.", async () => { await apiJson(`/p/${projectId}/mirror/run`, { method: "POST" }); });
 
   const last = info?.runs[0];
 
@@ -78,11 +78,11 @@ export function MirrorCard({ projectId, isOwner }: { projectId: string; isOwner:
       </CardHeader>
       <CardContent className="space-y-3 text-sm min-w-0">
         <p className="text-muted-foreground">
-          FlareGit stays the source of truth; GitHub is a copy. If GitHub is down or has diverged, nothing here is affected. Accepted work is pushed after it lands, never forced.
+          FlareGit stays the source of truth; GitHub is a copy. If GitHub is unavailable or has diverged, repository browsing and review remain independent of the mirror. Accepted work is pushed after it lands, never forced.
         </p>
         {loadError && (
           <div role="alert" className={`${alertCls} flex flex-wrap items-center justify-between gap-2`}>
-            <span>{loadError}</span>
+            <span>{loadError}{info ? ". Showing the last loaded mirror state." : ""}</span>
             <Button size="sm" variant="outline" onClick={() => void load()}>Retry</Button>
           </div>
         )}
@@ -104,11 +104,11 @@ export function MirrorCard({ projectId, isOwner }: { projectId: string; isOwner:
           <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); void save(); }}>
             <label className="block">
               <span className="font-medium">GitHub repository URL</span>
-              <input className={field} placeholder={info.target ?? "https://github.com/owner/repo"} value={target} onChange={(e) => setTarget(e.target.value)} />
+              <input className={field} type="url" disabled={busy === "save"} placeholder={info.target ?? "https://github.com/owner/repo"} value={target} onChange={(e) => setTarget(e.target.value)} />
             </label>
             <label className="block">
               <span className="font-medium">GitHub token</span>
-              <input className={field} type="password" autoComplete="off" placeholder={info.hasToken ? "Token saved — enter a new one to replace it" : "Fine-grained token (Contents: read and write)"} value={token} onChange={(e) => setToken(e.target.value)} />
+              <input className={field} type="password" disabled={busy === "save"} autoComplete="off" placeholder={info.hasToken ? "Token saved — enter a new one to replace it" : "Fine-grained token (Contents: read and write)"} value={token} onChange={(e) => setToken(e.target.value)} />
             </label>
             <Button size="sm" type="submit" disabled={busy !== null || (!target && !info.target) || (!token && !info.hasToken)}>{busy === "save" ? "Saving…" : "Save"}</Button>
           </form>
@@ -121,9 +121,10 @@ export function MirrorCard({ projectId, isOwner }: { projectId: string; isOwner:
               <li key={r.id} className="py-2 flex flex-col gap-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge variant={VARIANT[r.status]}>{LABEL[r.status]}</Badge>
-                  <code className="text-xs break-all">{r.commit.slice(0, 12)}</code>
+                  <code className="text-xs break-all" title={r.commit}>{r.commit.slice(0, 12)}</code>
                   <span className="text-xs text-muted-foreground ml-auto">{timeAgo(r.at)}</span>
                 </div>
+                <span className="text-xs text-muted-foreground break-all">Run <code>{r.id}</code></span>
                 {r.status !== "ok" && r.detail && <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-all">{r.detail}</pre>}
               </li>
             ))}

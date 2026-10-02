@@ -12,6 +12,7 @@ export const shippingVerifier: ProtectedVerifier = {
         identity: "flaregit-shipping-protected-verifier-v2",
         suite: "ShippingProtectedSuite",
         checksModule: path.join(import.meta.dirname, "checks.ts"),
+        observationModule: path.join(import.meta.dirname, "observe.ts"),
       },
       ctx
     ),

@@ -145,7 +145,7 @@ Show the test: a real Git landing exists; the persisted journal is deliberately 
 ## Things not to claim
 
 - No throughput, user, or "N agents at once" scale numbers. Limits that exist: one landing at a time per project, at most 8 changes per integration, 7-day review window, 20-minute landing lease.
-- Only cite measured numbers that appear in the README: diff time-to-interactive about 0.8–1 s in Safari; 60 fps scrolling at 3,000–8,000 px/s with at most about 100 DOM rows for a 12k-line diff; the landing-race test runs 20 branches by default and can be run with 500 (`RACE_BRANCHES=500`). Say "a test you can run", not a production benchmark.
+- The landing-race test runs 20 branches by default and can be run with 500 (`RACE_BRANCHES=500`). Say "a local test you can run", not a production benchmark. Do not quote authenticated diff latency, frame rate, or Artifacts throughput without retained measurements from the corresponding workflow and environment.
 - No uptime percentage.
 - Do not claim the AI repairs every conflict: failing repairs are blocked, not published.
 - Do not claim ongoing sync from GitHub: imports are one-time clones (depth 200). You may show the optional one-way mirror to GitHub only if you configured it and it shows an ok run.
@@ -244,3 +244,7 @@ bun run demo:hosted verify /tmp/flaregit-hosted-receipt.json
 `verify` requires an approved review bound to the current accepted SHA, fresh-clones with a short-lived credential, checks the commit object and Git integrity, and rechecks that accepted state did not advance. It saves the matching clone/accepted SHA only on success. This proves current recoverable history; stale-base refusal, actual overlap/conflict, interruption recovery, and webhook replay need their separate observations.
 
 For deliveries, configure a receiver you control in repository Settings; record the stable webhook event ID, sequence, status, attempts, and receiver receipt. Intentionally return a failure only from that owned receiver, restore it, and have the human use Redeliver. Retain duplicate/replay event IDs so the receiver can deduplicate safely. Never send the recording to an unrelated service or imply replay passed without a receiver receipt. Run `unset FLAREGIT_TOKEN` when finished.
+
+New hosted-runner receipts request two functional changes: a 15% group discount for four or more tickets, and a $5 refundable-ticket surcharge. The platform's protected policy checks cover both and the combined four-ticket total of $156. Shared comments record that policy before dispatch. Existing receipts without an exercise label retain the earlier comment-only diagnostic; do not relabel historical runs or claim functional evidence from them. Sign-in through the app is available; a missing CLI token does not block browser use.
+
+Run hosted checks/previews only after the secure Linux UID-isolation deployment. The local live-model demo fails closed outside that boundary. Trusted `NODE_ENV=test` fixtures do not establish production isolation, and the historical local model receipt above is not evidence of the newer security boundary. Hosted concurrency, human review, accepted-history clone verification, and the recording remain pending until observed.
