@@ -98,15 +98,9 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     await step.do("complete-publish", async () => stub.completePublish(prepared.journal!.id));
     // Stacked changes: re-base every dependent change onto what just landed, so the stack keeps tracking upstream.
     await step.do("rebase-dependents", { retries: { limit: 1, delay: "5 seconds" } }, async () => this.rebaseDependents(candidate, integrated.commit, integrated.branch, stub));
-    // The accepted commits now live in the canonical repository; the task forks are no longer needed.
-    await step.do("cleanup-forks", async () => {
-      const st = await stub.getState();
-      for (const id of candidate.participatingTaskIds) {
-        const t = st.tasks[id];
-        if (t && t.status === "accepted") await this.env.ARTIFACTS.delete(t.workspace.repoName).catch(() => false);
-      }
-      return { cleaned: true };
-    });
+    // Preserve contributor forks for original-change review and recoverable authorship,
+    // including squash landings whose original commits are not ancestors of the accepted head.
+    await step.do("preserve-contribution-history", async () => ({ preserved: candidate.participatingTaskIds }));
     // One-way copy to GitHub, only after the landing is fully committed. It never throws: GitHub being down or
     // diverged is recorded for the owner and changes nothing here.
     await step.do("mirror-to-github", async () => {

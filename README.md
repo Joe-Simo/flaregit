@@ -19,6 +19,8 @@ A Git collaboration platform on Cloudflare Workers and Artifacts for humans and 
 
 **Recovery.** Agents resume from their already pushed branch. Publication rehydrates from the stored candidate ref, so a crashed step does not need the original workspace. Webhook deliveries are written in the same transaction as the event (transactional outbox) and a Durable Object alarm re-sends anything not yet queued.
 
+Original contributor forks remain available after acceptance and cancellation, including squash landings, so the original work can still be reviewed and recovered.
+
 ## Platform features
 
 - Issues, with changes linkable to an issue (`work --issue N`).
@@ -119,6 +121,7 @@ RACE_BRANCHES=500 RACE_TIMEOUT_MS=7200000 bun test tests/landing-race.test.ts
 - One landing at a time per project; the landing lease is 20 minutes.
 - A candidate waits up to 7 days for review, then goes stale and must be re-run.
 - At most 8 changes per integration.
+- Tree diffs currently support at most 5,000 changed files. Larger diffs fail explicitly rather than presenting incomplete coordination evidence as complete.
 - Diff time-to-interactive is network and auth bound: about 0.8 to 1 s measured in Safari; scrolling holds 60 fps at 3,000 to 8,000 px/s, with at most about 100 DOM rows rendered for a 12k-line diff.
 - Syntax highlighting is per line, so multi-line constructs can be colored incorrectly.
 - Contradiction detection needs structured assertions on requirements.

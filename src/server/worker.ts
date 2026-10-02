@@ -355,6 +355,7 @@ export default {
           const head = await resolveCommit(repo, headCommit);
           if (!head) return text("Commit not found", 404);
           const base = baseCommit ? await resolveCommit(repo, baseCommit) : head.parents[0] ? await resolveCommit(repo, head.parents[0]) : null;
+          if ((baseCommit || head.parents[0]) && !base) return text("The comparison base could not be read; no complete diff is available. Retry.", 503);
           const files = await diffTrees(repo, base?.treeHash, head.treeHash);
           return json({ repo: taskParam ? `task:${taskParam}` : "canonical", base: base?.hash ?? null, head, files });
         }
