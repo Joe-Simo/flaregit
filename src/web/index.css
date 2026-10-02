@@ -96,3 +96,8 @@
   background: linear-gradient(to right, hsl(var(--primary) / 0.55), hsl(var(--border)));
 }
 .entry-auth .cl-rootBox, .entry-auth .cl-cardBox { max-width: 100%; }
+
+.entry-shell .entry-auth :is(button, a, input):focus-visible {
+  outline: 2px solid hsl(var(--foreground));
+  outline-offset: 3px;
+}
