@@ -699,6 +699,7 @@ export default {
             build: clean(b.build ?? state.verificationPolicy.build, 300) || undefined,
             test: clean(b.test ?? state.verificationPolicy.test, 300) || state.verificationPolicy.test,
             protectedPaths: Array.isArray(b.protectedPaths) ? b.protectedPaths.map((x) => clean(x, 120)).filter(Boolean).slice(0, 60) : state.verificationPolicy.protectedPaths,
+            landing: b.landing === "squash" || b.landing === "merge" ? b.landing : state.verificationPolicy.landing,
           };
           await project.setVerificationPolicy(next as unknown as Record<string, unknown>);
           return json({ ok: true });

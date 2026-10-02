@@ -9,6 +9,8 @@ export interface CommandPolicy {
   allowedScope?: string[];
   /** Paths contributors may not change: tests, build config, dependency manifests. */
   protectedPaths?: string[];
+  /** How a verified candidate lands: a merge commit per change (default) or one squashed commit with co-author trailers. */
+  landing?: "merge" | "squash";
 }
 
 export const DEFAULT_PROTECTED_PATHS = [
@@ -26,6 +28,7 @@ export interface ProjectSettings {
   protectedPaths: string[];
   allowedScope: string[];
   checkCommand?: string;
+  landing: "merge" | "squash";
 }
 
 const DEMO_PROTECTED = [".flaregit/", ".github/", "tests/", "verifier/", "package.json", "tsconfig.json", "bun.lock"];
@@ -38,7 +41,8 @@ export function settingsFor(policy: Record<string, unknown> | undefined): Projec
       protectedPaths: policy.protectedPaths ?? DEFAULT_PROTECTED_PATHS,
       allowedScope: policy.allowedScope && policy.allowedScope.length > 0 ? policy.allowedScope : ["*"],
       checkCommand: policy.test,
+      landing: policy.landing === "squash" ? "squash" : "merge",
     };
   }
-  return { fixture: "ticket-booking", protectedPaths: DEMO_PROTECTED, allowedScope: ["src/"] };
+  return { fixture: "ticket-booking", protectedPaths: DEMO_PROTECTED, allowedScope: ["src/"], landing: "merge" };
 }

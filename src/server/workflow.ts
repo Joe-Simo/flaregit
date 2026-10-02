@@ -241,7 +241,20 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       if (files.length === 0 || !(await repair("text_conflict", files))) return { ok: false, error: "Conflict repair failed" };
     }
 
+    // Squash landing: one commit on the accepted base with the combined tree. It is rebuilt before every
+    // verification, so the commit that is verified, reviewed and published is always the squashed one.
+    const squash = async () => {
+      if (settings.landing !== "squash") return true;
+      const tree = (await run(`git -C ${WORK} rev-parse ${q("HEAD^{tree}")}`)).stdout.trim();
+      const coauthors = [...new Map(tasks.map((t) => [t.contributor.name, `Co-authored-by: ${t.contributor.name} <${t.contributor.id}@users.flaregit.com>`])).values()];
+      const message = [`Land ${tasks.map((t) => t.id).join(" + ")}`, "", ...tasks.map((t) => `- ${t.goal}`), "", ...coauthors].join("\n");
+      const made = await run(`git -C ${WORK} commit-tree ${q(tree)} -p ${q(candidate.expectedAcceptedBase)} -m ${q(message)}`);
+      if (!made.success) return false;
+      return (await run(`git -C ${WORK} checkout --quiet --detach ${q(made.stdout.trim())}`)).success;
+    };
+
     for (;;) {
+      if (!(await squash())) return { ok: false, error: "Could not create the squashed commit" };
       const commit = (await run(`git -C ${WORK} rev-parse HEAD`)).stdout.trim();
       const v = await run(
         `cd /opt/flaregit && bun src/core/verification/cli.ts ${settings.fixture} ${WORK} ${commit} ${candidate.expectedAcceptedBase} ${candidate.frozenPolicyVersion} ${q(JSON.stringify(candidate.frozenVerificationPolicy))}`
