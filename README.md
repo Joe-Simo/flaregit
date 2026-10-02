@@ -98,7 +98,7 @@ Core engine without the cloud: `bun test` runs the integration engine with real 
 | `tests/dns.test.ts` | Domain normalization, TXT record construction and parsing, resolver failures. |
 | `tests/artifacts.test.ts` | Local Artifacts client: repo creation, tokens, forks. |
 
-The race test runs 20 contending branches by default (4 workers). Full run:
+The race test runs 20 contending branches by default (4 workers). The 500-branch run passed on an Apple-silicon laptop in about 14 minutes (local bare repository, real `git push --force-with-lease`; it tests the landing protocol, not Artifacts throughput). Full run:
 
 ```bash
 RACE_BRANCHES=500 RACE_TIMEOUT_MS=7200000 bun test tests/landing-race.test.ts
