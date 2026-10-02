@@ -26,6 +26,14 @@ test("redirect and provider errors never expose error bodies or tokens", async (
   expect(await readPublicPlanPrice(env, request)).toEqual({ status: "unavailable", reason: "provider_unavailable" });
   expect(await readPublicPlanPrice(env, async () => { throw new Error("server-only-secret"); })).toEqual({ status: "unavailable", reason: "provider_unavailable" });
 });
+test.each([
+  [401, "provider_access_denied"], [403, "provider_access_denied"], [404, "provider_not_found"],
+  [429, "provider_rate_limited"], [400, "provider_rejected_request"], [500, "provider_unavailable"],
+] as const)("HTTP %s projects a safe classification %s without vendor details", async (status, reason) => {
+  const result = await readPublicPlanPrice(env, async () => new Response("server-only-secret and private provider URL", { status: Number(status) }));
+  expect(result).toEqual({ status: "unavailable", reason });
+  expect(JSON.stringify(result)).not.toMatch(/secret|URL/);
+});
 test("wrong products, archived/draft/nonrecurring products cannot advertise a subscription", async () => {
   expect((await readPublicPlanPrice(env, returns({ ...product(), id: "other" })))).toEqual({ status: "unavailable", reason: "product_mismatch" });
   for (const patch of [{ is_archived: true }, { visibility: "draft" }, { is_recurring: false }]) expect(await readPublicPlanPrice(env, returns({ ...product(), ...patch }))).toEqual({ status: "unavailable", reason: "inactive_product" });

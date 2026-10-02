@@ -2,6 +2,8 @@
 
 Verified October 2, 2026. This is a proposal and an arithmetic model, not deployed pricing, measured customer usage, or a profitability claim. No billing changes are authorized by this document.
 
+The configured Polar product's actual subscription price remains unverified. The public `/pricing` reader is restricted to the server-configured product and publishes only validated fixed subscription amount/currency/interval/tax behavior. A private Polar catalog product may be the configured checkout target; this does not authorize publishing its names, organization, metadata or credentials. A successful projection establishes that configured subscription price, not per-seat pricing, feature parity or sustainable margins. The first reported live read returned an unavailable state, so the $4 figure below remains a hypothesis. HTTP classifications reveal only access denied, not found, rate limited, rejected request or unavailable; they never reveal provider response bodies. [Polar Get Product scopes/schema](https://polar.sh/docs/api-reference/products/get), [API versioning](https://polar.sh/docs/api-reference/2026-04/versioning)
+
 ## Product and pricing proposal
 
 Keep core Git collaboration, basic private repositories, contribution history, review, and bring-your-own tools/agents/AI/CI free. Outside contributors and bots must not create billable seats. Provider subscriptions remain the customer's choice; a GitHub bridge is optional.

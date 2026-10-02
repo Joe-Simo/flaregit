@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { Env } from "./env.js";
 
-type PriceUnavailableReason = "not_configured" | "invalid_configuration" | "provider_unavailable" | "product_mismatch" | "inactive_product" | "unsupported_pricing" | "invalid_response";
+type PriceUnavailableReason = "not_configured" | "invalid_configuration" | "provider_unavailable" | "provider_access_denied" | "provider_not_found" | "provider_rate_limited" | "provider_rejected_request" | "product_mismatch" | "inactive_product" | "unsupported_pricing" | "invalid_response";
 export type PublicPlanPrice = {
   status: "known"; source: "polar"; environment: "production" | "sandbox";
   amountMinor: number; currency: string; interval: "day" | "week" | "month" | "year";
@@ -38,7 +38,12 @@ export async function readPublicPlanPrice(
       method: "GET", redirect: "error", signal: AbortSignal.timeout(5_000),
       headers: { Authorization: `Bearer ${env.POLAR_ACCESS_TOKEN}`, Accept: "application/json", "Polar-Version": "2026-04" },
     });
-    if (!response.ok || response.redirected || (response.status >= 300 && response.status < 400)) return unavailable("provider_unavailable");
+    if (response.redirected || (response.status >= 300 && response.status < 400)) return unavailable("provider_unavailable");
+    if (response.status === 401 || response.status === 403) return unavailable("provider_access_denied");
+    if (response.status === 404) return unavailable("provider_not_found");
+    if (response.status === 429) return unavailable("provider_rate_limited");
+    if (response.status === 400) return unavailable("provider_rejected_request");
+    if (!response.ok) return unavailable("provider_unavailable");
     const product = productSchema.safeParse(await response.json());
     if (!product.success) return unavailable("invalid_response");
     const value = product.data;
