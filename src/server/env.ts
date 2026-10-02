@@ -15,6 +15,8 @@ export interface Env {
   ASSETS: Fetcher;
   /** HMAC key for preview capability links (secret). */
   PREVIEW_SIGNING_KEY?: string;
+  /** Comma-separated account keys of the people who handle abuse and impersonation reports (var). */
+  OPERATOR_ACCOUNTS?: string;
   /** Per-user API rate limit (Workers Rate Limiting binding). */
   API_LIMITER: { limit(opts: { key: string }): Promise<{ success: boolean }> };
   /** Clerk frontend API URL (the JWT issuer), e.g. https://example.clerk.accounts.dev (var). */

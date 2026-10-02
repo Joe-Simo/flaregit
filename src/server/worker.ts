@@ -34,10 +34,13 @@ export default {
 
     if (url.pathname === "/health") return json({ ok: true });
     if (url.pathname === "/status.json") {
-      const [rows, incidents] = await Promise.all([currentStatus(env), statusIncidents(env)]);
-      return Response.json({ degraded: rows.filter((r) => r.degradedNow).map((r) => r.label), components: rows, incidents }, { headers: { "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" } });
+      const [rows, incidents, reports] = await Promise.all([currentStatus(env), statusIncidents(env), globalOf(env).reportBacklog()]);
+      return Response.json({ degraded: rows.filter((r) => r.degradedNow).map((r) => r.label), components: rows, incidents, reports }, { headers: { "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" } });
     }
-    if (url.pathname === "/status") return new Response(statusPage(...(await Promise.all([currentStatus(env), statusIncidents(env)]))), { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+    if (url.pathname === "/status") {
+      const [rows, incidents, reports] = await Promise.all([currentStatus(env), statusIncidents(env), globalOf(env).reportBacklog()]);
+      return new Response(statusPage(rows, incidents, Date.now(), reports), { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+    }
 
     // The publishable key is public by design; the SPA needs it before the user can sign in.
     if (url.pathname === "/auth-config" && request.method === "GET") return json({ publishableKey: env.CLERK_PUBLISHABLE_KEY ?? null });
@@ -151,6 +154,34 @@ export default {
         await account.destroy();
         return json({ deleted: true });
       }
+
+      // ----- abuse, impersonation and security reports: filed by anyone signed in, handled by named operators -----
+      const KINDS = ["impersonation", "namespace_squatting", "malware", "harassment", "security", "other"];
+      if (path === "/reports" && method === "POST") {
+        const b = await body<{ kind?: string; target?: string; details?: string }>();
+        if (!b.kind || !KINDS.includes(b.kind)) return text(`kind must be one of ${KINDS.join(", ")}`, 400);
+        const target = clean(b.target, 300);
+        const details = clean(b.details, 5000);
+        if (!target || details.length < 10) return text("Say what you are reporting (a repository, handle or domain) and describe what happened", 400);
+        const report = await globalOf(env).fileReport({ reporter: accountKey, kind: b.kind, target, details });
+        return json({ id: report.id, status: report.status, note: "A person reviews every report. You can follow it under Account → Reports. The number of open reports and the age of the oldest one are public on /status." }, 201);
+      }
+      if (path === "/reports" && method === "GET") return json(await globalOf(env).listReports({ reporter: accountKey }));
+      const operators = (env.OPERATOR_ACCOUNTS ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+      if (path.startsWith("/operator/")) {
+        if (auth.viaToken || !operators.includes(accountKey)) return text("Not found", 404);
+        if (path === "/operator/reports" && method === "GET") return json(await globalOf(env).listReports({ status: url.searchParams.get("status") === "resolved" ? "resolved" : "open" }));
+        const resolveRoute = /^\/operator\/reports\/(rpt_[a-z0-9-]+)\/resolve$/.exec(path);
+        if (resolveRoute && method === "POST") {
+          const b = await body<{ resolution?: string }>();
+          const resolution = clean(b.resolution, 2000);
+          if (!resolution) return text("Write what was done", 400);
+          const r = await globalOf(env).resolveReport(resolveRoute[1]!, resolution, (await account.getProfile()).displayName || accountKey);
+          return r ? json(r) : text("Unknown report", 404);
+        }
+        return text("Not found", 404);
+      }
+      if (path === "/me" && method === "GET") return json({ operator: operators.includes(accountKey) });
 
       // ----- profile -----
       if (path === "/profile" && method === "GET") return json(await account.getProfile());

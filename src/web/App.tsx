@@ -7,6 +7,7 @@ import { Repo } from "./pages/Repo";
 import { Join } from "./pages/Join";
 import { Account } from "./pages/Account";
 import { Inbox } from "./pages/Inbox";
+import { OperatorPage, ReportPage } from "./pages/Reports";
 import { apiJson } from "./api";
 import { navigate, useRoute } from "./router";
 
@@ -59,6 +60,8 @@ export function App() {
         {route.name === "new" && <NewRepo />}
         {route.name === "account" && <Account />}
         {route.name === "inbox" && <Inbox onCount={setUnread} />}
+        {route.name === "report" && <ReportPage />}
+        {route.name === "operator" && <OperatorPage />}
         {route.name === "join" && <Join projectId={route.projectId} token={route.token} />}
         {route.name === "repo" && <Repo projectId={route.projectId} tab={route.tab} params={route.params} />}
       </main>
@@ -66,6 +69,7 @@ export function App() {
         <a href="/terms" className="hover:underline">Terms</a>
         <a href="/privacy" className="hover:underline">Privacy</a>
         <a href="/status" className="hover:underline">Status</a>
+        <a href="#/report" className="hover:underline">Report abuse</a>
         <a href="mailto:support@flaregit.com" className="hover:underline">Support</a>
       </footer>
     </div>

@@ -9,6 +9,7 @@
     "CANONICAL_REPO": "flaregit-canonical",
     "AI_GATEWAY_ID": "default",
     "GLOBAL_RUNS_PER_DAY": "300",
+    "OPERATOR_ACCOUNTS": "d169eecdcf6e",
     "RUNS_ENABLED": "true",
     "FREE_RUNS_PER_DAY": "10",
     "PRO_RUNS_PER_DAY": "200",

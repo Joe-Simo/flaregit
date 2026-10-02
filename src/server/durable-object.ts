@@ -106,6 +106,19 @@ export interface DomainRow {
   verified_at: string | null;
 }
 
+export interface ReportRow {
+  id: string;
+  at: string;
+  reporter: string;
+  kind: string;
+  target: string;
+  details: string;
+  status: "open" | "resolved";
+  resolution: string | null;
+  resolved_by: string | null;
+  resolved_at: string | null;
+}
+
 export interface InboxRow {
   id: number;
   project_id: string;
@@ -177,6 +190,10 @@ export interface Ledger {
   setMirror(p: { target?: string; token?: string; enabled?: boolean }): Promise<void>;
   deleteMirror(): Promise<void>;
   recordMirrorRun(commit: string, status: string, detail: string): Promise<void>;
+  fileReport(r: { reporter: string; kind: string; target: string; details: string }): Promise<ReportRow>;
+  listReports(filter: { status?: "open" | "resolved"; reporter?: string }): Promise<ReportRow[]>;
+  resolveReport(id: string, resolution: string, by: string): Promise<ReportRow | null>;
+  reportBacklog(): Promise<{ open: number; oldestOpenHours: number | null }>;
   listProbes(sinceMs: number): Promise<Array<{ component: string; at: number; ok: number; latency_ms: number | null; detail: string | null }>>;
   addWebhook(url: string, events: string[]): Promise<{ id: string; secret: string }>;
   listWebhooks(): Promise<WebhookRow[]>;
@@ -240,6 +257,7 @@ export class RepositoryController extends DurableObject<Env> {
       CREATE INDEX IF NOT EXISTS comments_subject ON comments (subject, id);
       CREATE TABLE IF NOT EXISTS mirror (id INTEGER PRIMARY KEY CHECK (id = 1), target TEXT NOT NULL, token TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS mirror_runs (id TEXT PRIMARY KEY, commit_sha TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL, at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, at TEXT NOT NULL, reporter TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, details TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', resolution TEXT, resolved_by TEXT, resolved_at TEXT);
       CREATE TABLE IF NOT EXISTS probes (id INTEGER PRIMARY KEY AUTOINCREMENT, component TEXT NOT NULL, at INTEGER NOT NULL, ok INTEGER NOT NULL, latency_ms INTEGER, detail TEXT);
       CREATE INDEX IF NOT EXISTS probes_component_at ON probes (component, at);
       CREATE TABLE IF NOT EXISTS api_tokens (id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, label TEXT NOT NULL, created_at TEXT NOT NULL, last_used TEXT);
@@ -635,6 +653,28 @@ export class RepositoryController extends DurableObject<Env> {
     if (c.subject.startsWith("issue:")) this.ctx.storage.sql.exec("UPDATE issues SET updated_at = ? WHERE number = ?", new Date().toISOString(), Number(c.subject.slice(6)));
     await this.logActivity(c.author, "comment.added", `${c.author} commented on ${c.subject.replace(":", " ")}${c.path ? ` (${c.path}${c.line ? `:${c.line}` : ""})` : ""}`);
     return this.ctx.storage.sql.exec('SELECT id, subject, author, body, path, line, "commit", created_at FROM comments WHERE id = ?', id).toArray()[0] as unknown as CommentRow;
+  }
+
+  // ---- abuse and impersonation reports (global instance): a human queue whose backlog is published ----
+  async fileReport(r: { reporter: string; kind: string; target: string; details: string }): Promise<ReportRow> {
+    const id = `rpt_${crypto.randomUUID().slice(0, 10)}`;
+    this.ctx.storage.sql.exec("INSERT INTO reports (id, at, reporter, kind, target, details) VALUES (?, ?, ?, ?, ?, ?)", id, new Date().toISOString(), r.reporter, r.kind, r.target, r.details);
+    return this.ctx.storage.sql.exec("SELECT * FROM reports WHERE id = ?", id).toArray()[0] as unknown as ReportRow;
+  }
+  async listReports(filter: { status?: "open" | "resolved"; reporter?: string }): Promise<ReportRow[]> {
+    const where: string[] = [];
+    const args: string[] = [];
+    if (filter.status) { where.push("status = ?"); args.push(filter.status); }
+    if (filter.reporter) { where.push("reporter = ?"); args.push(filter.reporter); }
+    return this.ctx.storage.sql.exec(`SELECT * FROM reports ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY at DESC LIMIT 200`, ...args).toArray() as unknown as ReportRow[];
+  }
+  async resolveReport(id: string, resolution: string, by: string): Promise<ReportRow | null> {
+    this.ctx.storage.sql.exec("UPDATE reports SET status = 'resolved', resolution = ?, resolved_by = ?, resolved_at = ? WHERE id = ?", resolution, by, new Date().toISOString(), id);
+    return (this.ctx.storage.sql.exec("SELECT * FROM reports WHERE id = ?", id).toArray()[0] as unknown as ReportRow) ?? null;
+  }
+  async reportBacklog(): Promise<{ open: number; oldestOpenHours: number | null }> {
+    const row = this.ctx.storage.sql.exec<{ n: number; oldest: string | null }>("SELECT COUNT(*) AS n, MIN(at) AS oldest FROM reports WHERE status = 'open'").toArray()[0];
+    return { open: row?.n ?? 0, oldestOpenHours: row?.oldest ? Math.floor((Date.now() - Date.parse(row.oldest)) / 3_600_000) : null };
   }
 
   // ---- GitHub mirror (per project) ----
