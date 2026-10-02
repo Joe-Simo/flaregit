@@ -1,0 +1,168 @@
+import { chmod, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { z } from "zod";
+import { redactSecrets } from "../agents/prompt.js";
+import { gitAuthEnv } from "../server/shell.js";
+
+const sha = z.string().regex(/^[0-9a-f]{40}$/);
+const receiptSchema = z.object({
+  version: z.literal(1), origin: z.string().url(), createdAt: z.string(), projectId: z.string().optional(), base: sha.optional(),
+  issue: z.number().optional(), tasks: z.array(z.string()), agentRuns: z.array(z.object({ taskId: z.string(), instanceId: z.string(), requestedAt: z.string() })),
+  pendingAction: z.string().optional(), pendingAgents: z.array(z.string()).optional(), integration: z.string().optional(), observations: z.array(z.unknown()), verification: z.object({ commit: sha, cloneHead: sha, verifiedAt: z.string() }).optional(),
+});
+type Receipt = z.infer<typeof receiptSchema>;
+const stateSchema = z.object({
+  acceptedState: z.object({ currentCommit: sha }),
+  tasks: z.record(z.string(), z.object({ status: z.string(), baseCommit: sha, currentCommit: sha, checkpoints: z.array(z.object({ commitHash: sha, timestamp: z.string(), filesChanged: z.array(z.string()) })) })),
+  candidates: z.record(z.string(), z.object({ status: z.string(), candidateCommit: sha.optional(), expectedAcceptedBase: sha, evidenceId: z.string().optional(), workflowInstanceId: z.string().optional(), compositionMethod: z.string().optional(), repairAttempts: z.array(z.object({ round: z.number(), affectedContracts: z.array(z.string()), timestamp: z.string(), durationMs: z.number() })), review: z.object({ approved: z.boolean(), at: z.string(), commit: sha }).optional() })),
+  evidence: z.record(z.string(), z.object({ status: z.string() })), decisions: z.record(z.string(), z.unknown()),
+});
+
+/** Local receipts contain allowlisted observations, never API/clone credentials or raw responses. */
+export async function saveReceipt(file: string, receipt: Receipt) {
+  const temporary = `${file}.${crypto.randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, redactSecrets(JSON.stringify(receipt, null, 2)) + "\n", { mode: 0o600, flag: "wx" });
+    await chmod(temporary, 0o600);
+    await rename(temporary, file);
+  } finally { await rm(temporary, { force: true }); }
+}
+
+class AcceptanceError extends Error {}
+
+export function assertReceiptOrigin(stored: string, configured: string) {
+  const expected = new URL(configured), actual = new URL(stored);
+  for (const origin of [expected, actual]) if (origin.protocol !== "https:" || origin.username || origin.password || origin.pathname !== "/" || origin.search || origin.hash) throw new AcceptanceError("Acceptance origins must be credential-free HTTPS origins");
+  if (actual.origin !== expected.origin) throw new AcceptanceError("Receipt origin differs from configured FLAREGIT_ORIGIN; authentication was not sent");
+}
+export function pendingAgentTasks(receipt: Pick<Receipt, "tasks" | "agentRuns">) {
+  return receipt.tasks.filter((taskId) => !receipt.agentRuns.some((run) => run.taskId === taskId));
+}
+
+async function main() {
+  const phase = process.argv[2];
+  if (!["prepare", "status", "integrate", "verify"].includes(phase ?? "")) throw new AcceptanceError("Usage: bun run src/cli/acceptance.ts prepare|status|integrate|verify [receipt.json]. Set FLAREGIT_TOKEN and optionally FLAREGIT_ORIGIN.");
+  const token = process.env.FLAREGIT_TOKEN;
+  if (!token) throw new AcceptanceError("FLAREGIT_TOKEN is required; use your own authenticated session or full API token. Credentials are accepted only through environment variables.");
+  const file = resolve(process.argv[3] ?? "acceptance-receipt.json");
+  let receipt: Receipt;
+  const configuredOrigin = process.env.FLAREGIT_ORIGIN ?? "https://flaregit.com";
+  try { receipt = receiptSchema.parse(JSON.parse(await readFile(file, "utf8"))); }
+  catch (error) {
+    if (phase !== "prepare" || !(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+    receipt = { version: 1, origin: configuredOrigin, createdAt: new Date().toISOString(), tasks: [], agentRuns: [], observations: [] };
+    assertReceiptOrigin(receipt.origin, configuredOrigin);
+    await saveReceipt(file, receipt);
+  }
+  assertReceiptOrigin(receipt.origin, configuredOrigin);
+  const api = async <T>(path: string, schema: z.ZodType<T>, body?: unknown): Promise<T> => {
+    const url = new URL(`/api${path}`, receipt.origin);
+    const response = await fetch(url, { method: body === undefined ? "GET" : "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), redirect: "error", signal: AbortSignal.timeout(120_000) });
+    if (!response.ok) throw new AcceptanceError(`API ${path} answered ${response.status}; saved receipt remains resumable`);
+    return schema.parse(await response.json());
+  };
+  if (phase === "prepare") {
+    if (receipt.pendingAction || receipt.pendingAgents?.length) throw new AcceptanceError("A previous mutation has an unknown outcome. Inspect the authenticated app and reconcile pendingAction/pendingAgents in the receipt before retrying; no duplicate resource or run will be created.");
+    if (!receipt.projectId) {
+    receipt.pendingAction = "create-repository"; await saveReceipt(file, receipt);
+    const created = await api("/projects", z.object({ id: z.string(), head: sha }), { kind: "demo", name: `Acceptance evidence ${new Date().toISOString().slice(0, 10)} ${crypto.randomUUID().slice(0, 6)}` });
+    receipt.projectId = created.id; receipt.base = created.head; delete receipt.pendingAction;
+    await saveReceipt(file, receipt);
+    }
+    const prefix = `/p/${receipt.projectId}`;
+    if (!receipt.issue) {
+    receipt.pendingAction = "create-issue"; await saveReceipt(file, receipt);
+    const issue = await api(`${prefix}/issues`, z.object({ number: z.number() }), { title: "Hosted concurrent-agent acceptance exercise", body: "Explicit test repository owned by this entrant. Two actual coding agents change the same existing source file. Human review is required; observed conflicts or failures are recorded without claims of success." });
+    receipt.issue = issue.number; delete receipt.pendingAction; await saveReceipt(file, receipt);
+    }
+    for (const [index, goal] of [
+      "In src/pricing.ts add one concise header comment explaining that prices are quoted before payment. Preserve every behavior and export; do not modify any other file.",
+      "In src/pricing.ts add one concise header comment explaining that refunds follow the booking policy. Preserve every behavior and export; do not modify any other file.",
+    ].entries()) {
+      if (receipt.tasks[index]) continue;
+      const taskId = `acceptance-${index + 1}-${crypto.randomUUID().slice(0, 8)}`;
+      receipt.pendingAction = `create-task:${taskId}`; await saveReceipt(file, receipt);
+      await api(`${prefix}/tasks`, z.object({ task: z.string() }), { taskId, goal, issue: receipt.issue });
+      receipt.tasks.push(taskId); delete receipt.pendingAction; await saveReceipt(file, receipt);
+    }
+    let saving = Promise.resolve();
+    const toStart = pendingAgentTasks(receipt);
+    receipt.pendingAgents = toStart; await saveReceipt(file, receipt);
+    const starts = await Promise.allSettled(toStart.map(async (taskId) => {
+      const requestedAt = new Date().toISOString();
+      const run = await api(`${prefix}/tasks/${taskId}/agent`, z.object({ instanceId: z.string() }), {});
+      receipt.agentRuns.push({ taskId, instanceId: run.instanceId, requestedAt });
+      receipt.pendingAgents = receipt.pendingAgents?.filter((id) => id !== taskId);
+      saving = saving.then(() => saveReceipt(file, receipt)); await saving;
+    }));
+    console.log(`Prepared owned test repository ${receipt.projectId}. Actual agent starts recorded: ${receipt.agentRuns.length}/2. Receipt: ${file}`);
+    if (starts.some((r) => r.status === "rejected")) throw new AcceptanceError("At least one agent start failed. Inspect status and the app; no concurrency success is claimed.");
+    console.log("Run status to observe checkpoints and failures. Overlapping edits are requested; an actual conflict must be observed before claiming one.");
+    return;
+  }
+  if (!receipt.projectId) throw new AcceptanceError("Prepare did not finish repository creation; inspect the owned account before retrying");
+  const prefix = `/p/${receipt.projectId}`;
+  const state = await api(`${prefix}/state`, stateSchema);
+  if (phase === "integrate") {
+    if (receipt.integration) throw new AcceptanceError("An integration is already recorded; inspect status rather than enqueueing another");
+    if (receipt.tasks.length !== 2 || !receipt.tasks.every((id) => state.tasks[id]?.status === "ready")) throw new AcceptanceError("Both actual agent changes must be ready before integration; inspect failures in the app");
+    if (receipt.pendingAction) throw new AcceptanceError("An earlier mutation requires explicit recovery before another integration");
+    receipt.pendingAction = "queue-integration"; await saveReceipt(file, receipt);
+    const result = await api(`${prefix}/integrations`, z.object({ queued: z.string() }), { taskIds: receipt.tasks });
+    receipt.integration = result.queued; delete receipt.pendingAction; await saveReceipt(file, receipt);
+    console.log(`Queued actual integration ${result.queued}. Run status. Human review must be completed explicitly in the app.`); return;
+  }
+  if (phase === "status") {
+    const runs = await Promise.all([...receipt.agentRuns.map((r) => r.instanceId), ...(receipt.integration ? [receipt.integration] : [])].map(async (id) => {
+      try { const result = await api(`${prefix}/workflows/${id}`, z.object({ status: z.string() })); return { instanceId: id, status: result.status }; }
+      catch { return { instanceId: id, status: "unavailable" }; }
+    }));
+    const subjects = [...receipt.tasks.map((id) => `change:${id}`), ...(receipt.issue ? [`issue:${receipt.issue}`] : [])];
+    const context = await Promise.all(subjects.map(async (subject) => {
+      try { const comments = await api(`${prefix}/comments?subject=${encodeURIComponent(subject)}`, z.array(z.object({ id: z.number() }))); return { subject, commentIds: comments.map((comment) => comment.id), count: comments.length }; }
+      catch { return { subject, commentIds: [], count: null }; }
+    }));
+    const observation = { context, at: new Date().toISOString(), acceptedCommit: state.acceptedState.currentCommit,
+      tasks: receipt.tasks.map((id) => ({ id, ...state.tasks[id] })), candidates: state.candidates,
+      checks: Object.entries(state.evidence).map(([id, evidence]) => ({ id, status: evidence.status })), decisionIds: Object.keys(state.decisions), runs };
+    receipt.observations.push(observation); await saveReceipt(file, receipt);
+    console.log(JSON.stringify(observation, null, 2));
+    if (Object.values(state.candidates).some((c) => c.status === "awaiting_review")) console.log("Pending human acceptance: inspect the exact candidate diff and checks in the app. This runner never approves review.");
+    return;
+  }
+  const accepted = state.acceptedState.currentCommit;
+  const landed = Object.values(state.candidates).find((c) => c.status === "accepted" && c.candidateCommit === accepted && c.review?.approved && c.review.commit === accepted);
+  if (!landed || accepted === receipt.base) throw new AcceptanceError("No reviewed, accepted landing matching the current committed state. Finish human review in the app, then retry verify.");
+  const credential = await api(`${prefix}/clone`, z.object({ remote: z.string().url(), token: z.string().min(1) }), {});
+  const remote = new URL(credential.remote);
+  if (remote.protocol !== "https:" || remote.username || remote.password || remote.search || remote.hash) throw new AcceptanceError("Clone endpoint returned an unsafe credential-bearing remote");
+  const directory = await mkdtemp(join(tmpdir(), "flaregit-acceptance-"));
+  await chmod(directory, 0o700);
+  const git = async (args: string[]) => {
+    const gitEnv: NodeJS.ProcessEnv = { ...process.env, ...gitAuthEnv(credential.token), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+    delete gitEnv.FLAREGIT_TOKEN;
+    delete gitEnv.CLOUDFLARE_API_TOKEN;
+    delete gitEnv.TYPESAFE_API_KEY;
+    const child = Bun.spawn(["git", ...args], { env: gitEnv, stdout: "pipe", stderr: "pipe" });
+    const [out, , exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+    if (exitCode !== 0) throw new AcceptanceError("Native Git verification failed; no recoverability success was recorded");
+    return out.trim();
+  };
+  try {
+    const checkout = join(directory, "checkout");
+    await git(["clone", "--quiet", remote.href, checkout]);
+    const cloneHead = await git(["-C", checkout, "rev-parse", "HEAD"]);
+    if (cloneHead !== accepted) throw new AcceptanceError("Fresh native clone differs from observed accepted state; inspect concurrent landings before retrying");
+    await git(["-C", checkout, "cat-file", "-e", `${accepted}^{commit}`]);
+    await git(["-C", checkout, "fsck", "--no-reflogs", "--full"]);
+    const freshState = await api(`${prefix}/state`, stateSchema);
+    if (freshState.acceptedState.currentCommit !== accepted) throw new AcceptanceError("Accepted state advanced during verification; rerun verify for a consistent receipt");
+    receipt.verification = { commit: accepted, cloneHead: sha.parse(cloneHead), verifiedAt: new Date().toISOString() };
+    await saveReceipt(file, receipt);
+    console.log(`Verified reviewed accepted commit ${accepted} through a fresh authenticated native Git clone and fsck. Receipt: ${file}`);
+    console.log("This proves current recoverable landing state only; interruption, stale-base, conflict, webhook and migration acceptance need their own observed evidence.");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+}
+
+if (import.meta.main) main().catch((error: unknown) => { if (error instanceof AcceptanceError) console.error(error.message); console.error("Acceptance phase failed. Credentials and raw provider errors are suppressed. Inspect the saved receipt and authenticated app; do not claim hosted acceptance passed."); process.exitCode = 1; });

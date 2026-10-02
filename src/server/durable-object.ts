@@ -190,6 +190,8 @@ export interface Ledger {
   statusSummary(): Promise<ComponentStatus[]>;
   recordWorkflowOutcome(kind: WorkflowKind, instanceId: string, status: WorkflowOutcome): Promise<void>;
   workflowCounts(sinceMs: number): Promise<WorkflowCount[]>;
+  registerWorkflow(instanceId: string, kind: "agent" | "integration" | "scenario", taskId?: string, actorId?: string): Promise<void>;
+  getWorkflowRun(instanceId: string): Promise<{ instanceId: string; kind: "agent" | "integration" | "scenario"; actorId: string | null } | null>;
   getMirror(): Promise<{ target: string | null; enabled: boolean; hasToken: boolean; runs: Array<{ id: string; commit: string; status: string; detail: string; at: string }> }>;
   /** Server-side only (workflow and mirror route); never returned to clients. */
   mirrorSecret(): Promise<{ target: string; token: string } | null>;
@@ -270,6 +272,7 @@ export class RepositoryController extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS probes (id INTEGER PRIMARY KEY AUTOINCREMENT, component TEXT NOT NULL, at INTEGER NOT NULL, ok INTEGER NOT NULL, latency_ms INTEGER, detail TEXT);
       CREATE INDEX IF NOT EXISTS probes_component_at ON probes (component, at);
       CREATE TABLE IF NOT EXISTS workflow_runs (kind TEXT NOT NULL, instance_id TEXT NOT NULL, status TEXT NOT NULL, started_at INTEGER NOT NULL, finished_at INTEGER, PRIMARY KEY (kind, instance_id));
+      CREATE TABLE IF NOT EXISTS project_workflows (instance_id TEXT PRIMARY KEY, kind TEXT NOT NULL, actor_id TEXT);
       CREATE TABLE IF NOT EXISTS api_tokens (id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, label TEXT NOT NULL, created_at TEXT NOT NULL, last_used TEXT);
       CREATE TABLE IF NOT EXISTS runs (day TEXT PRIMARY KEY, n INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS lease (id INTEGER PRIMARY KEY CHECK (id = 1), holder TEXT NOT NULL, expires_at INTEGER NOT NULL);
@@ -278,6 +281,7 @@ export class RepositoryController extends DurableObject<Env> {
     for (const col of ["seq INTEGER NOT NULL DEFAULT 0", "queue_ms INTEGER"]) {
       try { this.ctx.storage.sql.exec(`ALTER TABLE deliveries ADD COLUMN ${col}`); } catch { /* already present */ }
     }
+    try { this.ctx.storage.sql.exec("ALTER TABLE project_workflows ADD COLUMN actor_id TEXT"); } catch { /* already present */ }
     for (const col of ["scope TEXT NOT NULL DEFAULT 'full'", "repo TEXT", "expires_at INTEGER"]) {
       try { this.ctx.storage.sql.exec(`ALTER TABLE api_tokens ADD COLUMN ${col}`); } catch { /* already present */ }
     }
@@ -581,6 +585,26 @@ export class RepositoryController extends DurableObject<Env> {
   }
   async workflowCounts(sinceMs: number): Promise<WorkflowCount[]> {
     return this.ctx.storage.sql.exec("SELECT kind, status, COUNT(*) AS count FROM workflow_runs WHERE finished_at >= ? OR finished_at IS NULL GROUP BY kind, status", sinceMs).toArray() as unknown as WorkflowCount[];
+  }
+  /** Repository ownership of run IDs is durable and independent of global health telemetry. */
+  async registerWorkflow(instanceId: string, kind: "agent" | "integration" | "scenario", taskId?: string, actorId?: string): Promise<void> {
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(instanceId) || !["agent", "integration", "scenario"].includes(kind)) throw new Error("Invalid workflow registration");
+    const state = this.load();
+    if (taskId && (kind !== "agent" || !state.tasks[taskId])) throw new Error("Unknown agent change");
+    const old = await this.getWorkflowRun(instanceId);
+    if (old && old.kind !== kind) throw new Error("Workflow kind differs from its saved registration");
+    this.ctx.storage.sql.exec("INSERT OR IGNORE INTO project_workflows (instance_id, kind, actor_id) VALUES (?, ?, ?)", instanceId, kind, actorId ?? null);
+    if (taskId) {
+      state.tasks[taskId]!.agentWorkflowInstanceId = instanceId;
+      this.save();
+    }
+  }
+  async getWorkflowRun(instanceId: string): Promise<{ instanceId: string; kind: "agent" | "integration" | "scenario"; actorId: string | null } | null> {
+    const registered = this.ctx.storage.sql.exec<{ instanceId: string; kind: "agent" | "integration" | "scenario"; actorId: string | null }>("SELECT instance_id AS instanceId, kind, actor_id AS actorId FROM project_workflows WHERE instance_id = ?", instanceId).toArray()[0];
+    if (registered) return registered;
+    // Older review candidates already persist their exact instance ownership.
+    const candidate = Object.values(this.load().candidates).find((value) => value.workflowInstanceId === instanceId);
+    return candidate ? { instanceId, kind: "integration", actorId: null } : null;
   }
   async beginAgentTask(taskId: string): Promise<boolean> {
     const state = this.load();

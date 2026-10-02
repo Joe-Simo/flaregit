@@ -2,6 +2,15 @@
 
 A Git collaboration platform on Cloudflare Workers and Artifacts for humans and AI agents working at the same time. Each change lives in its own Artifacts fork and is pushed with ordinary `git`. FlareGit composes ready changes onto the accepted head, repairs what it safely can, verifies the exact candidate commit, waits for a human to accept that commit, and lands only that commit with a compare-and-swap ref update.
 
+The deployed prototype improvements are on [`codex/concurrent-collaboration-integrity`](https://github.com/Joe-Simo/flaregit/tree/codex/concurrent-collaboration-integrity), under review in [PR #1](https://github.com/Joe-Simo/flaregit/pull/1). To reproduce that version before the PR is merged:
+
+```bash
+git clone --branch codex/concurrent-collaboration-integrity https://github.com/Joe-Simo/flaregit.git
+cd flaregit
+```
+
+Cloudflare deployment messages record the exact source commit; check out that SHA to reproduce a particular deployment.
+
 ## Workflow
 
 1. **Changes.** `flaregit work <repo> "<goal>"` (or the web app) creates a change: a fork of the canonical repo with its own branch. Humans push to it; agents (`change new --agent`) run in an agent container and push to the same kind of fork.
@@ -81,6 +90,8 @@ bun run build && bunx wrangler deploy
 
 ## Develop locally
 
+Clone the [public Apache-2.0 repository](https://github.com/Joe-Simo/flaregit), then run these commands from its root. Git and Bun are required for the local controller and proof runner. Cloudflare credentials are needed only for the live model demo or hosted deployment.
+
 ```bash
 bun install
 bun run typecheck && bun run lint && bun test
@@ -125,6 +136,8 @@ RACE_BRANCHES=500 RACE_TIMEOUT_MS=7200000 bun test tests/landing-race.test.ts
 - Diff time-to-interactive is network and auth bound: about 0.8 to 1 s measured in Safari; scrolling holds 60 fps at 3,000 to 8,000 px/s, with at most about 100 DOM rows rendered for a 12k-line diff.
 - Syntax highlighting is per line, so multi-line constructs can be colored incorrectly.
 - Contradiction detection needs structured assertions on requirements.
+
+`bun run demo:hosted prepare|status|integrate|verify <receipt.json>` captures real hosted test-repository observations using an environment-only account token. The runner requires explicit human review before fresh-clone verification. Registered workflows can be inspected, paused, and resumed with `flaregit workflow status|pause|resume`; see [docs/DEMO.md](docs/DEMO.md) for exact secure setup, recovery limits, and recording gates.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for trust boundaries and the landing protocol.
 

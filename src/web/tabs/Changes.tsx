@@ -1,10 +1,10 @@
 import React, { useState } from "react";
-import { Bot, Check, Copy, GitPullRequestArrow, Layers, Plus, User, X, GitBranch, AlertTriangle, ShieldCheck } from "lucide-react";
+import { Bot, Check, Copy, GitPullRequestArrow, Layers, Plus, User, X, GitBranch, AlertTriangle, ShieldCheck, Pause, Play, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { apiJson } from "../api";
+import { apiFetch, apiJson } from "../api";
 import { navigate, timeAgo } from "../router";
 import type { FlareGitProjectState, Task, TaskStatus } from "@/core/types";
 
@@ -21,6 +21,53 @@ const STATUS: Record<TaskStatus, { label: string; variant: "secondary" | "info" 
 };
 
 const slug = (goal: string) => goal.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 24) || "change";
+
+interface WorkflowObservation { instanceId: string; kind: string; status: string; action: string; changed: boolean }
+const WORKFLOW_LABELS: Record<string, string> = { paused: "Paused", waitingForPause: "Pause pending", running: "Running", waiting: "Waiting", queued: "Queued", complete: "Completed", errored: "Failed", terminated: "Terminated", unknown: "Unknown" };
+
+function AgentRunControls({ projectId, instanceId, canRetry, retrying, onRetry, onChange }: { projectId: string; instanceId: string; canRetry: boolean; retrying: boolean; onRetry: () => void; onChange: () => void }) {
+  const [observation, setObservation] = useState<{ run: WorkflowObservation; at: string } | null>(null);
+  const [loading, setLoading] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const request = async (action: "status" | "pause" | "resume") => {
+    setLoading(action);
+    setError(null);
+    setActionMessage(null);
+    try {
+      const response = await apiFetch(`/api/p/${projectId}/workflows/${instanceId}${action === "status" ? "" : `/${action}`}`, { method: action === "status" ? "GET" : "POST" });
+      if (!response.ok) {
+        setUnavailable(response.status === 404);
+        throw new Error(await response.text() || "Could not read the agent run");
+      }
+      const run = await response.json() as WorkflowObservation;
+      setObservation({ run, at: new Date().toISOString() });
+      setUnavailable(false);
+      if (action !== "status") {
+        setActionMessage(run.changed ? `${action === "pause" ? "Pause" : "Resume"} requested. Observed state: ${WORKFLOW_LABELS[run.status] ?? run.status}.` : `No new transition requested. Observed state: ${WORKFLOW_LABELS[run.status] ?? run.status}.`);
+        onChange();
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not read the agent run");
+    } finally { setLoading(null); }
+  };
+  const status = observation?.run.status;
+  return <div className="mt-3 border-t border-border pt-2 space-y-2">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+      <span className="text-xs text-muted-foreground">Agent run{status ? ` · ${WORKFLOW_LABELS[status] ?? status}` : " · status not checked"}{observation ? ` · checked ${timeAgo(observation.at)}` : ""}</span>
+      <Button size="sm" variant="ghost" disabled={loading !== null} onClick={() => void request("status")}><RefreshCw className="mr-1 h-3 w-3" aria-hidden="true" />{loading === "status" ? "Checking…" : "Check run"}</Button>
+      {!error && status && ["running", "waiting", "queued"].includes(status) && <Button size="sm" variant="outline" disabled={loading !== null} onClick={() => void request("pause")}><Pause className="mr-1 h-3 w-3" aria-hidden="true" />{loading === "pause" ? "Requesting…" : "Pause agent"}</Button>}
+      {!error && status === "paused" && <Button size="sm" variant="outline" disabled={loading !== null} onClick={() => void request("resume")}><Play className="mr-1 h-3 w-3" aria-hidden="true" />{loading === "resume" ? "Requesting…" : "Resume agent"}</Button>}
+      {canRetry && (status === "errored" || unavailable) && <Button size="sm" variant="outline" disabled={loading !== null || retrying} onClick={onRetry}>{retrying ? "Starting…" : "Start new agent run"}</Button>}
+    </div>
+    {status === "waitingForPause" && <p className="text-xs text-amber-200">Pause is pending. The provider has not confirmed a paused state; check the run again.</p>}
+    {status === "paused" && <p className="text-xs text-muted-foreground">Resume continues this durable run. Saved checkpoints remain available above.</p>}
+    {actionMessage && <p role="status" className="text-xs text-sky-200">{actionMessage}</p>}
+    {error && <p role="alert" className="text-xs text-destructive">Run status unavailable: {error}. Saved checkpoints remain available.</p>}
+    {canRetry && (status === "errored" || unavailable) && <p className="text-xs text-muted-foreground">Starting a new run retries this change; it does not resume the previous run.</p>}
+  </div>;
+}
 
 export function ChangesTab({ projectId, state, reload }: { projectId: string; state: FlareGitProjectState; reload: () => void }) {
   const [goal, setGoal] = useState("");
@@ -80,7 +127,7 @@ export function ChangesTab({ projectId, state, reload }: { projectId: string; st
   const act = (task: Task, action: "ready" | "cancel" | "agent") =>
     run(`${action}-${task.id}`, async () => {
       await apiJson(`/p/${projectId}/tasks/${task.id}/${action}`, { method: "POST" });
-      if (action === "agent") setNotice("An AI agent is working on this change.");
+      if (action === "agent") setNotice("Agent run requested. Check its durable run status below.");
     });
 
   const integrate = () =>
@@ -195,6 +242,7 @@ export function ChangesTab({ projectId, state, reload }: { projectId: string; st
                     <summary className="cursor-pointer rounded w-fit focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Files touched in saved checkpoints</summary>
                     <ul className="mt-2 space-y-1">{[...new Set(t.checkpoints.flatMap((checkpoint) => checkpoint.filesChanged))].map((file) => <li key={file}><code className="break-all">{file}</code>{(paths.get(file)?.length ?? 0) > 1 && <span className="ml-2 text-amber-200">shared with another active change</span>}</li>)}</ul>
                   </details>}
+                  {t.agentWorkflowInstanceId && <AgentRunControls key={t.agentWorkflowInstanceId} projectId={projectId} instanceId={t.agentWorkflowInstanceId} canRetry={["working", "checkpointed", "blocked", "needs_decision"].includes(t.status)} retrying={busy !== null} onRetry={() => void act(t, "agent")} onChange={reload} />}
                   {t.status === "blocked" && (
                     <p className="mt-1.5 text-xs text-destructive">Blocked: {t.blockedReason ?? "no reason was recorded"}</p>
                   )}
@@ -206,7 +254,7 @@ export function ChangesTab({ projectId, state, reload }: { projectId: string; st
                   {(t.status === "working" || t.status === "checkpointed") && (
                     <>
                       <Button size="sm" variant="outline" disabled={busy !== null} title="Verify the pushed Git branch and mark this change ready" onClick={() => act(t, "ready")}><Check className="h-3.5 w-3.5 mr-1" aria-hidden="true" />{busy === `ready-${t.id}` ? "Verifying…" : "Mark ready"}</Button>
-                      <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => act(t, "agent")}><Bot className="h-3.5 w-3.5 mr-1" aria-hidden="true" />{busy === `agent-${t.id}` ? "Starting…" : "Hand to agent"}</Button>
+                      {!t.agentWorkflowInstanceId && <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => act(t, "agent")}><Bot className="h-3.5 w-3.5 mr-1" aria-hidden="true" />{busy === `agent-${t.id}` ? "Starting…" : "Hand to agent"}</Button>}
                     </>
                   )}
                   {t.status !== "accepted" && t.status !== "cancelled" && t.status !== "integrating" && t.status !== "verifying" && (

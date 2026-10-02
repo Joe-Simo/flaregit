@@ -14,7 +14,8 @@
     "test": "bun test",
     "demo": "bun run src/cli/demo.ts",
     "server": "bun run src/server/local.ts",
-    "demo:proof": "bun run src/cli/proof.ts"
+    "demo:proof": "bun run src/cli/proof.ts",
+    "demo:hosted": "bun run src/cli/acceptance.ts"
   },
   "dependencies": {
     "@clerk/clerk-react": "^5.61.3",

@@ -108,6 +108,7 @@ const HELP = `flaregit — JSON by default (--pretty for humans)
   push                                   push the current change branch (fresh credential)
   ready <repo> <change> | cancel <repo> <change>
   integrate <repo> <change> [<change> ...]       compose, verify and queue 1-8 changes for review
+  workflow status|pause|resume <repo> <instance>  inspect or preserve/resume a running workflow
   log <repo> [--limit N] | tree <repo> [path] | cat <repo> <path>
   issues <repo> [--state closed] | issue new <repo> "<title>" [--body T] | issue view|close|reopen <repo> <n>
   comment <repo> "<text>" (--issue N | --change ID | --candidate ID) [--path P --line N]
@@ -227,6 +228,12 @@ async function main() {
     return out(await api("POST", `/p/${await repo(sub)}/candidates/${rest[0] ?? fail(`Usage: flaregit ${cmd} <repo> <candidate> [--note TEXT]`)}/review`, { approved: cmd === "accept", note: flag("note") ?? "" }));
   }
   if (cmd === "integrate") return out(await api("POST", `/p/${await repo(sub)}/integrations`, { taskIds: rest.length > 0 ? rest : fail("Usage: flaregit integrate <repo> <change> [<change> ...] (1-8)") }));
+  if (cmd === "workflow") {
+    if (!["status", "pause", "resume"].includes(sub ?? "")) fail("Usage: flaregit workflow status|pause|resume <repo> <instance>");
+    const id = await repo(rest[0]);
+    const instance = rest[1] ?? fail("Specify a workflow instance");
+    return out(await api(sub === "status" ? "GET" : "POST", `/p/${id}/workflows/${encodeURIComponent(instance)}${sub === "status" ? "" : `/${sub}`}`));
+  }
   if (cmd === "activity") return out(await api("GET", `/p/${await repo(sub)}/activity`));
   if (cmd === "log") return out(await api("GET", `/p/${await repo(sub)}/commits?limit=${flag("limit") ?? 20}`));
   if (cmd === "tree") return out(await api("GET", `/p/${await repo(sub)}/tree?path=${encodeURIComponent(rest[0] ?? "")}`));

@@ -20,6 +20,7 @@ import { PROJECT_ID, accountKeyFor, accountOf, admitRun, adoptLegacyProject, can
 import type { Env, QueueMessage } from "./env.js";
 import type { Task } from "../core/types.js";
 import { redactSecrets } from "../agents/prompt.js";
+import { assertWorkflowControlPermission, controlWorkflow, WorkflowControlError } from "./workflow-control.js";
 
 export { RepositoryController, FlareGitIntegrationWorkflow, FlareGitScenarioWorkflow, FlareGitAgentWorkflow };
 export { IntegratorSandbox, AgentSandbox } from "./integrator.js";
@@ -462,8 +463,10 @@ export default {
           if (denied) return denied;
           if (!(await project.beginAgentTask(task.id))) return text("Change can no longer start an agent", 409);
           let instance: WorkflowInstance;
+          const instanceId = `agent-${projectId}-${task.id}-${crypto.randomUUID()}`;
           try {
-            instance = await env.AGENT_WORKFLOW.create({ id: `agent-${projectId}-${task.id}-${crypto.randomUUID()}`, params: { projectId, taskId: task.id } });
+            await project.registerWorkflow(instanceId, "agent", task.id, userId);
+            instance = await env.AGENT_WORKFLOW.create({ id: instanceId, params: { projectId, taskId: task.id } });
           } catch {
             await project.failAgentTask(task.id);
             return text("Change is saved, but the agent could not start. Retry or continue on its saved branch.", 503);
@@ -481,6 +484,7 @@ export default {
           const denied = await admitRun(env, account, planLimits(env)[plan]);
           if (denied) return denied;
           const eventId = `integ-${projectId}-${crypto.randomUUID()}`;
+          await project.registerWorkflow(eventId, "integration", undefined, userId);
           await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds: b.taskIds as string[], eventId } satisfies QueueMessage);
           return json({ queued: eventId }, 202);
         }
@@ -507,7 +511,11 @@ export default {
           const b = await body<{ decisionId?: string; selectedOptionId?: string }>();
           if (!b.decisionId || !b.selectedOptionId) return text("decisionId and selectedOptionId required", 400);
           const { taskIds } = await project.resolveDecision(b.decisionId, b.selectedOptionId);
-          if (taskIds.length > 0) await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds, eventId: `decision-${projectId}-${b.decisionId}` } satisfies QueueMessage);
+          if (taskIds.length > 0) {
+            const eventId = `decision-${projectId}-${b.decisionId}`;
+            await project.registerWorkflow(eventId, "integration", undefined, userId);
+            await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds, eventId } satisfies QueueMessage);
+          }
           return json({ resolved: true });
         }
 
@@ -519,17 +527,27 @@ export default {
           const denied = await admitRun(env, account, planLimits(env)[plan]);
           if (denied) return denied;
           const runId = crypto.randomUUID();
-          const instance = await env.SCENARIO_WORKFLOW.create({ id: `scn-${projectId}-${runId}`, params: { projectId, act: b.act, runId } });
+          const instanceId = `scn-${projectId}-${runId}`;
+          await project.registerWorkflow(instanceId, "scenario", undefined, userId);
+          const instance = await env.SCENARIO_WORKFLOW.create({ id: instanceId, params: { projectId, act: b.act, runId } });
           ctx.waitUntil(reportUsage(env, accountKey, "scenario_run", `${projectId}-${runId}`, { act: b.act, plan }));
           return json({ instanceId: instance.id }, 202);
         }
 
-        const wf = /^\/workflows\/([\w-]+)$/.exec(sub);
-        if (wf && method === "GET") {
+        const wf = /^\/workflows\/([\w-]+)(?:\/(pause|resume))?$/.exec(sub);
+        if (wf && ((method === "GET" && !wf[2]) || (method === "POST" && wf[2]))) {
           const id = wf[1]!;
-          if (!id.includes(projectId)) return text("Not found", 404);
-          const flow = id.startsWith("scn-") ? env.SCENARIO_WORKFLOW : id.startsWith("agent-") ? env.AGENT_WORKFLOW : env.INTEGRATION_WORKFLOW;
-          return json(await (await flow.get(id)).status());
+          try {
+            const run = await project.getWorkflowRun(id);
+            if (!run) return text("Workflow not found in this repository", 404);
+            if (method === "POST") assertWorkflowControlPermission(run, userId, isOwner);
+            const result = await controlWorkflow(env, project, id, wf[2] === "pause" ? "pause" : wf[2] === "resume" ? "resume" : "status");
+            if (method === "POST") await project.logActivity(userId, `workflow.${wf[2]}`, `${result.kind} run ${id}: ${result.status}`);
+            return json(result);
+          } catch (error) {
+            if (error instanceof WorkflowControlError) return text(error.message, error.statusCode);
+            throw error;
+          }
         }
 
         // ----- collaborators -----
