@@ -11,7 +11,7 @@ test("configured product GET keeps authentication and all private vendor fields 
   const request: PriceRequest = async (url, init) => {
     called = true;
     expect(String(url)).toBe(`https://api.polar.sh/v1/products/${id}`);
-    expect(init?.method).toBe("GET"); expect(init?.redirect).toBe("error");
+    expect(init?.method).toBe("GET"); expect(init?.redirect).toBe("manual");
     expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer server-only-secret");
     expect(init?.signal).toBeDefined();
     return Response.json(product());
@@ -25,6 +25,10 @@ test("redirect and provider errors never expose error bodies or tokens", async (
   const request: PriceRequest = async () => new Response("server-only-secret", { status: 302, headers: { Location: "https://attacker.example" } });
   expect(await readPublicPlanPrice(env, request)).toEqual({ status: "unavailable", reason: "provider_unavailable" });
   expect(await readPublicPlanPrice(env, async () => { throw new Error("server-only-secret"); })).toEqual({ status: "unavailable", reason: "provider_transport_unavailable" });
+});
+test("timeouts and native invocation errors are classified without revealing messages", async () => {
+  expect(await readPublicPlanPrice(env, async () => { throw new DOMException("server-only-secret", "TimeoutError"); })).toEqual({ status: "unavailable", reason: "provider_timeout" });
+  expect(await readPublicPlanPrice(env, async () => { throw new TypeError("Illegal invocation server-only-secret"); })).toEqual({ status: "unavailable", reason: "provider_runtime_error" });
 });
 test.each([
   [401, "provider_access_denied"], [403, "provider_access_denied"], [404, "provider_not_found"],

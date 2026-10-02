@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { Env } from "./env.js";
 
-type PriceUnavailableReason = "not_configured" | "invalid_configuration" | "provider_unavailable" | "provider_transport_unavailable" | "provider_server_error" | "provider_access_denied" | "provider_not_found" | "provider_rate_limited" | "provider_rejected_request" | "product_mismatch" | "inactive_product" | "unsupported_pricing" | "invalid_response";
+type PriceUnavailableReason = "not_configured" | "invalid_configuration" | "provider_unavailable" | "provider_transport_unavailable" | "provider_runtime_error" | "provider_timeout" | "provider_server_error" | "provider_access_denied" | "provider_not_found" | "provider_rate_limited" | "provider_rejected_request" | "product_mismatch" | "inactive_product" | "unsupported_pricing" | "invalid_response";
 export type PublicPlanPrice = {
   status: "known"; source: "polar"; environment: "production" | "sandbox";
   amountMinor: number; currency: string; interval: "day" | "week" | "month" | "year";
@@ -35,7 +35,7 @@ export async function readPublicPlanPrice(
   const base = environment === "sandbox" ? "https://sandbox-api.polar.sh" : "https://api.polar.sh";
   try {
     const response = await request(`${base}/v1/products/${env.POLAR_PRODUCT_ID}`, {
-      method: "GET", redirect: "error", signal: AbortSignal.timeout(5_000),
+      method: "GET", redirect: "manual", signal: AbortSignal.timeout(5_000),
       headers: { Authorization: `Bearer ${env.POLAR_ACCESS_TOKEN}`, Accept: "application/json", "Polar-Version": "2026-04" },
     });
     if (response.redirected || (response.status >= 300 && response.status < 400)) return unavailable("provider_unavailable");
@@ -63,5 +63,11 @@ export async function readPublicPlanPrice(
     const intervalCount = value.recurring_interval_count ?? (fixed.data.legacy ? 1 : undefined);
     if (!recurrence || !intervalCount) return unavailable("unsupported_pricing");
     return { status: "known", source: "polar", environment, amountMinor: fixed.data.price_amount, currency: fixed.data.price_currency.toUpperCase(), interval: recurrence, intervalCount, taxBehavior: fixed.data.tax_behavior };
-  } catch { return unavailable("provider_transport_unavailable"); }
+  } catch (error) {
+    const name = error && typeof error === "object" && "name" in error && typeof error.name === "string" ? error.name : "";
+    const message = error && typeof error === "object" && "message" in error && typeof error.message === "string" ? error.message : "";
+    if (name === "TimeoutError" || name === "AbortError") return unavailable("provider_timeout");
+    if (/illegal invocation|incorrect.*this|not a function|redirect/i.test(message)) return unavailable("provider_runtime_error");
+    return unavailable("provider_transport_unavailable");
+  }
 }
