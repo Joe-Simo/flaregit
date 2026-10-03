@@ -38,6 +38,12 @@ Webhook delivery rows are written in the same storage transaction as the state c
 
 Builds are stored in R2 under `builds/<projectId>/<commit>`. Only members can mint an expiring HMAC preview capability. The production Worker retains the signing secret, authorization and storage access; its `PreviewAssetBroker` service entrypoint validates each capability and serves only the requested repository's build assets. The stateless child Worker receives only `REPOSITORY_ID` and the `ASSET_BROKER` service binding. Candidate HTML never executes on the application origin or a shared repository preview origin. The old shared `/preview/*` route fails closed.
 
+Interrupted preview uploads can be replaced under `build-generations/<projectId>/<incarnation>/<commit>/<generation>`. An owner requests an exact accepted commit and expected generation with a stable request key. The replacement reserves its own allowance before compute and upload; old uncertain byte holds remain reserved. A known prior workspace must confirm shutdown before replacement dispatch. Each upload has durable receipts, and the active pointer changes only after the full manifest is confirmed and current authorization is rechecked. Generation-specific HMAC links never redirect an old capability to new content. Source browsing and human review remain available if preview preparation fails.
+
+Failed credential revocation is recorded server-side and retried by a bounded alarm. Client summaries contain only cleanup status and expiry; unverified expiry is not reported as confirmed revocation. The storage recovery report observes both legacy and replacement namespaces without releasing holds or treating missing objects as cancellation proof.
+
+When rolling out a new preview URL format, verify and update each already-registered child first using its existing origin and dedicated configuration. Keep support for existing signed paths during this additive child update, then deploy the main Worker that mints the new paths. Updating only the main Worker does not update separately deployed children.
+
 ### Provision a repository origin
 
 Use the installed Wrangler dependency (4.135.0 or later) and a Cloudflare account with a workers.dev subdomain. This is an operator procedure; checking in the template does not provision a remote origin.
