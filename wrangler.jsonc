@@ -6,6 +6,8 @@
   "compatibility_flags": ["nodejs_compat"],
   "assets": { "directory": "./dist", "binding": "ASSETS", "run_worker_first": ["/api/*", "/git/*", "/preview/*", "/webhooks/*", "/auth-config", "/pricing", "/plan-price", "/status", "/status.json", "/health"], "not_found_handling": "single-page-application" },
   "vars": {
+    "PREVIEW_STORAGE_GLOBAL_BYTES": "536870912",
+    "PREVIEW_STORAGE_ACCOUNT_BYTES": "134217728",
     "ARTIFACT_STORAGE_NAMESPACE": "flaregit-default",
     "ARTIFACT_STORAGE_GLOBAL_SLOTS": "32",
     "ARTIFACT_STORAGE_ACCOUNT_SLOTS": "32",

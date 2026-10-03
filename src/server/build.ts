@@ -1,11 +1,9 @@
-import { orderedPreviewAssets } from "./preview-assets.js";
-import { globalOf } from "./projects.js";
+import { inspectPreviewStorageManifest, publishPreviewStorageManifest } from "./preview-storage-upload.js";
+import { globalOf, projectOf } from "./projects.js";
 import { admitNativeCompute, claimNativeCompute } from "./native-compute.js";
 import type { Env } from "./env.js";
 import { gitAuthEnv, q } from "./shell.js";
 import { buildPrefix } from "./preview-access.js";
-
-const MIME: Record<string, string> = { html: "text/html; charset=utf-8", js: "text/javascript", css: "text/css", svg: "image/svg+xml", json: "application/json", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", avif: "image/avif", woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", otf: "font/otf" };
 
 /** Build the exact commit in a disposable unprivileged snapshot, then store its preview assets. */
 export async function ensureBuild(env: Env, projectId: string, commit: string, canonicalRepo: string, accountKey: string): Promise<void> {
@@ -32,20 +30,22 @@ export async function ensureBuild(env: Env, projectId: string, commit: string, c
     if (!cloned.success) throw new Error("Build checkout failed; no preview was published");
     const built = await run(`bun /opt/flaregit/src/core/verification/build-preview.ts ${q(dir)} /tmp/build-out`);
     if (!built.success) throw new Error("Build failed; no preview was published");
-    const listing = await run("cd /tmp/build-out && find . -type f");
-    if (!listing.success) throw new Error("Could not inspect built assets; no preview was published");
-    const files = orderedPreviewAssets(listing.stdout);
-    for (const rel of files) {
-      const ext = rel.split(".").pop() ?? "";
-      await env.EVIDENCE_BUCKET.put(`${prefix}/${rel}`, await sb.readFileBytes(`/tmp/build-out/${rel}`), { httpMetadata: { contentType: MIME[ext] ?? "application/octet-stream" } });
-    }
+    const ledger=projectOf(env,projectId);
+    const scope=await ledger.previewStorageScope(commit,canonicalRepo);
+    const manifest=await inspectPreviewStorageManifest(sb,scope);
+    await publishPreviewStorageManifest(manifest,{
+      prefix, bucket:env.EVIDENCE_BUCKET,
+      reserve:value=>globalOf(env).reservePreviewStorage(value),
+      authorize:async()=>{const current=await ledger.previewStorageScope(commit,canonicalRepo);if(JSON.stringify(current)!==JSON.stringify(scope))throw new Error("Preview storage owner or incarnation changed");},
+      getFile:path=>sb.readFileBytes(path),
+    });
   } catch(error) {
     await globalOf(env).setNativeComputeFailure(operationKey,true);
     throw error;
   } finally {
     if (token && repo) await repo.revokeToken(token).catch(() => false);
     let stopped = false;
-    try { await sb.destroy(); stopped = true; } catch { console.error("Preview container stop unconfirmed; build claim retained"); }
+    try { await sb.destroy(); stopped = (await sb.lifetimeStatus())?.state === "stopped"; } catch { console.error("Preview container stop unconfirmed; build claim retained"); }
     if (stopped) await globalOf(env).finishNativeCompute(operationKey, lease);
   }
 }

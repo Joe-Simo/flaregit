@@ -1,4 +1,4 @@
-import { orderedPreviewAssets } from "./preview-assets.js";
+import { inspectPreviewStorageManifest, publishPreviewStorageManifest } from "./preview-storage-upload.js";
 import { admitNativeCompute } from "./native-compute.js";
 import { isSafeRef } from "../core/sanitize.js";
 import { buildPrefix } from "./preview-access.js";
@@ -356,13 +356,14 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
           if (hasPage) {
             const built = await run(`bun /opt/flaregit/src/core/verification/build-preview.ts ${q(WORK)} /tmp/build-out`);
             if (!built.success) throw new Error("Optional preview build failed");
-            const listing=await run("cd /tmp/build-out && find . -type f");
-            if(!listing.success)throw new Error("Optional preview manifest unavailable");
-            for (const rel of orderedPreviewAssets(listing.stdout)) {
-              const types: Record<string, string> = { html: "text/html; charset=utf-8", js: "text/javascript", css: "text/css", svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", avif: "image/avif", woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", otf: "font/otf" };
-              const type = types[rel.split(".").pop() ?? ""] ?? "application/octet-stream";
-              await this.env.EVIDENCE_BUCKET.put(`${buildPrefix(params.projectId, commit)}/${rel}`, await sb.readFileBytes(`/tmp/build-out/${rel}`), { httpMetadata: { contentType: type } });
-            }
+            const scope=await stub.previewStorageScope(commit,state.canonicalRepoName);
+            const manifest=await inspectPreviewStorageManifest({exec:argv=>sb.exec(argv.map(q).join(" "))},scope);
+            await publishPreviewStorageManifest(manifest,{
+              prefix:buildPrefix(params.projectId,commit),bucket:this.env.EVIDENCE_BUCKET,
+              reserve:value=>globalOf(this.env).reservePreviewStorage(value),
+              authorize:async()=>{const current=await stub.previewStorageScope(commit,state.canonicalRepoName);if(JSON.stringify(current)!==JSON.stringify(scope))throw new Error("Preview storage owner or incarnation changed");},
+              getFile:path=>sb.readFileBytes(path),
+            });
           }
         } catch {
           await globalOf(this.env).setNativeComputeFailure(previewKey,true).catch(()=>console.warn("Preview failure state unavailable"));

@@ -1,3 +1,5 @@
+import { PreviewStorageLedger, previewStorageBudget } from "./preview-storage.js";
+import { validatePreviewStorageManifest, type PreviewStorageManifest } from "./preview-storage-upload.js";
 import { HealthProbeBudget, type HealthProbeAdmission } from "./health-probe-budget.js";
 import { z } from "zod";
 import { PublicGitPublicationLedger, type PublicGitPublication } from "./public-git-publication.js";
@@ -186,6 +188,8 @@ export interface ImportHistoryOperation { projectId: string; head: string; canon
 
 export interface Ledger {
   reserveHealthProbe(): Promise<HealthProbeAdmission>;
+  reservePreviewStorage(manifest:PreviewStorageManifest):Promise<void>;
+  previewStorageScope(commit:string,canonicalRepoName:string):Promise<PreviewStorageManifest["identity"]>;
   reservePrivateRecoveryStorage(id:string,accountKey:string):Promise<void>;
   releasePrivateRecoveryStorage(id: string, accountKey: string): Promise<void>;
   publicGitSharingState(ownerId: string): Promise<{ publication: PublicGitPublication | null; target: PublicGitConsentScope | null }>;
@@ -484,6 +488,18 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   private state: FlareGitProjectState | null = null;
+  async reservePreviewStorage(manifest:PreviewStorageManifest):Promise<void>{await validatePreviewStorageManifest(manifest);new PreviewStorageLedger(this.ctx.storage).reserve(manifest,previewStorageBudget(this.env));}
+  async previewStorageScope(commit:string,canonicalRepoName:string):Promise<PreviewStorageManifest["identity"]>{
+    const state=this.load();
+    if(this.repositoryDeleting()||!isSafeSha(commit)||state.canonicalRepoName!==canonicalRepoName)throw new Error("Preview repository scope changed");
+    const known=state.acceptedState.currentCommit===commit||state.journal.some(entry=>entry.state==="ACCEPTED"&&entry.newHead===commit)||Object.values(state.candidates).some(candidate=>candidate.candidateCommit===commit&&candidate.evidenceId&&state.evidence[candidate.evidenceId]?.status==="passed");
+    if(!known)throw new Error("Preview commit is not retained in repository context");
+    const owner=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY added_at,user_id LIMIT 1").toArray()[0];
+    if(!owner)throw new Error("Preview owner is unavailable");
+    const accountKey=await accountKeyFor(owner.user_id);
+    if(await accountOf(this.env,accountKey).accountLifecycle()!=="active"||this.repositoryDeleting()||this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",owner.user_id).toArray()[0]?.role!=="owner")throw new Error("Preview owner authority changed");
+    return {projectId:state.projectId,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation(),commit,accountKey};
+  }
   async reservePrivateRecoveryStorage(id:string,accountKey:string):Promise<void>{new PrivateRecoveryStorage(this.ctx.storage).reserve(id,accountKey);}
   async releasePrivateRecoveryStorage(id: string, accountKey: string): Promise<void> { new PrivateRecoveryStorage(this.ctx.storage).release(id, accountKey); }
   async privateRecoveryBeginUpload(id: string, expectedScope: string): Promise<void> {
