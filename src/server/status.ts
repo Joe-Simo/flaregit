@@ -1,3 +1,4 @@
+import { HEALTH_EMBEDDING_MODEL } from "./health-probe-budget.js";
 import type { ComponentStatus, WorkflowCount } from "./durable-object.js";
 import type { Env } from "./env.js";
 import { globalOf } from "./projects.js";
@@ -65,9 +66,9 @@ export async function runProbes(env: Env): Promise<void> {
         if (!/not.?found|unknown|does not exist/i.test(String(e))) throw e; // "no such instance" proves the service answered
       }
     },
-    // One tiny embedding (a few tokens, a fraction of a neuron): proves the model service answers without spending real budget.
+    // Fixed operator-funded embedding probe; response availability is not workflow health.
     ai: async () => {
-      const out = (await env.AI.run("@cf/baai/bge-small-en-v1.5", { text: ["ok"] })) as { data?: unknown[] };
+      const out = (await env.AI.run(HEALTH_EMBEDDING_MODEL, { text: ["ok"] })) as { data?: unknown[] };
       if (!out?.data?.length) throw new Error("model returned no embedding");
     },
     auth: async () => {
@@ -77,6 +78,13 @@ export async function runProbes(env: Env): Promise<void> {
     },
   };
   for (const [component, fn] of Object.entries(checks)) {
+    if (component === "ai") {
+      let admission;
+      try { admission = await g.reserveHealthProbe(); }
+      catch { await g.recordProbe("ai",false,0,"AI probe admission unavailable; response unverified"); continue; }
+      if (admission.kind === "duplicate") continue; // Original attempt owns its eventual observation.
+      if (admission.kind === "exhausted") { await g.recordProbe("ai",false,0,"AI availability probe budget exhausted; response unverified"); continue; }
+    }
     const r = await timed(fn);
     await g.recordProbe(component, r.ok, r.ms, r.detail);
   }

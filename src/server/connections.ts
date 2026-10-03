@@ -97,12 +97,15 @@ export class RepositoryConnections {
       return next;
     });
   }
-  async accept(callback: IntegrationCallback): Promise<CallbackReceipt> {
+  async accept(callback: IntegrationCallback, authorize?: () => Promise<boolean>): Promise<CallbackReceipt> {
     // Freshly signed retries can change timestamp; dedup binds the stable event's contents.
     const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify({ repositoryId: callback.repositoryId, serviceId: callback.serviceId, eventId: callback.eventId, report: callback.report })));
     const digest = [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
     const eventHash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([callback.serviceId, callback.eventId])));
     const scopedEventId = [...new Uint8Array(eventHash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    // Perform the repository/account fence after asynchronous hashing, directly
+    // before committing a receipt or report. Denial consumes no event identity.
+    if (authorize && !await authorize()) return { kind: "rejected", reason: "Repository service authority unavailable" };
     return this.storage.transactionSync((): CallbackReceipt => {
       if (callback.repositoryId !== this.repositoryId) return { kind: "rejected", reason: "Repository mismatch" };
       const connection = this.list().find((item) => item.id === callback.serviceId && item.active);

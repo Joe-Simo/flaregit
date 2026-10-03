@@ -1,3 +1,4 @@
+import { HealthProbeBudget, type HealthProbeAdmission } from "./health-probe-budget.js";
 import { PublicationModeration, type PublicationModerationState, type PublicationModerationDecision, type PublicationModerationKind } from "./publication-moderation.js";
 import { isSafeSha } from "../core/sanitize.js";
 import {PrivateRecoveryOperations,PrivateRecoveryStorage,type PrivateRecoveryOperation,type PrivateRecoveryReceipt,type PrivateRecoveryTarget,recoveryScopeId} from "./private-recovery.js";
@@ -181,6 +182,7 @@ export interface ActivityRow {
 export interface ImportHistoryOperation { projectId: string; head: string; canonicalRepoName: string; ownerId: string; instanceId: string; createdAt: string }
 
 export interface Ledger {
+  reserveHealthProbe(): Promise<HealthProbeAdmission>;
   reservePrivateRecoveryStorage(id:string,accountKey:string):Promise<void>;
   releasePrivateRecoveryStorage(id: string, accountKey: string): Promise<void>;
   privateRecoveryCleanupList(): Promise<PrivateRecoveryOperation[]>;
@@ -270,7 +272,7 @@ export interface Ledger {
   getImportHistoryOperation(instanceId: string): Promise<ImportHistoryOperation | null>;
   listImportHistoryOperations(): Promise<ImportHistoryOperation[]>;
   externalCheckReports(candidateId: string): Promise<ReturnType<RepositoryConnections["reports"]>>;
-  serviceCandidateSnapshot(serviceId: string, candidateId: string, commit: string, nonce: string): Promise<ReturnType<RepositoryConnections["serviceCandidateSnapshot"]>>;
+  serviceCandidateSnapshot(serviceId: string, candidateId: string, commit: string, nonce: string): Promise<ReturnType<RepositoryConnections["serviceCandidateSnapshot"]> | null>;
   listConnections(): Promise<{ connections: ConnectionMetadata[]; policy: ExternalCheckPolicy }>;
   createConnection(name: string, capabilities: IntegrationCapability[]): Promise<{ connection: ConnectionMetadata; secret: string }>;
   revokeConnection(id: string): Promise<void>;
@@ -960,11 +962,30 @@ export class RepositoryController extends DurableObject<Env> {
 
   private connections() { return new RepositoryConnections(this.ctx.storage, this.load().projectId); }
   async externalCheckReports(candidateId: string) { return this.connections().reports(candidateId); }
-  async serviceCandidateSnapshot(serviceId: string, candidateId: string, commit: string, nonce: string) { return this.connections().serviceCandidateSnapshot(serviceId, candidateId, commit, nonce); }
+  /** Connections inherit current repository owner authority, never retained data
+   * from a deleting account or repository. Recheck membership after remote RPCs. */
+  private async connectionAuthorityActive(): Promise<boolean> {
+    if (this.repositoryDeleting()) return false;
+    const owners = this.ctx.storage.sql.exec<{user_id: string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id").toArray().map(row => row.user_id);
+    if (!owners.length) return false;
+    try {
+      const lifecycles = await Promise.all(owners.map(async owner => accountOf(this.env, await accountKeyFor(owner)).accountLifecycle()));
+      if (lifecycles.some(lifecycle => lifecycle !== "active")) return false;
+    } catch { return false; }
+    const current = this.ctx.storage.sql.exec<{user_id: string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id").toArray().map(row => row.user_id);
+    return !this.repositoryDeleting() && JSON.stringify(current) === JSON.stringify(owners);
+  }
+  async serviceCandidateSnapshot(serviceId: string, candidateId: string, commit: string, nonce: string) {
+    if (!await this.connectionAuthorityActive()) return null;
+    return this.connections().serviceCandidateSnapshot(serviceId, candidateId, commit, nonce);
+  }
   async listConnections(): Promise<{ connections: ConnectionMetadata[]; policy: ExternalCheckPolicy }> { const ledger = this.connections(); return { connections: ledger.list(), policy: ledger.policy() }; }
   async createConnection(name: string, capabilities: IntegrationCapability[]) { const created = this.connections().create(name, capabilities); return { connection: created.metadata, secret: created.secret }; }
   async revokeConnection(id: string): Promise<void> { this.connections().revoke(id); }
-  async connectionSigningConfig(id: string) { return this.connections().signingConfig(id); }
+  async connectionSigningConfig(id: string) {
+    if (!await this.connectionAuthorityActive()) return null;
+    return this.connections().signingConfig(id);
+  }
   async setConnectionPolicy(policy: ExternalCheckPolicy): Promise<ExternalCheckPolicy> { const ledger = this.connections(); ledger.setPolicy(policy); return ledger.policy(); }
   async externalChecks(candidateId: string): Promise<ExternalCheckState | null> { return this.connections().candidateState(candidateId); }
   async registerExternalRun(candidateId: string, checkId: string, runId: string): Promise<ExternalCheckState> {
@@ -972,7 +993,10 @@ export class RepositoryController extends DurableObject<Env> {
     if (candidate?.status !== "awaiting_review" || candidate.review) throw new Error("Checks can only be retried before the review decision");
     return this.connections().registerRun(candidateId, checkId, runId);
   }
-  async acceptIntegrationCallback(callback: IntegrationCallback): Promise<CallbackReceipt> { return this.connections().accept(callback); }
+  async acceptIntegrationCallback(callback: IntegrationCallback): Promise<CallbackReceipt> {
+    if (this.repositoryDeleting()) return { kind: "rejected", reason: "Repository service authority unavailable" };
+    return this.connections().accept(callback, () => this.connectionAuthorityActive());
+  }
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -1810,6 +1834,9 @@ export class RepositoryController extends DurableObject<Env> {
     if(await this.roleOf(actorId)!=="owner")throw new Error("Owner required");
     const state=await this.getState();
     return new RepositoryDeployments(this.ctx.storage,state.projectId).existingRequest(target,serviceId,environment,key,actorId);
+  }
+  async reserveHealthProbe(): Promise<HealthProbeAdmission> {
+    return new HealthProbeBudget(this.ctx.storage).reserve();
   }
   async nativeComputeFailure(key: string): Promise<boolean> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS native_compute_failures(key TEXT PRIMARY KEY)");
