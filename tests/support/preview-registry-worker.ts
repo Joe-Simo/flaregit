@@ -1,7 +1,7 @@
 import { TICKET_BOOKING_POLICY } from "../../src/fixtures/ticket-booking/policy";
 import { RepositoryController, PreviewAssetBroker } from "../../src/server/worker";
 import worker from "../../src/server/worker";
-import { globalOf, accountKeyFor, accountOf } from "../../src/server/projects";
+import { globalOf, accountKeyFor, accountOf, projectOf } from "../../src/server/projects";
 import { resolveRepositoryPreviewOrigin } from "../../src/server/preview-registry";
 import { signPreview } from "../../src/server/preview-access";
 import type { Env } from "../../src/server/env";
@@ -53,6 +53,7 @@ export default { async fetch(request: Request, env: Env, ctx: ExecutionContext) 
       const origin = await resolveRepositoryPreviewOrigin(env, value.repository, "https://flaregit.com");
       if (!origin) return new Response("Unavailable", { status: 404 });
       const commit = "a".repeat(40);
+      await projectOf(env, value.repository).initialize({projectId:value.repository,projectName:"Synthetic registry fixture",canonicalRepoName:`flaregit-${value.repository}`,head:commit,verificationPolicy:TICKET_BOOKING_POLICY,ownerId:"registry-operator-fixture"});
       await env.EVIDENCE_BUCKET.put(`builds/${value.repository}/${commit}/index.html`, `private fixture ${value.repository}`, { httpMetadata: { contentType: "text/html" } });
       const { exp, sig } = await signPreview(env, value.repository, commit, origin);
       return Response.json({ url: `${origin}/preview/${commit}/${exp}/${sig}/` });

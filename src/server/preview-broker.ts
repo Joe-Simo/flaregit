@@ -1,6 +1,7 @@
 import { lookupRepositoryPreviewOrigin } from "./preview-registry.js";
 import type { Env } from "./env.js";
 import { buildPrefix, verifyPreview } from "./preview-access.js";
+import { projectOf } from "./projects.js";
 
 const securityHeaders = {
   "Cache-Control": "private, no-store",
@@ -28,8 +29,16 @@ export async function handlePreviewAsset(request: Request, env: Env, repositoryI
   const registration = await lookupRepositoryPreviewOrigin(env, repositoryId);
   if (registration.status === "unavailable") return failure(503);
   if (registration.status !== "active" || registration.origin !== url.origin) return failure(404);
-  const object = await env.EVIDENCE_BUCKET.get(`${buildPrefix(repositoryId, commit!)}/${asset || "index.html"}`);
+  const repository = projectOf(env, repositoryId);
+  try { if (!await repository.previewAvailable()) return failure(404); }
+  catch { return failure(503); }
+  let object: R2ObjectBody | null;
+  try { object = await env.EVIDENCE_BUCKET.get(`${buildPrefix(repositoryId, commit!)}/${asset || "index.html"}`); }
+  catch { return failure(503); }
   if (!object) return failure(404);
+  const discard = async () => { try { await object.body.cancel?.(); } catch { /* No private response is returned even if storage cancellation fails. */ } };
+  try { if (!await repository.previewAvailable()) { await discard(); return failure(404); } }
+  catch { await discard(); return failure(503); }
   const allowedParents = (env.CLERK_AUTHORIZED_PARTIES ?? "").split(",").map((origin) => origin.trim()).filter((origin) => {
     try { const parsed = new URL(origin); return parsed.origin === origin && parsed.protocol === "https:"; } catch { return false; }
   });

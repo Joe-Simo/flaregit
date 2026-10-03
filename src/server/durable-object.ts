@@ -246,6 +246,7 @@ export interface Ledger {
   reconcileContributorRegistrations(): Promise<void>;
   cancelContributorRegistration(userId: string): Promise<void>;
   accountLifecycle(): Promise<"active" | "deleting" | "deleted">;
+  previewAvailable(): Promise<boolean>;
   beginAccountDeletion(): Promise<void>;
   finishAccountDeletion(): Promise<void>;
   accountArtifactDeleted(name:string):Promise<boolean>;
@@ -991,6 +992,18 @@ export class RepositoryController extends DurableObject<Env> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS import_history_operations(instance TEXT PRIMARY KEY,scope TEXT UNIQUE,doc TEXT)");
     const row = this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM import_history_operations WHERE instance=?", instanceId).toArray()[0];
     return row ? JSON.parse(row.doc) as ImportHistoryOperation : null;
+  }
+
+  /** Capability previews remain private artifacts of an existing, active owner.
+   * Failures propagate so the broker distinguishes unavailable authority from revocation. */
+  async previewAvailable(): Promise<boolean> {
+    const projectExists = () => this.ctx.storage.sql.exec("SELECT 1 FROM project WHERE id=1").toArray().length > 0;
+    const owners = () => this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id").toArray().map(row => row.user_id);
+    if (this.repositoryDeleting() || !projectExists()) return false;
+    const before = owners();
+    if (!before.length) return false;
+    const lifecycles = await Promise.all(before.map(async owner => accountOf(this.env, await accountKeyFor(owner)).accountLifecycle()));
+    return lifecycles.every(lifecycle => lifecycle === "active") && !this.repositoryDeleting() && projectExists() && JSON.stringify(owners()) === JSON.stringify(before);
   }
 
   private connections() { return new RepositoryConnections(this.ctx.storage, this.load().projectId); }

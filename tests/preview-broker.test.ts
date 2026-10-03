@@ -13,7 +13,7 @@ function fixture() {
   const env = {
     REPOSITORY_PREVIEW_ORIGINS: JSON.stringify({ [repository]: origin, "123456abcdef": "https://repo-b.account.workers.dev" }),
     PREVIEW_SIGNING_KEY: "unit-test-signing-key",
-    REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: () => ({ activePreviewOrigin: async (id: string) => { lookups.push(id); return id === repository ? origin : "https://repo-b.account.workers.dev"; } }) },
+    REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: () => ({ previewAvailable: async () => true, activePreviewOrigin: async (id: string) => { lookups.push(id); return id === repository ? origin : "https://repo-b.account.workers.dev"; } }) },
     CLERK_AUTHORIZED_PARTIES: "https://flaregit.com",
     EVIDENCE_BUCKET: {
       async get(key: string) {
@@ -42,7 +42,7 @@ describe("repository preview broker", () => {
   });
   test("registry outage returns sanitized retryable 503 without reading private assets", async () => {
     const { env, keys } = fixture();
-    env.REPOSITORY_CONTROLLER = { idFromName: (name: string) => name, get: () => ({ activePreviewOrigin: async () => { throw new Error("provider secret=test-private-value"); } }) } as unknown as DurableObjectNamespace;
+    env.REPOSITORY_CONTROLLER = { idFromName: (name: string) => name, get: () => ({ previewAvailable: async () => true, activePreviewOrigin: async () => { throw new Error("provider secret=test-private-value"); } }) } as unknown as DurableObjectNamespace;
     const response = await handlePreviewAsset(new Request(await link(env)), env, repository);
     expect(response.status).toBe(503);
     expect(response.headers.get("Cache-Control")).toContain("no-store");
@@ -50,6 +50,22 @@ describe("repository preview broker", () => {
     expect(keys).toEqual([]);
   });
 
+  test("repository or owner revocation blocks storage and authority outage returns retryable failure", async () => {
+    for (const unavailable of [false, true]) {
+      const { env, keys } = fixture();
+      env.REPOSITORY_CONTROLLER = {idFromName: (name: string) => name, get: (id: string) => id === "global" ? {activePreviewOrigin:async()=>origin} : {previewAvailable:async()=>{if(unavailable)throw new Error("private lifecycle internals");return false;}}} as unknown as Env["REPOSITORY_CONTROLLER"];
+      const response = await handlePreviewAsset(new Request(await link(env)), env, repository);
+      expect(response.status).toBe(unavailable ? 503 : 404); expect(await response.text()).not.toContain("internals"); expect(keys).toEqual([]);
+    }
+  });
+  test("revocation during storage read withholds response headers and private bytes", async () => {
+    const { env, keys } = fixture(); let active = true;
+    env.REPOSITORY_CONTROLLER = {idFromName: (name: string) => name, get: (id: string) => id === "global" ? {activePreviewOrigin:async()=>origin} : {previewAvailable:async()=>active}} as unknown as Env["REPOSITORY_CONTROLLER"];
+    const originalGet = env.EVIDENCE_BUCKET.get.bind(env.EVIDENCE_BUCKET);
+    env.EVIDENCE_BUCKET.get = (async (key: string) => {const object=await originalGet(key);active=false;return object;}) as typeof env.EVIDENCE_BUCKET.get;
+    const response = await handlePreviewAsset(new Request(await link(env)), env, repository);
+    expect(response.status).toBe(404); expect(await response.text()).not.toContain("verified build"); expect(keys).toHaveLength(1);
+  });
   test("serves only the signed repository commit prefix and supplies private browser boundaries", async () => {
     const { env, keys } = fixture();
     const response = await handlePreviewAsset(new Request(await link(env)), env, repository);
