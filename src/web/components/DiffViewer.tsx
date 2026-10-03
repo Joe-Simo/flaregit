@@ -138,19 +138,19 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented, onReadyCha
   const fileStarts = useMemo(() => flat.flatMap((r, i) => (r.kind === "file" ? [i] : [])), [flat]);
   const hunkStarts = useMemo(() => flat.flatMap((r, i) => (r.kind === "line" && r.row.t === "h" ? [i] : [])), [flat]);
 
-  const currentIndex = () => virtualizer.getVirtualItems()[0]?.index ?? 0;
+  const currentIndex = useCallback(() => Math.max(0, Math.floor((parentRef.current?.scrollTop ?? 0) / ROW_HEIGHT)), []);
   const jump = useCallback((starts: number[], dir: 1 | -1) => {
     const here = currentIndex();
     const target = dir === 1 ? starts.find((i) => i > here) : [...starts].reverse().find((i) => i < here);
     if (target !== undefined) virtualizer.scrollToIndex(target, { align: "start" });
-  }, [virtualizer]);
+  }, [virtualizer, currentIndex]);
 
   const toggleCurrent = useCallback(() => {
     const here = currentIndex();
     const row = flat[here];
     if (!row) return;
     setState((s) => ({ ...s, [row.fileIndex]: { ...(s[row.fileIndex] ?? { collapsed: false }), collapsed: !(s[row.fileIndex]?.collapsed ?? false) } }));
-  }, [flat, virtualizer]);
+  }, [flat, currentIndex]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
