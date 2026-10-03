@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronDown, ChevronRight, Keyboard } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -16,7 +16,7 @@ export interface BlobResult { binary: boolean; truncated: boolean; size: number;
 type FileState = { rows?: DiffRow[]; note?: string; collapsed: boolean };
 type FlatRow =
   | { kind: "file"; file: FileChange; fileIndex: number; adds: number; dels: number }
-  | { kind: "line"; fileIndex: number; row: DiffRow }
+  | { kind: "line"; fileIndex: number; rowIndex: number; row: DiffRow }
   | { kind: "note"; fileIndex: number; text: string };
 
 const ROW_HEIGHT = 20;
@@ -52,6 +52,7 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented, onReadyCha
   const [helpOpen, setHelpOpen] = useState(false);
   const parentRef = useRef<HTMLDivElement>(null);
   const workerRef = useRef<Worker | null>(null);
+  const endIntent=useRef<FileChange[]|null>(null);
 
   const flat = useMemo<FlatRow[]>(() => {
     const out: FlatRow[] = [];
@@ -62,12 +63,23 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented, onReadyCha
       if (st?.collapsed) return;
       if (st?.note) out.push({ kind: "note", fileIndex, text: st.note });
       else if (!st?.rows) out.push({ kind: "note", fileIndex, text: "Loading…" });
-      else for (const row of st.rows) out.push({ kind: "line", fileIndex, row });
+      else st.rows.forEach((row,rowIndex)=>out.push({ kind: "line", fileIndex, rowIndex, row }));
     });
     return out;
   }, [files, state, stateFiles]);
 
-  const virtualizer = useVirtualizer({ count: flat.length, getScrollElement: () => parentRef.current, estimateSize: () => ROW_HEIGHT, overscan: 30 });
+  const viewportRows = useRef({ files, flat });
+  const fileIdentityKeys=useMemo(()=>files.map(file=>JSON.stringify([file.path,file.aHash,file.bHash])),[files]);
+  const getItemKey = useCallback((index:number) => {
+    const item=flat[index]!;
+    return `${fileIdentityKeys[item.fileIndex]}:${item.kind==="file"?"header":item.kind==="line"?item.rowIndex:0}`;
+  },[flat,fileIdentityKeys]);
+  const virtualizer = useVirtualizer({ count: flat.length, getScrollElement: () => parentRef.current, estimateSize: () => ROW_HEIGHT, overscan: 30, getItemKey, anchorTo: "end" });
+  useLayoutEffect(()=>{
+    if(viewportRows.current.files!==files){endIntent.current=null;virtualizer.scrollToOffset(0);}
+    viewportRows.current={files,flat};
+    if(endIntent.current===files)virtualizer.scrollToEnd();
+  },[files,flat,virtualizer]);
 
   // Compute each file's diff in the worker, three at a time.
   useEffect(() => {
@@ -102,8 +114,19 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented, onReadyCha
 
     let capacityFailure: string | null=null;
     const queue = files.flatMap((file,index)=>loadedRows.current.has(fileKey(file)) ? [] : [index]);
+    const takeNext = () => {
+      if(endIntent.current===files){const lastPending=queue.indexOf(files.length-1);if(lastPending>=0)return queue.splice(lastPending,1)[0];}
+      const current=viewportRows.current,element=parentRef.current;
+      if(current.files===files&&element){
+        const first=Math.floor(element.scrollTop/ROW_HEIGHT),last=Math.ceil((element.scrollTop+element.clientHeight)/ROW_HEIGHT);
+        const visible=new Set(current.flat.slice(first,last+1).map(row=>row.fileIndex));
+        const pendingVisible=queue.findIndex(index=>visible.has(index));
+        if(pendingVisible>=0)return queue.splice(pendingVisible,1)[0];
+      }
+      return queue.shift();
+    };
     const runOne = async () => {
-      for (let i = queue.shift(); i !== undefined && !cancelled; i = queue.shift()) {
+      for (let i = takeNext(); i !== undefined && !cancelled; i = takeNext()) {
         const f = files[i]!;
         if(capacityFailure){setState(previous=>({...previous,[i]:{collapsed:false,note:capacityFailure+" This file was not loaded; retry after capacity becomes available."}}));continue;}
         if (workerFailure) { setState((previous) => ({ ...previous, [i]: { collapsed: false, note: workerFailure!.message } })); continue; }
@@ -140,9 +163,10 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented, onReadyCha
 
   const currentIndex = useCallback(() => Math.max(0, Math.floor((parentRef.current?.scrollTop ?? 0) / ROW_HEIGHT)), []);
   const jump = useCallback((starts: number[], dir: 1 | -1) => {
+    endIntent.current=null;
     const here = currentIndex();
     const target = dir === 1 ? starts.find((i) => i > here) : [...starts].reverse().find((i) => i < here);
-    if (target !== undefined) virtualizer.scrollToIndex(target, { align: "start" });
+    if (target !== undefined) virtualizer.scrollToOffset(target * ROW_HEIGHT);
   }, [virtualizer, currentIndex]);
 
   const toggleCurrent = useCallback(() => {
@@ -162,8 +186,8 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented, onReadyCha
       else if (e.key === "n") jump(hunkStarts, 1);
       else if (e.key === "p") jump(hunkStarts, -1);
       else if (e.key === "c") toggleCurrent();
-      else if (e.key === "g") virtualizer.scrollToIndex(0);
-      else if (e.key === "G") virtualizer.scrollToIndex(flat.length - 1);
+      else if (e.key === "g") {endIntent.current=null;virtualizer.scrollToOffset(0);}
+      else if (e.key === "G") {endIntent.current=files;virtualizer.scrollToEnd();}
       else if (e.key === "?") setHelpOpen((v) => !v);
       else if (e.key === "Escape") setHelpOpen(false);
       else return;
@@ -171,7 +195,7 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented, onReadyCha
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [jump, fileStarts, hunkStarts, toggleCurrent, virtualizer, flat.length]);
+  }, [jump, fileStarts, hunkStarts, toggleCurrent, virtualizer, files]);
 
   if (files.length === 0) return <p className="text-sm text-muted-foreground">No file changes.</p>;
 
@@ -191,7 +215,7 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented, onReadyCha
           <span><kbd>g</kbd>/<kbd>G</kbd> top/bottom</span>
         </div>
       )}
-      <div ref={parentRef} className="h-[70vh] overflow-auto font-mono text-[11px] sm:text-xs touch-pan-x touch-pan-y" tabIndex={0} aria-label="Diff">
+      <div ref={parentRef} onWheel={(event)=>{if(event.deltaY<0)endIntent.current=null;}} onTouchStart={()=>{endIntent.current=null;}} onPointerDown={()=>{endIntent.current=null;}} onScroll={(event)=>{const element=event.currentTarget;if(endIntent.current===files&&element.scrollHeight-element.clientHeight-element.scrollTop>ROW_HEIGHT)endIntent.current=null;}} className="h-[70vh] overflow-auto font-mono text-[11px] sm:text-xs touch-pan-x touch-pan-y" tabIndex={0} aria-label="Diff">
         <div style={{ height: virtualizer.getTotalSize(), width: "max-content", minWidth: "100%", position: "relative" }}>
           {virtualizer.getVirtualItems().map((v) => {
             const r = flat[v.index]!;
