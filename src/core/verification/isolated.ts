@@ -1,3 +1,4 @@
+import { redactSecrets } from "../../agents/prompt.js";
 import { spawn, spawnSync } from "node:child_process";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
@@ -61,7 +62,7 @@ function typecheckCandidate(dir: string, env: NodeJS.ProcessEnv, boundary: Execu
     testId: "PLATFORM-TYPECHECK",
     description: "Merged candidate type-checks against its own module interfaces",
     passed,
-    message: passed ? undefined : (res.stdout + res.stderr).trim().split("\n").slice(0, 12).join("\n"),
+    message: passed ? undefined : redactSecrets((res.stdout ?? "") + (res.stderr ?? res.error?.message ?? "")).trim().split("\n").slice(0, 12).join("\n"),
     durationMs: Math.round(performance.now() - started),
   };
 }
@@ -81,9 +82,9 @@ export async function verifyInIsolation(
   let boundary: ExecutionBoundary | undefined;
   try {
     const clone = spawnSync("git", ["clone", "--quiet", "--no-hardlinks", ctx.repoDir, dir], { encoding: "utf-8" });
-    if (clone.status !== 0) throw new Error(`Verification clone failed: ${clone.stderr}`);
+    if (clone.status !== 0) throw new Error(`Verification clone failed: ${redactSecrets(clone.stderr ?? clone.error?.message ?? "Git clone failed")}`);
     const checkout = git(dir, ["checkout", "--quiet", "--detach", ctx.candidateCommit]);
-    if (checkout.status !== 0) throw new Error(`Candidate commit ${ctx.candidateCommit} unavailable: ${checkout.stderr}`);
+    if (checkout.status !== 0) throw new Error(`Candidate commit ${ctx.candidateCommit} unavailable: ${redactSecrets(checkout.stderr ?? checkout.error?.message ?? "Git checkout failed")}`);
     const head = git(dir, ["rev-parse", "HEAD"]).stdout.trim();
     if (head !== ctx.candidateCommit) {
       throw new Error(`Verification checkout ${head} does not match candidate ${ctx.candidateCommit}`);
@@ -102,7 +103,7 @@ export async function verifyInIsolation(
     else {
       try {
         const checks = await import(spec.checksModule) as { runChecks(dir: string, policy: Record<string, unknown>, observations: unknown): Promise<TestResultItem[]> };
-        items.push(...await checks.runChecks(dir, ctx.policy, child.observations));
+        items.push(...(await checks.runChecks(dir, ctx.policy, child.observations)).map(item => ({...item, description: redactSecrets(item.description), message: item.message === undefined ? undefined : redactSecrets(item.message)})));
       } catch { items.push({ testId: "PLATFORM-CHECK-HARNESS", description: "Protected parent checks completed", passed: false, message: "Candidate observations could not be checked", durationMs: 0 }); }
     }
 
@@ -144,7 +145,7 @@ function runChecksChild(
   const nonce = crypto.randomUUID().replaceAll("-", "");
   return new Promise((resolve) => {
     const failure = (message: string): { failure: TestResultItem[] } => ({ failure: [
-      { testId: "PLATFORM-CHECK-HARNESS", description: "Protected checks completed", passed: false, message, durationMs: 0 },
+      { testId: "PLATFORM-CHECK-HARNESS", description: "Protected checks completed", passed: false, message: redactSecrets(message), durationMs: 0 },
     ] });
     const invocation = boundary.command(process.execPath, [RUNNER, checksModule, dir]);
     const child = spawn(invocation.executable, invocation.args, { ...boundary.options(env), cwd: dir, env, stdio: ["pipe", "pipe", "pipe"] });
@@ -167,7 +168,7 @@ function runChecksChild(
       if (overflow) return resolve(failure("Candidate produced excessive output"));
       if (signal) return resolve(failure(`Checks terminated by ${signal} (timeout ${CHECK_TIMEOUT_MS}ms)`));
       const line = stdout.split("\n").find((l) => l.startsWith(`${nonce}:`));
-      if (code !== 0 || !line) return resolve(failure(`Checks crashed (exit ${code}): ${stderr.trim().slice(-800)}`));
+      if (code !== 0 || !line) return resolve(failure(`Checks crashed (exit ${code}): ${redactSecrets(stderr.trim()).slice(-800)}`));
       try {
         resolve({ observations: JSON.parse(line.slice(nonce.length + 1)) as unknown });
       } catch {

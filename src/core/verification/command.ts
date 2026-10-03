@@ -1,3 +1,4 @@
+import { redactSecrets } from "../../agents/prompt.js";
 import { spawn, spawnSync } from "node:child_process";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
@@ -30,15 +31,15 @@ function runStep(id: string, description: string, command: string, cwd: string, 
       const passed = code === 0;
       resolve({
         testId: id,
-        description,
+        description: redactSecrets(description),
         passed,
-        message: passed ? undefined : (signal ? `terminated by ${signal} (timeout ${Math.round(timeoutMs / 1000)}s)\n` : `exit ${code}\n`) + out.trim().slice(-MAX_OUTPUT),
+        message: passed ? undefined : (signal ? `terminated by ${signal} (timeout ${Math.round(timeoutMs / 1000)}s)\n` : `exit ${code}\n`) + redactSecrets(out.trim()).slice(-MAX_OUTPUT),
         durationMs: Math.round(performance.now() - started),
       });
     });
     child.on("error", (err) => {
       clearTimeout(timer);
-      resolve({ testId: id, description, passed: false, message: err.message, durationMs: Math.round(performance.now() - started) });
+      resolve({ testId: id, description: redactSecrets(description), passed: false, message: redactSecrets(err.message), durationMs: Math.round(performance.now() - started) });
     });
   });
 }
@@ -58,9 +59,9 @@ export function createCommandVerifier(policy: CommandPolicy): ProtectedVerifier 
       let boundary: ExecutionBoundary | undefined;
       try {
         const clone = spawnSync("git", ["clone", "--quiet", "--no-hardlinks", ctx.repoDir, dir], { encoding: "utf-8" });
-        if (clone.status !== 0) throw new Error(`Verification clone failed: ${clone.stderr}`);
+        if (clone.status !== 0) throw new Error(`Verification clone failed: ${redactSecrets(clone.stderr ?? clone.error?.message ?? "Git clone failed")}`);
         const co = spawnSync("git", ["-C", dir, "checkout", "--quiet", "--detach", ctx.candidateCommit], { encoding: "utf-8" });
-        if (co.status !== 0) throw new Error(`Candidate commit unavailable: ${co.stderr}`);
+        if (co.status !== 0) throw new Error(`Candidate commit unavailable: ${redactSecrets(co.stderr ?? co.error?.message ?? "Git checkout failed")}`);
         const head = spawnSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf-8" }).stdout.trim();
         if (head !== ctx.candidateCommit) throw new Error(`Checkout ${head} does not match candidate ${ctx.candidateCommit}`);
         const tree = spawnSync("git", ["-C", dir, "rev-parse", "HEAD^{tree}"], { encoding: "utf-8" }).stdout.trim();
