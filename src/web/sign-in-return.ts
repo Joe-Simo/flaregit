@@ -36,6 +36,15 @@ export function safeSignInReturn(value: string): string | null {
   else if (segments[0] === "p" && (segments.length === 2 || (segments.length === 3 && repositoryTabs.has(segments[2] ?? ""))) && projectId.test(segments[1] ?? "")) {
     const rules: Record<string, RegExp> = { topic: /^discussion_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, task: /^[a-z0-9-]{1,200}$/, candidate: /^[A-Za-z0-9_-]{1,200}$/, hash: /^[0-9a-f]{7,40}$/, n: /^[1-9][0-9]{0,9}$/ };
     for (const [name, rule] of Object.entries(rules)) { allowed.add(name); const parameter = query.get(name); if (parameter !== null) { if (!rule.test(parameter)) return null; destination.set(name, parameter); } }
+    if (segments[2] === "review") {
+      const reviewRules = { commit: /^[a-f0-9]{7,40}$/, base: /^[a-f0-9]{40}$/, input: /^[A-Za-z0-9][A-Za-z0-9_-]{0,100}$/ };
+      for (const [name, rule] of Object.entries(reviewRules)) { allowed.add(name); const parameter = query.get(name); if (parameter !== null) { if (!rule.test(parameter)) return null; destination.set(name, parameter); } }
+      const commit = query.get("commit"), base = query.get("base"), frozen = query.get("input");
+      if (base !== null && (!/^[a-f0-9]{40}$/.test(commit ?? "") || query.has("task") || query.has("candidate") || frozen !== null)) return null;
+      if (frozen !== null && (!query.has("candidate") || query.has("task") || commit !== null)) return null;
+      allowed.add("from");
+      if (query.has("from")) { if (query.get("from") !== "recovery" || base === null || commit === null) return null; destination.set("from", "recovery"); }
+    }
   } else return null;
   if ([...query.keys()].some((name) => !allowed.has(name))) return null;
   if (query.has("signin") && query.get("signin") !== "1") return null;

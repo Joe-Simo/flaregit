@@ -109,14 +109,14 @@ export type SignedRepositoryBrowseRequest =
   | { kind: "history"; ref?: string; limit: number; offset: number }
   | { kind: "directory"; ref?: string; path: string }
   | { kind: "file"; ref?: string; path: string }
-  | { kind: "diff"; commit?: string; task?: string; candidate?: string; input?: string }
+  | { kind: "diff"; commit?: string; base?: string; task?: string; candidate?: string; input?: string }
   | { kind: "blob"; hash: string; task?: string; candidate?: string; input?: string };
 
 /** Validate the complete request before acquiring a provider capability. */
 export function parseSignedRepositoryBrowseRequest(route: string, query: URLSearchParams): SignedRepositoryBrowseRequest {
   const keys: Record<string, readonly string[]> = {
     "/commits": ["ref", "limit", "offset"], "/tree": ["ref", "path"], "/blob": ["ref", "path"],
-    "/diff": ["commit", "task", "candidate", "input"], "/blob-by-hash": ["hash", "task", "candidate", "input"],
+    "/diff": ["commit", "base", "task", "candidate", "input"], "/blob-by-hash": ["hash", "task", "candidate", "input"],
   };
   const allowed = keys[route];
   if (!allowed) throw new RepositoryBrowseRequestError("Unsupported repository read");
@@ -155,5 +155,7 @@ export function parseSignedRepositoryBrowseRequest(route: string, query: URLSear
   }
   if ([commit, task, candidate].filter((value) => value !== undefined).length !== 1 || (commit !== undefined && !/^[0-9a-f]{7,40}$/.test(commit))) throw new RepositoryBrowseRequestError("Pass one commit, change or candidate for comparison");
   if (input !== undefined && candidate === undefined) throw new RepositoryBrowseRequestError("Frozen input review requires a candidate");
-  return { kind: "diff", commit, task, candidate, input };
+  const base = query.get("base") ?? undefined;
+  if (base !== undefined && (!/^[a-f0-9]{40}$/.test(base) || !/^[a-f0-9]{40}$/.test(commit ?? "") || task !== undefined || candidate !== undefined || input !== undefined)) throw new RepositoryBrowseRequestError("An explicit base requires two full canonical commit hashes");
+  return { kind: "diff", commit, base, task, candidate, input };
 }

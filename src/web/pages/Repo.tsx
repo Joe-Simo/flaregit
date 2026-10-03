@@ -156,7 +156,7 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
       {tab === "discussions" && <RepositoryDiscussionsTab key={`${projectId}:${params.get("topic") ?? "list"}`} projectId={projectId} owner={ownerActionsAvailable} topic={params.get("topic") ?? undefined} />}
       {tab === "issues" && <IssuesTab projectId={projectId} issue={params.get("n") ? Number(params.get("n")) : undefined} />}
       {tab === "people" && <PeopleTab projectId={projectId} />}
-      {tab === "review" && <ReviewTab isOwner={ownerActionsAvailable} projectId={projectId} task={params.get("task") ?? undefined} commit={params.get("commit") ?? undefined} input={params.get("input") ?? undefined} candidate={params.get("candidate") ? state.candidates[params.get("candidate")!] : undefined} evidence={state} reload={reload} />}
+      {tab === "review" && <ReviewTab isOwner={ownerActionsAvailable} projectId={projectId} task={params.get("task") ?? undefined} commit={params.get("commit") ?? undefined} baseCommit={params.get("base") ?? undefined} returnTo={params.get("from") === "recovery" ? "integration" : undefined} input={params.get("input") ?? undefined} candidate={params.get("candidate") ? state.candidates[params.get("candidate")!] : undefined} evidence={state} reload={reload} />}
       {tab === "commit" && <ReviewTab isOwner={ownerActionsAvailable} projectId={projectId} commit={params.get("hash") ?? undefined} />}
       {tab === "settings" && <SettingsTab meta={currentMeta} reload={reload} />}
       </div>

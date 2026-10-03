@@ -8,16 +8,17 @@ import { CandidatePurpose, CandidateReview } from "../components/CandidateReview
 import { Conversation, type Comment } from "../components/Conversation";
 import type { CandidateGeneration, FlareGitProjectState } from "@/core/types";
 import { navigate } from "../router";
+import { frozenInputDiffMatches } from "../review-diff-identity";
 
 interface DiffResponse { repo: string; base: string | null; head: { hash: string; message: string; author: { name: string }; parents?: string[] }; files: FileChange[]; input?: { taskId: string; commit: string; baseSource: "recorded-contribution-base" | "commit-parent" } }
 
 /** Review of one commit (against its parent) or one change (against the commit it started from). */
-export function ReviewTab({ projectId, task, commit, input, candidate, evidence, reload, isOwner = false }: { projectId: string; task?: string; commit?: string; input?: string; candidate?: CandidateGeneration; evidence?: FlareGitProjectState; reload?: () => void; isOwner?: boolean }) {
+export function ReviewTab({ projectId, task, commit, baseCommit, returnTo, input, candidate, evidence, reload, isOwner = false }: { projectId: string; task?: string; commit?: string; baseCommit?: string; returnTo?: "integration"; input?: string; candidate?: CandidateGeneration; evidence?: FlareGitProjectState; reload?: () => void; isOwner?: boolean }) {
   const sourceTaskId = input ?? task;
   const taskSnapshot = sourceTaskId ? evidence?.tasks[sourceTaskId] : undefined;
   const frozenInputCommit = input && candidate?.participatingTaskIds.includes(input) ? candidate.participatingCommits[input] : undefined;
   const frozenInputBase = input && candidate ? candidate.frozenContributorProofs?.find(proof => proof.id === input && proof.commit === frozenInputCommit)?.baseCommit : undefined;
-  const reviewScope = JSON.stringify([projectId, task, input ? undefined : taskSnapshot?.currentCommit, input ? undefined : taskSnapshot?.baseCommit, commit, candidate?.id, candidate?.candidateCommit, candidate?.expectedAcceptedBase, input, frozenInputCommit, frozenInputBase]);
+  const reviewScope = JSON.stringify([projectId, task, input ? undefined : taskSnapshot?.currentCommit, input ? undefined : taskSnapshot?.baseCommit, commit, baseCommit, candidate?.id, candidate?.candidateCommit, candidate?.expectedAcceptedBase, input, frozenInputCommit, frozenInputBase]);
   const [readyDiff, setReadyDiff] = useState<{ scope: string; ready: boolean } | null>(null);
   const onDiffReady = useCallback((ready: boolean) => setReadyDiff((previous) => previous?.scope === reviewScope && previous.ready === ready ? previous : { scope: reviewScope, ready }), [reviewScope]);
   const [loadedDiff, setLoadedDiff] = useState<{ scope: string; response: DiffResponse } | null>(null);
@@ -34,16 +35,17 @@ export function ReviewTab({ projectId, task, commit, input, candidate, evidence,
   useEffect(() => {
     let active = true; const controller = new AbortController();
     setLoadedDiff(null); setFailure(null); setCommentState(null);
-    const query = candidate ? `candidate=${encodeURIComponent(candidate.id)}${input ? `&input=${encodeURIComponent(input)}` : ""}` : task ? `task=${encodeURIComponent(task)}` : `commit=${encodeURIComponent(commit ?? "")}`;
+    const query = candidate ? `candidate=${encodeURIComponent(candidate.id)}${input ? `&input=${encodeURIComponent(input)}` : ""}` : task ? `task=${encodeURIComponent(task)}` : `commit=${encodeURIComponent(commit ?? "")}${baseCommit ? `&base=${encodeURIComponent(baseCommit)}` : ""}`;
     void apiJson<DiffResponse>(`/p/${projectId}/diff?${query}`, { signal: controller.signal }).then((response) => {
       if (!active) return;
-      if (input && (!frozenInputCommit || response.input?.taskId !== input || response.input.commit !== frozenInputCommit || response.head.hash !== frozenInputCommit || response.repo !== `task:${input}` || response.base !== (frozenInputBase ?? response.head.parents?.[0] ?? null) || response.input.baseSource !== (frozenInputBase ? "recorded-contribution-base" : "commit-parent"))) throw new Error("The returned diff does not match this candidate's frozen contribution input. Refresh without substituting a newer checkpoint.");
+      if (input && !frozenInputDiffMatches(response, { taskId: input, commit: frozenInputCommit, base: frozenInputBase })) throw new Error("The returned diff does not match this candidate's frozen contribution input. Refresh without substituting a newer checkpoint.");
+      if (baseCommit && !candidate && !task && (response.repo !== "canonical" || response.head.hash !== commit || response.base !== baseCommit)) throw new Error("The returned diff does not match the saved commit and base.");
       if (candidate && !input && (response.head.hash !== candidate.candidateCommit || response.base !== candidate.expectedAcceptedBase)) throw new Error("The returned diff does not match this candidate commit and base. Refresh the review before accepting.");
       if (taskSnapshot && !input && (response.head.hash !== taskSnapshot.currentCommit || response.base !== taskSnapshot.baseCommit)) throw new Error("The change checkpoint advanced while the diff was loading. Refresh the change before reviewing.");
       setLoadedDiff({ scope: reviewScope, response });
     }).catch((cause: unknown) => { if (active) setFailure({ scope: reviewScope, message: cause instanceof Error ? cause.message : "Could not load the review diff" }); });
     return () => { active = false; controller.abort(); };
-  }, [projectId, task, taskSnapshot?.currentCommit, taskSnapshot?.baseCommit, commit, candidate?.id, candidate?.candidateCommit, candidate?.expectedAcceptedBase, reviewScope, input, frozenInputCommit, frozenInputBase, revision]);
+  }, [projectId, task, taskSnapshot?.currentCommit, taskSnapshot?.baseCommit, commit, baseCommit, candidate?.id, candidate?.candidateCommit, candidate?.expectedAcceptedBase, reviewScope, input, frozenInputCommit, frozenInputBase, revision]);
 
   const loadBlob = useCallback(
     (hash: string) => apiJson<BlobResult>(`/p/${projectId}/blob-by-hash?hash=${hash}${input && candidate ? `&candidate=${encodeURIComponent(candidate.id)}&input=${encodeURIComponent(input)}` : sourceTaskId ? `&task=${encodeURIComponent(sourceTaskId)}` : ""}`),
@@ -52,10 +54,11 @@ export function ReviewTab({ projectId, task, commit, input, candidate, evidence,
 
   return (
     <div className="space-y-3">
-      <Button variant="ghost" size="sm" onClick={() => navigate(`/p/${projectId}/${candidate ? "integration" : sourceTaskId ? "changes" : "commits"}`)}>
+      <Button variant="ghost" size="sm" onClick={() => navigate(`/p/${projectId}/${returnTo ?? (candidate ? "integration" : sourceTaskId ? "changes" : "commits")}`)}>
         <ArrowLeft className="h-4 w-4 mr-1.5" /> Back
       </Button>
-      {input && <section aria-label="Frozen contribution input" className="text-sm space-y-1"><h2 className="font-semibold">Frozen contribution input</h2><p className="text-xs text-muted-foreground">{frozenInputBase ? "Compared with the contribution base recorded for this candidate." : "Compared with this commit’s first parent; a full contribution range was not recorded."}</p></section>}
+      {input && <section aria-label="Frozen contribution input" className="text-sm space-y-1"><h2 className="font-semibold">Frozen contribution input</h2><p className="text-xs text-muted-foreground">{frozenInputBase || diff?.input?.baseSource === "recorded-contribution-base" ? "Compared with the recorded contribution base." : diff ? "Compared with this commit’s first parent; a full contribution range was not recorded." : "Loading the saved contribution base…"}</p></section>}
+      {baseCommit && !candidate && !task && <p className="text-xs text-muted-foreground">Saved comparison <span className="font-mono" title={baseCommit}>{baseCommit.slice(0, 7)}</span> → <span className="font-mono" title={commit}>{commit?.slice(0, 7)}</span></p>}
       {candidate && <CandidatePurpose projectId={projectId} candidate={candidate} tasks={evidence?.tasks} />}
       {taskSnapshot && !candidate && <section aria-label="Contribution purpose" className="space-y-1 text-sm"><h2 className="font-semibold break-words">{taskSnapshot.goal}</h2><p className="text-xs text-muted-foreground">{taskSnapshot.contributor.name} · {taskSnapshot.contributor.type}{taskSnapshot.dependsOn ? ` · Builds on ${taskSnapshot.dependsOn}` : ""}{taskSnapshot.issue ? ` · Issue #${taskSnapshot.issue}` : ""}</p></section>}
       {task && evidence?.tasks[task]?.agentRunId && <AgentRecoveryPanel key={`${projectId}:${task}:${evidence.tasks[task]!.agentRunId}`} projectId={projectId} taskId={task} runId={evidence.tasks[task]!.agentRunId!} canResume={["working", "checkpointed", "blocked", "needs_decision"].includes(evidence.tasks[task]!.status)} onStarted={reload} />}

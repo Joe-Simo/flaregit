@@ -1,3 +1,4 @@
+import {RebaseRecoveryLedger,RebaseRecoveryError,verifyRebaseRecovery,type RebaseRecoverySnapshot,type RebaseRecoveryReport,type RebaseRecoveryReceipt} from "./rebase-recovery.js";
 import {RetainedCredentialIncidents} from "./retained-credential-incidents.js";
 import {RetainedInputs,retainedInputSchema,type RetainedInput,type RetainedInputReceipt,type RebaseApplication} from "./retained-inputs.js";
 import {ImportHistoryInspection,type HistorySide,type HistoryInspectionActor,type HistoryChunk,type HistoryInspectionSnapshot,type HistoryInspectionBatch} from "./import-history-inspection.js";
@@ -45,6 +46,8 @@ import type { PublicRepositoryGrant } from "./public-repositories.js";
 import { AgentRunLedger, type AgentRunInput, type AgentRunRecord, type AgentRunClaim } from "./agent-run-ledger.js";
 import { actorName, RepositoryPublicCommunity, type PublicCommunityActor, type PublicCommunityPolicy, type PublicPost, type ContributionRequest } from "./public-community.js";
 export interface RepositoryReadContext { projectId:string; incarnation:string|null; canonicalRepoName:string; repoName:string; ownerId:string; accountKey:string; publicationVersion?:number; acceptedCommit?:string; taskBase?:string; taskCommit?:string; taskBranch?:string; candidateId?:string; candidateCommit?:string; candidateBase?:string; candidateInputCommit?:string; candidateInputBase?:string;retainedInputReceiptId?:string }
+export type OwnerRebaseRecoveryResult={ok:true;receipt:RebaseRecoveryReceipt}|{ok:false;status:409|503|429;error:string;report?:RebaseRecoveryReport};
+export type OwnerRebaseApplication=RebaseRecoveryReport;
 export type PublicGrantMetadata = PublicRepositoryGrant & { name: string; version: number; canonicalRepoName: string };
 import type {
   CandidateGeneration,
@@ -448,6 +451,8 @@ export interface Ledger {
   retainedCredentialSummary(inputId:string,purpose:"workspace"|"canonical"):Promise<ReturnType<RetainedCredentialIncidents["summary"]>>;
   lookupRetainedInput(taskId:string,candidateId:string,commit:string,base?:string,userId?:string):Promise<RetainedInputReceipt|null>;
   assertRetainedInput(input:RetainedInput):Promise<boolean>;
+  reconcileRebaseApplication(id:string,actor:HumanDecisionActor,expectedVersion:number,idempotencyKey:string,credentialHash?:string,sessionExpiresAt?:number):Promise<OwnerRebaseRecoveryResult>;
+  ownerRebaseApplications(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<{applications:OwnerRebaseApplication[];truncated:boolean}>;
   prepareRebaseApplication(input:RetainedInput,commit:string,base:string,parentAccepted:boolean):Promise<RebaseApplication>;
   recordRebaseRemoteOutcome(id:string,observedCommit:string):Promise<RebaseApplication>;
   rebaseApplication(taskId:string,workflowId:string,candidateId:string,targetBase:string):Promise<RebaseApplication|null>;
@@ -1663,6 +1668,45 @@ export class RepositoryController extends DurableObject<Env> {
     return receipt;
   }
   async assertRetainedInput(input:RetainedInput):Promise<boolean>{try{await this.authorizeRetainedInput(input);return true;}catch{return false;}}
+  private async authorizeRebaseRecovery(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<()=>void>{
+    const incarnation=this.readRepositoryIncarnation();const current=await this.authorizeHumanDecision(actor,credentialHash,true);
+    const assert=()=>{current();if(this.readRepositoryIncarnation()!==incarnation||(!actor.viaToken&&(!Number.isFinite(sessionExpiresAt)||Date.now()>=sessionExpiresAt!)))throw new Error("Owner recovery authority changed");};assert();return assert;
+  }
+  private ownerRebaseSnapshot(application:RebaseApplication):RebaseRecoverySnapshot {
+    const state=this.load(),task=state.tasks[application.input.taskId];if(!task)throw new RebaseRecoveryError("Contribution is unavailable",409);
+    const candidate=state.candidates[application.input.candidateId];
+    const accepted=Boolean(candidate?.candidateCommit&&state.acceptedState.history.some(entry=>entry.candidateId===candidate.id&&entry.commit===candidate.candidateCommit)&&state.journal.some(entry=>entry.state==="ACCEPTED"&&entry.candidateId===candidate.id&&entry.newHead===candidate.candidateCommit));
+    const active=task.activeCandidateId?state.candidates[task.activeCandidateId]:undefined;
+    const agent=task.agentRunId?this.agentRuns().get(task.agentRunId):null;
+    const agentBusy=Boolean(agent?["claimed","proposed","pushed"].includes(agent.phase):task.status==="working"&&(task.agentWorkflowInstanceId||task.agentRunId));
+    return {projectId:state.projectId,incarnation:this.readRepositoryIncarnation(),canonicalRepoName:state.canonicalRepoName,accepted,task:{id:task.id,currentCommit:task.currentCommit,baseCommit:task.baseCommit,workspaceRepoName:task.workspace.repoName,branch:task.workspace.branch,dependsOn:task.dependsOn,status:task.status,busy:agentBusy||Boolean(active&&!["accepted","failed","stale"].includes(active.status))}};
+  }
+  async ownerRebaseApplications(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<{applications:OwnerRebaseApplication[];truncated:boolean}>{
+    const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();
+    if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='rebase_applications'").toArray().length)return {applications:[],truncated:false};
+    const state=this.load(),incarnation=this.readRepositoryIncarnation();const rows=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM rebase_applications ORDER BY rowid DESC LIMIT 51").toArray();
+    const ledger=new RebaseRecoveryLedger(this.ctx.storage);
+    const applications=rows.slice(0,50).map(row=>JSON.parse(row.doc) as RebaseApplication).filter(value=>value.input.projectId===state.projectId&&value.input.incarnation===incarnation&&value.input.canonicalRepoName===state.canonicalRepoName).map(value=>ledger.observe(value,this.ownerRebaseSnapshot(value)));
+    assert();return {applications,truncated:rows.length>50};
+  }
+  async reconcileRebaseApplication(id:string,actor:HumanDecisionActor,expectedVersion:number,idempotencyKey:string,credentialHash?:string,sessionExpiresAt?:number):Promise<OwnerRebaseRecoveryResult>{try{return {ok:true,receipt:await this.reconcileOwnerRebase(id,actor,expectedVersion,idempotencyKey,credentialHash,sessionExpiresAt)};}catch(error){return error instanceof RebaseRecoveryError?{ok:false,status:error.status,error:error.message,...(error.report?{report:error.report}:{})}:{ok:false,status:409,error:"Recovery was not confirmed. Reload saved state before retrying this request."};}}
+  private async reconcileOwnerRebase(id:string,actor:HumanDecisionActor,expectedVersion:number,idempotencyKey:string,credentialHash?:string,sessionExpiresAt?:number):Promise<RebaseRecoveryReceipt>{
+    const ledger=new RebaseRecoveryLedger(this.ctx.storage);let assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();
+    const applications=new RetainedInputs(this.ctx.storage),application=applications.application(id);if(!application)throw new RebaseRecoveryError("Saved rebase not found",409);
+    const current=this.load();if(application.input.projectId!==current.projectId||application.input.incarnation!==this.readRepositoryIncarnation()||application.input.canonicalRepoName!==current.canonicalRepoName)throw new RebaseRecoveryError("Saved recovery belongs to a different repository scope",409);
+    const replay=ledger.preflight(idempotencyKey,id,actor,expectedVersion);if(replay)return replay;
+    const snapshot=this.ownerRebaseSnapshot(application),snapshotKey=JSON.stringify(snapshot);
+    const report=ledger.observe(application,snapshot);if(report.version!==expectedVersion||(!report.canReconcile&&report.status!=="already_applied"))throw new RebaseRecoveryError(report.detail,409,report);
+    const authorize=async()=>{assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();if(JSON.stringify(this.ownerRebaseSnapshot(application))!==snapshotKey)throw new RebaseRecoveryError("Contribution changed while checking saved Git state",409);};
+    const accountKey=await accountKeyFor(actor.userId);
+    const proof=application.status==="applied"?{workspaceHead:null,original:null,originalBase:null,result:null,targetBase:null}:await verifyRebaseRecovery(this.env.ARTIFACTS,application,{authorize,reserveGroup:operationId=>globalOf(this.env).reserveCoreGitOperation(operationId,accountKey,this.currentGitBudget())});
+    await authorize();
+    try{return ledger.reconcile({application,snapshot,proof,actor,expectedVersion,idempotencyKey},plan=>{
+      assert();if(JSON.stringify(this.ownerRebaseSnapshot(application))!==snapshotKey)throw new RebaseRecoveryError("Contribution changed before recovery",409);
+      const task=this.load().tasks[application.input.taskId]!;applications.remoteVerified(id,application.commit);
+      applications.applyApplication(id,()=>{task.currentCommit=plan.commit;task.baseCommit=plan.base;if(plan.dependsOn===undefined)delete task.dependsOn;else task.dependsOn=plan.dependsOn;task.updatedAt=new Date().toISOString();this.save();});
+    },()=>{assert();if(JSON.stringify(this.ownerRebaseSnapshot(application))!==snapshotKey)throw new RebaseRecoveryError("Recovery scope changed",409);});}catch(error){this.state=null;throw error;}
+  }
   async prepareRebaseApplication(input:RetainedInput,commit:string,base:string,parentAccepted:boolean):Promise<RebaseApplication>{await this.authorizeRetainedInput(input);return this.ctx.storage.transactionSync(()=>{this.assertRetainedLocal(input);return new RetainedInputs(this.ctx.storage).prepareApplication(input,commit,base,parentAccepted);});}
   async recordRebaseRemoteOutcome(id:string,observedCommit:string):Promise<RebaseApplication>{const value=new RetainedInputs(this.ctx.storage).application(id);if(!value)throw new Error("Saved rebase application unavailable");await this.authorizeRetainedInput(value.input,false);return this.ctx.storage.transactionSync(()=>{this.assertRetainedLocal(value.input,false);return new RetainedInputs(this.ctx.storage).remoteVerified(id,observedCommit);});}
   async rebaseApplication(taskId:string,workflowId:string,candidateId:string,targetBase:string):Promise<RebaseApplication|null>{

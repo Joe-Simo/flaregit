@@ -13,6 +13,13 @@ test("preserves validated private review locations and discards credential-beari
   expect(safeSignInReturn("/p/abcdef012345/review?token=secret")).toBeNull();
 });
 
+test("sign-in preserves a saved canonical comparison and its recovery navigation", () => {
+  const commit = "c".repeat(40), base = "b".repeat(40);
+  expect(safeSignInReturn(`/p/pabcdef012345/review?commit=${commit}&base=${base}&from=recovery&signin=1`)).toBe(`/p/pabcdef012345/review?commit=${commit}&base=${base}&from=recovery`);
+  expect(safeSignInReturn("/p/pabcdef012345/review?candidate=candidate_1&input=task_1&signin=1")).toBe("/p/pabcdef012345/review?candidate=candidate_1&input=task_1");
+  for (const query of [`commit=${commit.slice(0, 7)}&base=${base}`, `commit=${commit}&base=${base}&from=https://other.example`, `task=task-1&base=${base}`, "input=task_1", `commit=${commit}&base=${base}&input=task_1`, `commit=${commit}&from=recovery`]) expect(safeSignInReturn(`/p/pabcdef012345/review?${query}`)).toBeNull();
+});
+
 test("repository discussion sign-in preserves only validated local context", () => {
  expect(safeSignInReturn("#/community-post?repo=pabcdef012345&topic=discussion_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee&signin=1")).toBe("/community-post?repo=pabcdef012345&topic=discussion_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
  for (const value of ["/community-post?repo=https://evil.example", "/community-post?repo=pabcdef012345&topic=forum_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "/community-post?topic=discussion_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "/community-post?repo=pabcdef012345&repo=pabcdef012346"]) expect(safeSignInReturn(value)).toBeNull();

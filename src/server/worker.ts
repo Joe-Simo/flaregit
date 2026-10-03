@@ -1121,7 +1121,7 @@ export default {
             } else if (browseRequest.kind === "blob") result = await readBlobByHash(repo, browseRequest.hash);
             else {
               let headCommit = inputTaskId ? readContext.candidateInputCommit : candidate?.candidateCommit ?? task?.currentCommit ?? browseRequest.commit;
-              const baseCommit = inputTaskId ? readContext.candidateInputBase : candidate?.expectedAcceptedBase ?? task?.baseCommit;
+              const baseCommit = inputTaskId ? readContext.candidateInputBase : candidate?.expectedAcceptedBase ?? task?.baseCommit ?? browseRequest.base;
               if (browseRequest.commit && browseRequest.commit.length < 40) {
                 const recent = await listCommits(repo, undefined, 100, 0);
                 const matches = recent.filter((commit) => commit.hash.startsWith(browseRequest.commit!));
@@ -1334,6 +1334,26 @@ export default {
           await project.registerWorkflow(eventId, "integration", undefined, userId);
           await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds: b.taskIds as string[], eventId } satisfies QueueMessage);
           return json({ queued: eventId }, 202);
+        }
+
+        if(sub==="/rebase-applications"&&method==="GET"){
+          if(!isOwner||(auth.viaToken&&auth.tokenScope!=="full"))return text("Only the current owner with a session or full-access token can inspect saved rebases",403);
+          const profile=await account.getProfile();const currentAuth=await authenticate(request,env);if(currentAuth instanceof Response)return currentAuth;
+          if(currentAuth.id!==userId||(currentAuth.viaToken===true)!==(auth.viaToken===true)||(currentAuth.viaToken&&(currentAuth.tokenScope!=="full"||(currentAuth.tokenRepo&&currentAuth.tokenRepo!==projectId))))return text("Owner authentication changed",403);
+          const credentialHash=currentAuth.viaToken?await gitParentTokenHash(request):undefined;
+          try{return Response.json(await project.ownerRebaseApplications({userId,displayName:clean(profile.displayName,120)||"Repository owner",viaToken:currentAuth.viaToken===true},credentialHash,currentAuth.expiresAt),{headers:{"Cache-Control":"no-store"}});}catch{return text("Saved rebase inspection requires current owner authority",403);}
+        }
+
+        const rebaseRecoveryRoute=/^\/rebase-applications\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\/reconcile$/.exec(sub);
+        if(rebaseRecoveryRoute&&method==="POST"){
+          if(!isOwner||(auth.viaToken&&auth.tokenScope!=="full"))return text("Only the current owner with a session or full-access token can recover saved rebases",403);
+          const b=await body<{expectedVersion?:number;idempotencyKey?:string}>();
+          if(!b||Object.keys(b).some(key=>key!=="expectedVersion"&&key!=="idempotencyKey")||!Number.isSafeInteger(b.expectedVersion)||b.expectedVersion!<0||typeof b.idempotencyKey!=="string"||!/^([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/.test(b.idempotencyKey))return text("Saved recovery version and request identity are required",400);
+          const profile=await account.getProfile();const currentAuth=await authenticate(request,env);if(currentAuth instanceof Response)return currentAuth;
+          if(currentAuth.id!==userId||(currentAuth.viaToken===true)!==(auth.viaToken===true)||(currentAuth.viaToken&&(currentAuth.tokenScope!=="full"||(currentAuth.tokenRepo&&currentAuth.tokenRepo!==projectId))))return text("Owner authentication changed",403);
+          const credentialHash=currentAuth.viaToken?await gitParentTokenHash(request):undefined;
+          try{const result=await project.reconcileRebaseApplication(rebaseRecoveryRoute[1]!,{userId,displayName:clean(profile.displayName,120)||"Repository owner",viaToken:currentAuth.viaToken===true},b.expectedVersion!,b.idempotencyKey,credentialHash,currentAuth.expiresAt);if(!result.ok)return Response.json({error:result.error,...(result.report?{report:result.report}:{})},{status:result.status,headers:{"Cache-Control":"no-store"}});const receipt=result.receipt;return Response.json({...receipt,actor:{displayName:receipt.actor.displayName,viaToken:receipt.actor.viaToken}},{headers:{"Cache-Control":"no-store"}});}
+          catch{return text("Recovery was not confirmed. Reload saved state before retrying this request.",503);}
         }
 
         // ----- human review of a verified candidate -----
