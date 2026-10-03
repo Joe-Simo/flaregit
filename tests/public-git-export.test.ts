@@ -6,6 +6,7 @@ import {createPublicGitExport} from "../src/server/public-git-export";
 import {createAcceptedBundle,type BundleExecutor} from "../src/server/private-recovery-bundle";
 test("ordinary native HTTP clone preserves accepted ancestry and excludes private candidate objects",async()=>{
  const root=await mkdtemp(join(tmpdir(),"public-git-fixture-")),directory=`/tmp/flaregit-private-recovery-${crypto.randomUUID()}`,repo=join(root,"repo"),remote=`https://${"a".repeat(32)}.artifacts.cloudflare.net/synthetic.git`;
+ const wrongTreeDirectory=`/tmp/flaregit-private-recovery-${crypto.randomUUID()}`,wrongCountDirectory=`/tmp/flaregit-private-recovery-${crypto.randomUUID()}`;
  const contaminatedDirectory=`/tmp/flaregit-private-recovery-${crypto.randomUUID()}`;
  const native:BundleExecutor={async exec(argv,options){const proc=Bun.spawn(argv,{env:{...process.env,...options?.env},stdout:"pipe",stderr:"pipe"});const [stdout,stderr,code]=await Promise.all([new Response(proc.stdout).text(),new Response(proc.stderr).text(),proc.exited]);return {success:code===0,stdout,stderr};}};
  const git=async(...args:string[])=>{const result=await native.exec(["git",...args]);if(!result.success)throw new Error(result.stderr);return result.stdout.trim();};
@@ -22,6 +23,11 @@ test("ordinary native HTTP clone preserves accepted ancestry and excludes privat
    return native.exec(argv,options);
   }};
   const bundle=await createAcceptedBundle(executor,{remote,token:"synthetic",commit,tree,directory});
+  const wrongTreeBundle=await createAcceptedBundle(executor,{remote,token:"synthetic",commit,tree,directory:wrongTreeDirectory});
+  await expect(createPublicGitExport(executor,{bundle:{...wrongTreeBundle,tree:"e".repeat(40)},directory:wrongTreeDirectory})).rejects.toThrow("tree differs");
+  const wrongCountBundle=await createAcceptedBundle(executor,{remote,token:"synthetic",commit,tree,directory:wrongCountDirectory});
+  await expect(createPublicGitExport(executor,{bundle:{...wrongCountBundle,objectCount:wrongCountBundle.objectCount+1},directory:wrongCountDirectory})).rejects.toThrow("object count differs");
+  for(const size of [0,-1,Number.NaN,512*1024*1024+1])await expect(createPublicGitExport(executor,{bundle:{...bundle,size},directory})).rejects.toThrow("Invalid verified");
   const contaminatedBundle=await createAcceptedBundle(executor,{remote,token:"synthetic",commit,tree,directory:contaminatedDirectory});
   const contaminated:BundleExecutor={async exec(argv,options){const result=await executor.exec(argv,options);if(result.success&&argv.includes("repack")){await git("--git-dir",`${contaminatedDirectory}/public.git`,"hash-object","-w",join(repo,"private.txt"));}return result;}};
   await expect(createPublicGitExport(contaminated,{bundle:contaminatedBundle,directory:contaminatedDirectory})).rejects.toThrow("nothing was published");
@@ -30,5 +36,5 @@ test("ordinary native HTTP clone preserves accepted ancestry and excludes privat
   server=Bun.serve({hostname:"127.0.0.1",port:0,fetch(request){const url=new URL(request.url),path=url.pathname.replace(/^\/accepted.git\//,"");requests.push(path);const asset=result.assets.find(item=>item.path===path);return asset?new Response(Bun.file(asset.file),{headers:{"Content-Type":"application/octet-stream"}}):new Response("Not found",{status:404});}});
   const clone=join(root,"clone");await git("-c","init.defaultBranch=master","clone","-q",`${server.url.origin}/accepted.git`,clone);await git("-C",clone,"fsck","--full");expect(await git("-C",clone,"rev-parse","HEAD")).toBe(commit);expect(await git("-C",clone,"rev-parse","--is-shallow-repository")).toBe("false");expect(await git("-C",clone,"rev-list","--count","HEAD")).toBe("2");expect(await git("-C",clone,"log","-1","--format=%an <%ae>")).toBe("Synthetic author <author@example.invalid>");
   expect((await native.exec(["git","-C",clone,"cat-file","-e",privateBlob])).success).toBe(false);expect(await Bun.file(join(clone,"private.txt")).exists()).toBe(false);expect(requests).toContain("info/refs");expect(requests.some(path=>path.endsWith(".pack"))).toBe(true);
- }finally{server?.stop(true);await rm(root,{recursive:true,force:true});await rm(directory,{recursive:true,force:true});await rm(contaminatedDirectory,{recursive:true,force:true});}
+ }finally{server?.stop(true);await rm(root,{recursive:true,force:true});await rm(directory,{recursive:true,force:true});await rm(contaminatedDirectory,{recursive:true,force:true});await rm(wrongTreeDirectory,{recursive:true,force:true});await rm(wrongCountDirectory,{recursive:true,force:true});}
 },30000);

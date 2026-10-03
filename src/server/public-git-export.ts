@@ -4,7 +4,7 @@ export interface PublicGitExportAsset { path: string; file: string; size: number
 /** Dormant native preparation only. No upload, route, owner consent mutation or publication. */
 export async function createPublicGitExport(executor: BundleExecutor, input: {directory:string;bundle:Awaited<ReturnType<typeof createAcceptedBundle>>}) {
   const bundle = input.bundle;
-  if (!/^\/tmp\/flaregit-private-recovery-[a-f0-9-]{36}$/.test(input.directory) || bundle.path !== `${input.directory}/repository.bundle` || !/^[a-f0-9]{40}$/.test(bundle.commit) || !/^[a-f0-9]{40}$/.test(bundle.tree) || !/^[a-f0-9]{64}$/.test(bundle.sha256)) throw new Error("Invalid verified accepted bundle scope");
+  if (!/^\/tmp\/flaregit-private-recovery-[a-f0-9-]{36}$/.test(input.directory) || bundle.path !== `${input.directory}/repository.bundle` || !/^[a-f0-9]{40}$/.test(bundle.commit) || !/^[a-f0-9]{40}$/.test(bundle.tree) || !/^[a-f0-9]{64}$/.test(bundle.sha256) || !Number.isSafeInteger(bundle.size) || bundle.size < 1 || bundle.size > MAX_BUNDLE_BYTES || !Number.isSafeInteger(bundle.objectCount) || bundle.objectCount < 1) throw new Error("Invalid verified accepted bundle scope");
   const repo = `${input.directory}/public.git`;
   const env = {GIT_CONFIG_GLOBAL:"/dev/null",GIT_CONFIG_SYSTEM:"/dev/null",GIT_CONFIG_NOSYSTEM:"1",GIT_TERMINAL_PROMPT:"0",GIT_CONFIG_COUNT:"0"};
   const run=async(argv:string[])=>{const result=await executor.exec(argv,{env,timeoutMs:120000});if(!result.success)throw new Error("Public Git preparation failed; nothing was published");return result.stdout.trim();};
@@ -17,6 +17,9 @@ export async function createPublicGitExport(executor: BundleExecutor, input: {di
   await run(["git","--git-dir",repo,"update-server-info"]);
   await run(["bash","-e","-o","pipefail","-c",`git --git-dir ${q(repo)} rev-list --objects --no-object-names refs/heads/main | sort > ${q(`${input.directory}/public-expected`)} && git --git-dir ${q(repo)} cat-file --batch-all-objects --batch-check='%(objectname)' | sort > ${q(`${input.directory}/public-actual`)} && cmp -s ${q(`${input.directory}/public-expected`)} ${q(`${input.directory}/public-actual`)}`]);
   await run(["git","--git-dir",repo,"fsck","--full","--no-reflogs"]);
+  if(await run(["git","--git-dir",repo,"rev-parse",`${bundle.commit}^{tree}`])!==bundle.tree)throw new Error("Accepted export tree differs from verified receipt");
+  const actualObjectCount=Number(await run(["sh","-c",`wc -l < ${q(`${input.directory}/public-actual`)}`]));
+  if(actualObjectCount!==bundle.objectCount)throw new Error("Accepted export object count differs from verified receipt");
   const packs=(await run(["find",`${repo}/objects/pack`,"-maxdepth","1","-type","f","-name","*.pack","-exec","basename","{}",";"])).split("\n");
   if(packs.length!==1||!/^pack-[a-f0-9]{40}\.pack$/.test(packs[0]!))throw new Error("Exactly one accepted pack required");
   const pack=packs[0]!,paths=["HEAD","info/refs","objects/info/packs",`objects/pack/${pack}`,`objects/pack/${pack.replace(/\.pack$/,".idx")}`];
