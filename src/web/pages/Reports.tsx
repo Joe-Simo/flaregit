@@ -5,6 +5,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { apiJson } from "../api";
 import { safeReportTarget } from "../report-target";
+import {OperatorReservations} from "./OperatorReservations";
 import { timeAgo } from "../router";
 
 interface Report { id: string; at: string; kind: string; target: string; details: string; status: "open" | "resolved"; resolution: string | null; resolved_by: string | null; resolved_at: string | null }
@@ -244,6 +245,7 @@ export function OperatorPage() {
         </form>}</div>
       )} />}
       {cursors[status] && <Button variant="outline" disabled={loading || loadingMore} onClick={() => void loadMore()}>{loadingMore ? "Loading more…" : "Load more reports"}</Button>}
+      <OperatorReservations />
     </div>
   );
 }

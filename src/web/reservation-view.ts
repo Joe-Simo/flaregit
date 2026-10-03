@@ -1,0 +1,14 @@
+import {ApiError} from "./api";
+import {string,regex,int,gte,lte,strictObject,boolean,enum as enumeration,null as nullType,nullable,array,maxLength,literal,type infer as Infer} from "zod/mini";
+const month = string().check(regex(/^\d{4}-(?:0[1-9]|1[0-2])$/));
+const digest = string().check(regex(/^[a-f0-9]{64}$/));
+const amount = int().check(gte(0),lte(Number.MAX_SAFE_INTEGER));
+const entry = strictObject({attemptDigest:digest,month,reservationUsdMicros:amount,admittedCalls:amount,admittedContainerSeconds:amount,dispatchAttempted:boolean(),accountingState:enumeration(["reserved","reconciled","released"]),measuredUsage:nullType(),invoiceCost:nullType(),recordedReconciliationUsdMicros:nullable(amount),reconciliationEvidenceDigest:nullable(digest),workflowAttribution:literal("unattributed")});
+export const reservationPageSchema = strictObject({month,entries:array(entry).check(maxLength(25)),nextCursor:nullable(string().check(maxLength(512))),membership:literal("bounded_snapshot"),values:literal("current_at_page_read"),measurement:literal("admitted_capacity_is_not_measured_usage"),invoice:literal("unverified")});
+export type ReservationPage = Infer<typeof reservationPageSchema>;
+export function parseReservationPage(raw:unknown,requestedMonth:string):ReservationPage{const parsed=reservationPageSchema.safeParse(raw);if(!parsed.success)throw Error("Reservation response could not be verified; refresh to try again");const page=parsed.data;if(page.month!==requestedMonth||page.entries.some(row=>row.month!==requestedMonth)||new Set(page.entries.map(row=>row.attemptDigest)).size!==page.entries.length)throw Error("Reservation page scope changed");return page;}
+export function appendReservationPage(previous:ReservationPage|null,next:ReservationPage){if(previous&&previous.month!==next.month)throw Error("Reservation month changed");const entries=new Map((previous?.entries??[]).map(row=>[row.attemptDigest,row]));for(const row of next.entries)entries.set(row.attemptDigest,row);if(entries.size>500)throw Error("Reservation display limit reached");return {...next,entries:[...entries.values()]};}
+export function reservationSubtotal(page:ReservationPage){const total=page.entries.reduce((sum,row)=>sum+row.reservationUsdMicros,0);if(!Number.isSafeInteger(total))throw Error("Reservation total unavailable");return total;}
+export const reservationMoney=(micros:number)=>new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",minimumFractionDigits:2,maximumFractionDigits:6}).format(micros/1_000_000);
+
+export function reservationFailurePage(previous:ReservationPage|null,error:unknown){return error instanceof ApiError&&[401,403,404].includes(error.status)?null:previous;}
