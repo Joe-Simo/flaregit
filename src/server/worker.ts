@@ -1443,13 +1443,25 @@ export default {
           if (kind === "change") return Boolean(state.tasks[id]);
           return Boolean(state.candidates[id]);
         };
+        const authorizeCommentAccess = async () => {
+          const fresh = await authenticate(request,env);
+          if(fresh instanceof Response || fresh.id !== userId || fresh.viaToken !== auth.viaToken) return false;
+          if(fresh.viaToken && fresh.tokenRepo && fresh.tokenRepo !== projectId) return false;
+          if(await account.accountLifecycle() !== "active") return false;
+          return Boolean(await project.roleOf(userId));
+        };
         if (sub === "/comments" && method === "GET") {
           const subject = url.searchParams.get("subject") ?? "";
           if (!SUBJECT.test(subject)) return text("Invalid subject", 400);
-          return json(await project.listComments(subject));
+          if([...url.searchParams.keys()].some(key=>!["subject","page","cursor"].includes(key)) || [...url.searchParams.keys()].some(key=>url.searchParams.getAll(key).length!==1) || (url.searchParams.has("page") && url.searchParams.get("page")!=="1"))return text("Invalid comment query",400);
+          if(!await authorizeCommentAccess())return text("Comment access was revoked",403);
+          let page;try{page=await project.listMemberCommentsPage(userId,subject,url.searchParams.get("cursor") ?? undefined);}catch(error){return text(String(error).includes("Invalid comment cursor")?"Invalid comment cursor":"Comment access unavailable",String(error).includes("Invalid comment cursor")?400:403);}
+          if(!await authorizeCommentAccess())return text("Comment access was revoked",403);
+          return Response.json(url.searchParams.get("page")==="1"?page:page.comments,{headers:{"Cache-Control":"no-store","X-FlareGit-Comments-Has-More":String(page.nextCursor!==null),...(page.nextCursor?{"X-FlareGit-Comments-Cursor":page.nextCursor}:{})}});
         }
         if (sub === "/comments" && method === "POST") {
-          const b = await body<{ subject?: string; body?: string; path?: string; line?: number; commit?: string }>();
+          const b = await body<{ subject?: string; body?: string; path?: string; line?: number; commit?: string; idempotencyKey?: string }>();
+          if(b.idempotencyKey !== undefined && (typeof b.idempotencyKey !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(b.idempotencyKey)))return text("Invalid comment request key",400);
           const subject = b.subject ?? "";
           const text_ = clean(b.body, 10_000);
           if (!SUBJECT.test(subject) || !(await subjectExists(subject))) return text("Unknown subject", 404);
@@ -1472,7 +1484,11 @@ export default {
               : state.acceptedState.currentCommit === b.commit || state.acceptedState.history.some((record) => record.commit === b.commit);
             if (!known) return text("The comment revision is not recorded for this subject. Reload without losing your draft.", 409);
           }
-          return json(await project.addComment({ subject, author: await me(), body: text_, path: path_, line, commit: b.commit }), 201);
+          const author=await me();
+          if(!await authorizeCommentAccess())return text("Comment access was revoked",403);
+          let saved;try{saved=await project.addMemberComment(userId,{subject,author,body:text_,path:path_,line,commit:b.commit,idempotencyKey:b.idempotencyKey});}catch(error){const message=String(error);return text(message.includes("different content")?"Comment request key was used for different content":message.includes("cannot be recreated")?"The recorded comment is unavailable; it cannot be recreated with this request key":"Comment access unavailable",message.includes("different content")?409:message.includes("cannot be recreated")?410:message.includes("Unknown comment subject")?404:message.includes("revision is no longer recorded")?409:message.includes("access was revoked")?403:503);}
+          if(!await authorizeCommentAccess())return text("Comment result unavailable because access was revoked",403);
+          return json(saved,201);
         }
 
         // ----- people: who works here and what they contributed (humans and agents, attributed separately) -----

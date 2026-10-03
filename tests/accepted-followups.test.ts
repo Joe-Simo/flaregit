@@ -1,0 +1,10 @@
+import {test,expect} from "bun:test";
+import {Miniflare,convertV4MiniflareOptions} from "miniflare";
+import {workerdChild} from "./support/workerd-child.js";
+test("confirmed journal survives native budget, revoked actor and mirror lookup followup failures",async()=>{
+ if(await workerdChild("tests/accepted-followups.test.ts"))return;
+ const file=`/tmp/accepted-followup-${crypto.randomUUID()}.js`,built=Bun.spawn([process.execPath,"build","tests/support/accepted-followups-worker.ts","--target=browser","--external=cloudflare:workers","--external=node:*",`--outfile=${file}`],{stdout:"ignore",stderr:"pipe"});const [stderr,code]=await Promise.all([new Response(built.stderr).text(),built.exited]);if(code)throw new Error(stderr);
+ const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:"accepted-followup",modules:true,script:await Bun.file(file).text(),compatibilityDate:"2026-10-02",compatibilityFlags:["nodejs_compat"],bindings:{MANAGED_GLOBAL_MONTHLY_USD_MICROS:"0",MANAGED_ACCOUNT_MONTHLY_USD_MICROS:"0"},durableObjects:{REPOSITORY_CONTROLLER:{className:"AcceptedFollowupFixture",useSQLite:true}}}]}));
+ try{const worker=await mf.getWorker("accepted-followup");for(const mode of ["budget","owner-revoked","mirror-lookup"]){const response=await worker.fetch(`http://fixture/?mode=${mode}`);expect(response.status).toBe(200);const body=await response.json() as {result:{status:string};before:Record<string,unknown>;after:Record<string,unknown>;receipt:{outcome:string;terminal:number};activities:Array<{type:string}>;mirror:Array<{status:string}>};expect(body.result.status).toBe("deferred");expect(body.after).toEqual(body.before);expect(body.receipt).toEqual({outcome:"accepted",terminal:1});expect(JSON.stringify(body.after)).toContain('"state":"ACCEPTED"');expect(JSON.stringify(body.after)).toContain("preserved-child-fork");if(mode==="mirror-lookup")expect(body.mirror[0]?.status).toBe("deferred");else expect(body.activities.some(a=>a.type==="stack.rebase_deferred")).toBe(true);}}
+ finally{await mf.dispose();await Bun.file(file).delete();}
+});

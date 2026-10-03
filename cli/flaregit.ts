@@ -115,7 +115,7 @@ const HELP = `flaregit — JSON by default (--pretty for humans)
   workflow status|pause|resume <repo> <instance>  inspect or preserve/resume a running workflow
   log <repo> [--limit N] | tree <repo> [path] | cat <repo> <path>
   issues <repo> [--state closed] | issue new <repo> "<title>" [--body T] | issue view|close|reopen <repo> <n>
-  comment <repo> "<text>" (--issue N | --change ID | --candidate ID) [--path P --line N]
+  comment <repo> "<text>" (--issue N | --change ID | --candidate ID) [--path P --line N] [--request UUID]
   candidates <repo> [--all]                      verified candidates waiting for review
   accept|reject <repo> <candidate> [--note T]    decide what becomes history
   diff <repo> (--change ID | --commit SHA)
@@ -263,7 +263,11 @@ async function main() {
   if (cmd === "comment") {
     const subject = flag("issue") ? `issue:${flag("issue")}` : flag("change") ? `change:${flag("change")}` : flag("candidate") ? `candidate:${flag("candidate")}` : fail("Pass --issue N, --change ID or --candidate ID");
     const line = flag("line");
-    return out(await api("POST", `/p/${await repo(sub)}/comments`, { subject, body: rest[0] ?? fail('Usage: flaregit comment <repo> "<text>" --change ID [--path P --line N]'), ...(flag("path") ? { path: flag("path") } : {}), ...(line ? { line: Number(line) } : {}) }));
+    const request = flag("request") ?? crypto.randomUUID();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(request)) fail("--request must be a UUID");
+    const repository = await repo(sub);
+    console.error(JSON.stringify({ requestId: request, retry: "Reuse --request with this ID and the same comment if the response is lost." }));
+    return out(await api("POST", `/p/${repository}/comments`, { subject, idempotencyKey: request, body: rest[0] ?? fail('Usage: flaregit comment <repo> "<text>" --change ID [--path P --line N]'), ...(flag("path") ? { path: flag("path") } : {}), ...(line ? { line: Number(line) } : {}) }));
   }
   if (cmd === "candidates") {
     const st = await api<{ candidates: Record<string, { id: string; status: string; candidateCommit?: string; participatingTaskIds: string[]; expectedAcceptedBase: string }> }>("GET", `/p/${await repo(sub)}/state`);

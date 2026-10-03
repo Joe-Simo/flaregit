@@ -5,6 +5,8 @@ import { timeAgo } from "../router";
 
 export interface Comment { id: number; author: string; body: string; path: string | null; line: number | null; commit: string | null; created_at: string }
 
+interface CommentPage { comments: Comment[]; nextCursor: string | null; hasMore: boolean }
+
 const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive";
 
 /** One conversation thread (issue, change or candidate). Comments can be anchored to a file line from the diff. */
@@ -17,6 +19,13 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
   onAnchorUsed?: () => void;
   onLoaded?: (comments: Comment[]) => void;
 }) {
+  const currentCursor = useRef<string | null>(null);
+  const [newerCursors, setNewerCursors] = useState<(string | null)[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [paging, setPaging] = useState(false);
+  const [pageError, setPageError] = useState<string | null>(null);
+  const requestIntent = useRef<{ payload: string; key: string } | null>(null);
+  const sending = useRef(false), pageLock = useRef(false);
   const [comments, setComments] = useState<Comment[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -32,33 +41,54 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
     const generation = lifetime.current, sequence = ++readSequence.current;
     setLoadError(null);
     try {
-      const c = await apiJson<Comment[]>(`/p/${projectId}/comments?subject=${encodeURIComponent(subject)}`);
+      const page = await apiJson<CommentPage>(`/p/${projectId}/comments?subject=${encodeURIComponent(subject)}&page=1`);
+      const c = page.comments;
       if (generation !== lifetime.current || sequence !== readSequence.current) return;
-      setComments(c);
-      onLoaded?.(c);
+      setComments(c); setNextCursor(page.nextCursor); setNewerCursors([]); currentCursor.current = null; setPageError(null);
     } catch (e) {
       if (generation === lifetime.current && sequence === readSequence.current) setLoadError(e instanceof Error ? e.message : "Could not load comments");
     }
-  }, [projectId, subject, onLoaded]);
+  }, [projectId, subject]);
+  useEffect(() => { if (comments) onLoaded?.(comments); }, [comments, onLoaded]);
   useEffect(() => { void load(); }, [load]);
 
+  const loadPage = async (direction: "older" | "newer") => {
+    if (pageLock.current || (direction === "older" ? !nextCursor : newerCursors.length === 0)) return;
+    const cursor = direction === "older" ? nextCursor : newerCursors.at(-1) ?? null, generation = lifetime.current, sequence = readSequence.current;
+    pageLock.current = true; setPaging(true); setPageError(null);
+    try {
+      const page = await apiJson<CommentPage>(`/p/${projectId}/comments?subject=${encodeURIComponent(subject)}&page=1${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+      if (generation !== lifetime.current || sequence !== readSequence.current) return;
+      setComments(page.comments);
+      const previousCursor = currentCursor.current;
+      setNewerCursors(previous => direction === "older" ? [...previous, previousCursor] : previous.slice(0, -1));
+      currentCursor.current = cursor; setNextCursor(page.nextCursor);
+    } catch { if (generation === lifetime.current && sequence === readSequence.current) setPageError("This comment page could not be loaded. Your current conversation and draft are preserved; retry this page."); }
+    finally { pageLock.current = false; if (generation === lifetime.current) setPaging(false); }
+  };
+
   const send = async () => {
-    if (saving || !draft.trim()) return;
+    if (sending.current || !draft.trim()) return;
+    const content = { subject, body: draft.trim(), ...(anchor ? { path: anchor.path, line: anchor.line, commit: anchor.commit } : {}) };
+    const payload = JSON.stringify(content);
+    if (requestIntent.current?.payload !== payload) requestIntent.current = { payload, key: crypto.randomUUID() };
+    const idempotencyKey = requestIntent.current.key; sending.current = true;
     const generation = lifetime.current;
     readSequence.current++;
     setSaving(true);
     setError(null);
     setSaved(false);
     try {
-      await apiJson(`/p/${projectId}/comments`, { method: "POST", json: { subject, body: draft, ...(anchor ? { path: anchor.path, line: anchor.line, commit: anchor.commit } : {}) } });
+      await apiJson<Comment>(`/p/${projectId}/comments`, { method: "POST", json: { ...content, idempotencyKey } });
       if (generation !== lifetime.current) return;
-      setDraft("");
+      requestIntent.current = null; setDraft("");
       setSaved(true);
       onAnchorUsed?.();
       await load();
     } catch (e) {
-      if (generation === lifetime.current) setError(e instanceof Error ? e.message : "Comment result is unknown. Your draft remains available.");
+      if (generation === lifetime.current) setError(`Comment save could not be confirmed. Your draft is preserved; retrying unchanged content reuses the same request. ${e instanceof Error ? e.message : ""}`);
     } finally {
+      sending.current = false;
       if (generation === lifetime.current) setSaving(false);
     }
   };
@@ -73,6 +103,8 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
         </div>
       )}
       {comments === null && !loadError && <p role="status" className="text-sm text-muted-foreground">Loading comments…</p>}
+      {comments && <div className="flex flex-wrap gap-2 items-center"><Button type="button" variant="ghost" size="sm" disabled={saving || paging} onClick={() => void load()}>Refresh latest comments</Button>{nextCursor && <Button type="button" variant="outline" size="sm" disabled={paging || saving} onClick={() => void loadPage("older")}>{paging ? "Loading comments…" : pageError ? "Retry older comments" : "Load older comments"}</Button>}{newerCursors.length > 0 && <Button type="button" variant="outline" size="sm" disabled={paging || saving} onClick={() => void loadPage("newer")}>Newer comments</Button>}{nextCursor && <p className="text-xs text-muted-foreground">Older comments are available. Showing up to 100 comments per page.</p>}</div>}
+      {pageError && <p role="alert" className={alertCls}>{pageError}</p>}
       {comments && (
         <ol className="space-y-2">
           {comments.map((c) => (
@@ -93,7 +125,7 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
           <p className="text-xs text-muted-foreground break-all">Commenting on <code>{anchor.path}:{anchor.line}</code> at <code title={anchor.commit}>{anchor.commit.slice(0, 7)}</code> <button type="button" className="underline" onClick={onAnchorUsed}>clear</button></p>
         )}
         <label htmlFor={draftId} className="sr-only">Comment</label>
-        <textarea id={draftId} className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm" rows={3} maxLength={10000} value={draft}
+        <textarea id={draftId} className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm" rows={3} maxLength={10000} value={draft} disabled={saving}
           onChange={(e) => { setDraft(e.target.value); setSaved(false); }}
           onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void send(); } }}
           placeholder="Write a comment (⌘/Ctrl+Enter to send)" />

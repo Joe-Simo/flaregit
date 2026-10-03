@@ -1,3 +1,4 @@
+import {rebaseAcceptedFollowup,mirrorAcceptedFollowup} from "./accepted-followups.js";
 import { assertPreviewStorageAdmission, PreviewStorageAdmissionError } from "./preview-storage.js";
 import { inspectPreviewStorageManifest, publishPreviewStorageManifest } from "./preview-storage-upload.js";
 import { admitNativeCompute } from "./native-compute.js";
@@ -41,14 +42,16 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     };
     await record("started");
     let result: Awaited<ReturnType<FlareGitIntegrationWorkflow["execute"]>>;
-    try { result = await this.execute(event, step); }
-    catch (error) { await record("failed"); throw error; }
+    let publicationConfirmed=false;
+    const accepted=async()=>{publicationConfirmed=true;await record("accepted");};
+    try { result = await this.execute(event, step, accepted); }
+    catch (error) { if(!publicationConfirmed)await record("failed"); throw error; }
     // A receipt delivery failure after successful publication must retry that
     // outcome, rather than overwrite accepted work with a fabricated failure.
     await record(result.status);
     return result;
   }
-  private async execute(event: WorkflowEvent<IntegrationParams>, step: WorkflowStep) {
+  private async execute(event: WorkflowEvent<IntegrationParams>, step: WorkflowStep, recordAccepted:()=>Promise<void>) {
     const stub = ledgerOf(this.env, event.payload.projectId) as Stub;
     this.projectId = event.payload.projectId;
     this.computeAccountKey = event.payload.accountKey;
@@ -108,29 +111,24 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       return { status: pushed.stale ? "stale" as const : "blocked" as const, error: pushed.error };
     }
     await step.do("complete-publish", async () => stub.completePublish(prepared.journal!.id));
+    // Core publication is durable before optional follow-ups consume resources.
+    await recordAccepted();
     // Stacked changes: re-base every dependent change onto what just landed, so the stack keeps tracking upstream.
-    await step.do("rebase-dependents", { retries: { limit: 1, delay: "5 seconds" } }, async () => this.rebaseDependents(candidate, integrated.commit, integrated.branch, stub));
+    await step.do("rebase-dependents", { retries: { limit: 1, delay: "5 seconds" } }, async () => rebaseAcceptedFollowup(stub,integrated.commit,()=>this.rebaseDependents(candidate,integrated.commit,integrated.branch,stub)));
     // Preserve contributor forks for original-change review and recoverable authorship,
     // including squash landings whose original commits are not ancestors of the accepted head.
     await step.do("preserve-contribution-history", async () => ({ preserved: candidate.participatingTaskIds }));
-    // One-way copy to GitHub, only after the landing is fully committed. It never throws: GitHub being down or
-    // diverged is recorded for the owner and changes nothing here.
-    await step.do("mirror-to-github", async () => {
-      const cfg = await stub.mirrorSecret();
-      if (!cfg) return { skipped: true };
-      const mirror = await this.sandbox(`mirror-${candidate.id}`);
+    // Mirror delivery is optional and has an existing owner-controlled retry route.
+    await step.do("mirror-to-github", {retries:{limit:1,delay:"5 seconds"}}, async () => mirrorAcceptedFollowup(stub,integrated.commit,async()=>{
+      let mirror:Awaited<ReturnType<FlareGitIntegrationWorkflow["sandbox"]>>|undefined;
       try {
-        const canonical = await this.canonicalRemote(stub);
-        const r = await pushMirror({ exec: mirror.exec }, { target: cfg.target, githubToken: cfg.token, canonicalRemote: canonical.remote, canonicalToken: canonical.token, branch: integrated.branch, commit: integrated.commit });
-        await stub.recordMirrorRun(integrated.commit, r.status, r.detail);
-        return { status: r.status };
-      } catch {
-        await stub.recordMirrorRun(integrated.commit, "error", "Mirror workspace unavailable; use Retry now");
-        return { status: "error" };
-      } finally {
-        await mirror.destroy();
-      }
-    });
+        const cfg=await stub.mirrorSecret();
+        if(!cfg)return{skipped:true as const};
+        mirror=await this.sandbox(`mirror-${candidate.id}`);
+        const canonical=await this.canonicalRemote(stub);
+        return await pushMirror({exec:mirror.exec},{target:cfg.target,githubToken:cfg.token,canonicalRemote:canonical.remote,canonicalToken:canonical.token,branch:integrated.branch,commit:integrated.commit});
+      } finally {if(mirror)await mirror.destroy();}
+    }));
     return { status: "accepted" as const, commit: integrated.commit, evidenceId: integrated.evidenceId };
   }
 

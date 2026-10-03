@@ -135,6 +135,9 @@ export interface CommentRow {
   created_at: string;
 }
 
+export interface CommentPage { comments: CommentRow[]; nextCursor: string | null; hasMore: boolean }
+export interface MemberCommentInput { subject: string; author: string; body: string; path?: string; line?: number; commit?: string; idempotencyKey?: string }
+
 export interface Profile {
   handle: string;
   displayName: string;
@@ -361,6 +364,8 @@ export interface Ledger {
   createIssue(i: { title: string; body: string; author: string }): Promise<IssueRow>;
   setIssueState(n: number, state: "open" | "closed", by: string): Promise<IssueRow | null>;
   listComments(subject: string): Promise<CommentRow[]>;
+  listMemberCommentsPage(userId: string, subject: string, cursor?: string): Promise<CommentPage>;
+  addMemberComment(userId: string, input: MemberCommentInput): Promise<CommentRow>;
   addComment(c: { subject: string; author: string; body: string; path?: string; line?: number; commit?: string }): Promise<CommentRow>;
   setProfile(p: Profile, expectedVersion?: number): Promise<void>;
   claimHandle(handle: string, accountKey: string): Promise<boolean>;
@@ -1251,6 +1256,7 @@ export class RepositoryController extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS issues (number INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', author TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, closed_by TEXT);
       CREATE TABLE IF NOT EXISTS comments (id INTEGER PRIMARY KEY AUTOINCREMENT, subject TEXT NOT NULL, author TEXT NOT NULL, body TEXT NOT NULL, path TEXT, line INTEGER, "commit" TEXT, created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS comments_subject ON comments (subject, id);
+      CREATE TABLE IF NOT EXISTS member_comment_receipts(actor_id TEXT NOT NULL,event_key TEXT NOT NULL,payload TEXT NOT NULL,comment_id INTEGER NOT NULL,PRIMARY KEY(actor_id,event_key));
       CREATE TABLE IF NOT EXISTS mirror (id INTEGER PRIMARY KEY CHECK (id = 1), target TEXT NOT NULL, token TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS mirror_runs (id TEXT PRIMARY KEY, commit_sha TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL, at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, at TEXT NOT NULL, reporter TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, details TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', resolution TEXT, resolved_by TEXT, resolved_at TEXT);
@@ -1857,6 +1863,53 @@ export class RepositoryController extends DurableObject<Env> {
   }
   async listComments(subject: string): Promise<CommentRow[]> {
     return this.ctx.storage.sql.exec('SELECT id, subject, author, body, path, line, "commit", created_at FROM comments WHERE subject = ? ORDER BY id LIMIT 500', subject).toArray() as unknown as CommentRow[];
+  }
+  async listMemberCommentsPage(userId: string, subject: string, cursor?: string): Promise<CommentPage> {
+    if (this.repositoryDeleting() || !this.ctx.storage.sql.exec("SELECT 1 FROM members WHERE user_id=?", userId).toArray().length) throw new Error("Comment access was revoked");
+    let before = Number.MAX_SAFE_INTEGER;
+    if (cursor !== undefined) {
+      try {
+        if (!/^[A-Za-z0-9_-]{1,600}$/.test(cursor)) throw new Error();
+        const parsed = JSON.parse(atob(cursor.replaceAll("-", "+").replaceAll("_", "/"))) as unknown;
+        if (!Array.isArray(parsed) || parsed.length !== 2 || parsed[0] !== subject || !Number.isSafeInteger(parsed[1]) || parsed[1] <= 0 || btoa(JSON.stringify(parsed)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "") !== cursor) throw new Error();
+        before = parsed[1];
+      } catch { throw new Error("Invalid comment cursor"); }
+    }
+    const rows = this.ctx.storage.sql.exec('SELECT id,subject,author,body,path,line,"commit",created_at FROM comments WHERE subject=? AND id<? ORDER BY id DESC LIMIT 101', subject, before).toArray() as unknown as CommentRow[];
+    const page = rows.slice(0,100);
+    const nextCursor = rows.length > 100 ? btoa(JSON.stringify([subject,page.at(-1)!.id])).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "") : null;
+    return { comments: page.reverse(), nextCursor, hasMore: nextCursor !== null };
+  }
+  async addMemberComment(userId: string, input: MemberCommentInput): Promise<CommentRow> {
+    return this.ctx.storage.transactionSync(() => {
+      if (this.repositoryDeleting() || !this.ctx.storage.sql.exec("SELECT 1 FROM members WHERE user_id=?",userId).toArray().length) throw new Error("Comment access was revoked");
+      const payload = JSON.stringify([input.subject,input.body,input.path ?? null,input.line ?? null,input.commit ?? null]);
+      if (input.idempotencyKey) {
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(input.idempotencyKey)) throw new Error("Invalid comment request key");
+        const receipt=this.ctx.storage.sql.exec<{payload:string;comment_id:number}>("SELECT payload,comment_id FROM member_comment_receipts WHERE actor_id=? AND event_key=?",userId,input.idempotencyKey).toArray()[0];
+        if(receipt){
+          if(receipt.payload!==payload)throw new Error("Comment request key was used for different content");
+          const existing=this.ctx.storage.sql.exec('SELECT id,subject,author,body,path,line,"commit",created_at FROM comments WHERE id=?',receipt.comment_id).toArray()[0] as unknown as CommentRow | undefined;
+          if(!existing)throw new Error("The recorded comment is unavailable; it cannot be recreated with this request key");
+          return existing;
+        }
+      }
+      const document=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM project WHERE id=1").toArray()[0];
+      if(!document)throw new Error("Unknown comment subject");
+      const current=JSON.parse(document.doc) as FlareGitProjectState;
+      const [kind,target]=input.subject.split(":");
+      const task=kind==="change" && target ? current.tasks[target] : undefined;
+      const candidate=kind==="candidate" && target ? current.candidates[target] : undefined;
+      const knownSubject=kind==="issue" ? !!this.ctx.storage.sql.exec("SELECT 1 FROM issues WHERE number=?",Number(target)).toArray().length : Boolean(task || candidate);
+      if(!knownSubject)throw new Error("Unknown comment subject");
+      if(input.commit){const known=task ? [task.baseCommit,task.currentCommit,...task.checkpoints.map(checkpoint=>checkpoint.commitHash)].includes(input.commit) : candidate ? candidate.candidateCommit===input.commit : current.acceptedState.currentCommit===input.commit || current.acceptedState.history.some(record=>record.commit===input.commit);if(!known)throw new Error("Comment revision is no longer recorded for this subject");}
+      const at=new Date().toISOString();
+      const id=this.ctx.storage.sql.exec<{id:number}>('INSERT INTO comments(subject,author,body,path,line,"commit",created_at) VALUES(?,?,?,?,?,?,?) RETURNING id',input.subject,input.author,input.body,input.path ?? null,input.line ?? null,input.commit ?? null,at).one().id;
+      if(input.idempotencyKey)this.ctx.storage.sql.exec("INSERT INTO member_comment_receipts VALUES(?,?,?,?)",userId,input.idempotencyKey,payload,id);
+      if(input.subject.startsWith("issue:"))this.ctx.storage.sql.exec("UPDATE issues SET updated_at=? WHERE number=?",at,Number(input.subject.slice(6)));
+      this.ctx.storage.sql.exec("INSERT INTO activity(at,actor,type,summary) VALUES(?,?,?,?)",at,input.author,"comment.added",input.author+" commented on "+input.subject.replace(":"," "));
+      return this.ctx.storage.sql.exec('SELECT id,subject,author,body,path,line,"commit",created_at FROM comments WHERE id=?',id).one() as unknown as CommentRow;
+    });
   }
   async addComment(c: { subject: string; author: string; body: string; path?: string; line?: number; commit?: string }): Promise<CommentRow> {
     const id = this.ctx.storage.sql
