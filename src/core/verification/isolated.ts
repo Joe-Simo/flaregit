@@ -151,6 +151,7 @@ function runChecksChild(
     const child = spawn(invocation.executable, invocation.args, { ...boundary.options(env), cwd: dir, env, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let stderrExceeded = false;
     let overflow = false;
     const timer = setTimeout(() => child.kill("SIGKILL"), CHECK_TIMEOUT_MS);
     child.stdout.on("data", (d: Buffer) => {
@@ -161,14 +162,16 @@ function runChecksChild(
       }
     });
     child.stderr.on("data", (d: Buffer) => {
-      stderr = (stderr + d.toString()).slice(-4000);
+      if (stderrExceeded) return;
+      const next = stderr + d.toString();
+      if (next.length > 4000) { stderrExceeded = true; stderr = ""; } else stderr = next;
     });
     child.on("close", (code, signal) => {
       clearTimeout(timer);
       if (overflow) return resolve(failure("Candidate produced excessive output"));
       if (signal) return resolve(failure(`Checks terminated by ${signal} (timeout ${CHECK_TIMEOUT_MS}ms)`));
       const line = stdout.split("\n").find((l) => l.startsWith(`${nonce}:`));
-      if (code !== 0 || !line) return resolve(failure(`Checks crashed (exit ${code}): ${redactSecrets(stderr.trim()).slice(-800)}`));
+      if (code !== 0 || !line) return resolve(failure(`Checks crashed (exit ${code}): ${stderrExceeded ? "Diagnostic output exceeded the capture limit and was omitted" : redactSecrets(stderr.trim()).slice(-800)}`));
       try {
         resolve({ observations: JSON.parse(line.slice(nonce.length + 1)) as unknown });
       } catch {

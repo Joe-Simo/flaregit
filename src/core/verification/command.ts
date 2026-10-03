@@ -20,8 +20,11 @@ function runStep(id: string, description: string, command: string, cwd: string, 
     const invocation = boundary.command("sh", ["-c", command]);
     const child = spawn(invocation.executable, invocation.args, { ...boundary.options(env), cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
+    let outputExceeded = false;
     const take = (d: Buffer) => {
-      out = (out + d.toString()).slice(-MAX_OUTPUT * 4);
+      if (outputExceeded) return;
+      const next = out + d.toString();
+      if (next.length > MAX_OUTPUT * 4) { outputExceeded = true; out = ""; } else out = next;
     };
     child.stdout.on("data", take);
     child.stderr.on("data", take);
@@ -33,7 +36,7 @@ function runStep(id: string, description: string, command: string, cwd: string, 
         testId: id,
         description: redactSecrets(description),
         passed,
-        message: passed ? undefined : (signal ? `terminated by ${signal} (timeout ${Math.round(timeoutMs / 1000)}s)\n` : `exit ${code}\n`) + redactSecrets(out.trim()).slice(-MAX_OUTPUT),
+        message: passed ? undefined : (signal ? `terminated by ${signal} (timeout ${Math.round(timeoutMs / 1000)}s)\n` : `exit ${code}\n`) + (outputExceeded ? "Diagnostic output exceeded the capture limit and was omitted" : redactSecrets(out.trim()).slice(-MAX_OUTPUT)),
         durationMs: Math.round(performance.now() - started),
       });
     });
