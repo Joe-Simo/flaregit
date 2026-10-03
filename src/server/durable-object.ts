@@ -1,3 +1,4 @@
+import { PublicationModeration, type PublicationModerationState, type PublicationModerationDecision, type PublicationModerationKind } from "./publication-moderation.js";
 import { previewOrigins, validPreviewRegistration } from "./preview-access.js";
 import { PublicDirectory, type DirectoryState, type DirectoryRegistration } from "./public-directory.js";
 import { RepositoryDiscussions } from "./repository-discussions.js";
@@ -131,7 +132,9 @@ export interface DomainRow {
   verified_at: string | null;
 }
 
+export type ReportPublicationTarget = { kind: "profile"; targetId: string; accountKey: string } | { kind: "repository"; targetId: string };
 export interface ReportRow {
+  publication_target?: string | null;
   id: string;
   at: string;
   reporter: string;
@@ -203,7 +206,7 @@ export interface Ledger {
   discussionSettings(actor:PublicCommunityActor,input?:unknown):Promise<{enabled:boolean}>;
   discussionPermissions(actor:PublicCommunityActor,id:string,publicOnly:boolean,canAdminister?:boolean):Promise<ReturnType<RepositoryDiscussions["permissions"]>>;
   discussionMutate(actor:PublicCommunityActor,operation:"create"|"reply"|"edit"|"remove"|"control",input:unknown,id:string|undefined,publicOnly:boolean,canAdminister?:boolean):Promise<ReturnType<RepositoryDiscussions["create"]>>;
-  publicCommunity(): Promise<{ policy: PublicCommunityPolicy; posts: PublicPost[] }>;
+  publicCommunity(publicOnly?: boolean): Promise<{ policy: PublicCommunityPolicy; posts: PublicPost[] }>;
   configurePublicCommunity(policy: PublicCommunityPolicy, confirmed: boolean, actor: PublicCommunityActor): Promise<PublicCommunityPolicy>;
   createPublicPost(actor: PublicCommunityActor, input: Parameters<RepositoryPublicCommunity["createPost"]>[1]): Promise<PublicPost>;
   signedPublicPosts(actor: PublicCommunityActor): Promise<{ posts: Array<PublicPost & { canEdit: boolean; canRemove: boolean }>; authorDisplayName: string }>;
@@ -226,6 +229,11 @@ export interface Ledger {
   markAgentPushed(runId: string, taskId: string, commit: string): Promise<boolean>;
   checkpointAgentRun(runId: string, taskId: string, eventId: string, commit: string): Promise<boolean>;
   failAgentRun(runId: string, taskId: string): Promise<boolean>;
+  repositoryModerationState(): Promise<PublicationModerationState>;
+  profileModerationState(ownerId: string): Promise<PublicationModerationState>;
+  moderateRepository(input: unknown, operatorAccountKey: string): Promise<PublicationModerationDecision>;
+  moderateProfile(ownerId: string, input: unknown, operatorAccountKey: string): Promise<PublicationModerationDecision>;
+  moderationHistory(kind: PublicationModerationKind, targetId: string): Promise<PublicationModerationDecision[]>;
   publicGrant(): Promise<PublicGrantMetadata | null>;
   publicContributionsFor(userId: string): Promise<{ grant: PublicGrantMetadata; contributions: Array<{ commit: string; acceptedAt: string }> } | null>;
   directoryState(): Promise<DirectoryState>;
@@ -305,7 +313,9 @@ export interface Ledger {
   forumEdit(actor:PublicCommunityActor,id:string,input:unknown):Promise<ReturnType<PlatformCommunity["edit"]>>;
   forumPermissions(actor:PublicCommunityActor,topicId:string,moderator:boolean):Promise<ReturnType<PlatformCommunity["permissions"]>>;
   forumRemove(actor:PublicCommunityActor,id:string,input:unknown,moderator:boolean):Promise<ReturnType<PlatformCommunity["remove"]>>;
-  fileReport(r: { reporter: string; kind: string; target: string; details: string }): Promise<ReportRow>;
+  fileReport(r: { reporter: string; kind: string; target: string; details: string; publicationTarget?: ReportPublicationTarget }): Promise<ReportRow>;
+  getReport(id: string): Promise<ReportRow | null>;
+  listReportsPage(filter: { status?: "open" | "resolved"; reporter?: string; cursor?: string | null }): Promise<{ reports: ReportRow[]; nextCursor: string | null }>;
   listReports(filter: { status?: "open" | "resolved"; reporter?: string }): Promise<ReportRow[]>;
   resolveReport(id: string, resolution: string, by: string): Promise<ReportRow | null>;
   reportBacklog(): Promise<{ open: number; oldestOpenHours: number | null }>;
@@ -511,9 +521,10 @@ export class RepositoryController extends DurableObject<Env> {
   private requirePublicRepository(): void {
     this.visibilityTable();
     const row = this.ctx.storage.sql.exec<{ visibility: string }>("SELECT visibility FROM repository_visibility WHERE id=1").toArray()[0];
-    if (row?.visibility !== "public") throw new Error("Repository is not public");
+    if (row?.visibility !== "public" || new PublicationModeration(this.ctx.storage).state("repository",this.load().projectId).suppressed) throw new Error("Repository is not public");
   }
-  async publicCommunity(): Promise<{ policy: PublicCommunityPolicy; posts: PublicPost[] }> {
+  async publicCommunity(publicOnly?: boolean): Promise<{ policy: PublicCommunityPolicy; posts: PublicPost[] }> {
+    if (publicOnly) this.requirePublicRepository();
     const community = this.community();
     return { policy: community.policy(), posts: community.listPublic() };
   }
@@ -699,7 +710,7 @@ export class RepositoryController extends DurableObject<Env> {
     this.visibilityTable();
     const directory = new PublicDirectory(this.ctx.storage);
     const visibility = this.ctx.storage.sql.exec<{visibility:string}>("SELECT visibility FROM repository_visibility WHERE id=1").toArray()[0];
-    directory.configure(input, visibility?.visibility === "public");
+    directory.configure(input, visibility?.visibility === "public" && !new PublicationModeration(this.ctx.storage).state("repository",this.load().projectId).suppressed);
     await this.reconcileDirectoryRegistration();
     return directory.state();
   }
@@ -722,7 +733,7 @@ export class RepositoryController extends DurableObject<Env> {
     if (this.repositoryDeleting()) return null;
     this.visibilityTable();
     const row = this.ctx.storage.sql.exec<{ visibility: string; version: number; confirmed_by: string }>("SELECT visibility,version,confirmed_by FROM repository_visibility WHERE id=1").toArray()[0];
-    if (row?.visibility !== "public" || !row.confirmed_by) return null;
+    if (row?.visibility !== "public" || !row.confirmed_by || new PublicationModeration(this.ctx.storage).state("repository",this.load().projectId).suppressed) return null;
     const state = this.load();
     return { visibility: "public", confirmedByOwner: true, acceptedCommit: state.acceptedState.currentCommit, name: state.projectName, canonicalRepoName: state.canonicalRepoName, version: row.version };
   }
@@ -742,11 +753,13 @@ export class RepositoryController extends DurableObject<Env> {
   async setRepositoryVisibility(visibility: "public" | "private", confirmed: boolean, by: string): Promise<void> {
     if (this.repositoryDeleting()) throw new Error("Repository deletion is in progress");
     if (!by || !["public", "private"].includes(visibility) || (visibility === "public" && confirmed !== true)) throw new Error("Explicit owner confirmation is required");
+    if (visibility === "public" && (await this.repositoryModerationState()).suppressed) throw new Error("Public repository publication is suppressed; see the owner moderation notice");
     if (await this.roleOf(by) !== "owner") throw new Error("Only the owner can change visibility");
     await this.ensureRecoveryAlarm();
     this.visibilityTable();
     const directory = new PublicDirectory(this.ctx.storage);
     if (visibility === "private") { const current = directory.state(); if (current.enabled) directory.configure({enabled:false,confirmed:true,expectedVersion:current.version},false); }
+    if (visibility === "public" && new PublicationModeration(this.ctx.storage).state("repository",this.load().projectId).suppressed) throw new Error("Public repository publication is suppressed");
     this.ctx.storage.sql.exec("INSERT INTO repository_visibility VALUES (1,?,1,?) ON CONFLICT(id) DO UPDATE SET visibility=excluded.visibility,version=version+1,confirmed_by=excluded.confirmed_by", visibility, by);
     await this.reconcileDirectoryRegistration();
     await this.logActivity("Maintainer", "repository.visibility", `Repository is now ${visibility}`);
@@ -1382,11 +1395,16 @@ export class RepositoryController extends DurableObject<Env> {
   async forumEdit(actor:PublicCommunityActor,id:string,input:unknown) {return new PlatformCommunity(this.ctx.storage).edit(actor,id,input);}
   async forumPermissions(actor:PublicCommunityActor,topicId:string,moderator:boolean) {return new PlatformCommunity(this.ctx.storage).permissions(actor,topicId,moderator);}
   async forumRemove(actor:PublicCommunityActor,id:string,input:unknown,moderator:boolean) {return new PlatformCommunity(this.ctx.storage).remove(actor,id,input,moderator);}
-  async fileReport(r: { reporter: string; kind: string; target: string; details: string }): Promise<ReportRow> {
+  async fileReport(r: { reporter: string; kind: string; target: string; details: string; publicationTarget?: ReportPublicationTarget }): Promise<ReportRow> {
+    this.reportPublicationTable();
     const id = `rpt_${crypto.randomUUID().slice(0, 10)}`;
-    this.ctx.storage.sql.exec("INSERT INTO reports (id, at, reporter, kind, target, details) VALUES (?, ?, ?, ?, ?, ?)", id, new Date().toISOString(), r.reporter, r.kind, r.target, r.details);
+    this.ctx.storage.sql.exec("INSERT INTO reports (id, at, reporter, kind, target, details, publication_target) VALUES (?, ?, ?, ?, ?, ?, ?)", id, new Date().toISOString(), r.reporter, r.kind, r.target, r.details, r.publicationTarget ? JSON.stringify(r.publicationTarget) : null);
     return this.ctx.storage.sql.exec("SELECT * FROM reports WHERE id = ?", id).toArray()[0] as unknown as ReportRow;
   }
+  private reportPublicationTable(): void {
+    if (!this.ctx.storage.sql.exec<{name:string}>("PRAGMA table_info(reports)").toArray().some(row=>row.name==="publication_target")) this.ctx.storage.sql.exec("ALTER TABLE reports ADD COLUMN publication_target TEXT");
+  }
+  async getReport(id: string): Promise<ReportRow | null> { this.reportPublicationTable(); return this.ctx.storage.sql.exec("SELECT * FROM reports WHERE id=?",id).toArray()[0] as unknown as ReportRow ?? null; }
   async listReports(filter: { status?: "open" | "resolved"; reporter?: string }): Promise<ReportRow[]> {
     const where: string[] = [];
     const args: string[] = [];
@@ -1394,6 +1412,27 @@ export class RepositoryController extends DurableObject<Env> {
     if (filter.reporter) { where.push("reporter = ?"); args.push(filter.reporter); }
     const direction = filter.status === "open" && !filter.reporter ? "ASC" : "DESC";
     return this.ctx.storage.sql.exec(`SELECT * FROM reports ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY at ${direction}, id ${direction} LIMIT 200`, ...args).toArray() as unknown as ReportRow[];
+  }
+  async listReportsPage(filter: { status?: "open" | "resolved"; reporter?: string; cursor?: string | null }): Promise<{ reports: ReportRow[]; nextCursor: string | null }> {
+    const where: string[] = [];
+    const args: string[] = [];
+    if (filter.status) { where.push("status = ?"); args.push(filter.status); }
+    if (filter.reporter) { where.push("reporter = ?"); args.push(filter.reporter); }
+    const ascending = filter.status === "open" && !filter.reporter;
+    if (filter.cursor) {
+      if (filter.cursor.length > 1000) throw new Error("Invalid report cursor");
+      let cursor: unknown;
+      try { cursor = JSON.parse(atob(filter.cursor)); } catch { throw new Error("Invalid report cursor"); }
+      if (!Array.isArray(cursor) || cursor.length !== 4 || typeof cursor[0] !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(cursor[0]) || !Number.isFinite(Date.parse(cursor[0])) || typeof cursor[1] !== "string" || !/^rpt_[a-zA-Z0-9-]{1,64}$/.test(cursor[1]) || cursor[2] !== (filter.status ?? "") || cursor[3] !== (filter.reporter ?? "")) throw new Error("Invalid report cursor");
+      const comparison = ascending ? ">" : "<";
+      where.push(`(at ${comparison} ? OR (at = ? AND id ${comparison} ?))`);
+      args.push(cursor[0], cursor[0], cursor[1]);
+    }
+    const direction = ascending ? "ASC" : "DESC";
+    const rows = this.ctx.storage.sql.exec(`SELECT * FROM reports ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY at ${direction}, id ${direction} LIMIT 101`, ...args).toArray() as unknown as ReportRow[];
+    const reports = rows.slice(0, 100);
+    const last = reports.at(-1);
+    return { reports: filter.reporter ? reports.map(row => ({ id: row.id, at: row.at, reporter: row.reporter, kind: row.kind, target: row.target, details: row.details, status: row.status, resolution: row.resolution, resolved_by: row.resolved_by, resolved_at: row.resolved_at })) : reports, nextCursor: rows.length > 100 && last ? btoa(JSON.stringify([last.at, last.id, filter.status ?? "", filter.reporter ?? ""])) : null };
   }
   async resolveReport(id: string, resolution: string, by: string): Promise<ReportRow | null> {
     if (!resolution.trim() || !by) throw new Error("Report resolution and operator identity required");
@@ -1448,16 +1487,30 @@ export class RepositoryController extends DurableObject<Env> {
     const row = this.ctx.storage.sql.exec<{ doc: string }>("SELECT doc FROM profile WHERE id = 1").toArray()[0];
     return row ? (JSON.parse(row.doc) as Profile) : { handle: "", displayName: "", bio: "", joinedAt: new Date().toISOString() };
   }
+  async repositoryModerationState(): Promise<PublicationModerationState> { return new PublicationModeration(this.ctx.storage).state("repository",this.load().projectId); }
+  async profileModerationState(ownerId: string): Promise<PublicationModerationState> { return new PublicationModeration(this.ctx.storage).state("profile",ownerId); }
+  async moderationHistory(kind: PublicationModerationKind, targetId: string): Promise<PublicationModerationDecision[]> { return new PublicationModeration(this.ctx.storage).history(kind,targetId); }
+  async moderateRepository(input: unknown, operatorAccountKey: string): Promise<PublicationModerationDecision> {
+    if (this.repositoryDeleting()) throw new Error("Repository deletion is in progress");
+    this.visibilityTable();
+    return new PublicationModeration(this.ctx.storage).moderate("repository",this.load().projectId,input,operatorAccountKey,()=>{this.ctx.storage.sql.exec("INSERT INTO repository_visibility VALUES(1,'private',1,'') ON CONFLICT(id) DO UPDATE SET version=version+1");});
+  }
+  async moderateProfile(ownerId: string, input: unknown, operatorAccountKey: string): Promise<PublicationModerationDecision> {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS profile_publication(id INTEGER PRIMARY KEY CHECK(id=1),visibility TEXT,version INTEGER,owner_id TEXT)");
+    return new PublicationModeration(this.ctx.storage).moderate("profile",ownerId,input,operatorAccountKey,()=>{this.ctx.storage.sql.exec("INSERT INTO profile_publication VALUES(1,'private',1,?) ON CONFLICT(id) DO UPDATE SET version=version+1",ownerId);});
+  }
   async publicProfileState(): Promise<PublicProfileState> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS profile_publication(id INTEGER PRIMARY KEY CHECK(id=1),visibility TEXT,version INTEGER,owner_id TEXT)");
     const row = this.ctx.storage.sql.exec<{visibility:"public"|"private";version:number;owner_id:string}>("SELECT visibility,version,owner_id FROM profile_publication WHERE id=1").toArray()[0];
-    return { profile: await this.getProfile(), visibility: row?.visibility ?? "private", version: row?.version ?? 0, ownerId: row?.owner_id ?? null };
+    return { profile: await this.getProfile(), visibility: row?.visibility ?? "private", version: row?.version ?? 0, ownerId: row?.owner_id ?? null, moderation: row?.owner_id ? new PublicationModeration(this.ctx.storage).state("profile",row.owner_id) : undefined };
   }
   async setPublicProfileVisibility(visibility: "public" | "private", confirmed: boolean, ownerId: string, expectedVersion?: number): Promise<void> {
+    if (visibility === "public" && (await this.profileModerationState(ownerId)).suppressed) throw new Error("Public profile publication is suppressed; see your moderation notice");
     if (!["public","private"].includes(visibility) || !ownerId || (visibility === "public" && confirmed !== true)) throw new Error("Explicit profile publication confirmation required");
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS profile_publication(id INTEGER PRIMARY KEY CHECK(id=1),visibility TEXT,version INTEGER,owner_id TEXT)");
     this.ctx.storage.transactionSync(() => {
       const version = this.ctx.storage.sql.exec<{version:number}>("SELECT version FROM profile_publication WHERE id=1").toArray()[0]?.version ?? 0;
+      if (visibility === "public" && new PublicationModeration(this.ctx.storage).state("profile",ownerId).suppressed) throw new Error("Public profile publication is suppressed");
       if (visibility === "public" && (!Number.isSafeInteger(expectedVersion) || expectedVersion !== version)) throw new Error("Profile version changed; refresh before publishing");
       const row = this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM profile WHERE id=1").toArray()[0];
       const profile = row ? JSON.parse(row.doc) as Profile : null;

@@ -1,3 +1,7 @@
+import { z } from "zod";
+import type { PublicationModerationState } from "./publication-moderation.js";
+import { publicationModerationInput } from "./publication-moderation.js";
+import type { ReportPublicationTarget } from "./durable-object.js";
 import {admitCredentialLookup} from "./lookup-admission.js";
 import { directoryQuerySchema, directoryUpdateSchema, projectPublicDirectory } from "./public-directory.js";
 import { recoverNativeCompute, claimNativeCompute, admitNativeCompute, NativeComputeAdmissionError } from "./native-compute.js";
@@ -48,6 +52,8 @@ import type { ExternalCheckPolicy } from "../core/external-checks.js";
 import { verifyServiceRead } from "./service-read-auth.js";
 import { publicProfileProjection, type PublicContribution } from "./public-profile.js";
 import { parsePublicBrowseRequest, readPublicRepository } from "./public-repositories.js";
+
+function ownerModerationNotice(state: PublicationModerationState | undefined) { return state ? {suppressed:state.suppressed,version:state.version,reason:state.reason,reportId:state.reportId,decidedAt:state.decidedAt} : undefined; }
 
 /** Service binding entrypoint: contributor Workers can only request signed build assets. */
 export class PreviewAssetBroker extends WorkerEntrypoint<Env> {
@@ -183,7 +189,7 @@ export default {
         if (!ip) return publicResponse({ error: "Public browsing unavailable" }, 503);
         const limited = await env.API_LIMITER.limit({ key: `public:${projectId}:${ip}` });
         if (!limited.success) return publicResponse({ error: "Too many requests" }, 429);
-        const community = await project.publicCommunity();
+        const community = await project.publicCommunity(true);
         const current = await project.publicGrant().catch(() => null);
         if (!current || current.version !== grant.version) return publicResponse({ error: "Published state changed; retry" }, 409);
         return publicResponse(community);
@@ -486,13 +492,40 @@ export default {
         const target = clean(b.target, 300);
         const details = clean(b.details, 5000);
         if (!target || details.length < 10) return text("Say what you are reporting (a repository, handle or domain) and describe what happened", 400);
-        const report = await globalOf(env).fileReport({ reporter: accountKey, kind: b.kind, target, details });
+        let publicationTarget: ReportPublicationTarget | undefined;
+        const profileReference = /^\/#\/profile\/([a-z0-9-]{1,39})$/.exec(target);
+        const repositoryReference = /^\/#\/(?:p|public)\/(p?[a-f0-9]{12})(?:\/|$)/.exec(target) ?? /^\/community#repo=(p?[a-f0-9]{12})(?:&|$)/.exec(target);
+        if (profileReference) {
+          const key = await globalOf(env).accountForHandle(profileReference[1]!);
+          if (key) { const saved = await accountOf(env,key).publicProfileState(); if (saved.ownerId && saved.profile.handle === profileReference[1]) publicationTarget = {kind:"profile",targetId:saved.ownerId,accountKey:key}; }
+        } else if (repositoryReference) {
+          const targetId=repositoryReference[1]!;
+          const saved=await projectOf(env,targetId).getState().catch(()=>null);
+          if (saved?.projectId===targetId) publicationTarget={kind:"repository",targetId};
+        }
+        const report = await globalOf(env).fileReport({ reporter: accountKey, kind: b.kind, target, details, publicationTarget });
         return json({ id: report.id, status: report.status, note: "Your report is saved for operator review. You can track its status under Account → Reports. The number of open reports and the age of the oldest one are public on /status." }, 201);
       }
-      if (path === "/reports" && method === "GET") return json(await globalOf(env).listReports({ reporter: accountKey }));
+      if (path === "/reports" && method === "GET") { if(url.searchParams.getAll("cursor").length>1)return text("Invalid report cursor",400); try { return json(await globalOf(env).listReportsPage({ reporter: accountKey, cursor: url.searchParams.get("cursor") })); } catch (error) { if (String(error).includes("Invalid report cursor")) return text("Invalid report cursor; reload the report list",400); throw error; } }
       const operators = (env.OPERATOR_ACCOUNTS ?? "").split(",").map((x) => x.trim()).filter(Boolean);
       if (path.startsWith("/operator/")) {
         if (auth.viaToken || !operators.includes(accountKey)) return text("Not found", 404);
+        const publicationRoute = /^\/operator\/reports\/(rpt_[a-z0-9-]+)\/publication$/.exec(path);
+        if (publicationRoute) {
+          const report = await globalOf(env).getReport(publicationRoute[1]!);
+          if (!report?.publication_target) return text("This report has no frozen publication target; file a report from its current profile or repository page",409);
+          const target = JSON.parse(report.publication_target) as ReportPublicationTarget;
+          const ledger = target.kind === "profile" ? accountOf(env,target.accountKey) : projectOf(env,target.targetId);
+          if (method === "GET") return json({target, state:target.kind === "profile" ? await ledger.profileModerationState(target.targetId) : await ledger.repositoryModerationState(), history:await ledger.moderationHistory(target.kind,target.targetId)});
+          if (method === "POST") {
+            const input=publicationModerationInput.extend({confirmedTarget:z.string()}).strict().safeParse(await body<unknown>());
+            if (!input.success || input.data.reportId !== report.id || input.data.confirmedTarget !== `${target.kind}:${target.targetId}`) return text("Confirm the exact frozen publication target and report reference",400);
+            const {confirmedTarget: _confirmation,...decision}=input.data;
+            try { return json(target.kind === "profile" ? await ledger.moderateProfile(target.targetId,decision,accountKey) : await ledger.moderateRepository(decision,accountKey)); }
+            catch(error) { return text(error instanceof Error ? error.message : "Publication decision failed",409); }
+          }
+          return text("Method not allowed",405);
+        }
         const previewRegistration = /^\/operator\/preview-origins\/([a-z0-9]{12,16})$/.exec(path);
         if (previewRegistration) {
           const repository = previewRegistration[1]!;
@@ -508,7 +541,7 @@ export default {
           if (method === "DELETE") return json({ registration: await registry.retirePreviewOrigin(repository, accountKey, url.origin) });
           return text("Method not allowed", 405);
         }
-        if (path === "/operator/reports" && method === "GET") return json(await globalOf(env).listReports({ status: url.searchParams.get("status") === "resolved" ? "resolved" : "open" }));
+        if (path === "/operator/reports" && method === "GET") { if(url.searchParams.getAll("cursor").length>1||url.searchParams.getAll("status").length>1)return text("Invalid report cursor",400); try { return json(await globalOf(env).listReportsPage({ status: url.searchParams.get("status") === "resolved" ? "resolved" : "open", cursor: url.searchParams.get("cursor") })); } catch (error) { if (String(error).includes("Invalid report cursor")) return text("Invalid report cursor; reload the report list",400); throw error; } }
         const resolveRoute = /^\/operator\/reports\/(rpt_[a-z0-9-]+)\/resolve$/.exec(path);
         if (resolveRoute && method === "POST") {
           const b = await body<{ resolution?: string; expectedStatus?: string }>();
@@ -528,7 +561,7 @@ export default {
       if (path === "/me" && method === "GET") return json({ operator: operators.includes(accountKey) });
 
       // ----- profile -----
-      if (path === "/profile" && method === "GET") { const publication = await account.publicProfileState(); return json({ ...publication.profile, visibility: publication.visibility, version: publication.version }); }
+      if (path === "/profile" && method === "GET") { const publication = await account.publicProfileState(); return json({ ...publication.profile, visibility: publication.visibility, version: publication.version, moderation: ownerModerationNotice(publication.moderation) }); }
       if (path === "/profile/visibility" && method === "PUT") {
         if (auth.viaToken) return text("Change profile publication from the web app", 403);
         const value = await body<{ visibility?: string; confirmed?: boolean; expectedVersion?: number }>();
@@ -665,7 +698,7 @@ export default {
         const canAdminister = !auth.viaToken || auth.tokenScope === "full";
         const isOwner = role === "owner" && canAdminister;
 
-        if (sub === "" && method === "GET") return json({ id: projectId, role, kind: state.kind ?? "demo", name: state.projectName, source: state.source ?? null, verification: state.verificationPolicy, protectedPaths: settings.protectedPaths, visibility: await project.repositoryVisibility() });
+        if (sub === "" && method === "GET") return json({ id: projectId, role, kind: state.kind ?? "demo", name: state.projectName, source: state.source ?? null, verification: state.verificationPolicy, protectedPaths: settings.protectedPaths, visibility: await project.repositoryVisibility(), ...(role === "owner" ? {moderation:ownerModerationNotice(await project.repositoryModerationState())} : {}) });
         if (sub === "/import-history" && method === "POST") {
           if (!isOwner) return text("Only the owner can inspect import history", 403);
           const job = await account.getImportJob(projectId);

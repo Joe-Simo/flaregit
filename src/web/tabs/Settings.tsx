@@ -20,7 +20,7 @@ const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3
 const okCls = "rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200";
 const errText = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback);
 
-interface Meta { id: string; role: "owner" | "member"; kind: string; name: string; source: string | null; verification: Record<string, unknown>; protectedPaths: string[]; visibility?: "private" | "public" }
+interface Meta { id: string; role: "owner" | "member"; kind: string; name: string; source: string | null; verification: Record<string, unknown>; protectedPaths: string[]; visibility?: "private" | "public"; moderation?: { suppressed: boolean; reason: string; reportId: string; version: number } }
 interface Member { user_id: string; role: string; label: string | null; added_at: string }
 type Busy = null | "save" | "invite" | "delete" | `remove:${string}`;
 
@@ -157,8 +157,9 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
         </CardContent>
       </Card>
 
-      {isOwner && <VisibilityCard key={meta.id} projectId={meta.id} visibility={meta.visibility ?? "private"} reload={reload} />}
-      {isOwner && <PublicCommunityCard key={`community:${meta.id}`} projectId={meta.id} isPublic={meta.visibility === "public"} />}
+      {isOwner && meta.moderation?.suppressed && <Card><CardHeader className="pb-2"><CardTitle className="text-sm">Public repository unavailable</CardTitle></CardHeader><CardContent className="space-y-2 text-sm"><p className="whitespace-pre-wrap break-words">{meta.moderation.reason}</p><p className="text-xs text-muted-foreground break-all">Report {meta.moderation.reportId}</p><p className="text-xs text-muted-foreground">Private Git, reviews, and collaborator access remain available.</p><a className="inline-block underline underline-offset-4" href={`/#/report?signin=1&target=${encodeURIComponent(`/#/public/${meta.id}`)}`}>Appeal this decision</a></CardContent></Card>}
+      {isOwner && <VisibilityCard key={meta.id} projectId={meta.id} visibility={meta.visibility ?? "private"} publicationBlocked={meta.moderation?.suppressed} reload={reload} />}
+      {isOwner && <PublicCommunityCard key={`community:${meta.id}`} projectId={meta.id} isPublic={meta.visibility === "public"} publicationBlocked={meta.moderation?.suppressed} />}
       {isOwner && <ConnectionsCard key={meta.id} projectId={meta.id} isOwner={isOwner} isCustom={meta.kind === "import" && isCommandPolicy(meta.verification)} />}
       {isOwner && <DeploymentCard key={`deployments:${meta.id}`} projectId={meta.id} />}
       <div id="deployment-deliveries"><WebhooksCard projectId={meta.id} isOwner={isOwner} /></div>

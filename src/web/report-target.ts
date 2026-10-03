@@ -1,6 +1,7 @@
 const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const repository = "p?[0-9a-f]{12}";
 const patterns = [
+  new RegExp(`^/#/public/${repository}$`),
   new RegExp(`^/community#repo=${repository}&topic=discussion_${uuid}&entry=discussion_${uuid}$`),
   new RegExp(`^/#/p/${repository}/discussions\\?topic=discussion_${uuid}&entry=discussion_${uuid}$`),
   new RegExp(`^/community#view=help&topic=forum_${uuid}&entry=forum_${uuid}$`),

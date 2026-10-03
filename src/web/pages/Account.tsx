@@ -9,7 +9,7 @@ import { timeAgo } from "../router";
 
 interface Token { id: string; label: string; created_at: string; last_used: string | null; scope: string; repo: string | null; expires_at: number | null }
 interface Billing { plan: "free" | "pro"; runsToday: number; runsPerDay: number }
-interface Profile { handle: string; displayName: string; bio: string; visibility: "private" | "public"; version: number }
+interface Profile { handle: string; displayName: string; bio: string; visibility: "private" | "public"; version: number; moderation?: { suppressed: boolean; reason: string; reportId: string; version: number } }
 const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm";
 const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive";
 const okCls = "rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200";
@@ -128,7 +128,7 @@ export function Account() {
           {!profile && !profileError && <p role="status" className="text-sm text-muted-foreground">Loading profile…</p>}
           {profile && (
             <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); void saveProfile(); }}>
-              {profile.visibility === "public" && <p className="text-xs text-muted-foreground">This profile is public. Saving changes updates the public name, handle and biography.</p>}
+              {profile.visibility === "public" && !profile.moderation?.suppressed && <p className="text-xs text-muted-foreground">This profile is public. Saving changes updates the public name, handle and biography.</p>}
               <label className="block text-xs text-muted-foreground">Handle<input className={field} disabled={busy !== null || visibilityUnknown} value={profile.handle} maxLength={39} onChange={(e) => setProfile({ ...profile, handle: e.target.value })} placeholder="ada" /></label>
               <label className="block text-xs text-muted-foreground">Display name<input className={field} disabled={busy !== null || visibilityUnknown} value={profile.displayName} maxLength={60} onChange={(e) => setProfile({ ...profile, displayName: e.target.value })} placeholder="Ada Lovelace" /></label>
               <label className="block text-xs text-muted-foreground">Bio<textarea className={field} disabled={busy !== null || visibilityUnknown} rows={2} value={profile.bio} maxLength={300} onChange={(e) => setProfile({ ...profile, bio: e.target.value })} /></label>
@@ -140,11 +140,13 @@ export function Account() {
           )}
           {profile && <div className="space-y-3 border-t border-border pt-4 mt-4">
             <h2 className="text-sm font-medium">Public profile</h2>
-            <p className="text-xs leading-6 text-muted-foreground">Currently {profile.visibility === "public" ? "public" : "private"}. Publishing exposes your handle, display name, biography, join date and accepted contributions from currently public repositories. Private repository activity and sign-in details are excluded.</p>
+            {profile.moderation?.suppressed && <div role="status" className="rounded-md border border-border p-3 space-y-2 text-sm"><p className="font-medium">Public profile unavailable</p><p className="whitespace-pre-wrap break-words">{profile.moderation.reason}</p><p className="text-xs text-muted-foreground break-all">Report {profile.moderation.reportId}</p><p className="text-xs text-muted-foreground">You can still edit your profile and use your private repositories.</p><a className="inline-block underline underline-offset-4" href={`/#/report?signin=1${savedProfile?.handle ? `&target=${encodeURIComponent(`/#/profile/${savedProfile.handle}`)}` : ""}`}>Appeal this decision</a></div>}
+            <p className="text-xs leading-6 text-muted-foreground">Publication setting: {profile.visibility === "public" ? "public" : "private"}. Publishing exposes your handle, display name, biography, join date and accepted contributions from currently public repositories. Private repository activity and sign-in details are excluded.</p>
             {profile.visibility === "private" && savedProfile && (profile.handle !== savedProfile.handle || profile.displayName !== savedProfile.displayName || profile.bio !== savedProfile.bio) && <p className="text-xs text-muted-foreground">Save your profile edits before publishing.</p>}
-            {profile.visibility === "private" && <label className="flex items-start gap-2 text-xs leading-5"><input type="checkbox" className="mt-1 accent-orange-600" checked={publishConfirmed} disabled={busy !== null} onChange={event => setPublishConfirmed(event.target.checked)} /><span>I confirm that these profile fields and public contribution records may be viewed by anyone.</span></label>}
+            {profile.visibility === "private" && <label className="flex items-start gap-2 text-xs leading-5"><input type="checkbox" className="mt-1 accent-orange-600" checked={publishConfirmed} disabled={busy !== null || profile.moderation?.suppressed} onChange={event => setPublishConfirmed(event.target.checked)} /><span>I confirm that these profile fields and public contribution records may be viewed by anyone.</span></label>}
             {visibilityNotice && <p role={visibilityNotice.ok ? "status" : "alert"} className={visibilityNotice.ok ? "text-xs text-muted-foreground" : "text-xs text-destructive"}>{visibilityNotice.text}</p>}
-            <div className="flex flex-wrap gap-3 items-center"><Button size="sm" variant="outline" disabled={busy !== null || visibilityUnknown || (profile.visibility === "private" && (!publishConfirmed || !savedProfile?.handle || profile.handle !== savedProfile.handle || profile.displayName !== savedProfile.displayName || profile.bio !== savedProfile.bio))} onClick={async () => {
+            <div className="flex flex-wrap gap-3 items-center"><Button size="sm" variant="outline" disabled={busy !== null || visibilityUnknown || (profile.visibility === "private" && (profile.moderation?.suppressed || !publishConfirmed || !savedProfile?.handle || profile.handle !== savedProfile.handle || profile.displayName !== savedProfile.displayName || profile.bio !== savedProfile.bio))} onClick={async () => {
+              if (profile.moderation?.suppressed && profile.visibility === "private") return;
               setBusy("visibility"); setVisibilityNotice(null);
               const visibility = profile.visibility === "public" ? "private" : "public";
               try {
@@ -154,7 +156,7 @@ export function Account() {
                 setVisibilityNotice({ ok: true, text: visibility === "public" ? "Public profile enabled." : "Public profile disabled." });
               } catch (failure) { setVisibilityUnknown(true); setVisibilityNotice({ ok: false, text: `${errText(failure, "Publication response unavailable")}. Publication state is not confirmed. Reload the saved profile before continuing.` }); }
               finally { setBusy(null); }
-            }}>{busy === "visibility" ? "Saving…" : profile.visibility === "public" ? "Make profile private" : "Publish profile"}</Button>{profile.visibility === "public" && <a className="text-xs underline underline-offset-4" href={`/#/profile/${encodeURIComponent(savedProfile?.handle ?? profile.handle)}`}>View public profile</a>}</div>
+            }}>{busy === "visibility" ? "Saving…" : profile.visibility === "public" ? "Make profile private" : "Publish profile"}</Button>{profile.visibility === "public" && !profile.moderation?.suppressed && <a className="text-xs underline underline-offset-4" href={`/#/profile/${encodeURIComponent(savedProfile?.handle ?? profile.handle)}`}>View public profile</a>}</div>
           </div>}
         </CardContent>
       </Card>
