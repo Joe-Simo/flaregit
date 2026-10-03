@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from "react";
-import { ClerkProvider, ClerkLoading, ClerkFailed, SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-react";
+import React, { useEffect, useLayoutEffect, useState } from "react";
+import { ClerkProvider, ClerkLoading, ClerkFailed, SignedIn, SignedOut, SignIn, UserButton, useAuth, useSession } from "@clerk/clerk-react";
 import { GitBranch, RefreshCw, Sun, ArrowUpRight } from "lucide-react";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { setTokenGetter } from "./api";
+import { bindApiSession } from "./api";
 import { Landing } from "./pages/Landing";
 import { AppearanceDialog, useTheme } from "./ThemeProvider";
 import { PublicRepo } from "./pages/PublicRepo";
@@ -22,12 +22,16 @@ function SignInReturn({ destination }: { destination: string | null }) {
   useEffect(() => { restoreReturn(destination); }, [destination]);
   return null;
 }
-function TokenBridge() {
-  const { getToken } = useAuth();
-  useEffect(() => {
-    setTokenGetter(() => getToken());
-  }, [getToken]);
-  return null;
+function SignedInWorkspace({ children }: { children: React.ReactNode }) {
+  const { userId } = useAuth();
+  const { session } = useSession();
+  const principal = userId && session ? `${userId}:${session.id}` : null;
+  if (!principal || !session) return <p role="status">Loading secure workspace…</p>;
+  return <SessionWorkspace key={principal} principal={principal} session={session}>{children}</SessionWorkspace>;
+}
+function SessionWorkspace({ principal, session, children }: { principal: string; session: NonNullable<ReturnType<typeof useSession>["session"]>; children: React.ReactNode }) {
+  useLayoutEffect(() => bindApiSession(principal, () => session.getToken()), [principal, session]);
+  return <>{children}</>;
 }
 
 function Entry({ children }: { children: React.ReactNode }) {
@@ -123,13 +127,14 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
         </Entry>}
       </SignedOut>
       <SignedIn>
+        <SignedInWorkspace>
         <SignInReturn destination={rememberedReturn()} />
-        <TokenBridge />
         <div className="fixed right-4 top-3 z-50">
           <UserButton><UserButton.MenuItems><UserButton.Action label="Appearance" labelIcon={<Sun className="h-4 w-4" aria-hidden />} onClick={() => setAppearanceOpen(true)} /></UserButton.MenuItems></UserButton>
         </div>
         <AppearanceDialog open={appearanceOpen} onOpenChange={setAppearanceOpen} />
         {children}
+        </SignedInWorkspace>
       </SignedIn>
     </ClerkProvider>
   );
