@@ -17,6 +17,7 @@ import {recoveryBundleKey,recoveryScopeId} from "./private-recovery.js";
 import {downloadPrivateRecovery} from "./private-recovery-download.js";
 import {admitCredentialLookup} from "./lookup-admission.js";
 import { directoryQuerySchema, directoryUpdateSchema, projectPublicDirectory } from "./public-directory.js";
+import { projectPublicCommunityActivity } from "./public-community-activity.js";
 import { recoverNativeCompute, claimNativeCompute, admitNativeCompute, NativeComputeAdmissionError } from "./native-compute.js";
 import { allocateArtifact } from "./storage-allocation.js";
 import { gitRemote, gitParentTokenHash } from "./git-gateway-handler.js";
@@ -289,16 +290,17 @@ export default {
       return json(result, result.kind === "rejected" ? 409 : 200);
     }
 
-    if (url.pathname === "/api/community/repositories" && request.method === "GET") {
+    if ((url.pathname === "/api/community/repositories" || url.pathname === "/api/community/activity") && request.method === "GET") {
       const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" };
       if (!(await env.API_LIMITER.limit({key:`directory:${request.headers.get("CF-Connecting-IP") ?? "unknown"}`})).success) return Response.json({error:"Too many requests"},{status:429,headers});
+      if (url.pathname.endsWith("/activity") && [...url.searchParams.keys()].some(key => url.searchParams.getAll(key).length !== 1)) return Response.json({error:"Invalid activity query"},{status:400,headers});
       const query = directoryQuerySchema.safeParse(Object.fromEntries(url.searchParams));
       if (!query.success) return Response.json({error:"Invalid directory query"},{status:400,headers});
       try {
         const page = await globalOf(env).directoryPage(query.data.cursor);
-        const projection = await projectPublicDirectory({rows:page.rows,query:query.data.q,repository:(id)=>projectOf(env,id)});
+        const projection = await (url.pathname.endsWith("/activity") ? projectPublicCommunityActivity : projectPublicDirectory)({rows:page.rows,query:query.data.q,repository:(id)=>projectOf(env,id)});
         return Response.json({...projection,nextCursor:page.nextCursor},{headers});
-      } catch { return Response.json({repositories:[],nextCursor:null,incomplete:true,checked:0},{status:503,headers}); }
+      } catch { return Response.json({...(url.pathname.endsWith("/activity") ? {items:[]} : {repositories:[]}),nextCursor:null,incomplete:true,checked:0},{status:503,headers}); }
     }
 
     if (request.method === "GET" && (url.pathname === "/api/community" || /^\/api\/community\/topics\/forum_[a-f0-9-]{36}$/.test(url.pathname))) {

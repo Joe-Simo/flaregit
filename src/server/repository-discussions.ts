@@ -28,6 +28,11 @@ export interface DiscussionTopic extends DiscussionEntry {
     replyCount: number;
 }
 export class RepositoryDiscussions {
+    activity(query: string, ids?: string[]) {
+      if (query.length > 200 || (ids && (ids.length > 3 || ids.some(id => !/^discussion_[a-f0-9-]{36}$/.test(id))))) throw new Error("Invalid activity slice");
+      const filter = ids ? `t.id IN (${ids.map(() => "?").join(",") || "NULL"})` : "instr(lower(json_extract(t.doc,'$.title') || ' ' || json_extract(t.doc,'$.body')),lower(?))>0";
+      return this.exec<{doc:string;reply_count:number}>(`SELECT t.doc,(SELECT COUNT(*) FROM repository_discussion_entries r WHERE r.topic_id=t.id AND r.id!=r.topic_id AND json_extract(r.doc,'$.removed')=0) AS reply_count FROM repository_discussion_entries t WHERE t.id=t.topic_id AND json_extract(t.doc,'$.removed')=0 AND ${filter} ORDER BY json_extract(t.doc,'$.createdAt') DESC,t.id DESC LIMIT 3`, ...(ids ?? [query])).toArray().map(row => ({...this.projection(row.doc), body:this.projection(row.doc).body.slice(0,500),replyCount:row.reply_count}));
+    }
     constructor(private storage: DurableObjectStorage, private readonly publicOnly = true) { this.exec("CREATE TABLE IF NOT EXISTS repository_discussion_entries(id TEXT PRIMARY KEY,topic_id TEXT NOT NULL,author_id TEXT NOT NULL,doc TEXT NOT NULL); CREATE TABLE IF NOT EXISTS repository_discussion_receipts(actor_id TEXT NOT NULL,event_key TEXT NOT NULL,payload TEXT NOT NULL,entry_id TEXT NOT NULL,PRIMARY KEY(actor_id,event_key)); CREATE INDEX IF NOT EXISTS repository_discussion_topic ON repository_discussion_entries(topic_id);"); }
     private exec<T extends Record<string,SqlStorageValue> = Record<string,SqlStorageValue>>(query:string,...bindings:SqlStorageValue[]):SqlStorageCursor<T>{return this.storage.sql.exec<T>(query.replaceAll("repository_discussion_",this.publicOnly?"repository_public_discussion_":"repository_private_discussion_"),...bindings);}
     private row(id: string) { return this.exec<{

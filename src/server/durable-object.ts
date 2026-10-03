@@ -26,7 +26,7 @@ import { isSafeSha } from "../core/sanitize.js";
 import {PrivateRecoveryOperations,PrivateRecoveryStorage,type PrivateRecoveryOperation,type PrivateRecoveryReceipt,type PrivateRecoveryTarget,recoveryScopeId} from "./private-recovery.js";
 import { previewOrigins, validPreviewRegistration } from "./preview-access.js";
 import { PublicDirectory, type DirectoryState, type DirectoryRegistration } from "./public-directory.js";
-import { RepositoryDiscussions } from "./repository-discussions.js";
+import { RepositoryDiscussions, type DiscussionTopic } from "./repository-discussions.js";
 import { ArtifactAllocationFence, type PendingArtifactAllocation } from "./allocation-fence.js";
 import { ArtifactStorageAdmission, type ArtifactKind, type StorageAdmissionPolicy, type StorageReservation } from "./storage-admission.js";
 import { CoreGitOperationLedger, configuredGitCap, type CoreGitBudget, type CoreGitAdmission } from "./core-git-budget.js";
@@ -317,6 +317,8 @@ export interface Ledger {
   listDeployments():Promise<DeploymentRecord[]>;
   requestDeployment(target:AcceptedDeploymentTarget,serviceId:string,environment:string,key:string,actorId:string):Promise<{kind:"created"|"duplicate";deployment:DeploymentRecord}>;
   discussionList(publicOnly:boolean,actor?:PublicCommunityActor):Promise<ReturnType<RepositoryDiscussions["list"]>>;
+  publicDiscussionActivity(query:string,ids?:string[]):Promise<DiscussionTopic[]>;
+  publicDiscussionActivitySnapshot(ids:string[]):Promise<{directory:DirectoryState;grant:PublicGrantMetadata|null;topics:DiscussionTopic[]}>;
   discussionTopic(id:string,publicOnly:boolean,actor?:PublicCommunityActor):Promise<ReturnType<RepositoryDiscussions["topic"]>>;
   discussionSettings(actor:PublicCommunityActor,input?:unknown):Promise<{enabled:boolean}>;
   discussionPermissions(actor:PublicCommunityActor,id:string,publicOnly:boolean,canAdminister?:boolean):Promise<ReturnType<RepositoryDiscussions["permissions"]>>;
@@ -988,6 +990,15 @@ export class RepositoryController extends DurableObject<Env> {
     return {enabled:this.ctx.storage.sql.exec<{enabled:number}>("SELECT enabled FROM repository_discussion_settings WHERE id=1").toArray()[0]?.enabled===1};
   }
   async discussionList(publicOnly:boolean,actor?:PublicCommunityActor){await this.assertDiscussionAccess(publicOnly,actor);return this.discussions(publicOnly).list();}
+  async publicDiscussionActivity(query:string,ids?:string[]){await this.assertDiscussionAccess(true);return this.discussions(true).activity(query,ids);}
+  async publicDiscussionActivitySnapshot(ids:string[]){
+    // All visibility, policy, moderation, listing and selected-content reads are
+    // synchronous within one DO invocation: no revocation window between RPCs.
+    const grant=this.publicGrantSnapshot();
+    const directory=new PublicDirectory(this.ctx.storage).state();
+    const topics=grant&&directory.enabled&&this.discussionEnabled(true)?this.discussions(true).activity("",ids):[];
+    return {directory,grant,topics};
+  }
   async discussionTopic(id:string,publicOnly:boolean,actor?:PublicCommunityActor){await this.assertDiscussionAccess(publicOnly,actor);return this.discussions(publicOnly).topic(id);}
   async discussionPermissions(actor:PublicCommunityActor,id:string,publicOnly:boolean,canAdminister=false){const owner=canAdminister&&await this.roleOf(actor.userId)==="owner";await this.assertDiscussionAccess(publicOnly,actor);return this.discussions(publicOnly).permissions(actor,id,owner);}
   async discussionMutate(actor:PublicCommunityActor,operation:"create"|"reply"|"edit"|"remove"|"control",input:unknown,id:string|undefined,publicOnly:boolean,canAdminister=false){
@@ -1216,6 +1227,9 @@ export class RepositoryController extends DurableObject<Env> {
     return row?.visibility === "public" ? "public" : "private";
   }
   async publicGrant(): Promise<PublicGrantMetadata | null> {
+    return this.publicGrantSnapshot();
+  }
+  private publicGrantSnapshot(): PublicGrantMetadata | null {
     if (this.repositoryDeleting()) return null;
     this.visibilityTable();
     const row = this.ctx.storage.sql.exec<{ visibility: string; version: number; confirmed_by: string }>("SELECT visibility,version,confirmed_by FROM repository_visibility WHERE id=1").toArray()[0];
