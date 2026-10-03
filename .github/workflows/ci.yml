@@ -31,4 +31,5 @@ jobs:
           docker run --rm --network none --entrypoint sh \
             -e FLAREGIT_BOUNDARY_PROOF_REQUIRED=1 \
             --mount type=bind,src="$PWD/tests/native-boundary-linux.test.ts",dst=/proof.ts,readonly \
-            flaregit-boundary-proof -c 'mkdir -p /opt/flaregit/tests && cp /proof.ts /opt/flaregit/tests/native-boundary-linux.test.ts && bun test /opt/flaregit/tests/native-boundary-linux.test.ts'
+            --mount type=bind,src="$PWD/tests/verification-diagnostics.test.ts",dst=/diagnostics-proof.ts,readonly \
+            flaregit-boundary-proof -c 'mkdir -p /opt/flaregit/tests && cp /proof.ts /opt/flaregit/tests/native-boundary-linux.test.ts && cp /diagnostics-proof.ts /opt/flaregit/tests/verification-diagnostics.test.ts && bun test /opt/flaregit/tests/native-boundary-linux.test.ts /opt/flaregit/tests/verification-diagnostics.test.ts'
