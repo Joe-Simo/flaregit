@@ -18,7 +18,15 @@ const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const denied=()=>new Error("Storage reconciliation unavailable");
 function validPlan(plan:StorageReconciliationPlan,scope:StorageReconciliationScope):boolean {
  if(plan.identity.projectId!==scope.projectId||plan.identity.incarnation!==scope.incarnation||!Number.isSafeInteger(plan.bytes)||plan.bytes<0||!Number.isSafeInteger(plan.unfinishedCount)||plan.unfinishedCount<0||typeof plan.currentWriter!=="boolean"||!Array.isArray(plan.keys)||plan.keys.length>1000||new Set(plan.keys).size!==plan.keys.length)return false;
- const prefix=plan.kind==="preview"?`builds/${scope.projectId}/`:plan.kind==="evidence"?`evidence/${scope.projectId}/${scope.incarnation}/`:plan.kind==="private-recovery"?`private-recovery/${scope.projectId}/${scope.incarnation}/`:null;
+ if(plan.kind==="preview"){
+  const legacy=`builds/${scope.projectId}/`,generation=`build-generations/${scope.projectId}/${scope.incarnation}/`;
+  if(plan.physicalKey.startsWith(generation)){
+   const segments=plan.physicalKey.slice(generation.length).split("/");
+   if(segments.length!==2||!/^[a-f0-9]{40}$/.test(segments[0]!)||!uuid.test(segments[1]!))return false;
+  }else if(!plan.physicalKey.startsWith(legacy)||!/^[a-f0-9]{40}$/.test(plan.physicalKey.slice(legacy.length)))return false;
+  return plan.keys.every(key=>key.startsWith(`${plan.physicalKey}/`)&&key.slice(plan.physicalKey.length+1).split("/").every(segment=>!!segment&&segment!=="."&&segment!=="..")&&!/[\\\x00-\x1f\x7f]/.test(key));
+ }
+ const prefix=plan.kind==="evidence"?`evidence/${scope.projectId}/${scope.incarnation}/`:plan.kind==="private-recovery"?`private-recovery/${scope.projectId}/${scope.incarnation}/`:null;
  return !!prefix&&plan.physicalKey.startsWith(prefix)&&plan.keys.every(key=>key===plan.physicalKey||(plan.kind==="private-recovery"&&key===`${plan.physicalKey}.json`)||key.startsWith(`${plan.physicalKey}/`));
 }
 async function snapshotToken(snapshot:StorageReconciliationSnapshot):Promise<string> {
@@ -48,10 +56,13 @@ export async function storageReconciliationReport(input:{snapshot:StorageReconci
   }
  }));
  const inventory: {kind:StorageReconciliationPlan["kind"];status:"empty"|"nonempty"|"incomplete"|"unknown"}[]=[];
- for(const [kind,prefix] of [["preview",`builds/${scope.projectId}/`],["evidence",`evidence/${scope.projectId}/${scope.incarnation}/`],["private-recovery",`private-recovery/${scope.projectId}/${scope.incarnation}/`]] as const){
+ for(const [kind,prefix] of [["preview",`builds/${scope.projectId}/`],["preview",`build-generations/${scope.projectId}/${scope.incarnation}/`],["evidence",`evidence/${scope.projectId}/${scope.incarnation}/`],["private-recovery",`private-recovery/${scope.projectId}/${scope.incarnation}/`]] as const){
   await authorize();let status:"empty"|"nonempty"|"incomplete"|"unknown"="unknown";
   try{const value=await callbacks.list({prefix,limit:1});status=value.objects.length?"nonempty":value.truncated?"incomplete":"empty";}catch{/* Provider failures are observations, never cleanup evidence. */}
-  await authorize();inventory.push({kind,status});
+  await authorize();
+  const previous=inventory.find(item=>item.kind===kind);
+  if(previous)previous.status=previous.status==="unknown"||status==="unknown"?"unknown":previous.status==="incomplete"||status==="incomplete"?"incomplete":previous.status==="nonempty"||status==="nonempty"?"nonempty":"empty";
+  else inventory.push({kind,status});
  }
  await authorize();
  const end=offset+page.length,pageComplete=observations.every(value=>value.status!=="unknown")&&inventory.every(value=>value.status!=="unknown"&&value.status!=="incomplete");

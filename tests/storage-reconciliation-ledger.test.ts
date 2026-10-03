@@ -50,3 +50,20 @@ test("oversized stored copy metadata is rejected before materializing plan bodie
   expect(f.queries.some(query=>query.includes("SELECT rowid,doc"))).toBe(false);
  }finally{f.db.close();}
 });
+
+test("generation compute observations are scoped through recorded copy identity",()=>{
+ const f=fixture();
+ try{
+  f.db.exec("CREATE TABLE preview_copy_plans(physical_key TEXT PRIMARY KEY,project_id TEXT,incarnation TEXT,doc TEXT); CREATE TABLE native_compute(key TEXT,active INTEGER)");
+  const generation=crypto.randomUUID(),physicalKey=`build-generations/${projectId}/${incarnation}/${"a".repeat(40)}/${generation}`;
+  const plan={identity:{projectId,incarnation,generation},physicalKey,kind:"preview",keys:[`${physicalKey}/index.html`],bytes:1};
+  f.db.query("INSERT INTO preview_copy_plans VALUES(?,?,?,?)").run(physicalKey,projectId,incarnation,JSON.stringify(plan));
+  f.db.query("INSERT INTO native_compute VALUES(?,1)").run(`build-generation-${generation}`);
+  f.db.query("INSERT INTO native_compute VALUES(?,1)").run(`build-generation-${crypto.randomUUID()}`);
+  const before=copyReportPage(f.storage,projectId,incarnation);
+  expect(before.native.storedActive).toBe(1);expect(before.complete).toBe(true);
+  f.db.query("UPDATE native_compute SET active=0 WHERE key=?").run(`build-generation-${generation}`);
+  const after=copyReportPage(f.storage,projectId,incarnation);
+  expect(after.native.storedActive).toBe(0);expect(after.epoch).not.toBe(before.epoch);
+ }finally{f.db.close();}
+});
