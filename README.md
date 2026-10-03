@@ -50,6 +50,19 @@ Original contributor forks remain available after acceptance and cancellation, i
 
 Anyone signed in can file a report (footer → Report abuse). Reports go to a human queue at `#/operator` for the accounts listed in `OPERATOR_ACCOUNTS` (wrangler.jsonc); each is closed only with a written resolution that the reporter sees. The number of open reports and the age of the oldest are public on `/status`.
 
+### Private Git recovery
+
+In repository Settings, an owner can prepare a Git bundle from a recorded accepted commit, including historical accepted commits. Preparation uses funded native compute. A prepared bundle preserves that commit's full Git ancestry and original attribution; private candidate objects and unrelated refs are excluded. Current authorized members can download cached bundles even when the Git-operation budget is exhausted, without allocating a VM. Account, membership, token, and repository lifecycle authority are rechecked during delivery.
+
+The prototype reserves at most two cached bundles per account and eight globally, with a 512 MiB maximum per bundle. The browser downloads bundles up to 16 MiB. Larger bundles use the streaming CLI, authenticated with your existing personal API token configuration or `FLAREGIT_TOKEN` in your local environment:
+
+```bash
+bun cli/flaregit.ts recovery download <repository-id> <snapshot-id> --output repository.bundle
+git clone --branch main repository.bundle restored-repository
+```
+
+The CLI verifies the complete byte count and SHA-256 digest before publishing the output file, and refuses to overwrite an existing destination. An interrupted preparation resumes with its saved identity. Owners can permanently remove a cached copy with exact confirmation; this preserves repository history. Unknown workflow, multipart-upload, or deletion outcomes retain their storage reservation until reconciled.
+
 ## Self-host on your Cloudflare account
 
 Requirements:
