@@ -20,7 +20,7 @@ test("native repository reads validate, fund and reauthorize before releasing by
   try{
     const {token}=await(await call("/fixture/bootstrap")).json() as {token:string};
     const outsider=await session("outsider"),member=await session("member"),route="/api/p/p123456789abc";
-    const counts=async()=>await(await call("/fixture/counts")).json() as {gets:number;reads:number;refs:string[];reservations:Array<{account_key:string;category:string}>};
+    const counts=async()=>await(await call("/fixture/counts")).json() as {gets:number;reads:number;refs:string[];repoNames:string[];commitReads:string[];reservations:Array<{account_key:string;category:string}>};
     const config=async(query="")=>{const response=await call(`/fixture/config?${query}`);if(!response.ok)throw new Error(await response.text());};
     await config();expect((await call(`${route}/commits`)).status).toBe(401);expect((await call(`${route}/commits`,"GET",undefined,outsider)).status).toBe(404);expect((await counts()).gets).toBe(0);
     for(const query of ["limit=NaN","limit=0","limit=2&limit=3","offset=-1","unknown=1"]){
@@ -40,6 +40,15 @@ test("native repository reads validate, fund and reauthorize before releasing by
     await config("race=visibility");const hidden=await call("/api/public/p123456789abc/file?path=readme.md");expect([409,503]).toContain(hidden.status);expect(await hidden.text()).not.toContain("synthetic private contents");
     await config("race=head");const changed=await call("/api/public/p123456789abc/file?path=readme.md");expect([409,503]).toContain(changed.status);expect(await changed.text()).not.toContain("synthetic private contents");
     await config("mode=expiry");const expiringRead=await new SignJWT({azp:"https://fixture.example"}).setProtectedHeader({alg:"RS256",kid:jwk.kid}).setIssuer(issuer.url.origin).setSubject("member").setIssuedAt().setExpirationTime(Math.floor(Date.now()/1000)+2).sign(pair.privateKey);const expiredRead=await call(`${route}/blob?path=readme.md`,"GET",undefined,expiringRead);expect(expiredRead.status).toBe(503);expect(await expiredRead.text()).not.toContain("synthetic private contents");
+    const frozenRoute=`${route}/diff?candidate=candidate-frozen&input=frozen`;
+    await config("mode=frozen");const frozen=await call(frozenRoute,"GET",undefined,token);expect(frozen.status).toBe(200);expect(await frozen.json()).toMatchObject({repo:"task:frozen",base:"a".repeat(40),head:{hash:"e".repeat(40)},input:{taskId:"frozen",commit:"e".repeat(40),baseSource:"recorded-contribution-base"}});expect((await counts()).repoNames).toEqual(["synthetic-retained-input"]);expect((await counts()).commitReads).toEqual(["e".repeat(40),"a".repeat(40)]);
+    await config("mode=frozen-old-context");const oldContext=await call(frozenRoute,"GET",undefined,token);expect(oldContext.status).toBe(503);expect(await oldContext.text()).toContain("no workspace read was started");expect((await counts()).gets).toBe(0);expect((await counts()).commitReads).toEqual([]);
+    await config("mode=frozen-legacy");const parentBase=await call(frozenRoute,"GET",undefined,token);expect(parentBase.status).toBe(200);expect(await parentBase.json()).toMatchObject({base:"7".repeat(40),input:{baseSource:"commit-parent"}});
+    for(const query of ["candidate=unknown&input=frozen","candidate=candidate-frozen&input=working","candidate=candidate-frozen&input=missing"]){await config("mode=frozen");expect((await call(`${route}/diff?${query}`,"GET",undefined,token)).status).toBe(404);expect((await counts()).gets).toBe(0);}
+    await config("mode=frozen");expect((await call(`${route}/diff?commit=${"e".repeat(40)}&input=frozen`,"GET",undefined,token)).status).toBe(400);expect((await counts()).gets).toBe(0);
+    await config("mode=frozen&funded=false");expect((await call(frozenRoute,"GET",undefined,token)).status).toBe(429);expect((await counts()).gets).toBe(0);
+    for(const race of ["input-map","input-base"]){await config(`mode=frozen&race=${race}`);const changed=await call(frozenRoute,"GET",undefined,token);expect(changed.status).toBe(503);expect(await changed.text()).not.toContain("readme.md");}
+    await config("mode=frozen-missing");const missingInput=await call(frozenRoute,"GET",undefined,token);expect(missingInput.status).toBe(503);expect(await missingInput.text()).toContain("No newer checkpoint was substituted");expect((await counts()).commitReads).toEqual(["e".repeat(40)]);
     const savedTask=async()=>await(await call("/fixture/task")).json() as {currentCommit:string;status:string;checkpoints:unknown[]};
     const original=await savedTask();
     for(const [query,status] of [["mode=ready5000&funded=false",429],["mode=unavailable",503],["mode=ready-base-unavailable",503],["mode=ready5001",413],["mode=ready5000&race=membership",503]] as const){await config(query);const failed=await call(`${route}/tasks/working/ready`,"POST",{},member);expect(failed.status).toBe(status);expect(await savedTask()).toEqual(original);}

@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiJson } from "../api";
 import { timeAgo } from "../router";
+import { useVisiblePolling } from "../use-visible-polling";
 
 type RunStatus = "ok" | "diverged" | "auth_failed" | "error" | "pending";
 interface MirrorRun { id: string; commit: string; status: RunStatus; detail: string; at: string }
@@ -13,7 +14,7 @@ type Busy = null | "save" | "toggle" | "remove" | "retry";
 
 const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive";
-const okCls = "rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200";
+const okCls = "rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-200";
 const errText = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback);
 const LABEL: Record<RunStatus, string> = { ok: "Mirrored", diverged: "GitHub diverged", auth_failed: "Token rejected", error: "Failed", pending: "Queued" };
 const VARIANT: Record<RunStatus, "success" | "warning" | "destructive" | "secondary"> = { ok: "success", diverged: "warning", auth_failed: "destructive", error: "destructive", pending: "secondary" };
@@ -27,42 +28,49 @@ export function MirrorCard({ projectId, isOwner }: { projectId: string; isOwner:
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<Busy>(null);
 
-  const load = useCallback(async () => {
-    try {
-      setInfo(await apiJson<MirrorInfo>(`/p/${projectId}/mirror`));
-      setLoadError(null);
-    } catch (e) {
-      setLoadError(errText(e, "Could not load mirror status"));
-    }
-  }, [projectId]);
+  const generation = useRef(0);
+  const mutationInFlight = useRef(false);
+  const [lastLoadedAt, setLastLoadedAt] = useState<string | null>(null);
   useEffect(() => {
-    void load();
-    const t = setInterval(() => void load(), 10000);
-    return () => clearInterval(t);
-  }, [load]);
+    generation.current++;
+    mutationInFlight.current = false;
+    setInfo(null); setLoadError(null); setLastLoadedAt(null); setTarget(""); setToken(""); setError(null); setNotice(null); setBusy(null);
+    return () => { generation.current++; };
+  }, [projectId]);
+  const read = useCallback((signal: AbortSignal) => apiJson<MirrorInfo>(`/p/${projectId}/mirror`, { signal }), [projectId]);
+  const refresh = useVisiblePolling({
+    scope: projectId, intervalMs: 10000, read,
+    onValue: (value) => { setInfo(value); setLoadError(null); setLastLoadedAt(new Date().toISOString()); },
+    onError: (e) => setLoadError(errText(e, "Could not load mirror status")),
+  });
 
-  const guard = async (label: Exclude<Busy, null>, done: string, fn: () => Promise<void>) => {
+  const guard = async (label: Exclude<Busy, null>, done: string, fn: (current: number) => Promise<void>) => {
+    if (mutationInFlight.current) return;
+    mutationInFlight.current = true;
+    const current = generation.current;
     setBusy(label);
     setError(null);
     setNotice(null);
     try {
-      await fn();
+      await fn(current);
+      if (current !== generation.current) return;
       setNotice(done);
-      await load();
+      await refresh();
     } catch (e) {
-      setError(errText(e, "Something went wrong"));
+      if (current === generation.current) setError(errText(e, "Something went wrong"));
     } finally {
-      setBusy(null);
+      if (current === generation.current) { mutationInFlight.current = false; setBusy(null); }
     }
   };
 
-  const save = () => guard("save", "Mirror settings saved.", async () => {
+  const save = () => guard("save", "Mirror settings saved.", async (current) => {
     await apiJson(`/p/${projectId}/mirror`, { method: "PUT", json: { target: target || info?.target, token: token || undefined, enabled: info?.target ? info.enabled : true } });
+    if (current !== generation.current) return;
     setToken("");
     setTarget("");
   });
   const toggle = () => guard("toggle", info?.enabled ? "Mirror paused." : "Mirror resumed.", async () => { await apiJson(`/p/${projectId}/mirror`, { method: "PUT", json: { enabled: !info?.enabled } }); });
-  const remove = () => guard("remove", "Mirror removed.", async () => { await apiJson(`/p/${projectId}/mirror`, { method: "DELETE" }); setToken(""); setTarget(""); });
+  const remove = () => guard("remove", "Mirror removed.", async (current) => { await apiJson(`/p/${projectId}/mirror`, { method: "DELETE" }); if (current !== generation.current) return; setToken(""); setTarget(""); });
   const retry = () => guard("retry", "Mirror run requested. Check the delivery log for the result; accepted repository history is unchanged.", async () => { await apiJson(`/p/${projectId}/mirror/run`, { method: "POST" }); });
 
   const last = info?.runs[0];
@@ -83,9 +91,10 @@ export function MirrorCard({ projectId, isOwner }: { projectId: string; isOwner:
         {loadError && (
           <div role="alert" className={`${alertCls} flex flex-wrap items-center justify-between gap-2`}>
             <span>{loadError}{info ? ". Showing the last loaded mirror state." : ""}</span>
-            <Button size="sm" variant="outline" onClick={() => void load()}>Retry</Button>
           </div>
         )}
+        {lastLoadedAt && <p className="text-xs text-muted-foreground">Last loaded {timeAgo(lastLoadedAt)}</p>}
+        <Button size="sm" variant="ghost" onClick={() => void refresh()}>{loadError ? "Retry refresh" : "Refresh status"}</Button>
         {!info && !loadError && <p role="status" className="text-muted-foreground">Loading mirror status…</p>}
         {info && !info.target && <p className="text-muted-foreground">No mirror configured.</p>}
         {info?.target && (

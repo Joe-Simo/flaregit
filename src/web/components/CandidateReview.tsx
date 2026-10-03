@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Check, Eye, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { apiJson } from "../api";
+import { useVisiblePolling } from "../use-visible-polling";
 import { ExternalCheckRows, type ExternalCheckDetail } from "./ExternalCheckRows";
 import { VERIFIER_IDENTITIES } from "@/core/verification-identities";
 import { externalCheckGate, type ExternalCheckState } from "@/core/external-checks";
@@ -17,7 +18,7 @@ export function CandidatePurpose({ projectId, candidate, tasks }: { projectId: s
       <ul className="mt-2 divide-y divide-border">{candidate.participatingTaskIds.map((id) => {
         const task = tasks?.[id]; const commit = candidate.participatingCommits[id];
         return <li key={id} className="py-2 space-y-1">
-          <a className="font-medium text-primary underline-offset-4 hover:underline break-words" href={`#/p/${projectId}/review?${commit ? `commit=${encodeURIComponent(commit)}` : `task=${encodeURIComponent(id)}`}`}>{task?.goal || id}</a>
+          <a className="font-medium text-primary underline-offset-4 hover:underline break-words" href={`#/p/${projectId}/review?${commit ? `candidate=${encodeURIComponent(candidate.id)}&input=${encodeURIComponent(id)}` : `task=${encodeURIComponent(id)}`}`}>{task?.goal || id}</a>
           <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground"><span>{id}</span>{commit && <code title={commit}>{commit.slice(0, 7)}</code>}{task?.contributor && <span>{task.contributor.name} · {task.contributor.type}</span>}{task?.issue && <a className="text-primary hover:underline" href={`#/p/${projectId}/issues?n=${task.issue}`}>Issue #{task.issue}</a>}{task?.dependsOn && <a className="text-primary hover:underline" href={`#/p/${projectId}/review?task=${encodeURIComponent(task.dependsOn)}`}>Builds on {task.dependsOn}</a>}</div>
           {task && commit && task.currentCommit !== commit && <p className="text-xs text-muted-foreground">This contribution has advanced. The link opens its candidate input commit.</p>}
         </li>;
@@ -39,8 +40,9 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
   const total = evidence?.testResults.reduce((n, s) => n + s.passedCount + s.failedCount, 0) ?? 0;
 
   const scope = `${projectId}:${candidate.id}:${candidate.candidateCommit ?? ""}`;
+  const checkScope = `${scope}:${isOwner ? "owner" : "member"}`;
   const decisionGeneration = useRef(0);
-  useEffect(() => { decisionGeneration.current++; setBusy(null); setError(null); return () => { decisionGeneration.current++; }; }, [scope]);
+  useEffect(() => { decisionGeneration.current++; setBusy(null); setError(null); return () => { decisionGeneration.current++; }; }, [scope, isOwner]);
   const [loadedChecks, setLoadedChecks] = useState<{ scope: string; checks: ExternalCheckState | null; reports: ExternalCheckDetail[] } | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
   const [names, setNames] = useState<Record<string, string>>({});
@@ -49,35 +51,34 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
   const retryInFlight = useRef(false);
   const [retryingCheck, setRetryingCheck] = useState(false);
   const [retryingRequired, setRetryingRequired] = useState(false);
+  const refresh = useVisiblePolling({
+    scope: checkScope,
+    intervalMs: 8000,
+    maxBackoffMs: 60_000,
+    enabled: !retryingCheck,
+    read: (signal) => apiJson<{ checks: ExternalCheckState | null; reports: ExternalCheckDetail[] }>(`/p/${projectId}/candidates/${candidate.id}/checks`, { signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]) }),
+    onValue: (response) => {
+      if (retryInFlight.current) return;
+      setLoadedChecks({ scope: checkScope, checks: response.checks, reports: response.reports ?? [] }); setCheckError(null);
+    },
+    onError: (cause) => { if (!retryInFlight.current) setCheckError(cause instanceof Error ? cause.message : "Could not load connected checks"); },
+  });
   const refreshChecks = async () => {
     if (retryInFlight.current) return;
-    const sequence = ++requestSequence.current;
+    const generation = decisionGeneration.current;
     setChecking(true);
-    try {
-      const response = await apiJson<{ checks: ExternalCheckState | null; reports: ExternalCheckDetail[] }>(`/p/${projectId}/candidates/${candidate.id}/checks`);
-      if (sequence !== requestSequence.current) return;
-      setLoadedChecks({ scope, checks: response.checks, reports: response.reports ?? [] }); setCheckError(null);
-    } catch (cause) {
-      if (sequence === requestSequence.current) setCheckError(cause instanceof Error ? cause.message : "Could not load connected checks");
-    } finally { if (sequence === requestSequence.current) setChecking(false); }
+    try { await refresh(); }
+    finally { if (generation === decisionGeneration.current) setChecking(false); }
   };
   useEffect(() => {
     let active = true;
-    setLoadedChecks(null); setCheckError(null); setNames({}); retryInFlight.current = false; setRetryingCheck(false); setRetryingRequired(false); setRetryingRequired(false);
-    const check = async () => {
-      if (retryInFlight.current) return;
-      const sequence = ++requestSequence.current;
-      try {
-        const response = await apiJson<{ checks: ExternalCheckState | null; reports: ExternalCheckDetail[] }>(`/p/${projectId}/candidates/${candidate.id}/checks`);
-        if (active && sequence === requestSequence.current) { setLoadedChecks({ scope, checks: response.checks, reports: response.reports ?? [] }); setCheckError(null); }
-      } catch (cause) { if (active && sequence === requestSequence.current) setCheckError(cause instanceof Error ? cause.message : "Could not load connected checks"); }
-    };
-    void check();
-    if (isOwner) void apiJson<{ connections: Array<{ id: string; name: string }> }>(`/p/${projectId}/connections`).then((response) => { if (active) setNames(Object.fromEntries(response.connections.map((connection) => [connection.id, connection.name]))); }).catch(() => undefined);
-    const timer = setInterval(() => void check(), 8000);
-    return () => { active = false; requestSequence.current++; clearInterval(timer); };
-  }, [projectId, candidate.id, candidate.candidateCommit, isOwner, scope]);
-  const checksKnown = loadedChecks?.scope === scope;
+    const controller = new AbortController();
+    requestSequence.current++;
+    setLoadedChecks(null); setCheckError(null); setNames({}); setChecking(false); retryInFlight.current = false; setRetryingCheck(false); setRetryingRequired(false);
+    if (isOwner) void apiJson<{ connections: Array<{ id: string; name: string }> }>(`/p/${projectId}/connections`, { signal: controller.signal }).then((response) => { if (active) setNames(Object.fromEntries(response.connections.map((connection) => [connection.id, connection.name]))); }).catch(() => undefined);
+    return () => { active = false; controller.abort(); requestSequence.current++; };
+  }, [projectId, isOwner, scope]);
+  const checksKnown = loadedChecks?.scope === checkScope;
   const checks = checksKnown ? loadedChecks.checks : externalChecks;
   const identityMismatch = checks && (checks.frozen.repositoryId !== projectId || checks.frozen.candidateId !== candidate.id || checks.frozen.commit !== candidate.candidateCommit || (candidate.frozenExternalChecksPolicy && (checks.frozen.policy.version !== candidate.frozenExternalChecksPolicy.version || checks.frozen.policy.mode !== candidate.frozenExternalChecksPolicy.mode)) || (evidence && (checks.frozen.commit !== evidence.candidateCommit || checks.frozen.tree !== evidence.candidateTree)));
   const declaredRequiredChecks = candidate.frozenExternalChecksPolicy?.checks.some((check) => check.required) ?? false;
@@ -89,15 +90,19 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
     try {
       if (onRetryExternalCheck) { await onRetryExternalCheck(checkId); if (sequence === requestSequence.current) setLoadedChecks(null); return; }
       const response = await apiJson<{ checks: ExternalCheckState; reports?: ExternalCheckDetail[] }>(`/p/${projectId}/candidates/${candidate.id}/checks`, { method: "POST", json: { checkId } });
-      if (sequence === requestSequence.current) { setLoadedChecks({ scope, checks: response.checks, reports: response.reports ?? [] }); setCheckError(null); }
+      if (sequence === requestSequence.current) { setLoadedChecks({ scope: checkScope, checks: response.checks, reports: response.reports ?? [] }); setCheckError(null); }
+    } catch (cause) {
+      if (sequence === requestSequence.current) setCheckError(cause instanceof Error ? cause.message : "Check retry was not confirmed; refresh its status");
+      throw cause;
     } finally { if (sequence === requestSequence.current) { retryInFlight.current = false; setRetryingCheck(false); setRetryingRequired(false); } }
   } : undefined;
   const connectedRows = <>
-    {checks && <ExternalCheckRows key={`${scope}:${checks.frozen.commit}:${checks.frozen.policy.version}`} externalChecks={checks} reports={checksKnown ? loadedChecks.reports : []} providerNames={providerNames ?? names} onRetryExternalCheck={retryCheck} />}
+    {checks && <ExternalCheckRows key={`${scope}:${checks.frozen.commit}:${checks.frozen.policy.version}`} externalChecks={checks} reports={checksKnown ? loadedChecks.reports : []} providerNames={providerNames ?? (isOwner ? names : {})} onRetryExternalCheck={retryCheck} />}
     {(!checksKnown || checkError) && <div className="text-xs text-muted-foreground flex flex-wrap gap-2 items-center"><span role={checkError ? "alert" : "status"}>{checkError ? declaredRequiredChecks ? `Required check state unavailable: ${checkError}. Acceptance is paused; review remains available.` : `Required connected checks: none. Optional reports are unavailable: ${checkError}.` : declaredRequiredChecks ? "Reading required connected check evidence…" : "Required connected checks: none. Reading optional reports…"}</span>{checkError && <Button size="sm" variant="outline" disabled={checking || retryingCheck} onClick={() => void refreshChecks()}>{checking ? "Checking…" : "Retry check status"}</Button>}</div>}
   </>;
 
   const decide = async (approved: boolean) => {
+    if (!isOwner || busy !== null || !candidate.candidateCommit || (approved && acceptanceBlocked)) return;
     const generation = decisionGeneration.current;
     setBusy(approved ? "approve" : "reject");
     setError(null);
@@ -119,7 +124,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
         {connectedRows}
         {identityMismatch && <p role="alert" className="text-destructive">Connected check evidence belongs to a different candidate or tree. Reload before accepting.</p>}
         {error && <p role="alert" className="text-destructive">{error}</p>}
-        <Button size="sm" variant="outline" disabled={busy !== null || acceptanceBlocked} onClick={() => decide(true)}>{busy ? "Resending…" : "Resend approval"}</Button>
+        <Button size="sm" variant="outline" disabled={!isOwner || busy !== null || acceptanceBlocked} onClick={() => decide(true)}>{busy ? "Resending…" : "Resend approval"}</Button>
       </section>
     );
   }
@@ -152,8 +157,8 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       <div className="flex flex-wrap gap-2">
         {showOpen && <Button size="sm" variant="outline" onClick={() => navigate(`/p/${projectId}/review?candidate=${candidate.id}`)}><Eye className="h-3.5 w-3.5 mr-1.5" /> Read the diff</Button>}
-        <Button size="sm" variant="orange" disabled={busy !== null || acceptanceBlocked} onClick={() => decide(true)}><Check className="h-3.5 w-3.5 mr-1.5" /> {busy === "approve" ? "Accepting…" : "Accept into history"}</Button>
-        <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => decide(false)}><X className="h-3.5 w-3.5 mr-1.5" /> {busy === "reject" ? "Rejecting…" : "Reject"}</Button>
+        <Button size="sm" variant="orange" disabled={!isOwner || busy !== null || acceptanceBlocked} onClick={() => decide(true)}><Check className="h-3.5 w-3.5 mr-1.5" /> {busy === "approve" ? "Accepting…" : "Accept into history"}</Button>
+        <Button size="sm" variant="outline" disabled={!isOwner || busy !== null || !candidate.candidateCommit} onClick={() => decide(false)}><X className="h-3.5 w-3.5 mr-1.5" /> {busy === "reject" ? "Rejecting…" : "Reject"}</Button>
       </div>
     </section>
   );
