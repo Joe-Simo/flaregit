@@ -7,7 +7,7 @@ import { Dialog, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui
 import { Input } from "@/components/ui/input";
 import { apiFetch, apiJson } from "../api";
 
-interface Snapshot { id: string; commit: string; tree: string | null; cacheState?: "deleting" | "deleted"; canRetry?: boolean; status: "pending" | "ready" | "failed"; createdAt: string; error?: string; size?: number }
+interface Snapshot { cleanupAdvice?: {recoveryAction:"retry"|"provider-reconciliation";detail:string}|null; id: string; commit: string; tree: string | null; cacheState?: "deleting" | "deleted"; canRetry?: boolean; status: "pending" | "ready" | "failed"; createdAt: string; error?: string; size?: number }
 interface Target { journalId: string; commit: string; tree: string | null; acceptedAt: string }
 interface RecoveryInfo { snapshots: Snapshot[]; target: { commit: string; tree: string | null } | null; targets?: Target[] }
 interface Preparation { commit: string; expectedTree: string | null; idempotencyKey: string }
@@ -151,13 +151,13 @@ function RecoveryPanel({ projectId, isOwner }: { projectId: string; isOwner: boo
       <p className="break-all text-xs">Commit <code>{snapshot.commit}</code><br /><span className="text-muted-foreground">Tree <code>{snapshot.tree}</code></span></p>
       {!snapshot.cacheState && snapshot.status === "pending" && <p className="text-xs text-muted-foreground">Preparation is pending. Refresh status to check progress.{isOwner && snapshot.canRetry === true && " Resume reconciles the saved request using the same identity."}</p>}
       {isOwner && !snapshot.cacheState && snapshot.status === "pending" && snapshot.canRetry === true && <Button size="sm" variant="outline" disabled={busy !== null || draft !== null} onClick={() => void prepare(snapshot)}>Resume preparation</Button>}
-      {snapshot.cacheState && <p className="text-xs text-muted-foreground">{snapshot.cacheState === "deleted" ? "Cached bundle removed. Repository history is preserved." : "Cache cleanup is pending. Repository history is preserved; refresh or retry removal."}</p>}
+      {snapshot.cacheState && <p className="text-xs text-muted-foreground">{snapshot.cacheState === "deleted" ? "Cached bundle removed. Repository history is preserved." : snapshot.cleanupAdvice?.detail ?? "Cache cleanup is pending. Repository history is preserved; refresh or retry removal."}</p>}
       {snapshot.size !== undefined && <p className="text-xs text-muted-foreground">{snapshot.size.toLocaleString()} bytes</p>}
       {isOwner && (snapshot.status === "failed" || snapshot.cacheState === "deleted") && snapshot.cacheState !== "deleting" && <Button size="sm" variant="outline" disabled={busy !== null || draft !== null} onClick={() => void prepare(snapshot)}>{snapshot.cacheState === "deleted" ? "Prepare this commit again" : snapshot.canRetry === true ? "Retry this preparation" : "Prepare this commit"}</Button>}
       {snapshot.error && <p className="break-words text-xs text-destructive">{snapshot.error}</p>}
       {snapshot.status === "ready" && !snapshot.cacheState && browserDownloadable(snapshot) && <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void download(snapshot)}>{busy === snapshot.id ? "Downloading…" : "Download Git bundle"}</Button>}
       {snapshot.status === "ready" && !snapshot.cacheState && !browserDownloadable(snapshot) && <div className="space-y-1"><p className="text-xs text-muted-foreground">Use the CLI for bundles larger than 16 MiB or without a recorded size.</p><code className="block break-all text-xs">bun cli/flaregit.ts recovery download {projectId} {snapshot.id} --output repository.bundle</code></div>}
-      {isOwner && snapshot.cacheState !== "deleted" && <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => { setRemoving(snapshot); setConfirmation(""); }}>{snapshot.cacheState === "deleting" ? "Retry cache removal" : "Remove cached bundle"}</Button>}
+      {isOwner && snapshot.cacheState !== "deleted" && snapshot.cleanupAdvice?.recoveryAction !== "provider-reconciliation" && <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => { setRemoving(snapshot); setConfirmation(""); }}>{snapshot.cacheState === "deleting" ? "Retry cache removal" : "Remove cached bundle"}</Button>}
     </li>)}</ul>}
     <Dialog open={choosing} onOpenChange={setChoosing}>
       <DialogHeader><DialogTitle>Choose accepted commit</DialogTitle></DialogHeader>

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { cleanupPrivateRecoveryOperation, deleteRecoveryObjects } from "../src/server/private-recovery-cleanup";
+import { cleanupPrivateRecoveryOutcome, cleanupPrivateRecoveryOperation, deleteRecoveryObjects } from "../src/server/private-recovery-cleanup";
 import { recoveryScopeId, type PrivateRecoveryOperation } from "../src/server/private-recovery";
 import type { Env } from "../src/server/env";
 import type { Ledger } from "../src/server/durable-object";
@@ -154,4 +154,18 @@ test("cleanup re-reads upload identity saved while workflow termination is pendi
   const f = fixture({ lateUpload: true });
   expect(await cleanupPrivateRecoveryOperation(f.env, f.ledger, f.current)).toBe(true);
   expect(f.events).toEqual(["workflow", "terminate", "upload-abort", "upload-close", "delete", "release", "tombstone"]);
+});
+
+test("lost upload identity reports operator reconciliation without deleting or releasing", async () => {
+ const f=fixture({uploadState:"allocating"});
+ const outcome=await cleanupPrivateRecoveryOutcome(f.env,f.ledger,f.current);
+ expect(outcome.deleted).toBe(false);expect(outcome.recoveryAction).toBe("provider-reconciliation");
+ expect(outcome.detail).toContain("retrying removal alone cannot resolve");expect(f.events).not.toContain("delete");expect(f.events).not.toContain("release");
+});
+test("unknown dispatch distinguishes provider reconciliation from transient known Workflow lookup failure",async()=>{
+ const unknown=fixture({dispatchState:"uncertain",workflowAvailable:false});
+ expect((await cleanupPrivateRecoveryOutcome(unknown.env,unknown.ledger,unknown.current)).recoveryAction).toBe("provider-reconciliation");
+ const known=fixture({workflowAvailable:false});
+ expect((await cleanupPrivateRecoveryOutcome(known.env,known.ledger,known.current)).recoveryAction).toBe("retry");
+ expect(unknown.events).toEqual(["workflow"]);expect(known.events).toEqual(["workflow"]);
 });
