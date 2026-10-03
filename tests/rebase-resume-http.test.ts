@@ -9,8 +9,9 @@ test('saved rebase resume HTTP preserves one dispatch identity and rejects revok
  const file=`/tmp/resume-http-${crypto.randomUUID()}.js`,build=Bun.spawn([process.execPath,'build','tests/support/rebase-resume-http-worker.ts','--target=browser','--external=cloudflare:workers','--external=node:*',`--outfile=${file}`],{stdout:'ignore',stderr:'pipe'});
  const [error,code]=await Promise.all([new Response(build.stderr).text(),build.exited]);if(code)throw Error(error);
  const script=await Bun.file(file).text();await Bun.file(file).delete();
- const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:'resume-http',modules:true,script,compatibilityDate:'2026-10-02',compatibilityFlags:['nodejs_compat'],bindings:{FIXTURE_ISSUER:issuer.url.origin},durableObjects:{REPOSITORY_CONTROLLER:{className:'RebaseResumeHttpFixture',useSQLite:true}}}]}));
- const call=async(path:string,token?:string,body?:unknown)=>(await mf.getWorker('resume-http')).fetch(`http://fixture${path}`,{method:body?'POST':'GET',headers:{'CF-Connecting-IP':'198.51.100.31',...(token?{Authorization:`Bearer ${token}`} : {}),...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});
+ const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:'resume-http',unsafeDirectSockets:[{host:'127.0.0.1'}],modules:true,script,compatibilityDate:'2026-10-02',compatibilityFlags:['nodejs_compat'],bindings:{FIXTURE_ISSUER:issuer.url.origin},durableObjects:{REPOSITORY_CONTROLLER:{className:'RebaseResumeHttpFixture',useSQLite:true}}}]}));
+ const direct=await mf.unsafeGetDirectURL('resume-http');
+ const call=(path:string,token?:string,body?:unknown)=>fetch(new URL(path,direct),{method:body?'POST':'GET',headers:{Connection:'close','CF-Connecting-IP':'198.51.100.31',...(token?{Authorization:`Bearer ${token}`} : {}),...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});
  const session=(who:string)=>new SignJWT({azp:'https://fixture.example'}).setProtectedHeader({alg:'RS256',kid:jwk.kid}).setIssuer(issuer.url.origin).setSubject(who).setIssuedAt().setExpirationTime('5m').sign(pair.privateKey);
  const route='/api/p/p123456789abc/rebase-applications';
  const safe=(text:string)=>{for(const hidden of ['credentialHash','actorId','userId','accountKey','original-actor','old-workflow','synthetic-server','sessionExpiresAt','requestId','nativeRunId'])expect(text).not.toContain(hidden);};
@@ -21,16 +22,16 @@ test('saved rebase resume HTTP preserves one dispatch identity and rejects revok
  const request={expectedVersion:version,idempotencyKey:crypto.randomUUID()};
  expect((await call(endpoint,undefined,request)).status).toBe(401);expect((await call(endpoint,member,request)).status).toBe(403);expect((await call(endpoint,seeded.writeToken,request)).status).toBe(403);
  expect((await call(endpoint,owner,{...request,extra:true})).status).toBe(400);expect((await call(endpoint,owner,{...request,idempotencyKey:'bad'})).status).toBe(400);
- expect(await(await call('/fixture/calls')).json()).toEqual({calls:[],dispatches:[]});
- const before=await(await call('/fixture/snapshot')).json();
+ expect(await(await call('/fixture/calls')).json() as {calls:string[];dispatches:unknown[]}).toEqual({calls:[],dispatches:[]});
+ const before=await(await call('/fixture/snapshot')).json() as Record<string,unknown>;
  for(const value of ['race-role','race-account','race-project','race-token']){
  await call(`/fixture/mode?value=${value}`);const denied=await call(endpoint,value==='race-token'?seeded.fullToken:owner,{expectedVersion:version,idempotencyKey:crypto.randomUUID()});expect(denied.status).toBeGreaterThanOrEqual(400);
- expect(await(await call('/fixture/calls')).json()).toEqual({calls:[],dispatches:[]});expect(await(await call('/fixture/snapshot')).json()).toEqual(before);
+ expect(await(await call('/fixture/calls')).json() as {calls:string[];dispatches:unknown[]}).toEqual({calls:[],dispatches:[]});expect(await(await call('/fixture/snapshot')).json() as Record<string,unknown>).toEqual(before);
  const restored=await call('/fixture/restore');if(!restored.ok)throw Error(await restored.text());
  }
  await call('/fixture/mode?value=lost-dispatch');
  const uncertain=await call(endpoint,owner,request);expect(uncertain.status).toBe(202);expect(uncertain.headers.get('Cache-Control')).toBe('no-store');const uncertainText=await uncertain.text();safe(uncertainText);const attempt=JSON.parse(uncertainText) as {id:string;dispatch:string;generation:number};expect(attempt.dispatch).toBe('unknown');
- const retry=await call(endpoint,owner,request);expect(retry.status).toBe(202);expect(await retry.json()).toEqual(attempt);
+ const retry=await call(endpoint,owner,request);expect(retry.status).toBe(202);expect(await retry.json() as typeof attempt).toEqual(attempt);
  const observedCalls=await(await call('/fixture/calls')).json() as {calls:string[];dispatches:Array<{id:string;params:{projectId:string;attemptId:string;generation:number};retention:{successRetention:string;errorRetention:string}}>};expect(observedCalls.calls).toEqual([]);expect(observedCalls.dispatches).toHaveLength(2);expect(observedCalls.dispatches[0]).toEqual(observedCalls.dispatches[1]);expect(observedCalls.dispatches[0]).toEqual({id:`rebase-resume-${attempt.id}`,params:{projectId:'p123456789abc',attemptId:attempt.id,generation:attempt.generation},retention:{successRetention:'3 days',errorRetention:'3 days'}});
  expect((await call(endpoint,owner,{...request,expectedVersion:version+1})).status).toBe(409);
  expect((await call(endpoint,owner,{...request,idempotencyKey:crypto.randomUUID()})).status).toBe(409);
