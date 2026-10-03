@@ -146,7 +146,8 @@ RACE_BRANCHES=500 RACE_TIMEOUT_MS=7200000 bun test tests/landing-race.test.ts
 
 ## Known limits
 
-- Imports are public HTTPS Git URLs, cloned once with depth 200; there is no ongoing sync from GitHub. Mirroring the other way (FlareGit to GitHub, one-way, after each landing, never force-pushed) is optional per repository under Settings; FlareGit stays the source of truth.
+- Imports use public HTTPS Git URLs without requesting a shallow depth. Provider readiness alone does not prove complete history. There is no ongoing sync from GitHub. Optional one-way mirroring publishes accepted FlareGit commits to GitHub without force-pushing; FlareGit stays the source of truth.
+- Owner-requested history inspection supports public github.com sources and compares only the saved imported branch’s reachable commit metadata. New inspections checkpoint source and imported ancestry in SQLite, with up to 25,000 commits per side and an 8 MiB serialized inspection envelope; either bound can pause an incomplete comparison. Resume keeps the same pinned head and requires confirmed termination and workspace shutdown. Blobs, tags and unselected refs remain outside this receipt. Legacy untracked attempts are not silently replaced.
 - One landing at a time per project; the landing lease is 20 minutes.
 - A candidate waits up to 7 days for review, then goes stale and must be re-run.
 - At most 8 changes per integration.

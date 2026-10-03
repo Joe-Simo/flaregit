@@ -1,3 +1,5 @@
+import {ImportHistoryInspection,type HistorySide,type HistoryInspectionActor,type HistoryChunk,type HistoryInspectionSnapshot,type HistoryInspectionBatch} from "./import-history-inspection.js";
+import {ImportHistoryAttempts,type ImportHistoryAttempt} from "./import-history-attempts.js";
 import {taskCreationPayload,type TaskCreationInput} from "./task-creation.js";
 import {ownerStorageContext,copyReportPage,privateRecoveryReportPage,type OwnerStorageContext,type CopyReportPage} from "./storage-reconciliation-ledger.js";
 import {PreviewCredentialIncidents,type PreviewCredentialIncidentStatus} from "./preview-credential-incidents.js";
@@ -197,9 +199,25 @@ export interface ActivityRow {
   summary: string;
 }
 
-export interface ImportHistoryOperation { projectId: string; head: string; canonicalRepoName: string; ownerId: string; instanceId: string; createdAt: string }
+export interface ImportHistoryOperation { protocolVersion?:2; projectId: string; head: string; canonicalRepoName: string; ownerId: string; instanceId: string; createdAt: string }
 
 export interface Ledger {
+  assertHistoryInspectionAttempt(operationId:string,generation:number,workflowId:string):Promise<void>;
+  beginHistoryInspection(operationId:string,accountKey:string,expectedHead:string):Promise<HistoryInspectionSnapshot>;
+  getHistoryInspection(operationId:string):Promise<HistoryInspectionSnapshot|null>;
+  importHistoryBatch(operationId:string,side:HistorySide,limit?:number):Promise<HistoryInspectionBatch>;
+  commitHistoryChunk(operationId:string,side:HistorySide,chunk:HistoryChunk,actor?:HistoryInspectionActor):Promise<{kind:"applied"|"duplicate"|"paused";snapshot:HistoryInspectionSnapshot}>;
+  pauseHistoryInspection(operationId:string,reason:string,actor?:HistoryInspectionActor):Promise<HistoryInspectionSnapshot>;
+  resumeHistoryInspection(operationId:string,actor?:HistoryInspectionActor):Promise<HistoryInspectionSnapshot>;
+  finishHistoryInspection(operationId:string,actor?:HistoryInspectionActor):Promise<HistoryInspectionSnapshot>;
+  historyInspectionAttempt(operationId:string):Promise<ImportHistoryAttempt|null>;
+  startHistoryInspectionAttempt(operationId:string,expectedGeneration:number):Promise<ImportHistoryAttempt>;
+  markHistoryInspectionDispatch(operationId:string,generation:number):Promise<ImportHistoryAttempt>;
+  observeHistoryInspectionAttempt(operationId:string,generation:number,status:string):Promise<ImportHistoryAttempt>;
+  historyInspectionNativeIntent(operationId:string,generation:number,workflowId?:string):Promise<ImportHistoryAttempt>;
+  historyInspectionNativeStopped(operationId:string,generation:number,nativeRunId:string):Promise<ImportHistoryAttempt>;
+  listHistoryInspectionAttemptsForCleanup():Promise<ImportHistoryAttempt[]>;
+
   previewGenerationCredentialIncident(g:string,repoName:string,token:string,expiresAt:number):Promise<void>;
   previewGenerationCredentialSummary(g:string):Promise<{status:PreviewCredentialIncidentStatus;expiresAt:number}|null>;
 
@@ -329,7 +347,7 @@ export interface Ledger {
   saveImportJob(job: ImportJob): Promise<void>;
   getImportJob(id: string): Promise<ImportJob | null>;
   listImportJobs(): Promise<ImportJob[]>;
-  claimImportHistoryOperation(input: { projectId: string; head: string; canonicalRepoName: string; ownerId: string; instanceId: string }): Promise<ImportHistoryOperation>;
+  claimImportHistoryOperation(input: { projectId: string; head: string; canonicalRepoName: string; ownerId: string; instanceId: string; protocolVersion?:2 }): Promise<ImportHistoryOperation>;
   getImportHistoryOperation(instanceId: string): Promise<ImportHistoryOperation | null>;
   listImportHistoryOperations(): Promise<ImportHistoryOperation[]>;
   externalCheckReports(candidateId: string): Promise<ReturnType<RepositoryConnections["reports"]>>;
@@ -547,6 +565,57 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   private state: FlareGitProjectState | null = null;
+  private historyAttemptLocal(id:string,actor:HistoryInspectionActor|undefined,allowPaused=false){
+    if(!actor)throw new Error("Exact inspection attempt authority required");
+    const inspection=new ImportHistoryInspection(this.ctx.storage).authority(id),attempt=new ImportHistoryAttempts(this.ctx.storage).get(id),state=this.load();
+    if(!inspection||!attempt||attempt.generation!==actor.generation||attempt.workflowId!==actor.workflowId||attempt.terminal||(!allowPaused&&inspection.status!=="running")||this.repositoryDeleting()||state.projectId!==inspection.scope.projectId||state.canonicalRepoName!==inspection.scope.canonicalRepoName||new PrivateRecoveryOperations(this.ctx.storage).incarnation()!==inspection.scope.incarnation||this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",inspection.scope.ownerId).toArray()[0]?.role!=="owner")throw new Error("Inspection attempt was replaced or its authority changed");
+    return inspection.scope;
+  }
+  async assertHistoryInspectionAttempt(id:string,generation:number,workflowId:string){
+    const actor={generation,workflowId},scope=this.historyAttemptLocal(id,actor);
+    if(await accountOf(this.env,scope.accountKey).accountLifecycle()!=="active")throw new Error("Inspection account is unavailable");
+    this.historyAttemptLocal(id,actor);
+  }
+  private historySnapshot(operationId:string):HistoryInspectionSnapshot|null{
+    const value=new ImportHistoryInspection(this.ctx.storage).get(operationId);
+    return value?{...value,currentAttempt:new ImportHistoryAttempts(this.ctx.storage).get(operationId)}:null;
+  }
+  private async authorizeHistoryInspection(operationId:string,accountKey?:string,expectedHead?:string){
+    const known=new ImportHistoryInspection(this.ctx.storage).get(operationId),state=this.load();
+    const key=known?.scope.accountKey??accountKey;
+    if(!key||this.repositoryDeleting())throw new Error("Inspection owner unavailable");
+    const account=accountOf(this.env,key);
+    const [operation,job,lifecycle]=await Promise.all([account.getImportHistoryOperation(operationId),account.getImportJob(state.projectId),account.accountLifecycle()]);
+    if(!operation||!job||lifecycle!=="active"||job.status!=="ready"||job.ownerId!==operation.ownerId||job.id!==state.projectId||operation.projectId!==state.projectId||job.canonicalRepoName!==state.canonicalRepoName||operation.canonicalRepoName!==state.canonicalRepoName||job.importedHead!==operation.head||!job.importedBranch||(expectedHead!==undefined&&operation.head!==expectedHead)||await accountKeyFor(operation.ownerId)!==key)throw new Error("Inspection import authority changed");
+    if(await this.roleOf(operation.ownerId)!=="owner")throw new Error("Inspection owner access revoked");
+    if(await account.accountLifecycle()!=="active")throw new Error("Inspection account was sealed during authorization");
+    if(!known&&operation.protocolVersion!==2)throw new Error("Legacy inspection dispatch remains unconfirmed");
+    const scope={operationId,projectId:state.projectId,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation(),ownerId:operation.ownerId,accountKey:key,canonicalRepoName:state.canonicalRepoName,source:job.source,branch:job.importedBranch,head:operation.head};
+    const fresh=this.load();
+    if(this.repositoryDeleting()||fresh.projectId!==scope.projectId||fresh.canonicalRepoName!==scope.canonicalRepoName||new PrivateRecoveryOperations(this.ctx.storage).incarnation()!==scope.incarnation||this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",scope.ownerId).toArray()[0]?.role!=="owner"||(known&&JSON.stringify(known.scope)!==JSON.stringify(scope)))throw new Error("Inspection scope changed during authorization");
+    return scope;
+  }
+  async beginHistoryInspection(id:string,accountKey:string,head:string){const scope=await this.authorizeHistoryInspection(id,accountKey,head);new ImportHistoryInspection(this.ctx.storage).begin(scope);return this.historySnapshot(id)!;}
+  async getHistoryInspection(id:string){if(!new ImportHistoryInspection(this.ctx.storage).get(id))return null;await this.authorizeHistoryInspection(id);return this.historySnapshot(id);}
+  async importHistoryBatch(id:string,side:HistorySide,limit=256){await this.authorizeHistoryInspection(id);return new ImportHistoryInspection(this.ctx.storage).batch(id,side,limit);}
+  async commitHistoryChunk(id:string,side:HistorySide,chunk:HistoryChunk,actor?:HistoryInspectionActor){const result=await new ImportHistoryInspection(this.ctx.storage).commit(id,side,chunk,async()=>{if(!actor)throw new Error("Exact inspection attempt required");await this.assertHistoryInspectionAttempt(id,actor.generation,actor.workflowId);},()=>{this.historyAttemptLocal(id,actor);});return{...result,snapshot:this.historySnapshot(id)!};}
+  async pauseHistoryInspection(id:string,reason:string,actor?:HistoryInspectionActor){if(!actor)throw new Error("Exact inspection attempt required");await this.assertHistoryInspectionAttempt(id,actor.generation,actor.workflowId);this.historyAttemptLocal(id,actor);new ImportHistoryInspection(this.ctx.storage).pause(id,reason);return this.historySnapshot(id)!;}
+  async resumeHistoryInspection(id:string,actor?:HistoryInspectionActor){await this.authorizeHistoryInspection(id);this.historyAttemptLocal(id,actor,true);new ImportHistoryInspection(this.ctx.storage).resume(id);return this.historySnapshot(id)!;}
+  async finishHistoryInspection(id:string,actor?:HistoryInspectionActor){if(!actor)throw new Error("Exact inspection attempt required");await this.assertHistoryInspectionAttempt(id,actor.generation,actor.workflowId);this.historyAttemptLocal(id,actor);new ImportHistoryInspection(this.ctx.storage).finish(id);return this.historySnapshot(id)!;}
+  async historyInspectionAttempt(id:string){await this.authorizeHistoryInspection(id);return new ImportHistoryAttempts(this.ctx.storage).get(id);}
+  async startHistoryInspectionAttempt(id:string,generation:number){await this.authorizeHistoryInspection(id);const snapshot=this.historySnapshot(id);if(!snapshot||["verified","mismatch"].includes(snapshot.status))throw new Error("Inspection already finished");return this.ctx.storage.transactionSync(()=>{const fresh=this.load(),scope=snapshot.scope;if(this.repositoryDeleting()||fresh.projectId!==scope.projectId||fresh.canonicalRepoName!==scope.canonicalRepoName||new PrivateRecoveryOperations(this.ctx.storage).incarnation()!==scope.incarnation||this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",scope.ownerId).toArray()[0]?.role!=="owner")throw new Error("Inspection resume authority changed");const attempt=new ImportHistoryAttempts(this.ctx.storage).start(id,generation);new ImportHistoryInspection(this.ctx.storage).resume(id);return attempt;});}
+  async markHistoryInspectionDispatch(id:string,generation:number){await this.authorizeHistoryInspection(id);return new ImportHistoryAttempts(this.ctx.storage).dispatchUnknown(id,generation);}
+  async observeHistoryInspectionAttempt(id:string,generation:number,status:string){await this.authorizeHistoryInspection(id);if(status!=="queued"&&status!=="running"&&status!=="waiting"&&status!=="complete"&&status!=="errored"&&status!=="terminated")throw new Error("Inspection provider state is unconfirmed");return new ImportHistoryAttempts(this.ctx.storage).observed(id,generation,status);}
+  async historyInspectionNativeIntent(id:string,generation:number,workflowId?:string){if(!workflowId)throw new Error("Exact inspection native attempt required");await this.assertHistoryInspectionAttempt(id,generation,workflowId);this.historyAttemptLocal(id,{generation,workflowId});return new ImportHistoryAttempts(this.ctx.storage).nativeAllocationIntent(id,generation);}
+  async historyInspectionNativeStopped(id:string,generation:number,nativeRunId:string){
+    const attempt=new ImportHistoryAttempts(this.ctx.storage).get(id);
+    if(!attempt||attempt.generation!==generation||attempt.nativeRunId!==nativeRunId)throw new Error("Inspection native identity changed");
+    if(attempt.nativeState==="unallocated"||attempt.nativeState==="stopped")return new ImportHistoryAttempts(this.ctx.storage).nativeStopped(id,generation,nativeRunId);
+    const sandbox=this.env.INTEGRATOR.getByName(nativeRunId);
+    await sandbox.destroy();if((await sandbox.lifetimeStatus())?.state!=="stopped")throw new Error("Inspection native stop is unconfirmed");
+    return new ImportHistoryAttempts(this.ctx.storage).nativeStopped(id,generation,nativeRunId);
+  }
+  async listHistoryInspectionAttemptsForCleanup(){if(!this.repositoryDeleting())throw new Error("Inspection cleanup requires deletion fence");new ImportHistoryInspection(this.ctx.storage);const ids=this.ctx.storage.sql.exec<{id:string}>("SELECT id FROM history_inspections ORDER BY id").toArray();return ids.flatMap(row=>{const attempt=new ImportHistoryAttempts(this.ctx.storage).get(row.id);return attempt?[attempt]:[];});}
   async previewGenerationCredentialIncident(g:string,repoName:string,token:string,expiresAt:number){
     const record=new RepositoryPreviewGenerations(this.ctx.storage).get(g);
     if(!record||repoName!==`flaregit-${record.identity.projectId}`||record.identity.projectId!==this.load().projectId)throw new Error("Preview credential incident repository mismatch");
@@ -1166,6 +1235,7 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   async claimImportHistoryOperation(input: Omit<ImportHistoryOperation, "createdAt">): Promise<ImportHistoryOperation> {
+    if (input.protocolVersion!==undefined&&input.protocolVersion!==2)throw new Error("Invalid import inspection protocol");
     if (!/^[a-z0-9]{12,16}$/.test(input.projectId) || !/^[a-f0-9]{40}$/.test(input.head) || !/^import-history-[A-Za-z0-9_-]{1,90}$/.test(input.instanceId)) throw new Error("Invalid history operation");
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS import_history_operations(instance TEXT PRIMARY KEY,scope TEXT UNIQUE,doc TEXT)");
     return this.ctx.storage.transactionSync(() => {

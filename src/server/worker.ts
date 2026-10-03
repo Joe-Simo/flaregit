@@ -447,6 +447,16 @@ export default {
         // workflow state is retained rather than claiming its work has stopped.
         for (const operation of await account.listImportHistoryOperations()) {
           if (operation.ownerId !== userId || !imports.some((job) => job.id === operation.projectId && job.canonicalRepoName === operation.canonicalRepoName)) continue;
+          if (operation.protocolVersion === 2) {
+            const repository = projectOf(env, operation.projectId);
+            if (await repository.roleOf(userId) !== "owner") return json({ deleted: false, status: "deleting", reason: "Import inspection ownership is unconfirmed; metadata is preserved" }, 202);
+            await repository.beginRepositoryDeletion();
+            // Protocol 2 is frozen with the account operation before any
+            // dispatch. Every dispatch requires an atomic attempt record first;
+            // a fenced operation without one was never sent to the provider.
+            if (!await stopImportHistoryAttempts(env, repository)) return json({ deleted: false, status: "deleting", reason: "Import inspection shutdown is unconfirmed; metadata is preserved" }, 202);
+            continue;
+          }
           try {
             const handle = await env.IMPORT_HISTORY_WORKFLOW.get(operation.instanceId);
             const status = await handle.status();
@@ -799,42 +809,51 @@ export default {
           }});
         }
         if (sub === "" && method === "GET") return json({ id: projectId, role, kind: state.kind ?? "demo", name: state.projectName, source: state.source ?? null, verification: state.verificationPolicy, protectedPaths: settings.protectedPaths, visibility: await project.repositoryVisibility(), ...(role === "owner" ? {moderation:ownerModerationNotice(await project.repositoryModerationState())} : {}) });
-        if (sub === "/import-history" && method === "POST") {
-          if (!isOwner) return text("Only the owner can inspect import history", 403);
-          const job = await account.getImportJob(projectId);
-          if (!job || job.ownerId !== userId || job.status !== "ready" || job.canonicalRepoName !== state.canonicalRepoName) return text("Ready owned import required", 409);
-          if (!job.importedHead || !job.importedBranch) return json({ status: "unavailable", detail: "This legacy import has no recorded import-time head; its migration cannot be verified from the current branch." }, 409);
-          const requestBody = request.body ? await body<{ instanceId?: string }>() : {};
-          if (Object.keys(requestBody).some((key) => key !== "instanceId") || (requestBody.instanceId !== undefined && !/^import-history-[a-f0-9-]{36}$/.test(requestBody.instanceId))) return text("Invalid import inspection retry", 400);
-          const operation = requestBody.instanceId
-            ? await account.getImportHistoryOperation(requestBody.instanceId)
-            : await account.claimImportHistoryOperation({ projectId, head: job.importedHead, canonicalRepoName: state.canonicalRepoName, ownerId: userId, instanceId: `import-history-${crypto.randomUUID()}` });
-          if (!operation || operation.ownerId !== userId || operation.projectId !== projectId || operation.canonicalRepoName !== state.canonicalRepoName) return text("Saved inspection operation not found", 404);
-          if (Date.now() - Date.parse(operation.createdAt) > 30 * 86400_000) return text("Inspection retry window expired; contact support", 410);
-          const existing = await env.IMPORT_HISTORY_WORKFLOW.get(operation.instanceId).then(async (handle) => ({ handle, status: await handle.status() })).catch(() => null);
-          if (existing) return json({ instanceId: operation.instanceId, head: operation.head, status: existing.status.status }, 202);
-          const { plan } = await account.getBilling();
-          const denied = await admitRun(env, account, planLimits(env)[plan], operation.instanceId);
-          if (denied) return denied;
-          try {
-            const handle = await env.IMPORT_HISTORY_WORKFLOW.create({ id: operation.instanceId, params: { accountKey, projectId, expectedHead: operation.head } });
-            return json({ instanceId: handle.id, head: operation.head, status: "queued" }, 202);
-          } catch { return json({ instanceId: operation.instanceId, head: operation.head, status: "dispatch-unknown", detail: "Operation is saved. Check its status or retry to dispatch this exact operation." }, 202); }
-        }
         const historyOperationRoute = /^\/import-history\/(import-history-[a-f0-9-]{36})$/.exec(sub);
-        if (historyOperationRoute && method === "GET") {
-          if (!isOwner) return text("Only the owner can read import receipts", 403);
-          const operation = await account.getImportHistoryOperation(historyOperationRoute[1]!);
-          if (!operation || operation.ownerId !== userId || operation.projectId !== projectId || operation.canonicalRepoName !== state.canonicalRepoName) return text("Not found", 404);
-          const handle = await env.IMPORT_HISTORY_WORKFLOW.get(operation.instanceId).then(async (value) => value.status()).catch(() => null);
-          const object = await env.EVIDENCE_BUCKET.get(importHistoryReceiptKey(projectId, operation.head, operation.instanceId));
-          let receipt: unknown = null;
-          if (object) {
-            const saved = await object.json<{ projectId: string; canonicalRepoName: string; expectedHead: string; workflowInstanceId: string; result: unknown; inspectedAt: string }>();
-            if (saved.projectId !== projectId || saved.canonicalRepoName !== operation.canonicalRepoName || saved.expectedHead !== operation.head || saved.workflowInstanceId !== operation.instanceId) return text("Receipt provenance does not match this operation", 409);
-            receipt = { head: saved.expectedHead, inspectedAt: saved.inspectedAt, result: saved.result };
+        if((sub==="/import-history"&&method==="POST")||(historyOperationRoute&&method==="GET")){
+          if(!isOwner)return text("Only the owner can inspect import history",403);
+          const authorizeHistoryOwner=async()=>{const current=await authenticate(request,env);return !(current instanceof Response)&&current.id===userId&&(!current.viaToken||current.tokenScope==="full")&&(!current.tokenRepo||current.tokenRepo===projectId)&&await account.accountLifecycle()==="active"&&await project.roleOf(userId)==="owner"&&!await project.repositoryDeletionPending()&&(await project.getState()).canonicalRepoName===state.canonicalRepoName;};
+          if(!await authorizeHistoryOwner())return text("Import inspection owner access changed",403);
+          const job=await account.getImportJob(projectId);
+          if(!job||job.ownerId!==userId||job.status!=="ready"||job.canonicalRepoName!==state.canonicalRepoName)return text("Ready owned import required",409);
+          if(!job.importedHead||!job.importedBranch)return json({status:"unavailable",canResume:false,detail:"This legacy import has no recorded import-time head; current branch history is not a substitute."},409);
+          const input=method==="POST"&&request.body?await body<{instanceId?:string;expectedGeneration?:number}>():{};
+          if(Object.keys(input).some(key=>key!=="instanceId"&&key!=="expectedGeneration")||(input.instanceId!==undefined&&!/^import-history-[a-f0-9-]{36}$/.test(input.instanceId))||(input.expectedGeneration!==undefined&&(!Number.isSafeInteger(input.expectedGeneration)||input.expectedGeneration<0)))return text("Invalid inspection resume request",400);
+          const proposed=`import-history-${crypto.randomUUID()}`;
+          const operation=method==="GET"?await account.getImportHistoryOperation(historyOperationRoute![1]!):input.instanceId?await account.getImportHistoryOperation(input.instanceId):await account.claimImportHistoryOperation({protocolVersion:2,projectId,head:job.importedHead,canonicalRepoName:state.canonicalRepoName,ownerId:userId,instanceId:proposed});
+          if(!operation||operation.ownerId!==userId||operation.projectId!==projectId||operation.canonicalRepoName!==state.canonicalRepoName||operation.head!==job.importedHead)return text("Saved inspection not found",404);
+          let inspection=await project.getHistoryInspection(operation.instanceId);
+          if(!inspection&&operation.protocolVersion===2)inspection=await project.beginHistoryInspection(operation.instanceId,accountKey,operation.head);
+          if(!inspection){
+            let providerStatus:string="unavailable";try{providerStatus=(await(await env.IMPORT_HISTORY_WORKFLOW.get(operation.instanceId)).status()).status;}catch{/* Unknown old dispatch never authorizes a replacement. */}
+            let receipt:unknown=null;
+            if(method==="GET")try{const object=await env.EVIDENCE_BUCKET.get(importHistoryReceiptKey(projectId,operation.head,operation.instanceId));if(object&&object.size<=131072){const saved=await object.json<{projectId:string;canonicalRepoName:string;expectedHead:string;workflowInstanceId:string;result:unknown;inspectedAt:string}>();if(saved.projectId===projectId&&saved.canonicalRepoName===operation.canonicalRepoName&&saved.expectedHead===operation.head&&saved.workflowInstanceId===operation.instanceId)receipt={head:saved.expectedHead,inspectedAt:saved.inspectedAt,result:saved.result};}}catch{/* Optional legacy copy is unavailable. */}
+            if(!await authorizeHistoryOwner())return text("Import inspection owner access changed",403);
+            return json({instanceId:operation.instanceId,head:operation.head,status:"unavailable",reason:"legacy_attempt_untracked",workflowStatus:providerStatus,canResume:false,authority:receipt?"legacy-r2":"unavailable",receipt,detail:"Legacy attempt dispatch and native shutdown are not durably recorded. No replacement was started."},method==="POST"?202:200);
           }
-          return Response.json({ instanceId: operation.instanceId, head: operation.head, status: handle?.status ?? "handle-unavailable", receipt }, { headers: { "Cache-Control": "no-store" } });
+          let attempt=inspection.currentAttempt,workflowStatus:string|null=null;
+          if(attempt&&attempt.dispatch!=="saved"){
+            try{workflowStatus=(await(await env.IMPORT_HISTORY_WORKFLOW.get(attempt.workflowId)).status()).status;if(["queued","running","waiting","complete","errored","terminated"].includes(workflowStatus))await project.observeHistoryInspectionAttempt(operation.instanceId,attempt.generation,workflowStatus);}catch{workflowStatus="unavailable";}
+            inspection=(await project.getHistoryInspection(operation.instanceId))!;attempt=inspection.currentAttempt;
+          }
+          if(operation.protocolVersion===2&&attempt?.terminal&&attempt.nativeState==="possible"&&(method==="GET"||input.expectedGeneration===attempt.generation)){try{await project.historyInspectionNativeStopped(operation.instanceId,attempt.generation,attempt.nativeRunId);inspection=(await project.getHistoryInspection(operation.instanceId))!;attempt=inspection.currentAttempt;}catch{/* Unknown stop keeps recovery disabled. */}}
+          const canResume=inspection.status==="paused"&&Boolean(attempt?.terminal)&&attempt?.nativeState!=="possible"&&!['unsupported_source','inspection_capacity','source_shallow','history_metadata_capacity'].includes(inspection.reason??"");
+          if(method==="POST"&&inspection.status!=="verified"&&inspection.status!=="mismatch"){
+            if(!attempt){if(operation.protocolVersion!==2)return json({instanceId:operation.instanceId,head:operation.head,status:inspection.status,reason:"attempt_identity_unavailable",canResume:false,detail:"Saved attempt identity is unavailable; no replacement was started."},202);attempt=await project.startHistoryInspectionAttempt(operation.instanceId,0);}
+            else if(canResume&&input.expectedGeneration===attempt.generation){attempt=await project.startHistoryInspectionAttempt(operation.instanceId,attempt.generation);inspection=(await project.getHistoryInspection(operation.instanceId))!;}
+            else if(input.expectedGeneration!==undefined&&input.expectedGeneration!==attempt.generation&&input.expectedGeneration+1!==attempt.generation)return text("Inspection attempt changed; refresh before resuming",409);
+            const withinDeliveryWindow=Date.now()<=Date.parse(attempt.deliveryUntil);
+            if(attempt.dispatch==="saved"||(attempt.dispatch==="unknown"&&!attempt.terminal&&withinDeliveryWindow)){
+              const {plan}=await account.getBilling();const denied=await admitRun(env,account,planLimits(env)[plan],attempt.workflowId);if(denied)return denied;
+              if(!await authorizeHistoryOwner())return text("Import inspection owner access changed",403);
+              await project.markHistoryInspectionDispatch(operation.instanceId,attempt.generation);
+              try{await env.IMPORT_HISTORY_WORKFLOW.createBatch([{id:attempt.workflowId,params:{accountKey,projectId,expectedHead:operation.head,operationId:operation.instanceId,attemptGeneration:attempt.generation},retention:{successRetention:"3 days",errorRetention:"3 days"}}]);workflowStatus="delivery-confirmed";}catch{workflowStatus="unavailable";}
+              inspection=(await project.getHistoryInspection(operation.instanceId))!;attempt=inspection.currentAttempt;
+            }
+          }
+          if(!await authorizeHistoryOwner())return text("Import inspection owner access changed",403);
+          const resumable=inspection.status==="paused"&&Boolean(attempt?.terminal)&&attempt?.nativeState!=="possible"&&!['unsupported_source','inspection_capacity','source_shallow','history_metadata_capacity'].includes(inspection.reason??"");
+          return Response.json({instanceId:operation.instanceId,head:operation.head,status:inspection.status,reason:inspection.reason,progress:{source:inspection.source,destination:inspection.destination},attemptGeneration:attempt?.generation??null,workflowStatus:workflowStatus??(attempt?.terminal??null),canResume:resumable,authority:"durable-sql",receipt:inspection.result?{head:operation.head,inspectedAt:inspection.result.destinationCapturedAt,result:inspection.result}:null},{status:method==="POST"?202:200,headers:{"Cache-Control":"no-store"}});
         }
 
         if (sub === "/directory" && method === "GET") {
@@ -1793,7 +1812,26 @@ async function importRepository(
   return finishImport(env,account,job,readiness);
 }
 
+async function stopImportHistoryAttempts(env: Env, ledger: Ledger): Promise<boolean> {
+  for (const attempt of await ledger.listHistoryInspectionAttemptsForCleanup()) {
+    try {
+      if (attempt.dispatch !== "saved" && !attempt.terminal) {
+        const handle = await env.IMPORT_HISTORY_WORKFLOW.get(attempt.workflowId);
+        if (!["complete", "errored", "terminated"].includes((await handle.status()).status)) {
+          await handle.terminate();
+          if ((await handle.status()).status !== "terminated") return false;
+        }
+      }
+      // Exact persisted native identity; cleanup remains possible after the
+      // owner's authority is withdrawn. Unknown allocation outcomes retain holds.
+      await ledger.historyInspectionNativeStopped(attempt.operationId, attempt.generation, attempt.nativeRunId);
+    } catch { return false; }
+  }
+  return true;
+}
+
 async function stopRepositoryWorkflows(env: Env, ledger: Ledger): Promise<boolean> {
+  if (!await stopImportHistoryAttempts(env, ledger)) return false;
   for (const run of await ledger.listRepositoryWorkflows()) {
     const binding = run.kind === "agent" ? env.AGENT_WORKFLOW : run.kind === "scenario" ? env.SCENARIO_WORKFLOW : env.INTEGRATION_WORKFLOW;
     try {

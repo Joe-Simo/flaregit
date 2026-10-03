@@ -7,6 +7,55 @@ export interface HistoryReader {
 export interface HistoryBinding { get(name: string): Promise<HistoryReader> }
 export type ImportHistoryResult = { status: "unavailable" | "incomplete"; detail: string } | { status: "verified" | "mismatch"; receipt: MigrationReceipt; detail: string };
 const HASH = /^[a-f0-9]{40}$/;
+export class HistoryMetadataLimitError extends Error {
+  constructor() { super("History metadata exceeds the bounded inspection capacity"); this.name = "HistoryMetadataLimitError"; }
+}
+export interface HistoryChunk {
+  commits: GitHistoryInventory["commits"];
+  missing: string[];
+}
+/** A bounded explicit frontier read. The caller durably saves each chunk before advancing. */
+export async function captureArtifactsHistoryChunk(
+  binding: HistoryBinding,
+  name: string,
+  hashes: readonly string[],
+  beforeRead: (hash: string, index: number) => Promise<void>,
+  knownHashes: readonly string[] = [],
+  authorize: () => Promise<void> = async () => {},
+): Promise<HistoryChunk> {
+  if (!hashes.length || hashes.length > 128 || new Set(hashes).size !== hashes.length || hashes.some(hash => !HASH.test(hash))) throw new Error("Invalid history inspection frontier");
+  if (knownHashes.length > 25_000 || knownHashes.some(hash => !HASH.test(hash))) throw new Error("Invalid captured history boundary");
+  const deadline = Date.now() + 10_000;
+  const bounded = async <T>(operation: Promise<T>): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([operation, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("History chunk deadline reached")), Math.max(1, deadline - Date.now())); })]);
+    } finally { if (timer) clearTimeout(timer); }
+  };
+  await bounded(authorize());
+  using repo = await bounded(binding.get(name));
+  await bounded(authorize());
+  const commits: HistoryChunk["commits"] = {}, missing: string[] = [];
+  const pending = [...hashes], visited = new Set<string>(), known = new Set(knownHashes);
+  for (const hash of hashes) known.delete(hash);
+  while (pending.length && visited.size < 128) {
+    const hash = pending.shift()!;
+    if (visited.has(hash) || known.has(hash)) continue;
+    const index = visited.size;
+    visited.add(hash);
+    if (Date.now() >= deadline) throw new Error("History chunk deadline reached");
+    await bounded(beforeRead(hash, index));
+    await bounded(authorize());
+    const commit = await bounded(repo.readCommit(hash));
+    await bounded(authorize());
+    if (!commit) { missing.push(hash); continue; }
+    if (commit.parents.length > 256) throw new HistoryMetadataLimitError();
+    if (commit.hash !== hash || !HASH.test(commit.treeHash) || commit.parents.some(parent => !HASH.test(parent))) throw new Error("Invalid imported commit metadata");
+    commits[hash] = { tree: commit.treeHash, parents: [...commit.parents] };
+    pending.push(...commit.parents);
+  }
+  return { commits, missing };
+}
 /** Read only ancestry at a pinned head; never checks out or executes imported source. */
 export async function captureArtifactsHistory(binding: HistoryBinding, name: string, branch: string, expectedHead: string): Promise<GitHistoryInventory | null> {
   if (!HASH.test(expectedHead) || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branch) || branch.includes("..") || branch.includes("//") || branch.endsWith(".lock")) throw new Error("Invalid import history scope");
