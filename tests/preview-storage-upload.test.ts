@@ -46,7 +46,7 @@ test("inspector uses standard Bun exec and rejects malformed output", async () =
 });
 
 test("actual inspector script hashes binaries and rejects filesystem symlinks", async () => {
-  const { mkdtemp, writeFile, symlink, rm } = await import("node:fs/promises");
+  const { mkdtemp, writeFile, symlink, rm, truncate } = await import("node:fs/promises");
   const dir = await mkdtemp("/tmp/preview-manifest-test-");
   try {
     await writeFile(`${dir}/index.html`, bytes);
@@ -58,6 +58,13 @@ test("actual inspector script hashes binaries and rejects filesystem symlinks", 
     const manifest = await inspectPreviewStorageManifest(sandbox, identity);
     expect(manifest.assets).toEqual([asset("index.html")]);
     await symlink(`${dir}/index.html`, `${dir}/alias.html`);
+    await expect(inspectPreviewStorageManifest(sandbox, identity)).rejects.toThrow("Could not inspect");
+    await rm(`${dir}/alias.html`);
+    await writeFile(`${dir}/bad\nname.js`,bytes);
+    await expect(inspectPreviewStorageManifest(sandbox, identity)).rejects.toThrow();
+    await rm(`${dir}/bad\nname.js`);
+    await writeFile(`${dir}/large.js`,new Uint8Array());
+    await truncate(`${dir}/large.js`,16*1024*1024+1);
     await expect(inspectPreviewStorageManifest(sandbox, identity)).rejects.toThrow("Could not inspect");
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

@@ -2,7 +2,7 @@ import type { PreviewStorageManifest } from "./preview-storage-upload.js";
 export interface PreviewStorageBudget { globalBytes:number|null;accountBytes:number|null }
 /** Retained bytes only; failed and unknown uploads remain charged. No automatic deletion. */
 export class PreviewStorageLedger {
- constructor(private storage:DurableObjectStorage){storage.sql.exec("CREATE TABLE IF NOT EXISTS preview_storage_reservations(physical_key TEXT PRIMARY KEY,account_key TEXT NOT NULL,bytes INTEGER NOT NULL,manifest_hash TEXT NOT NULL,payload TEXT NOT NULL)");}
+ constructor(private storage:DurableObjectStorage){storage.sql.exec("CREATE TABLE IF NOT EXISTS preview_storage_reservations(physical_key TEXT PRIMARY KEY,account_key TEXT NOT NULL,bytes INTEGER NOT NULL,manifest_hash TEXT NOT NULL,payload TEXT NOT NULL); CREATE INDEX IF NOT EXISTS preview_storage_account ON preview_storage_reservations(account_key)");}
  reserve(manifest:PreviewStorageManifest,budget:PreviewStorageBudget):void{
   const {projectId,incarnation,commit,accountKey}=manifest.identity;
   if(manifest.version!==1||! /^[a-z0-9]{12,16}$/.test(projectId)||! /^[a-f0-9-]{36}$/.test(incarnation)||! /^[a-f0-9]{40}$/.test(commit)||! /^[a-f0-9]{12}$/.test(accountKey)||! /^[a-f0-9]{64}$/.test(manifest.manifestHash)||!Number.isSafeInteger(manifest.totalBytes)||manifest.totalBytes<1||manifest.totalBytes>64*1024*1024||manifest.assets.length<1||manifest.assets.length>1000||manifest.assets.reduce((sum,asset)=>sum+asset.size,0)!==manifest.totalBytes)throw new Error("Invalid preview storage manifest");
