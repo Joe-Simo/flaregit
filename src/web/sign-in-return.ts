@@ -50,3 +50,27 @@ export function safeSignInReturn(value: string): string | null {
   if (query.has("signin") && query.get("signin") !== "1") return null;
   return `${path}${destination.size ? `?${destination}` : ""}`;
 }
+
+
+/** A product intent must validate completely before it can override an OAuth return. */
+export function explicitSignInReturn(value: string): string | null {
+  const destination = safeSignInReturn(value);
+  if (!destination) return null;
+  const query = new URLSearchParams(value.split("?")[1] ?? "");
+  return query.get("signin") === "1" ? destination : null;
+}
+
+export function initialSignInReturn(current: string, remembered: string | null): string {
+  return explicitSignInReturn(current) ?? (remembered ? safeSignInReturn(remembered) : null) ?? safeSignInReturn(current) ?? "/";
+}
+
+
+/** Callback entry is not a redirect destination; its query is never persisted. */
+export function isSignInCallback(value: string): boolean {
+  return value.replace(/^#/, "").split("?")[0] === "/sign-in/sso-callback";
+}
+
+
+export function callbackSignInReturn(remembered: string | null, current: string): string {
+  return (remembered ? safeSignInReturn(remembered) : null) ?? safeSignInReturn(current) ?? "/";
+}

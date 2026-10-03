@@ -48,3 +48,33 @@ test("community sign-in retains social section intent without broadening return 
   }
   for (const value of ["/community?view=https%3A%2F%2Fevil.example", "/community?view=people&signin=2", "/community?view=people&token=secret", "/community?view=people&handle=https://evil.example", "/community?view=following&cursor=1", "/community?view=people&signin=1&signin=1"]) expect(safeSignInReturn(value)).toBeNull();
 });
+
+test("a fresh validated sign-in intent overrides an abandoned remembered destination", async () => {
+ const { initialSignInReturn, explicitSignInReturn } = await import("../src/web/sign-in-return");
+ const old = "/p/pabcdef012345/review?task=old-change";
+ expect(initialSignInReturn("#/community?view=people&signin=1", old)).toBe("/community?view=people");
+ expect(initialSignInReturn("#/community?view=following&signin=1", old)).toBe("/community?view=following");
+ expect(initialSignInReturn("#/sign-in/sso-callback", old)).toBe(old);
+ expect(initialSignInReturn("#/community?view=people", old)).toBe(old);
+ expect(initialSignInReturn("#/sign-in/sso-callback?token=secret", "https://evil.example")).toBe("/");
+ for (const value of ["https://evil.example?signin=1", "#/community?view=people&token=secret&signin=1", "#/community?view=people&signin=1&signin=1", "#/community?view=people&signin=2", "#/community?view=people&redirect_url=https://evil.example&signin=1", "#/community?view=people&repo=pabcdef012345&signin=1"]) expect(explicitSignInReturn(value)).toBeNull();
+});
+
+
+test("callback entry recognition is narrow and separate from stored return destinations", async () => {
+ const { isSignInCallback, initialSignInReturn } = await import("../src/web/sign-in-return");
+ expect(isSignInCallback("#/sign-in/sso-callback?code=synthetic")).toBe(true);
+ expect(initialSignInReturn("#/sign-in/sso-callback?code=synthetic", "/community?view=people")).toBe("/community?view=people");
+ for (const value of ["https://evil.example/sign-in/sso-callback", "#//evil.example/sign-in/sso-callback", "#/sign-in/sso-callback/extra", "#/sign-in/sso-callback#bad", "#/sign-in/sso-callback-evil"]) expect(isSignInCallback(value)).toBe(false);
+ expect(safeSignInReturn("#/sign-in/sso-callback?code=synthetic")).toBeNull();
+});
+
+
+test("a callback SPA entry refreshes remembered intent and preserves validated in-memory recovery", async () => {
+ const { callbackSignInReturn } = await import("../src/web/sign-in-return");
+ expect(callbackSignInReturn("/community?view=following", "/")).toBe("/community?view=following");
+ expect(callbackSignInReturn(null, "/community?view=people")).toBe("/community?view=people");
+ expect(callbackSignInReturn("https://evil.example", "/community?view=people")).toBe("/community?view=people");
+ expect(callbackSignInReturn("/sign-in/sso-callback?code=synthetic", "/community?view=people")).toBe("/community?view=people");
+ expect(callbackSignInReturn(null, "https://evil.example")).toBe("/");
+});

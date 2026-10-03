@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ClerkProvider, ClerkLoading, ClerkFailed, SignedIn, SignedOut, SignIn, UserButton, useAuth, useSession } from "@clerk/clerk-react";
 import { GitBranch, RefreshCw, Sun, ArrowUpRight } from "lucide-react";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -12,7 +12,8 @@ import { Pricing } from "./pages/Pricing";
 import { About } from "./pages/About";
 import { Community } from "./pages/Community";
 import { CloudflareBadgeFooter } from "./components/CloudflareBadge";
-import { safeSignInReturn } from "./sign-in-return";
+import { safeSignInReturn, explicitSignInReturn, initialSignInReturn, isSignInCallback, callbackSignInReturn } from "./sign-in-return";
+import { loadAuthConfiguration } from "./auth-configuration";
 import { navigate, useRoute } from "./router";
 
 const RETURN_KEY = "flaregit.signInReturn";
@@ -73,8 +74,10 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const aboutPage = window.location.pathname === "/about";
   const communityPage = window.location.pathname === "/community";
   const route = useRoute();
-  const [signingIn, setSigningIn] = useState(() => new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("signin") === "1");
-  const [returnTo, setReturnTo] = useState(() => rememberedReturn() ?? safeSignInReturn(window.location.hash) ?? "/");
+  const explicitReturn = explicitSignInReturn(window.location.hash);
+  const callbackEntry = isSignInCallback(window.location.hash);
+  const [signingIn, setSigningIn] = useState(() => explicitReturn !== null || callbackEntry);
+  const [returnTo, setReturnTo] = useState(() => initialSignInReturn(window.location.hash, rememberedReturn()));
   const beginSignIn = (intent = safeSignInReturn(window.location.hash) ?? "/") => { const destination = safeSignInReturn(intent) ?? "/"; setReturnTo(destination); try { sessionStorage.setItem(RETURN_KEY, destination); } catch { /* In-memory return still supports nonredirect sign-in. */ } setSigningIn(true); };
   const [appearanceOpen, setAppearanceOpen] = useState(false);
   const { resolvedTheme } = useTheme();
@@ -82,19 +85,26 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
 
-  useEffect(() => {
-    if (signingIn && !rememberedReturn()) { const destination = safeSignInReturn(window.location.hash); if (destination) { setReturnTo(destination); try { sessionStorage.setItem(RETURN_KEY, destination); } catch { /* In-memory return remains valid. */ } } }
-  }, [signingIn]);
+  const configurationRequest = useRef<AbortController | null>(null);
+  const retryConfiguration = () => { configurationRequest.current?.abort(); setError(null); setAttempt(value => value + 1); };
+
+  useLayoutEffect(() => {
+    if (!explicitReturn && !callbackEntry) return;
+    setSigningIn(true);
+    if (!explicitReturn) { setReturnTo(current => callbackSignInReturn(rememberedReturn(), current)); return; }
+    setReturnTo(explicitReturn);
+    try { sessionStorage.setItem(RETURN_KEY, explicitReturn); } catch { /* In-memory return remains valid. */ }
+  }, [explicitReturn, callbackEntry]);
 
   useEffect(() => {
     if (key || docsPage || pricingPage || aboutPage || communityPage || route.name === "public" || route.name === "profile") return;
     let active = true; const controller = new AbortController();
+    configurationRequest.current?.abort(); configurationRequest.current = controller;
     setError(null);
-    fetch("/auth-config", { signal: controller.signal })
-      .then((r) => (r.ok ? (r.json() as Promise<{ publishableKey?: string }>) : Promise.reject(new Error(String(r.status)))))
-      .then((config) => { if (active) { if (config.publishableKey) setKey(config.publishableKey); else setError("Sign-in is not configured yet."); } })
-      .catch(() => { if (active) setError("Could not load sign-in. Please retry."); });
-    return () => { active = false; controller.abort(); };
+    void loadAuthConfiguration(controller.signal)
+      .then(value => { if (active && !controller.signal.aborted) setKey(value); })
+      .catch((failure: unknown) => { if (active && !controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Could not load sign-in. Please retry."); });
+    return () => { active = false; controller.abort(); if (configurationRequest.current === controller) configurationRequest.current = null; };
   }, [attempt, route.name, docsPage, pricingPage, aboutPage, communityPage, key]);
 
   if (docsPage) return <Docs />;
@@ -113,14 +123,14 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   if (error) return <Entry><div className="rounded-xl border border-border bg-card p-6 sm:p-8">
     <h2 className="text-xl font-semibold tracking-tight">Sign in to your workspace</h2>
     <p role="alert" className="mt-4 text-sm leading-relaxed text-destructive">{error}</p>
-    <Button className="mt-5" variant="outline" onClick={() => setAttempt((value) => value + 1)}><RefreshCw className="mr-2 h-4 w-4" aria-hidden="true" />Retry sign-in</Button>
+    <Button className="mt-5" variant="outline" onClick={retryConfiguration}><RefreshCw className="mr-2 h-4 w-4" aria-hidden="true" />Retry sign-in</Button>
   </div></Entry>;
-  if (!key) return <Entry><div role="status" className="rounded-xl border border-border bg-card p-8 text-sm text-muted-foreground">Loading sign-in…</div></Entry>;
+  if (!key) return <Entry><div className="rounded-xl border border-border bg-card p-8 text-sm text-muted-foreground"><p role="status">Loading sign-in…</p><Button variant="outline" className="mt-5" onClick={retryConfiguration}>Retry sign-in setup</Button></div></Entry>;
 
   return (
     <ClerkProvider publishableKey={key}>
       <ClerkLoading>{signingIn ? <Entry><p role="status" className="text-sm text-muted-foreground">Loading secure sign-in…</p></Entry> : <Landing onSignIn={() => beginSignIn()} />}</ClerkLoading>
-      <ClerkFailed><Entry><h2 className="text-xl font-semibold">Sign-in is unavailable</h2><p role="alert" className="mt-4 text-sm text-muted-foreground">The authentication service could not load. Retry to reconnect.</p><Button variant="outline" className="mt-5" onClick={() => window.location.reload()}>Retry sign-in</Button></Entry></ClerkFailed>
+      <ClerkFailed>{!signingIn ? <Landing onSignIn={() => beginSignIn()} /> : <Entry><h2 className="text-xl font-semibold">Sign-in is unavailable</h2><p role="alert" className="mt-4 text-sm text-muted-foreground">The authentication service could not load. Retry to reconnect.</p><Button variant="outline" className="mt-5" onClick={() => window.location.reload()}>Retry sign-in</Button></Entry>}</ClerkFailed>
       <SignedOut>
         {!signingIn ? <Landing onSignIn={() => beginSignIn()} /> : <Entry>
           <Button variant="ghost" className="mb-6 -ml-3 text-muted-foreground" onClick={() => { try { sessionStorage.removeItem(RETURN_KEY); } catch { /* No stored return. */ } setSigningIn(false); }}>Back to FlareGit</Button>
@@ -133,7 +143,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       </SignedOut>
       <SignedIn>
         <SignedInWorkspace>
-        <SignInReturn destination={rememberedReturn()} />
+        <SignInReturn destination={explicitReturn ?? rememberedReturn()} />
         <div className="fixed right-4 top-3 z-50">
           <UserButton><UserButton.MenuItems><UserButton.Action label="Appearance" labelIcon={<Sun className="h-4 w-4" aria-hidden />} onClick={() => setAppearanceOpen(true)} /></UserButton.MenuItems></UserButton>
         </div>
