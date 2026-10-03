@@ -18,7 +18,9 @@ import { handleGitGateway } from "./git-gateway-handler.js";
 import { admitGitOperation } from "./core-git-budget.js";
 import { gitAuthEnv, q } from "./shell.js";
 import { ensureBuild } from "./build.js";
-import { buildPrefix, signPreview, verifyPreview } from "./preview-access.js";
+import { buildPrefix, signPreview, repositoryPreviewOrigin } from "./preview-access.js";
+import { handlePreviewAsset } from "./preview-broker.js";
+import { WorkerEntrypoint } from "cloudflare:workers";
 import { billingFromEvent, createCheckout, planLimits, reportUsage, verifyPolarWebhook } from "./polar.js";
 import { TICKET_BOOKING_POLICY } from "../fixtures/ticket-booking/policy.js";
 import { DEFAULT_PROTECTED_PATHS, isCommandPolicy, settingsFor, type CommandPolicy } from "../core/command-policy.js";
@@ -45,6 +47,13 @@ import type { ExternalCheckPolicy } from "../core/external-checks.js";
 import { verifyServiceRead } from "./service-read-auth.js";
 import { publicProfileProjection, type PublicContribution } from "./public-profile.js";
 import { parsePublicBrowseRequest, readPublicRepository } from "./public-repositories.js";
+
+/** Service binding entrypoint: contributor Workers can only request signed build assets. */
+export class PreviewAssetBroker extends WorkerEntrypoint<Env> {
+  override fetch(request: Request): Promise<Response> {
+    return handlePreviewAsset(request, this.env, request.headers.get("x-preview-repository-id") ?? "");
+  }
+}
 
 export { RepositoryController, FlareGitIntegrationWorkflow, FlareGitScenarioWorkflow, FlareGitAgentWorkflow, FlareGitImportHistoryWorkflow };
 export { IntegratorSandbox, AgentSandbox } from "./integrator.js";
@@ -104,32 +113,12 @@ export default {
       return new Response(null, { status: 202 });
     }
 
-    // Previews run contributor-built JavaScript, so they are served only from the separate preview origin,
-    // only with a member-minted capability (query once, then a path-scoped cookie for the page's own assets).
+    // The authenticated Worker never serves contributor code. Existing shared links fail closed.
     if (url.pathname.startsWith("/preview/")) {
-      const previewHost = env.PREVIEW_ORIGIN ? new URL(env.PREVIEW_ORIGIN).hostname : null;
-      if (!previewHost || url.hostname !== previewHost) return text("Not found", 404);
-      const m = /^\/preview\/(p?[0-9a-f]{12})\/([0-9a-f]{40})(\/.*)?$/.exec(url.pathname);
-      if (!m) return text("Not found", 404);
-      const [, pid, sha] = m as unknown as [string, string, string];
-      const rel = (m[3] ?? "/").replace(/^\/+/, "") || "index.html";
-      if (rel.split("/").includes("..")) return text("Not found", 404);
-      const scope = `/preview/${pid}/${sha}/`;
-      const fromQuery = { exp: Number(url.searchParams.get("exp")), sig: url.searchParams.get("sig") ?? "" };
-      const cookie = /(?:^|;\s*)fgp=(\d+)\.([0-9a-f]{64})/.exec(request.headers.get("Cookie") ?? "");
-      const cred = fromQuery.sig ? fromQuery : cookie ? { exp: Number(cookie[1]), sig: cookie[2]! } : null;
-      if (!cred || !(await verifyPreview(env, pid, sha, cred.exp, cred.sig))) return text("This preview link has expired. Open it again from FlareGit.", 403);
-      const object = await env.EVIDENCE_BUCKET.get(`${buildPrefix(pid, sha)}/${rel}`);
-      if (!object) return text("No verified build stored for this commit", 404);
-      const headers = new Headers({
-        "Content-Type": object.httpMetadata?.contentType ?? "application/octet-stream",
-        "Content-Security-Policy": "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'none'; frame-ancestors " + (env.CLERK_AUTHORIZED_PARTIES ?? "'none'").split(",").join(" "),
-        "X-Content-Type-Options": "nosniff",
-        "Referrer-Policy": "no-referrer",
-        "Cache-Control": "private, max-age=3600",
+      return new Response("This preview link is no longer supported. Open the repository in FlareGit to request its isolated preview.", {
+        status: 410,
+        headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff" },
       });
-      if (fromQuery.sig) headers.append("Set-Cookie", `fgp=${cred.exp}.${cred.sig}; Path=${scope}; Max-Age=3600; Secure; HttpOnly; SameSite=Lax`);
-      return new Response(object.body, { headers });
     }
 
     if (!url.pathname.startsWith("/api/")) return env.ASSETS.fetch(request);
@@ -402,7 +391,7 @@ export default {
       }
 
       // ---------- account level ----------
-      if (path === "/config" && method === "GET") return json({ previewBase: env.PREVIEW_ORIGIN });
+      if (path === "/config" && method === "GET") return json({ previewIsolation: "repository-origin" });
 
       if (path === "/account" && method === "GET") {
         let projects = await account.listProjects();
@@ -1156,6 +1145,8 @@ export default {
         if (sub === "/preview" && method === "GET") {
           const commit = url.searchParams.get("commit") ?? state.acceptedState.currentCommit;
           if (!/^[0-9a-f]{40}$/.test(commit)) return text("Invalid commit", 400);
+          const previewOrigin = repositoryPreviewOrigin(env, projectId, url.origin);
+          if (!previewOrigin || !env.PREVIEW_SIGNING_KEY) return json({ ready: false, status: "unavailable", canRetry: false, reason: "An isolated preview origin has not been configured for this repository. The platform operator must provision its preview Worker before a link can be opened." });
           const ready = Boolean(await env.EVIDENCE_BUCKET.head(`${buildPrefix(projectId, commit)}/index.html`));
           if (!ready && commit === state.acceptedState.currentCommit && settings.fixture === "ticket-booking") ctx.waitUntil(ensureBuild(env, projectId, commit, state.canonicalRepoName, accountKey).catch((e) => console.error("preview build failed", String(e))));
           if (!ready) {
@@ -1166,8 +1157,8 @@ export default {
             const status=failed?"failed":spending.status!=="configured"?"unavailable":compute?.active?"pending":"not_started";
             return json({ready:false,status,canRetry:isOwner&&commit===state.acceptedState.currentCommit&&settings.fixture==="ticket-booking",reason:failed?"Build failed; retry requires owner action":status==="unavailable"?"Compute budget unavailable":undefined});
           }
-          const { exp, sig } = await signPreview(env, projectId, commit);
-          return json({ ready: true, status:"available", url: `${env.PREVIEW_ORIGIN}/preview/${projectId}/${commit}/?exp=${exp}&sig=${sig}`, expiresAt: new Date(exp * 1000).toISOString() });
+          const { exp, sig } = await signPreview(env, projectId, commit, previewOrigin);
+          return Response.json({ ready: true, status:"available", url: `${previewOrigin}/preview/${commit}/${exp}/${sig}/`, expiresAt: new Date(exp * 1000).toISOString() }, { headers: { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff" } });
         }
 
         // ----- issues -----

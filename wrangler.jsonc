@@ -23,7 +23,7 @@
     "POLAR_SERVER": "production",
     "PAID_CHECKOUT_ENABLED": "false",
     "POLAR_PRODUCT_ID": "e0bf2687-739c-4051-91e5-2ab15d24262c",
-    "PREVIEW_ORIGIN": "https://preview.flaregit.com",
+    "REPOSITORY_PREVIEW_ORIGINS": "{}",
     "CLERK_ISSUER": "https://clerk.flaregit.com",
     "CLERK_AUTHORIZED_PARTIES": "https://flaregit.com",
     "CLERK_PUBLISHABLE_KEY": "pk_live_Y2xlcmsuZmxhcmVnaXQuY29tJA"

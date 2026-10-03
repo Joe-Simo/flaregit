@@ -30,8 +30,10 @@ export interface Env {
   CLERK_AUTHORIZED_PARTIES?: string;
   /** Clerk publishable key; public by design, served to the SPA via /api/config-free endpoint (var). */
   CLERK_PUBLISHABLE_KEY?: string;
-  /** Dedicated origin serving previews (e.g. https://preview.flaregit.com), isolated from the app origin. */
-  PREVIEW_ORIGIN: string;
+  /** Deprecated shared preview origin; retained only for older configuration fixtures. */
+  PREVIEW_ORIGIN?: string;
+  /** Trusted JSON object mapping repository IDs to distinct HTTPS worker.workers.dev origins. */
+  REPOSITORY_PREVIEW_ORIGINS?: string;
   AI_GATEWAY_ID?: string;
   /** Daily model-backed run allowance per plan (spend control). */
   /** Platform-wide ceiling on model-backed runs per UTC day, across all customers (spend control). */
