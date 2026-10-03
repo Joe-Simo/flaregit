@@ -2711,21 +2711,23 @@ export class RepositoryController extends DurableObject<Env> {
   private publicationReadbackScope(journal:PublicationJournalEntry):string {
     const state=this.load(),candidate=state.candidates[journal.candidateId];
     if(!candidate)throw new Error("Publication candidate unavailable");
-    return JSON.stringify({projectId:state.projectId,incarnation:this.readRepositoryIncarnation(),canonicalRepoName:state.canonicalRepoName,journal,candidateCommit:candidate.candidateCommit,evidenceId:candidate.evidenceId,branch:state.defaultBranch??"main"});
+    return JSON.stringify({projectId:state.projectId,incarnation:this.readRepositoryIncarnation(),canonicalRepoName:state.canonicalRepoName,journal:{id:journal.id,candidateId:journal.candidateId,candidateCommit:journal.candidateCommit,candidateTree:journal.candidateTree,expectedHead:journal.expectedHead,newHead:journal.newHead,outputDigest:journal.outputDigest,publicationAuthority:journal.publicationAuthority},candidateCommit:candidate.candidateCommit,evidenceId:candidate.evidenceId,policyVersion:candidate.frozenPolicyVersion,branch:state.defaultBranch??"main"});
   }
   async ownerPublicationReadbacks(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<PublicationReadbackReport[]> {
     const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();const ledger=new PublicationReadbacks(this.ctx.storage);
-    return this.load().journal.filter(journal=>journal.state==="PREPARED"&&this.legacyPreparedPublication(journal.candidateId)).slice(0,50).map(journal=>ledger.report(journal.id)??{journalId:journal.id,reason:"awaiting_readback",checkedAt:journal.timestamp,automaticAttempts:0,canCheck:true});
+    return this.load().journal.filter(journal=>journal.state==="PREPARED"&&this.legacyPreparedPublication(journal.candidateId)).slice(0,50).map(journal=>ledger.report(journal.id,this.publicationReadbackScope(journal))??{journalId:journal.id,reason:"awaiting_readback",checkedAt:journal.timestamp,automaticAttempts:0,canCheck:true});
   }
   async checkOwnerPublicationReadback(journalId:string,requestId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<PublicationReadbackReport>{
     const authorize=async()=>{const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();};await authorize();return this.checkLegacyPublicationReadback(journalId,"manual",requestId,authorize);
   }
   private async checkLegacyPublicationReadback(journalId:string,mode:"automatic"|"manual",requestId?:string,ownerAuthorize?:()=>Promise<void>):Promise<PublicationReadbackReport>{
-    const ledger=new PublicationReadbacks(this.ctx.storage);if(mode==="manual"&&requestId){const replay=ledger.replay(journalId,requestId);if(replay)return replay;}
-    const journal=this.load().journal.find(item=>item.id===journalId);if(!journal||journal.state!=="PREPARED"||!this.legacyPreparedPublication(journal.candidateId))throw new Error("Pending legacy publication unavailable");
+    const ledger=new PublicationReadbacks(this.ctx.storage),journal=this.load().journal.find(item=>item.id===journalId);
+    if(!journal)throw new Error("Publication recovery scope unavailable");
     new PrivateRecoveryOperations(this.ctx.storage).incarnation();
     const scope=this.publicationReadbackScope(journal);
-    if(!ledger.claim(journalId,scope,mode,requestId))return ledger.report(journalId)!;
+    if(mode==="manual"&&requestId){const replay=ledger.replay(journalId,requestId,scope);if(replay)return replay;}
+    if(journal.state!=="PREPARED"||!this.legacyPreparedPublication(journal.candidateId))throw new Error("Pending legacy publication unavailable");
+    if(!ledger.claim(journalId,scope,mode,requestId))return ledger.report(journalId,scope)!;
     let result:PublicationReadbackResult={reason:"provider_unavailable",checkedAt:new Date().toISOString()};
     try{
       const state=this.load(),candidate=state.candidates[journal.candidateId],evidence=candidate?.evidenceId?state.evidence[candidate.evidenceId]:null;
@@ -2743,7 +2745,7 @@ export class RepositoryController extends DurableObject<Env> {
         if(workflow&&this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='integration_dispatch_receipts'").toArray().length&&this.ctx.storage.sql.exec("SELECT event_id FROM integration_dispatch_receipts WHERE event_id=?",workflow).toArray().length)await this.recordIntegrationDispatchOutcome(workflow,"accepted");
       }
     }catch(error){if(!(result.reason==="confirmed"&&this.load().journal.some(item=>item.id===journalId&&item.state==="ACCEPTED"&&item.newHead===journal.newHead))){result={reason:error instanceof RepositoryReadError?(error.reason==="authorization"?"scope_changed":error.reason==="account_budget"||error.reason==="global_budget"||error.reason==="unconfigured"?"capacity_unavailable":"provider_unavailable"):"provider_unavailable",checkedAt:new Date().toISOString()};}}
-    ledger.save(journalId,scope,result);return ledger.report(journalId)!;
+    ledger.save(journalId,scope,result);return ledger.report(journalId,scope)!;
   }
   private async reconcileLegacyPublicationReadbacks():Promise<void>{
     if(!this.ctx.storage.sql.exec("SELECT id FROM project WHERE id=1").toArray().length||this.repositoryDeleting())return;
