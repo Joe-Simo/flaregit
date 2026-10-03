@@ -18,3 +18,17 @@ jobs:
       - run: bun run lint
       - run: bun test
       - run: bun run build
+
+  native-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the production integrator image
+        run: docker build --tag flaregit-boundary-proof .
+      - name: Verify strict Linux execution isolation with synthetic canaries
+        run: |
+          docker run --rm --network none --entrypoint sh \
+            -e FLAREGIT_BOUNDARY_PROOF_REQUIRED=1 \
+            --mount type=bind,src="$PWD/tests/native-boundary-linux.test.ts",dst=/proof.ts,readonly \
+            flaregit-boundary-proof -c 'mkdir -p /opt/flaregit/tests && cp /proof.ts /opt/flaregit/tests/native-boundary-linux.test.ts && bun test /opt/flaregit/tests/native-boundary-linux.test.ts'
