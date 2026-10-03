@@ -99,6 +99,10 @@ For illustration only: `F=$3,000` (a small part-time operating budget, not a sus
 
 Run `bun src/tooling/unit-economics.ts`. The TypeScript source exposes verified unit rates and every hypothetical workload/payment/support input; output includes assumptions and exclusions. To use other merchant terms or measured usage, copy the output's `assumptions` object into a JSON file and run `bun src/tooling/unit-economics.ts /absolute/path/assumptions.json`. No provider calls or billing changes occur.
 
+For scoped operational evidence, run `bun src/tooling/provider-usage.ts` with an operator-only `CLOUDFLARE_API_TOKEN` already configured in the server environment. The collector reads only the FlareGit Worker, Artifacts namespace and two confirmed sandbox applications. It bounds the time window, response size, row count and request timeout; missing, denied or truncated data is never reported as zero. Output contains sanitized totals and a receipt hash, not credentials or provider messages.
+
+A signed-in read on October 3 covered October 2 at 15:13:54 UTC through October 3 at 15:13:54 UTC. It observed 67 Artifacts events, 2,347 Worker requests, zero Worker errors, 9,596 subrequests and about 65.01 container CPU seconds across the two applications. Memory/disk byte-seconds and transmitted bytes were also returned. These are adaptive operational aggregates for the selected resources, not billable-operation counts, per-workflow attribution, invoice reconciliation, customer-cohort costs or evidence of profitable pricing. Artifacts stored bytes, Worker CPU, DO/Workflow/R2/model charges, shared allowances and payment/support costs remain outside this receipt. Checkout remains disabled.
+
 Default output matches the tables: light/base/heavy contribution $2.70/$1.60/−$1.10; base break-even 2,500; ten-minute container $0.021504; model $0.01075; combined 100 runs $3.2254. Set `seatsPerInvoice` to 5 to reproduce the 2,000-seat base threshold. Set `paymentAdditionalPerSeat` for measured payouts/refunds/disputes rather than treating the zero placeholder as evidence.
 
 ## Go/no-go gates
