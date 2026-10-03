@@ -47,6 +47,7 @@ export function IntegrationTab({
 }) {
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const [resolving, setResolving] = useState(false);
+  const [reviewDecisionId, setReviewDecisionId] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<string | null>(null);
   const [scenario, setScenario] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -58,7 +59,9 @@ export function IntegrationTab({
   const running = all.filter((c) => (c.status === "composing" || c.status === "repairing" || c.status === "verifying" || c.status === "verified") && !reviewing.includes(c));
   const landed = all.filter((c) => c.status === "accepted").slice(-10).reverse();
   const failed = all.filter((c) => c.status === "failed" || c.status === "stale").slice(-10).reverse();
-  const pending: ProductDecision | undefined = Object.values(state.decisions).find((d) => d.status === "pending" && d.id !== dismissed);
+  const pendingDecisions = Object.values(state.decisions).filter(decision => decision.status === "pending");
+  const resolvedDecisions = Object.values(state.decisions).filter(decision => decision.status === "resolved").sort((a, b) => (b.resolvedAt ?? b.createdAt).localeCompare(a.resolvedAt ?? a.createdAt));
+  const pending: ProductDecision | undefined = pendingDecisions.find(decision => decision.id === reviewDecisionId && decision.id !== dismissed) ?? pendingDecisions.find(decision => decision.id !== dismissed);
 
   const resolve = async (decisionId: string, selectedOptionId: string) => {
     setResolving(true);
@@ -107,8 +110,8 @@ export function IntegrationTab({
       {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>}
       <section aria-labelledby="int-review" className="space-y-2">
         <h2 id="int-review" className="text-sm font-semibold">Waiting for your review ({reviewing.length})</h2>
-        {reviewing.length === 0 ? <p className="text-sm text-muted-foreground">Nothing needs your review.</p> :
-          reviewing.map((c) => <CandidateReview key={c.id} projectId={projectId} isOwner={isOwner} candidate={c} evidence={c.evidenceId ? state.evidence[c.evidenceId] : undefined} onDone={reload} />)}
+        {reviewing.length === 0 ? <p className="text-sm text-muted-foreground">No candidate is ready for acceptance.</p> :
+          reviewing.map((c) => <CandidateReview key={c.id} projectId={projectId} isOwner={isOwner} candidate={c} tasks={state.tasks} evidence={c.evidenceId ? state.evidence[c.evidenceId] : undefined} onDone={reload} />)}
       </section>
       <div className="grid gap-4 md:grid-cols-3">
         <section aria-labelledby="int-running" className="rounded-lg border border-border p-3 space-y-2 min-w-0">
@@ -164,7 +167,9 @@ export function IntegrationTab({
           </div>
         )}
       </div>
-      <DecisionModal decision={pending ?? null} onResolve={resolve} onDismiss={() => setDismissed(pending?.id ?? null)} isResolving={resolving} />
+      {pendingDecisions.length > 0 && <section aria-labelledby="pending-decisions" className="rounded-lg border border-border p-4 space-y-3"><h2 id="pending-decisions" className="text-sm font-semibold">Decisions needed</h2>{pendingDecisions.map(decision => <div key={decision.id} className="flex flex-wrap items-center justify-between gap-3"><p className="text-sm min-w-0 break-words">{decision.question}</p><Button variant="outline" size="sm" onClick={() => { setReviewDecisionId(decision.id); setDismissed(null); }}>Review choices</Button></div>)}</section>}
+      {resolvedDecisions.length > 0 && <section aria-labelledby="resolved-decisions" className="space-y-3"><h2 id="resolved-decisions" className="text-sm font-semibold">Decision history</h2>{resolvedDecisions.map(decision => { const selected = decision.options.find(option => option.id === decision.selectedOptionId); return <details key={decision.id} className="rounded-lg border border-border p-4"><summary className="cursor-pointer text-sm font-medium break-words focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{decision.question}</summary><p className="mt-3 text-sm text-muted-foreground whitespace-pre-wrap break-words">{decision.explanation}</p><p className="mt-3 text-sm">Chosen: <strong>{selected?.label ?? "The selected option is unavailable"}</strong>{decision.resolvedAt && <span className="ml-2 text-xs text-muted-foreground"><time dateTime={decision.resolvedAt}>{new Date(decision.resolvedAt).toLocaleString()}</time></span>}</p><ul className="mt-3 space-y-3">{decision.options.map(option => <li key={option.id} className="text-sm border-t border-border pt-3"><p className="font-medium break-words">{option.label}{option.id === decision.selectedOptionId ? " · Chosen" : ""}</p><p className="mt-1 text-xs text-muted-foreground whitespace-pre-wrap break-words">{option.description}</p><p className="mt-2 text-xs font-mono break-words">{option.concreteExample}</p></li>)}</ul></details>; })}</section>}
+      <DecisionModal key={pending?.id ?? "no-decision"} decision={pending ?? null} onResolve={resolve} onDismiss={() => setDismissed(pending?.id ?? null)} isResolving={resolving} />
       <EvidenceDrawer
         open={evidenceOpen}
         onOpenChange={setEvidenceOpen}

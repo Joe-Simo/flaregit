@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { DiffViewer, type BlobResult, type FileChange } from "../components/DiffViewer";
 import { apiJson } from "../api";
 import { AgentRecoveryPanel } from "../components/AgentRecoveryPanel";
-import { CandidateReview } from "../components/CandidateReview";
+import { CandidatePurpose, CandidateReview } from "../components/CandidateReview";
 import { Conversation, type Comment } from "../components/Conversation";
 import type { CandidateGeneration, FlareGitProjectState } from "@/core/types";
 import { navigate } from "../router";
@@ -51,6 +51,8 @@ export function ReviewTab({ projectId, task, commit, candidate, evidence, reload
       <Button variant="ghost" size="sm" onClick={() => navigate(`/p/${projectId}/${candidate ? "integration" : task ? "changes" : "commits"}`)}>
         <ArrowLeft className="h-4 w-4 mr-1.5" /> Back
       </Button>
+      {candidate && <CandidatePurpose projectId={projectId} candidate={candidate} tasks={evidence?.tasks} />}
+      {taskSnapshot && !candidate && <section aria-label="Contribution purpose" className="space-y-1 text-sm"><h2 className="font-semibold break-words">{taskSnapshot.goal}</h2><p className="text-xs text-muted-foreground">{taskSnapshot.contributor.name} · {taskSnapshot.contributor.type}{taskSnapshot.dependsOn ? ` · Builds on ${taskSnapshot.dependsOn}` : ""}{taskSnapshot.issue ? ` · Issue #${taskSnapshot.issue}` : ""}</p></section>}
       {task && evidence?.tasks[task]?.agentRunId && <AgentRecoveryPanel key={`${projectId}:${task}:${evidence.tasks[task]!.agentRunId}`} projectId={projectId} taskId={task} runId={evidence.tasks[task]!.agentRunId!} canResume={["working", "checkpointed", "blocked", "needs_decision"].includes(evidence.tasks[task]!.status)} onStarted={reload} />}
       {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}<Button size="sm" variant="outline" className="ml-3" onClick={() => setRevision((value) => value + 1)}>Retry diff</Button></div>}
       {!diff && !error && <p className="text-sm text-muted-foreground">Loading changes…</p>}

@@ -40,7 +40,7 @@ export function CandidateJournal({
           <div className="py-12 text-center text-muted-foreground text-xs">
             <GitMerge className="h-8 w-8 mx-auto mb-2 opacity-30" aria-hidden />
             <p>No candidate compositions yet.</p>
-            <p className="mt-1">Candidates are generated automatically when contributors checkpoint work.</p>
+            <p className="mt-1">No candidate has been prepared yet.</p>
           </div>
         ) : (
           <ul className="space-y-3">

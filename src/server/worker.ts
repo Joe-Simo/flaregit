@@ -1,3 +1,4 @@
+import {taskCreationInputSchema} from "./task-creation.js";
 import {storageReconciliationReport,type StorageReconciliationSnapshot} from "./storage-reconciliation-report.js";
 import {createHash} from "node:crypto";
 import type {PreviewGenerationRecord} from "./preview-generations.js";
@@ -1124,8 +1125,23 @@ export default {
           const b = await body<{ taskId?: string; goal?: string; name?: string; dependsOn?: string; issue?: number }>();
           const goal = clean(b.goal, 300);
           if (!b.taskId || !TASK_ID.test(b.taskId) || !goal) return text("taskId (3-41 chars: a-z, 0-9, -) and goal are required", 400);
-          if (state.tasks[b.taskId]) return text("A change with that id already exists", 409);
-          if (b.issue !== undefined && !(await project.getIssue(Number(b.issue)))) return text("Unknown issue", 400);
+          if(Object.keys(b).some(key=>!["taskId","goal","name","dependsOn","issue"].includes(key)))return text("Invalid change creation input",400);
+          const input=taskCreationInputSchema.safeParse({goal,dependsOn:b.dependsOn??null,issue:b.issue??null});
+          if(!input.success)return text("Invalid change goal, dependency or issue",400);
+          let replay;
+          try{replay=await project.taskCreationReplay(b.taskId,userId,input.data);}catch{return text("Existing change cannot be recovered with this creator and input. No workspace was allocated.",409);}
+          if(replay){
+            const terminal=replay.status==="accepted"||replay.status==="cancelled";
+            const remote=gitRemote(url.origin,projectId,replay.id);
+            if(terminal)return json({task:replay.id,remote,branch:replay.workspace.branch,replayed:true,terminal:true,status:replay.status,agentRunId:replay.agentRunId??null,commands:[]});
+            try{
+              const {token}=await project.mintGitCapability(userId,replay.id,true,await gitParentTokenHash(request));
+              const current=await project.taskCreationReplay(replay.id,userId,input.data);
+              if(!current||current.status==="accepted"||current.status==="cancelled")return text("Saved change state changed during recovery; retry to read its current state",409);
+              return json({task:current.id,remote,branch:current.workspace.branch,token,expiresInSeconds:3600,replayed:true,terminal:false,status:current.status,agentRunId:current.agentRunId??null,commands:[`git -c http.extraHeader="Authorization: Bearer ${token}" clone ${remote} ${current.id} && cd ${current.id}`,`git checkout ${current.workspace.branch} || git checkout -b ${current.workspace.branch} ${current.currentCommit}   # resume the saved commit and branch`]});
+            }catch{return text("Saved change was found, but current Git access was not confirmed. No new workspace was allocated.",409);}
+          }
+          if (input.data.issue !== null && !(await project.getIssue(input.data.issue))) return text("Unknown issue", 400);
           const parent = b.dependsOn ? state.tasks[b.dependsOn] : undefined;
           if (b.dependsOn && (!parent || parent.status === "cancelled")) return text("dependsOn must name an existing, uncancelled change", 400);
           const source = await env.ARTIFACTS.get(parent ? parent.workspace.repoName : state.canonicalRepoName);
@@ -1139,7 +1155,7 @@ export default {
             contributor: { id: userId.slice(-12), name: (await account.getProfile()).displayName || clean(b.name, 60) || `member-${userId.slice(-6)}`, type: "human" },
             baseCommit: parent ? parent.currentCommit : state.acceptedState.currentCommit,
             ...(parent ? { dependsOn: parent.id } : {}),
-            ...(b.issue !== undefined ? { issue: Number(b.issue) } : {}),
+            ...(input.data.issue !== null ? { issue: input.data.issue } : {}),
             allowedScope: settings.allowedScope,
             status: "working",
             requirements: [],
@@ -1149,19 +1165,26 @@ export default {
             createdAt: now,
             updatedAt: now,
           };
-          await project.createTask(task,userId);
+          const saved=await project.createTask(task,userId,input.data);
+          const existing=await project.taskCreationReplay(saved.id,userId,input.data);
+          if(!existing)return text("Saved change could not be confirmed; retry the same creation request",409);
+          if(existing.status==="accepted"||existing.status==="cancelled")return json({task:existing.id,remote,branch:existing.workspace.branch,replayed:true,terminal:true,status:existing.status,agentRunId:existing.agentRunId??null,commands:[]});
           const {token}=await project.mintGitCapability(userId,b.taskId,true,await gitParentTokenHash(request));
+          const current=await project.taskCreationReplay(saved.id,userId,input.data);
+          if(!current)return text("Saved change state changed; retry the same creation request",409);
+          if(current.status==="accepted"||current.status==="cancelled")return json({task:current.id,remote,branch:current.workspace.branch,replayed:true,terminal:true,status:current.status,agentRunId:current.agentRunId??null,commands:[]});
           return json({
             task: b.taskId,
+            replayed:saved.creationReplayed===true,terminal:false,status:current.status,agentRunId:current.agentRunId??null,
             remote,
-            branch: task.workspace.branch,
+            branch: current.workspace.branch,
             token,
             expiresInSeconds: 3600,
             commands: [
               `git -c http.extraHeader="Authorization: Bearer ${token}" clone ${remote} ${b.taskId} && cd ${b.taskId}`,
-              ...(parent ? [`git checkout --detach ${parent.currentCommit}   # stacked: start from the recorded parent checkpoint`] : []),
-              `git checkout -b ${task.workspace.branch}   # edit, then commit`,
-              `git -c http.extraHeader="Authorization: Bearer ${token}" push origin ${task.workspace.branch}`,
+              ...(existing.dependsOn ? [`git checkout --detach ${existing.baseCommit}   # stacked: start from the recorded parent checkpoint`] : []),
+              `git checkout -b ${existing.workspace.branch}   # edit, then commit`,
+              `git -c http.extraHeader="Authorization: Bearer ${token}" push origin ${existing.workspace.branch}`,
             ],
           }, 201);
         }

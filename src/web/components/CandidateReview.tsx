@@ -7,13 +7,30 @@ import { VERIFIER_IDENTITIES } from "@/core/verification-identities";
 import { externalCheckGate, type ExternalCheckState } from "@/core/external-checks";
 import { blocksExternalAcceptance } from "../review-gate";
 import { navigate } from "../router";
-import type { CandidateGeneration, VerificationEvidence } from "@/core/types";
+import type { CandidateGeneration, Task, VerificationEvidence } from "@/core/types";
+
+/** Requirements and input commits are frozen; legacy task descriptions are current context only. */
+export function CandidatePurpose({ projectId, candidate, tasks }: { projectId: string; candidate: CandidateGeneration; tasks?: Record<string, Task> }) {
+  return <section aria-label="Contribution purpose" className="space-y-3 text-sm">
+    {candidate.frozenRequirements.length > 0 && <div><h3 className="font-semibold">Requirements for this candidate</h3><ul className="mt-2 space-y-1 list-disc pl-5">{candidate.frozenRequirements.map((requirement) => <li key={requirement.id} className="break-words">{requirement.description}</li>)}</ul></div>}
+    <div><h3 className="font-semibold">Contributions</h3><p className="mt-1 text-xs text-muted-foreground">Input commits belong to this candidate. Descriptions, contributors, and issue/dependency links reflect the current contributions.</p>
+      <ul className="mt-2 divide-y divide-border">{candidate.participatingTaskIds.map((id) => {
+        const task = tasks?.[id]; const commit = candidate.participatingCommits[id];
+        return <li key={id} className="py-2 space-y-1">
+          <a className="font-medium text-primary underline-offset-4 hover:underline break-words" href={`#/p/${projectId}/review?${commit ? `commit=${encodeURIComponent(commit)}` : `task=${encodeURIComponent(id)}`}`}>{task?.goal || id}</a>
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground"><span>{id}</span>{commit && <code title={commit}>{commit.slice(0, 7)}</code>}{task?.contributor && <span>{task.contributor.name} · {task.contributor.type}</span>}{task?.issue && <a className="text-primary hover:underline" href={`#/p/${projectId}/issues?n=${task.issue}`}>Issue #{task.issue}</a>}{task?.dependsOn && <a className="text-primary hover:underline" href={`#/p/${projectId}/review?task=${encodeURIComponent(task.dependsOn)}`}>Builds on {task.dependsOn}</a>}</div>
+          {task && commit && task.currentCommit !== commit && <p className="text-xs text-muted-foreground">This contribution has advanced. The link opens its candidate input commit.</p>}
+        </li>;
+      })}</ul>
+    </div>
+  </section>;
+}
 
 /**
  * The explicit human gate: a verified candidate shows what would land, which checks passed, and asks for
  * Accept or Reject. Nothing becomes repository history without this decision on this exact commit.
  */
-export function CandidateReview({ projectId, candidate, evidence, onDone, showOpen = true, externalChecks, providerNames, onRetryExternalCheck, isOwner = false, reviewReady = true }: { projectId: string; candidate: CandidateGeneration; evidence?: VerificationEvidence; onDone: () => void; showOpen?: boolean; externalChecks?: ExternalCheckState; providerNames?: Record<string, string>; onRetryExternalCheck?: (checkId: string) => Promise<void>; isOwner?: boolean; reviewReady?: boolean }) {
+export function CandidateReview({ projectId, candidate, evidence, tasks, onDone, showOpen = true, externalChecks, providerNames, onRetryExternalCheck, isOwner = false, reviewReady = true }: { projectId: string; candidate: CandidateGeneration; evidence?: VerificationEvidence; tasks?: Record<string, Task>; onDone: () => void; showOpen?: boolean; externalChecks?: ExternalCheckState; providerNames?: Record<string, string>; onRetryExternalCheck?: (checkId: string) => Promise<void>; isOwner?: boolean; reviewReady?: boolean }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -118,6 +135,7 @@ export function CandidateReview({ projectId, candidate, evidence, onDone, showOp
         {candidate.repairAttempts.length > 0 ? `, with ${candidate.repairAttempts.length} AI repair round${candidate.repairAttempts.length === 1 ? "" : "s"} you should read` : ""}.{" "}
         {nativeOnly ? total > 0 ? `${passed} of ${total} native Git integrity checks passed. Application CI is reported by connected providers below.` : "Read the native Git integrity evidence and connected application CI below." : total > 0 ? `${passed} of ${total} protected checks passed.` : "No check totals were recorded; read the verification evidence."} Accepting moves the branch to exactly this commit.
       </p>
+      {showOpen && <CandidatePurpose projectId={projectId} candidate={candidate} tasks={tasks} />}
       {candidate.repairAttempts.length > 0 && <div className="space-y-2">
         <h4 className="text-sm font-medium text-amber-800 dark:text-amber-200">Conflict repairs are part of this candidate</h4>
         {candidate.repairAttempts.map((repair, index) => <details key={`${repair.round}-${index}`} className="rounded-md border border-border bg-background/60 p-3">

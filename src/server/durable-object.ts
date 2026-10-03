@@ -1,3 +1,4 @@
+import {taskCreationPayload,type TaskCreationInput} from "./task-creation.js";
 import {ownerStorageContext,copyReportPage,privateRecoveryReportPage,type OwnerStorageContext,type CopyReportPage} from "./storage-reconciliation-ledger.js";
 import {PreviewCredentialIncidents,type PreviewCredentialIncidentStatus} from "./preview-credential-incidents.js";
 import {RepositoryPreviewGenerations,type PreviewGenerationRecord} from "./preview-generations.js";
@@ -415,7 +416,8 @@ export interface Ledger {
   repositoryArtifactDeleted(name: string): Promise<boolean>;
   recordRepositoryArtifactDeleted(name: string): Promise<void>;
   initialize(init: { projectId: string; projectName: string; canonicalRepoName: string; head: string; tree?: string; verificationPolicy: Record<string, unknown>; kind?: "demo" | "import" | "empty"; defaultBranch?: string; ownerId?: string; source?: string }): Promise<FlareGitProjectState>;
-  createTask(task: Task, actorId?: string): Promise<Task>;
+  createTask(task: Task, actorId?: string,creationInput?:TaskCreationInput): Promise<Task & {creationReplayed?:boolean}>;
+  taskCreationReplay(taskId:string,actorId:string,input:TaskCreationInput):Promise<Task|null>;
   mintGitCapability(userId: string, taskId: string | null, write: boolean, parentTokenHash?: string): Promise<{token: string; expiresInSeconds: number}>;
   verifyGitCapability(secret: string, taskId: string | null, write: boolean): Promise<{userId:string;parentTokenHash:string|null}|null>;
   canGitAccess(userId: string, taskId: string | null, write: boolean): Promise<boolean>;
@@ -1328,16 +1330,39 @@ export class RepositoryController extends DurableObject<Env> {
     if (current === null || current > deadline) await this.ctx.storage.setAlarm(deadline);
   }
 
-  async createTask(task: Task, actorId?: string): Promise<Task> {
-    const s = this.load();
-    if (s.tasks[task.id]) return s.tasks[task.id]!;
-    s.tasks[task.id] = task;
-    this.ctx.storage.transactionSync(() => {
-      if(actorId) { this.gitTables(); this.ctx.storage.sql.exec("INSERT INTO git_task_writers(task_id,user_id) VALUES (?,?)",task.id,actorId); }
-      this.save();
-    });
-    await this.logActivity(task.contributor.name, "task.created", `Change started: ${task.goal}`);
+  private async requireTaskCreationActor(actorId:string):Promise<void>{
+    if(!actorId||!await this.roleOf(actorId)||this.repositoryDeleting())throw new Error("Task creation access changed");
+    const accountKey=await accountKeyFor(actorId);
+    if(await accountOf(this.env,accountKey).accountLifecycle()!=="active")throw new Error("Task creation account is unavailable");
+    const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId).toArray()[0]?.role;
+    if(this.repositoryDeleting()||(role!=="owner"&&role!=="member"))throw new Error("Task creation access changed");
+  }
+  async taskCreationReplay(taskId:string,actorId:string,input:TaskCreationInput):Promise<Task|null>{
+    await this.requireTaskCreationActor(actorId);
+    const state=this.load(),task=state.tasks[taskId];if(!task)return null;
+    if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='task_creation_receipts'").toArray().length)throw new Error("Legacy task has no creation receipt");
+    const receipt=this.ctx.storage.sql.exec<{actor_id:string;payload:string}>("SELECT actor_id,payload FROM task_creation_receipts WHERE task_id=?",taskId).toArray()[0];
+    const writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",taskId).toArray()[0];
+    if(!receipt||receipt.actor_id!==actorId||writer?.user_id!==actorId||receipt.payload!==taskCreationPayload(input))throw new Error("Task creation retry identity changed or is unavailable");
     return task;
+  }
+  async createTask(task: Task, actorId?: string,creationInput?:TaskCreationInput): Promise<Task & {creationReplayed?:boolean}> {
+    const payload=creationInput?taskCreationPayload(creationInput):null;
+    if(creationInput&&(!actorId||task.goal!==creationInput.goal||(task.dependsOn??null)!==creationInput.dependsOn||(task.issue??null)!==creationInput.issue))throw new Error("Task creation input or authority changed");
+    if(creationInput)await this.requireTaskCreationActor(actorId!);
+    const s = this.load();
+    if (s.tasks[task.id]) {if(creationInput){const existing=await this.taskCreationReplay(task.id,actorId!,creationInput);if(!existing)throw new Error("Saved task changed during creation retry");return {...existing,creationReplayed:true};}return s.tasks[task.id]!;}
+    const next={...s,tasks:{...s.tasks,[task.id]:task}};
+    this.ctx.storage.transactionSync(() => {
+      if(creationInput&&this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId!).toArray()[0]?.role===undefined)throw new Error("Task creation access changed");
+      if(actorId) { this.gitTables(); this.ctx.storage.sql.exec("INSERT INTO git_task_writers(task_id,user_id) VALUES (?,?)",task.id,actorId); }
+      if(payload){this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS task_creation_receipts(task_id TEXT PRIMARY KEY,actor_id TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL)");this.ctx.storage.sql.exec("INSERT INTO task_creation_receipts VALUES(?,?,?,?)",task.id,actorId!,payload,task.createdAt);}
+      if(this.repositoryDeleting())throw new Error("Repository deletion is in progress");
+      this.ctx.storage.sql.exec("INSERT INTO project (id, doc) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET doc=excluded.doc",JSON.stringify(next));
+    });
+    this.state=next;
+    await this.logActivity(task.contributor.name, "task.created", `Change started: ${task.goal}`);
+    return creationInput?{...task,creationReplayed:false}:task;
   }
 
   async ingestCheckpoint(ev: { eventId: string; taskId: string; commit: string; ready: boolean; filesChanged?: string[] }): Promise<{ applied: boolean }> {
