@@ -1,12 +1,12 @@
 import { CloudflareBadge } from "./components/CloudflareBadge";
 import React, { useEffect, useRef, useState } from "react";
-import { GitBranch, Search, Menu, X, Inbox as InboxIcon, Settings, FolderGit2, Plus } from "lucide-react";
+import { GitBranch, Search, Menu, X, Inbox as InboxIcon, Settings, FolderGit2, Plus, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SearchDialog, type SearchLoader } from "./components/SearchDialog";
 import { BillingBar } from "./components/BillingBar";
 import { Home } from "./pages/Home";
 import { PublicParticipation } from "./pages/PublicParticipation";
-import { CommunityCompose } from "./pages/Community";
+import { Community, CommunityCompose } from "./pages/Community";
 import { NewRepo } from "./pages/NewRepo";
 import { Repo } from "./pages/Repo";
 import { Join } from "./pages/Join";
@@ -45,8 +45,8 @@ export function App() {
     const check = () => fetch("/status.json").then((response) => response.json() as Promise<{ degraded: string[] }>).then((response) => setDegraded(response.degraded)).catch(() => undefined);
     void check(); const timer = setInterval(check, 60_000); return () => clearInterval(timer);
   }, []);
-  const section = route.name === "home" ? "Repositories" : route.name === "repo" ? "Repository" : route.name === "new" ? "New repository" : route.name === "inbox" ? "Inbox" : route.name === "account" ? "Account" : route.name === "participate" ? "Public participation" : "Workspace";
-  const nav = [{ name: "Repositories", path: "/", current: route.name === "home" || route.name === "repo", Icon: FolderGit2 }, { name: "Inbox", path: "/inbox", current: route.name === "inbox", Icon: InboxIcon }, { name: "Account", path: "/account", current: route.name === "account", Icon: Settings }];
+  const section = route.name === "home" ? "Repositories" : route.name === "repo" ? "Repository" : route.name === "new" ? "New repository" : route.name === "inbox" ? "Inbox" : route.name === "account" ? "Account" : (route.name === "community" || route.name === "community-post") ? "Community" : route.name === "participate" ? "Public participation" : "Workspace";
+  const nav = [{ name: "Repositories", path: "/", current: route.name === "home" || route.name === "repo", Icon: FolderGit2 }, { name: "Community", path: "/community", current: route.name === "community" || route.name === "community-post", Icon: MessageSquare }, { name: "Inbox", path: "/inbox", current: route.name === "inbox", Icon: InboxIcon }, { name: "Account", path: "/account", current: route.name === "account", Icon: Settings }];
   return (
     <div className="dashboard-shell min-h-screen bg-background text-foreground">
       <a href="#workspace-content" onClick={(event) => { event.preventDefault(); document.getElementById("workspace-content")?.focus(); }} className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[100] focus:bg-card focus:px-4 focus:py-2">Skip to content</a>
@@ -70,6 +70,7 @@ export function App() {
       <main id="workspace-content" tabIndex={-1} className="flex-1 min-w-0">
         {route.name === "home" && <Home />}
         {route.name === "participate" && <PublicParticipation key={route.projectId} projectId={route.projectId} />}
+        {route.name === "community" && <Community workspace />}
         {route.name === "community-post" && <CommunityCompose key={`${route.params.get("repo") ?? "help"}:${route.params.get("topic") ?? "new"}`} repository={route.params.get("repo") ?? undefined} topic={route.params.get("topic") ?? undefined} />}
         {route.name === "new" && <NewRepo />}
         {route.name === "account" && <Account />}

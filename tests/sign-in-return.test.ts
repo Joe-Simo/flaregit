@@ -19,3 +19,10 @@ test("repository discussion sign-in preserves only validated local context", () 
 });
 
 test("private discussions keep local topic intent", () => { expect(safeSignInReturn("#/p/pabcdef012345/discussions?topic=discussion_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee&signin=1")).toBe("/p/pabcdef012345/discussions?topic=discussion_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"); expect(safeSignInReturn("#/p/pabcdef012345/discussions?topic=https://evil.example")).toBeNull(); });
+
+test("community sign-in resumes exact public repository or help conversation", () => {
+  expect(safeSignInReturn("#/community?signin=1")).toBe("/community");
+  expect(safeSignInReturn("#/community?repo=pabcdef012345&topic=discussion_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee&signin=1")).toBe("/community?repo=pabcdef012345&topic=discussion_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+  expect(safeSignInReturn("#/community?view=help&topic=forum_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee&signin=1")).toBe("/community?view=help&topic=forum_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+  for (const value of ["/community?redirect_url=https://evil.example", "/community?repo=private-url", "/community?view=help&repo=pabcdef012345", "/community?view=anything", "/community?topic=forum_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "/community?repo=pabcdef012345&topic=forum_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "/community?view=help&topic=discussion_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "/community?repo=pabcdef012345&repo=pabcdef012346"]) expect(safeSignInReturn(value)).toBeNull();
+});

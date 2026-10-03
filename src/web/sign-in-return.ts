@@ -19,6 +19,15 @@ export function safeSignInReturn(value: string): string | null {
     const target = query.get("target"), kind = query.get("kind");
     if (target !== null) { const safe = safeReportTarget(target); if (!safe) return null; destination.set("target", safe); }
     if (kind !== null) { if (!["impersonation","namespace_squatting","malware","harassment","security","other"].includes(kind)) return null; destination.set("kind", kind); }
+  } else if (path === "/community") {
+    allowed.add("repo"); allowed.add("topic"); allowed.add("view");
+    const repo = query.get("repo"), topic = query.get("topic"), view = query.get("view");
+    if (view !== null) { if (view !== "help" || repo !== null) return null; destination.set("view", view); }
+    if (repo !== null) { if (!projectId.test(repo)) return null; destination.set("repo", repo); }
+    if (topic !== null) {
+      const valid = repo ? /^discussion_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(topic) : view === "help" && topicId.test(topic);
+      if (!valid) return null; destination.set("topic", topic);
+    }
   } else if (path === "/community-post") {
     allowed.add("topic"); allowed.add("repo"); const topic = query.get("topic"), repo = query.get("repo");
     if (repo !== null) { if (!projectId.test(repo)) return null; destination.set("repo", repo); }
