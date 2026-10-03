@@ -46,8 +46,8 @@ export function ReviewTab({ projectId, task, commit, input, candidate, evidence,
   }, [projectId, task, taskSnapshot?.currentCommit, taskSnapshot?.baseCommit, commit, candidate?.id, candidate?.candidateCommit, candidate?.expectedAcceptedBase, reviewScope, input, frozenInputCommit, frozenInputBase, revision]);
 
   const loadBlob = useCallback(
-    (hash: string) => apiJson<BlobResult>(`/p/${projectId}/blob-by-hash?hash=${hash}${sourceTaskId ? `&task=${encodeURIComponent(sourceTaskId)}` : ""}`),
-    [projectId, sourceTaskId]
+    (hash: string) => apiJson<BlobResult>(`/p/${projectId}/blob-by-hash?hash=${hash}${input && candidate ? `&candidate=${encodeURIComponent(candidate.id)}&input=${encodeURIComponent(input)}` : sourceTaskId ? `&task=${encodeURIComponent(sourceTaskId)}` : ""}`),
+    [projectId, sourceTaskId, input, candidate?.id]
   );
 
   return (

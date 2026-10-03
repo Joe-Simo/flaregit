@@ -1082,7 +1082,7 @@ export default {
           let browseRequest;
           try { browseRequest = parseSignedRepositoryBrowseRequest(sub, url.searchParams); }
           catch (error) { return repositoryReadJson({ error: error instanceof Error ? error.message : "Invalid repository request" }, error instanceof RepositoryBrowseRequestError ? error.status : 400); }
-          const inputTaskId = browseRequest.kind === "diff" ? browseRequest.input : undefined;
+          const inputTaskId = "input" in browseRequest ? browseRequest.input : undefined;
           const taskId = inputTaskId ?? ("task" in browseRequest ? browseRequest.task : undefined);
           const candidateId = "candidate" in browseRequest ? browseRequest.candidate : undefined;
           const task = taskId && Object.hasOwn(state.tasks, taskId) ? state.tasks[taskId] : undefined;
@@ -1090,12 +1090,19 @@ export default {
           if (taskId && !task) return repositoryReadText("Unknown change", 404);
           if (candidateId && (!candidate || (!inputTaskId && !candidate.candidateCommit))) return repositoryReadText("Unknown candidate", 404);
           if (inputTaskId && (!candidate?.participatingTaskIds.includes(inputTaskId) || !candidate.participatingCommits[inputTaskId])) return repositoryReadText("Unknown frozen contribution input", 404);
-          const repoName = task?.workspace.repoName ?? state.canonicalRepoName;
+          let repoName = task?.workspace.repoName ?? state.canonicalRepoName;
           let readContext;
           try { readContext = await project.repositoryReadContext(userId, taskId ?? null, candidateId ?? null); }
           catch { return repositoryReadJson({ error: "Repository read scope is unavailable", reason: "authorization" }, 503); }
+          if (inputTaskId && readContext?.retainedInputReceiptId) repoName = state.canonicalRepoName;
           if (!readContext || readContext.repoName !== repoName || readContext.canonicalRepoName !== state.canonicalRepoName) return repositoryReadText("Repository read scope is unavailable", 503);
-          if (inputTaskId && (!/^[a-f0-9]{40}$/.test(readContext.candidateInputCommit ?? "") || readContext.candidateInputCommit !== candidate?.participatingCommits[inputTaskId] || readContext.candidateInputBase !== candidate?.frozenContributorProofs?.find(proof => proof.id === inputTaskId && proof.commit === readContext.candidateInputCommit)?.baseCommit)) return repositoryReadJson({ error: "Frozen input identity changed; no workspace read was started" }, 503);
+          const frozenProofBase = inputTaskId ? candidate?.frozenContributorProofs?.find(proof => proof.id === inputTaskId && proof.commit === readContext.candidateInputCommit)?.baseCommit : undefined;
+          const inputBaseMatches = frozenProofBase !== undefined
+            ? readContext.candidateInputBase === frozenProofBase
+            : readContext.retainedInputReceiptId
+              ? /^[a-f0-9]{40}$/.test(readContext.candidateInputBase ?? "")
+              : readContext.candidateInputBase === undefined;
+          if (inputTaskId && (!/^[a-f0-9]{40}$/.test(readContext.candidateInputCommit ?? "") || readContext.candidateInputCommit !== candidate?.participatingCommits[inputTaskId] || !inputBaseMatches)) return repositoryReadJson({ error: "Frozen input identity changed; no workspace read was started" }, 503);
           const reserveRepositoryBrowse = (operationId: string) => globalOf(env).reserveRepositoryReadOperation(operationId, readContext.accountKey);
           const credentialHash = auth.viaToken ? await gitParentTokenHash(request) : undefined;
           const authorizeRead = async () => {
@@ -1122,7 +1129,7 @@ export default {
                 headCommit = matches[0]!.hash;
               }
               const head = await resolveCommit(repo, headCommit);
-              if (!head) return inputTaskId ? repositoryReadJson({ error: "The frozen input commit is unavailable in its retained workspace. No newer checkpoint was substituted." }, 503) : repositoryReadText("Commit not found", 404);
+              if (!head) return inputTaskId ? repositoryReadJson({ error: "The recorded input commit is unavailable in its saved repository. No newer checkpoint was substituted." }, 503) : repositoryReadText("Commit not found", 404);
               const base = baseCommit ? await resolveCommit(repo, baseCommit) : head.parents[0] ? await resolveCommit(repo, head.parents[0]) : null;
               if ((baseCommit || head.parents[0]) && !base) return repositoryReadText("The comparison base could not be read; no complete diff is available. Retry.", 503);
               result = { repo: taskId ? `task:${taskId}` : "canonical", base: base?.hash ?? null, head, files: await diffTrees(repo, base?.treeHash, head.treeHash), ...(inputTaskId ? { input: { taskId: inputTaskId, commit: head.hash, baseSource: baseCommit ? "recorded-contribution-base" : "commit-parent" } } : {}) };

@@ -28,7 +28,7 @@ Cloudflare deployment messages record the exact source commit; check out that SH
 
 **Recovery.** Agents resume from their already pushed branch. Publication rehydrates from the stored candidate ref, so a crashed step does not need the original workspace. Webhook deliveries are written in the same transaction as the event (transactional outbox) and a Durable Object alarm re-sends anything not yet queued.
 
-Original contributor forks remain available after acceptance and cancellation, including squash landings, so the original work can still be reviewed and recovered.
+Contributor workspaces remain after acceptance and cancellation, but their branches can advance. New integrations preserve the recorded input commit and base with verified Git references in the canonical repository before composing a candidate. Saved-input review uses those exact commits. Legacy inputs without a preservation receipt still depend on their original workspace; missing history is reported rather than replaced with a newer checkpoint.
 
 ## Platform features
 
@@ -137,6 +137,8 @@ The local demo is a scenario harness, not the hosted multi-repository product. I
 | `tests/sanitize.test.ts` | Git ref, refspec and header sanitization, including a 20,000-string fuzz. |
 | `tests/dns.test.ts` | Domain normalization, TXT record construction and parsing, resolver failures. |
 | `tests/artifacts.test.ts` | Local Artifacts client: repo creation, tokens, forks. |
+| `tests/retained-git-input.test.ts`, `tests/rebase-workflow-native.test.ts` | Real local Git preservation through garbage collection and production rebase orchestration after lost push or checkpoint acknowledgements. These tests do not prove hosted Artifacts behavior. |
+| `tests/retained-input-native.test.ts`, `tests/repository-read-http.test.ts` | Native Worker authorization, exact rebase replay, bounded credential cleanup, and saved-input reads without substituting newer work. Provider responses are synthetic. |
 
 The race test runs 20 contending branches by default (4 workers), using a local bare repository and real `git push --force-with-lease`. It tests the landing protocol, not Artifacts throughput. An optional larger run is available; this release does not claim a measured production throughput or timing result:
 

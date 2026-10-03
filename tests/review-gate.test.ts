@@ -41,6 +41,14 @@ test("approval waits for current diff while rejection remains available on the e
 import { CandidatePurpose } from "../src/web/components/CandidateReview";
 import { parseSignedRepositoryBrowseRequest } from "../src/server/public-repositories";
 import type { Task } from "../src/core/types";
+test("frozen input bytes require the same candidate and input scope as their diff", () => {
+  const hash = "a".repeat(40);
+  expect(parseSignedRepositoryBrowseRequest("/blob-by-hash", new URLSearchParams({ hash, candidate: "candidate-frozen", input: "working" }))).toMatchObject({ kind: "blob", hash, candidate: "candidate-frozen", input: "working", task: undefined });
+  const invalidScopes: Record<string, string>[] = [{ input: "working" }, { candidate: "candidate-frozen" }, { candidate: "candidate-frozen", input: "working", task: "working" }];
+  for (const scope of invalidScopes) {
+    expect(() => parseSignedRepositoryBrowseRequest("/blob-by-hash", new URLSearchParams({ hash, ...scope }))).toThrow();
+  }
+});
 test("rendered frozen-input links select the recorded candidate input after a task advances", () => {
   const task: Task = { id: "working", goal: "Synthetic frozen contribution", contributor: { id: "contributor", name: "Contributor", type: "human" }, baseCommit: "a".repeat(40), currentCommit: "c".repeat(40), requirements: [], allowedScope: [], status: "accepted", workspace: { repoName: "synthetic-fork", remote: "https://fixture.invalid", branch: "task/working" }, checkpoints: [], createdAt: "2026-10-03", updatedAt: "2026-10-03" };
   const value = { ...candidate, participatingTaskIds: [task.id], participatingCommits: { [task.id]: "b".repeat(40) } };

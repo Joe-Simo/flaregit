@@ -1,3 +1,5 @@
+import {RetainedCredentialIncidents} from "./retained-credential-incidents.js";
+import {RetainedInputs,retainedInputSchema,type RetainedInput,type RetainedInputReceipt,type RebaseApplication} from "./retained-inputs.js";
 import {ImportHistoryInspection,type HistorySide,type HistoryInspectionActor,type HistoryChunk,type HistoryInspectionSnapshot,type HistoryInspectionBatch} from "./import-history-inspection.js";
 import {ImportHistoryAttempts,type ImportHistoryAttempt} from "./import-history-attempts.js";
 import {taskCreationPayload,type TaskCreationInput} from "./task-creation.js";
@@ -42,7 +44,7 @@ import type { ImportJob } from "./import-job.js";
 import type { PublicRepositoryGrant } from "./public-repositories.js";
 import { AgentRunLedger, type AgentRunInput, type AgentRunRecord, type AgentRunClaim } from "./agent-run-ledger.js";
 import { actorName, RepositoryPublicCommunity, type PublicCommunityActor, type PublicCommunityPolicy, type PublicPost, type ContributionRequest } from "./public-community.js";
-export interface RepositoryReadContext { projectId:string; incarnation:string|null; canonicalRepoName:string; repoName:string; ownerId:string; accountKey:string; publicationVersion?:number; acceptedCommit?:string; taskBase?:string; taskCommit?:string; taskBranch?:string; candidateId?:string; candidateCommit?:string; candidateBase?:string; candidateInputCommit?:string; candidateInputBase?:string }
+export interface RepositoryReadContext { projectId:string; incarnation:string|null; canonicalRepoName:string; repoName:string; ownerId:string; accountKey:string; publicationVersion?:number; acceptedCommit?:string; taskBase?:string; taskCommit?:string; taskBranch?:string; candidateId?:string; candidateCommit?:string; candidateBase?:string; candidateInputCommit?:string; candidateInputBase?:string;retainedInputReceiptId?:string }
 export type PublicGrantMetadata = PublicRepositoryGrant & { name: string; version: number; canonicalRepoName: string };
 import type {
   CandidateGeneration,
@@ -439,7 +441,19 @@ export interface Ledger {
   markDelivery(id: string, result: { ok: boolean; status?: number; error?: string; latencyMs?: number; final?: boolean }): Promise<number>;
   redeliver(id: string): Promise<boolean>;
   isBlocked(id: string): Promise<boolean>;
-  applyRebase(taskId: string, r: { commit?: string; base?: string; parentAccepted?: boolean; failed?: string }): Promise<void>;
+  beginRetainedCredential(input:RetainedInput,purpose:"workspace"|"canonical",expiresAt:number,scope:"read"|"write"):Promise<boolean>;
+  recordRetainedCredential(inputId:string,purpose:"workspace"|"canonical",repoName:string,token:string,expiresAt:number):Promise<void>;
+  revokeRetainedCredential(inputId:string,purpose:"workspace"|"canonical"):Promise<boolean>;
+  markRetainedCredentialRevoked(inputId:string,purpose:"workspace"|"canonical",token:string):Promise<void>;
+  retainedCredentialSummary(inputId:string,purpose:"workspace"|"canonical"):Promise<ReturnType<RetainedCredentialIncidents["summary"]>>;
+  lookupRetainedInput(taskId:string,candidateId:string,commit:string,base?:string,userId?:string):Promise<RetainedInputReceipt|null>;
+  assertRetainedInput(input:RetainedInput):Promise<boolean>;
+  prepareRebaseApplication(input:RetainedInput,commit:string,base:string,parentAccepted:boolean):Promise<RebaseApplication>;
+  recordRebaseRemoteOutcome(id:string,observedCommit:string):Promise<RebaseApplication>;
+  rebaseApplication(taskId:string,workflowId:string,candidateId:string,targetBase:string):Promise<RebaseApplication|null>;
+  prepareRetainedInput(taskId:string,workflowId:string,candidateId:string,id:string,followup?:boolean):Promise<RetainedInput>;
+  recordRetainedInput(input:RetainedInput,proof:{commit:string;base:string}):Promise<RetainedInputReceipt>;
+  applyRebase(taskId: string, r: { commit?: string; base?: string; parentAccepted?: boolean; failed?: string; expected?:RetainedInput; receiptId?:string;applicationId?:string }): Promise<void>;
   listActivity(limit: number): Promise<ActivityRow[]>;
   setVerificationPolicy(policy: Record<string, unknown>): Promise<void>;
   destroy(): Promise<void>;
@@ -1581,23 +1595,100 @@ export class RepositoryController extends DurableObject<Env> {
     );
     return attempts;
   }
-  /** Records the result of re-basing a stacked change onto its parent's new tip. */
-  async applyRebase(taskId: string, r: { commit?: string; base?: string; parentAccepted?: boolean; failed?: string }): Promise<void> {
-    const s = this.load();
-    const task = s.tasks[taskId];
-    if (!task) return;
-    if (r.failed) {
-      task.status = "blocked";
-      task.blockedReason = r.failed;
-    } else if (r.commit && r.base) {
-      task.currentCommit = r.commit;
-      task.baseCommit = r.base;
-      if (r.parentAccepted) delete task.dependsOn;
-      if (task.status === "blocked") { task.status = "working"; delete task.blockedReason; }
+  private assertRetainedLocal(input:RetainedInput,checkpoint=true):void {
+    const state=this.load(),task=state.tasks[input.taskId],candidate=state.candidates[input.candidateId];
+    const actor=this.ctx.storage.sql.exec<{actor_id:string|null;kind:string}>("SELECT actor_id,kind FROM project_workflows WHERE instance_id=?",input.workflowId).toArray()[0];
+    if(actor?.kind!=="integration"||actor.actor_id!==input.actorId||!this.ctx.storage.sql.exec("SELECT role FROM members WHERE user_id=?",input.actorId).toArray().length)throw new Error("Registered integration actor changed");
+    if(input.followup&&(!candidate||candidate.status!=="accepted"||!candidate.candidateCommit||!candidate.participatingTaskIds.includes(input.taskId)||!state.acceptedState.history.some(entry=>entry.candidateId===candidate.id&&entry.commit===candidate.candidateCommit)||!state.journal.some(entry=>entry.state==="ACCEPTED"&&entry.candidateId===candidate.id&&entry.newHead===candidate.candidateCommit)))throw new Error("Accepted followup history required");
+    if(this.repositoryDeleting()||state.projectId!==input.projectId||state.canonicalRepoName!==input.canonicalRepoName||this.readRepositoryIncarnation()!==input.incarnation||!task||(checkpoint&&(task.currentCommit!==input.commit||task.baseCommit!==input.base))||task.workspace.repoName!==input.workspaceRepoName||task.workspace.branch!==input.branch||(checkpoint&&task.dependsOn!==input.dependsOn)||(checkpoint&&!input.followup&&["accepted","cancelled"].includes(task.status))||candidate?.workflowInstanceId!==input.workflowId||this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",input.ownerId).toArray()[0]?.role!=="owner")throw new Error("Retained input authority or checkpoint changed");
+  }
+  private async authorizeRetainedInput(input:RetainedInput,checkpoint=true):Promise<void>{retainedInputSchema.parse(input);if(await accountKeyFor(input.ownerId)!==input.accountKey||await accountOf(this.env,input.accountKey).accountLifecycle()!=="active")throw new Error("Retained input owner unavailable");if(await accountOf(this.env,await accountKeyFor(input.actorId)).accountLifecycle()!=="active")throw new Error("Integration actor unavailable");this.assertRetainedLocal(input,checkpoint);}
+  async prepareRetainedInput(taskId:string,workflowId:string,candidateId:string,id:string,followup?:boolean):Promise<RetainedInput>{
+    const state=this.load(),task=state.tasks[taskId];if(!task)throw new Error("Contribution unavailable");
+    const ownerId=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id;if(!ownerId)throw new Error("Owner unavailable");
+    const actor=await this.getWorkflowRun(workflowId);if(actor?.kind!=="integration"||!actor.actorId)throw new Error("Registered integration actor required");
+    const input:RetainedInput={id,...(followup?{followup:true as const}:{}),actorId:actor.actorId,projectId:state.projectId,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation(),taskId,commit:task.currentCommit,base:task.baseCommit,canonicalRepoName:state.canonicalRepoName,workspaceRepoName:task.workspace.repoName,branch:task.workspace.branch,workflowId,candidateId,ownerId,accountKey:await accountKeyFor(ownerId),protectedRef:`refs/flaregit/inputs/${new PrivateRecoveryOperations(this.ctx.storage).incarnation()}/${taskId}/${task.currentCommit}`,protectedBaseRef:`refs/flaregit/inputs/${new PrivateRecoveryOperations(this.ctx.storage).incarnation()}/${taskId}/${task.baseCommit}`,...(task.dependsOn?{dependsOn:task.dependsOn}:{}),version:1};
+    await this.authorizeRetainedInput(input);return input;
+  }
+  private retainedReceiptHistorical(input:RetainedInput):boolean {
+    if(input.followup||!new RetainedCredentialIncidents(this.ctx.storage).canonicalWriteIssued(input))return false;
+    const candidate=this.load().candidates[input.candidateId];
+    if(!candidate||!candidate.participatingTaskIds.includes(input.taskId)||candidate.participatingCommits[input.taskId]!==input.commit)return false;
+    const frozen=candidate.frozenContributorProofs?.find(item=>item.id===input.taskId&&item.commit===input.commit);
+    return !frozen||frozen.baseCommit===input.base;
+  }
+  async recordRetainedInput(input:RetainedInput,proof:{commit:string;base:string}):Promise<RetainedInputReceipt>{
+    const historical=this.retainedReceiptHistorical(input);
+    await this.authorizeRetainedInput(input,!historical);
+    return this.ctx.storage.transactionSync(()=>{if(historical&&!this.retainedReceiptHistorical(input))throw new Error("Historical retained input provenance changed");this.assertRetainedLocal(input,!historical);return new RetainedInputs(this.ctx.storage).record(input,proof);});
+  }
+  async beginRetainedCredential(input:RetainedInput,purpose:"workspace"|"canonical",expiresAt:number,scope:"read"|"write"):Promise<boolean>{
+    if(input.followup&&(purpose!=="canonical"||scope!=="read"))throw new Error("Accepted followup only permits canonical reads");
+    await this.ensureRecoveryAlarm();await this.authorizeRetainedInput(input);
+    return new RetainedCredentialIncidents(this.ctx.storage).begin(input,purpose,expiresAt,scope,()=>this.assertRetainedLocal(input));
+  }
+  async recordRetainedCredential(inputId:string,purpose:"workspace"|"canonical",repoName:string,token:string,expiresAt:number):Promise<void>{
+    await new RetainedCredentialIncidents(this.ctx.storage).record(inputId,purpose,repoName,token,expiresAt);
+    await this.ensureRecoveryAlarm();
+  }
+  async revokeRetainedCredential(inputId:string,purpose:"workspace"|"canonical"):Promise<boolean>{
+    const incidents=new RetainedCredentialIncidents(this.ctx.storage),summary=incidents.summary(inputId,purpose);
+    if(summary?.status==="revoked")return true;
+    const pending=incidents.credentialForRevocation(inputId,purpose);if(!pending)return false;
+    const admission=await globalOf(this.env).reserveCoreGitOperation(`retained-cleanup-${crypto.randomUUID()}`,pending.accountKey,this.currentGitBudget()).catch(()=>null);
+    if(!admission?.allowed||!incidents.markAttempt(inputId,purpose))return false;
+    try{using repo=await this.env.ARTIFACTS.get(pending.repoName);if(!await repo.revokeToken(pending.token))return false;await incidents.markRevoked(inputId,purpose,pending.token);return true;}catch{return false;}
+  }
+  async markRetainedCredentialRevoked(inputId:string,purpose:"workspace"|"canonical",token:string):Promise<void>{await new RetainedCredentialIncidents(this.ctx.storage).markRevoked(inputId,purpose,token);}
+  async retainedCredentialSummary(inputId:string,purpose:"workspace"|"canonical"){const incidents=new RetainedCredentialIncidents(this.ctx.storage);incidents.pendingBatch();return incidents.summary(inputId,purpose);}
+  private async retryRetainedCredentialIncidents(){
+    const incidents=new RetainedCredentialIncidents(this.ctx.storage),pending=incidents.pendingBatch();
+    for(const incident of pending){
+      if(!incidents.markAutomaticSweep(incident.inputId,incident.purpose))continue;
+      const admission=await globalOf(this.env).reserveCoreGitOperation(`retained-cleanup-${crypto.randomUUID()}`,incident.accountKey,this.currentGitBudget()).catch(()=>null);
+      if(!admission?.allowed||!incidents.markAttempt(incident.inputId,incident.purpose))continue;
+      try{using repo=await this.env.ARTIFACTS.get(incident.repoName);if(await repo.revokeToken(incident.token))await incidents.markRevoked(incident.inputId,incident.purpose,incident.token);}catch{console.error("Retained credential revocation retry unavailable");}
     }
-    task.updatedAt = new Date().toISOString();
-    this.save();
-    await this.logActivity("FlareGit", r.failed ? "stack.rebase_blocked" : "stack.rebased", r.failed ? `${taskId}: ${r.failed}` : `${taskId} was rebased onto its updated parent (${r.commit?.slice(0, 7)})`);
+    const wake=incidents.nextWake();if(wake!==null)await this.ensureRecoveryAlarm(Math.max(1,wake-Date.now()));
+  }
+  async lookupRetainedInput(taskId:string,candidateId:string,commit:string,base?:string,userId?:string):Promise<RetainedInputReceipt|null>{
+    if(!userId)throw new Error("Current member required for retained source");
+    const context=await this.repositoryReadContext(userId,null);
+    const state=this.load(),candidate=state.candidates[candidateId];
+    this.assertReadLocal(context,userId,null);
+    if(!candidate||candidate.participatingCommits[taskId]!==commit)throw new Error("Frozen candidate input does not match retained source");
+    const receipt=new RetainedInputs(this.ctx.storage).lookup(taskId,candidateId,commit,base);
+    if(!receipt)return null;
+    if(receipt.projectId!==context.projectId||receipt.incarnation!==context.incarnation||receipt.canonicalRepoName!==context.canonicalRepoName||receipt.workflowId!==candidate.workflowInstanceId)throw new Error("Retained source scope changed");
+    return receipt;
+  }
+  async assertRetainedInput(input:RetainedInput):Promise<boolean>{try{await this.authorizeRetainedInput(input);return true;}catch{return false;}}
+  async prepareRebaseApplication(input:RetainedInput,commit:string,base:string,parentAccepted:boolean):Promise<RebaseApplication>{await this.authorizeRetainedInput(input);return this.ctx.storage.transactionSync(()=>{this.assertRetainedLocal(input);return new RetainedInputs(this.ctx.storage).prepareApplication(input,commit,base,parentAccepted);});}
+  async recordRebaseRemoteOutcome(id:string,observedCommit:string):Promise<RebaseApplication>{const value=new RetainedInputs(this.ctx.storage).application(id);if(!value)throw new Error("Saved rebase application unavailable");await this.authorizeRetainedInput(value.input,false);return this.ctx.storage.transactionSync(()=>{this.assertRetainedLocal(value.input,false);return new RetainedInputs(this.ctx.storage).remoteVerified(id,observedCommit);});}
+  async rebaseApplication(taskId:string,workflowId:string,candidateId:string,targetBase:string):Promise<RebaseApplication|null>{
+    const ledger=new RetainedInputs(this.ctx.storage);const rows=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM rebase_applications WHERE json_extract(doc,'$.input.taskId')=? AND json_extract(doc,'$.input.workflowId')=? AND json_extract(doc,'$.input.candidateId')=? AND json_extract(doc,'$.base')=? ORDER BY rowid DESC LIMIT 1",taskId,workflowId,candidateId,targetBase).toArray();const value=rows[0]?JSON.parse(rows[0].doc) as RebaseApplication:null;if(!value)return null;await this.authorizeRetainedInput(value.input,false);this.assertRetainedLocal(value.input,false);return ledger.application(value.input.id);
+  }
+  /** Remote preservation must precede rewriting a contribution; never overwrite a newer checkpoint. */
+  async applyRebase(taskId:string,r:{commit?:string;base?:string;parentAccepted?:boolean;failed?:string;expected?:RetainedInput;receiptId?:string;applicationId?:string}):Promise<void>{
+    if(!r.expected||r.expected.followup||r.expected.taskId!==taskId)throw new Error("Frozen rebase input required");
+    const expected=retainedInputSchema.parse(r.expected);
+    const application=r.applicationId?new RetainedInputs(this.ctx.storage).application(r.applicationId):null;
+    if(application&&(JSON.stringify(application.input)!==JSON.stringify(expected)||application.commit!==r.commit||application.base!==r.base||application.parentAccepted!==Boolean(r.parentAccepted)))throw new Error("Rebase application outcome changed");
+    await this.authorizeRetainedInput(expected,application?.status!=="applied");
+    if(application?.status==="applied")return;
+    try{this.ctx.storage.transactionSync(()=>{
+      this.assertRetainedLocal(expected);const task=this.load().tasks[taskId]!;
+      if(r.failed){task.status="blocked";task.blockedReason=r.failed;}
+      else if(r.commit&&r.base){
+        if(!/^[a-f0-9]{40}$/.test(r.commit)||!/^[a-f0-9]{40}$/.test(r.base))throw new Error("Invalid rebased Git checkpoint");
+        const receipt=r.receiptId?new RetainedInputs(this.ctx.storage).get(r.receiptId):null;
+        if(!receipt||JSON.stringify(retainedInputSchema.parse((({verifiedAt:_verifiedAt,...value})=>value)(receipt)))!==JSON.stringify(expected))throw new Error("Confirmed retained input receipt required");
+        if(!r.applicationId)throw new Error("Saved rebase application required");
+        new RetainedInputs(this.ctx.storage).applyApplication(r.applicationId,()=>{task.currentCommit=r.commit!;task.baseCommit=r.base!;if(r.parentAccepted)delete task.dependsOn;if(task.status==="blocked"){task.status="working";delete task.blockedReason;}});
+      }else throw new Error("Rebase outcome required");
+      task.updatedAt=new Date().toISOString();this.save();
+    });}catch(error){this.state=null;throw error;}
+    await this.logActivity("FlareGit",r.failed?"stack.rebase_blocked":"stack.rebased",r.failed?`${taskId}: ${r.failed}`:`${taskId} was rebased onto its updated parent (${r.commit?.slice(0,7)})`);
   }
   /** True while an earlier event for the same webhook is still pending, so receivers see events in order. */
   async isBlocked(id: string): Promise<boolean> {
@@ -1633,6 +1724,7 @@ export class RepositoryController extends DurableObject<Env> {
 
   /** Recovery sweep: re-send deliveries whose queue message was never sent or was lost, until none are pending. */
   override async alarm(): Promise<void> {
+    await this.retryRetainedCredentialIncidents();
     await this.retryPreviewCredentialIncidents();
     await this.reconcileDirectoryRegistration();
     await this.reconcileContributorRegistrations();
@@ -2396,21 +2488,27 @@ export class RepositoryController extends DurableObject<Env> {
     if(userId===null&&JSON.stringify(await this.publicGrant())!==JSON.stringify(grant))throw new Error("Public repository changed");
     const latest=this.load();
     if(this.repositoryDeleting()||latest.canonicalRepoName!==state.canonicalRepoName||latest.projectId!==state.projectId||this.readRepositoryIncarnation()!==incarnation||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==ownerId||(userId!==null&&!this.ctx.storage.sql.exec("SELECT role FROM members WHERE user_id=?",userId).toArray().length))throw new Error("Repository authority changed");
-    const repoName=taskId?latest.tasks[taskId]?.workspace.repoName:latest.canonicalRepoName;if(!repoName)throw new Error("Workspace unavailable");
+    let repoName=taskId?latest.tasks[taskId]?.workspace.repoName:latest.canonicalRepoName;if(!repoName)throw new Error("Workspace unavailable");
     const candidate=candidateId?latest.candidates[candidateId]:null;
     if(candidateId&&(!candidate||(!taskId&&!candidate.candidateCommit)))throw new Error("Candidate unavailable");
     const inputCommit=candidate&&taskId?candidate.participatingCommits[taskId]:undefined;
     if(candidate&&taskId&&(!candidate.participatingTaskIds.includes(taskId)||!inputCommit||!/^[a-f0-9]{40}$/.test(inputCommit)))throw new Error("Frozen candidate input unavailable");
-    const inputBase=candidate&&taskId?candidate.frozenContributorProofs?.find(proof=>proof.id===taskId&&proof.commit===inputCommit)?.baseCommit:undefined;
+    let inputBase=candidate&&taskId?candidate.frozenContributorProofs?.find(proof=>proof.id===taskId&&proof.commit===inputCommit)?.baseCommit:undefined;
     if(inputBase!==undefined&&!/^[a-f0-9]{40}$/.test(inputBase))throw new Error("Frozen input base unavailable");
-    return {projectId:fresh.projectId,incarnation,canonicalRepoName:fresh.canonicalRepoName,repoName,ownerId,accountKey,...(candidate?{candidateId:candidate.id,candidateCommit:candidate.candidateCommit,candidateBase:candidate.expectedAcceptedBase,...(taskId?{candidateInputCommit:inputCommit,candidateInputBase:inputBase}:{})}:{}),...(taskId?{taskBase:latest.tasks[taskId]!.baseCommit,taskCommit:latest.tasks[taskId]!.currentCommit,taskBranch:latest.tasks[taskId]!.workspace.branch}:{}),...(grant?{publicationVersion:grant.version,acceptedCommit:grant.acceptedCommit}:{})};
+    let retained:RetainedInputReceipt|null=null;
+    if(taskId&&candidate&&inputCommit&&this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='retained_inputs'").toArray().length){
+      retained=new RetainedInputs(this.ctx.storage).lookup(taskId,candidate.id,inputCommit);
+      if(retained){if(retained.projectId!==latest.projectId||retained.incarnation!==incarnation||retained.canonicalRepoName!==latest.canonicalRepoName||retained.workflowId!==candidate.workflowInstanceId||(inputBase!==undefined&&retained.base!==inputBase))throw new Error("Retained input scope changed");inputBase=retained.base;repoName=latest.canonicalRepoName;}
+    }
+    return {projectId:fresh.projectId,incarnation,canonicalRepoName:fresh.canonicalRepoName,repoName,ownerId,accountKey,...(retained?{retainedInputReceiptId:retained.id}:{}),...(candidate?{candidateId:candidate.id,candidateCommit:candidate.candidateCommit,candidateBase:candidate.expectedAcceptedBase,...(taskId?{candidateInputCommit:inputCommit,candidateInputBase:inputBase}:{})}:{}),...(taskId&&!retained?{taskBase:latest.tasks[taskId]!.baseCommit,taskCommit:latest.tasks[taskId]!.currentCommit,taskBranch:latest.tasks[taskId]!.workspace.branch}:{}),...(grant?{publicationVersion:grant.version,acceptedCommit:grant.acceptedCommit}:{})};
   }
   private assertReadLocal(context:RepositoryReadContext,userId:string|null,taskId:string|null,write=false):void {
     const state=this.load(),task=taskId?state.tasks[taskId]:null;
     const role=userId?this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",userId).toArray()[0]?.role:null;
     if(this.repositoryDeleting()||state.projectId!==context.projectId||state.canonicalRepoName!==context.canonicalRepoName||this.readRepositoryIncarnation()!==context.incarnation||(userId&&!role)||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==context.ownerId)throw new Error("Repository read authority changed");
-    if(taskId&&(!task||task.workspace.repoName!==context.repoName||task.baseCommit!==context.taskBase||task.currentCommit!==context.taskCommit||task.workspace.branch!==context.taskBranch))throw new Error("Contribution checkpoint changed");
-    if(context.candidateId){const candidate=state.candidates[context.candidateId];if(!candidate||candidate.candidateCommit!==context.candidateCommit||candidate.expectedAcceptedBase!==context.candidateBase)throw new Error("Candidate review changed");if(taskId&&( !candidate.participatingTaskIds.includes(taskId)||candidate.participatingCommits[taskId]!==context.candidateInputCommit||candidate.frozenContributorProofs?.find(proof=>proof.id===taskId&&proof.commit===context.candidateInputCommit)?.baseCommit!==context.candidateInputBase))throw new Error("Frozen candidate input changed");}
+    if(taskId&&(!task||(!context.retainedInputReceiptId&&(task.workspace.repoName!==context.repoName||task.baseCommit!==context.taskBase||task.currentCommit!==context.taskCommit||task.workspace.branch!==context.taskBranch))))throw new Error("Contribution checkpoint changed");
+    if(context.candidateId){const candidate=state.candidates[context.candidateId];if(!candidate||candidate.candidateCommit!==context.candidateCommit||candidate.expectedAcceptedBase!==context.candidateBase)throw new Error("Candidate review changed");if(taskId&&( !candidate.participatingTaskIds.includes(taskId)||candidate.participatingCommits[taskId]!==context.candidateInputCommit||((candidate.frozenContributorProofs?.find(proof=>proof.id===taskId&&proof.commit===context.candidateInputCommit)?.baseCommit!==undefined||!context.retainedInputReceiptId)&&candidate.frozenContributorProofs?.find(proof=>proof.id===taskId&&proof.commit===context.candidateInputCommit)?.baseCommit!==context.candidateInputBase)))throw new Error("Frozen candidate input changed");}
+    if(context.retainedInputReceiptId){const retained=new RetainedInputs(this.ctx.storage).get(context.retainedInputReceiptId);if(!retained||retained.projectId!==context.projectId||retained.incarnation!==context.incarnation||retained.canonicalRepoName!==context.repoName||retained.taskId!==taskId||retained.candidateId!==context.candidateId||retained.commit!==context.candidateInputCommit||retained.base!==context.candidateInputBase)throw new Error("Retained input read scope changed");}
     if(write){this.gitTables();if(!task||["accepted","cancelled"].includes(task.status)||(role!=="owner"&&!this.ctx.storage.sql.exec("SELECT task_id FROM git_task_writers WHERE task_id=? AND user_id=?",taskId!,userId!).toArray().length))throw new Error("Contribution writer authority changed");}
     if(userId===null){this.requirePublicRepository();const visibility=this.ctx.storage.sql.exec<{version:number}>("SELECT version FROM repository_visibility WHERE id=1").toArray()[0];if(visibility?.version!==context.publicationVersion||state.acceptedState.currentCommit!==context.acceptedCommit)throw new Error("Public read scope changed");}
   }

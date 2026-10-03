@@ -110,13 +110,13 @@ export type SignedRepositoryBrowseRequest =
   | { kind: "directory"; ref?: string; path: string }
   | { kind: "file"; ref?: string; path: string }
   | { kind: "diff"; commit?: string; task?: string; candidate?: string; input?: string }
-  | { kind: "blob"; hash: string; task?: string };
+  | { kind: "blob"; hash: string; task?: string; candidate?: string; input?: string };
 
 /** Validate the complete request before acquiring a provider capability. */
 export function parseSignedRepositoryBrowseRequest(route: string, query: URLSearchParams): SignedRepositoryBrowseRequest {
   const keys: Record<string, readonly string[]> = {
     "/commits": ["ref", "limit", "offset"], "/tree": ["ref", "path"], "/blob": ["ref", "path"],
-    "/diff": ["commit", "task", "candidate", "input"], "/blob-by-hash": ["hash", "task"],
+    "/diff": ["commit", "task", "candidate", "input"], "/blob-by-hash": ["hash", "task", "candidate", "input"],
   };
   const allowed = keys[route];
   if (!allowed) throw new RepositoryBrowseRequestError("Unsupported repository read");
@@ -150,7 +150,8 @@ export function parseSignedRepositoryBrowseRequest(route: string, query: URLSear
   if (route === "/blob-by-hash") {
     const hash = query.get("hash") ?? "";
     if (!HASH.test(hash)) throw new RepositoryBrowseRequestError("Invalid hash");
-    return { kind: "blob", hash, task };
+    if ((candidate !== undefined || input !== undefined) && (!candidate || !input || task !== undefined)) throw new RepositoryBrowseRequestError("Frozen input bytes require one candidate and its input");
+    return { kind: "blob", hash, task, candidate, input };
   }
   if ([commit, task, candidate].filter((value) => value !== undefined).length !== 1 || (commit !== undefined && !/^[0-9a-f]{7,40}$/.test(commit))) throw new RepositoryBrowseRequestError("Pass one commit, change or candidate for comparison");
   if (input !== undefined && candidate === undefined) throw new RepositoryBrowseRequestError("Frozen input review requires a candidate");

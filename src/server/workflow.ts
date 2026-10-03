@@ -1,3 +1,7 @@
+import { retainGitInput, retainedGitInputRef } from "./retained-git-input.js";
+import type { RetainedInput } from "./retained-inputs.js";
+import { validateRecoveryRemote } from "./private-recovery-bundle.js";
+import { admitGitOperation } from "./core-git-budget.js";
 import {rebaseAcceptedFollowup,mirrorAcceptedFollowup} from "./accepted-followups.js";
 import { assertPreviewStorageAdmission, PreviewStorageAdmissionError } from "./preview-storage.js";
 import { inspectPreviewStorageManifest, publishPreviewStorageManifest } from "./preview-storage-upload.js";
@@ -115,9 +119,8 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     await recordAccepted();
     // Stacked changes: re-base every dependent change onto what just landed, so the stack keeps tracking upstream.
     await step.do("rebase-dependents", { retries: { limit: 1, delay: "5 seconds" } }, async () => rebaseAcceptedFollowup(stub,integrated.commit,()=>this.rebaseDependents(candidate,integrated.commit,integrated.branch,stub)));
-    // Preserve contributor forks for original-change review and recoverable authorship,
-    // including squash landings whose original commits are not ancestors of the accepted head.
-    await step.do("preserve-contribution-history", async () => ({ preserved: candidate.participatingTaskIds }));
+    // Composition already required remote-verified original/base pins and durable receipts.
+    // Accepted history never depends on the optional stack/mirror follow-ups below.
     // Mirror delivery is optional and has an existing owner-controlled retry route.
     await step.do("mirror-to-github", {retries:{limit:1,delay:"5 seconds"}}, async () => mirrorAcceptedFollowup(stub,integrated.commit,async()=>{
       let mirror:Awaited<ReturnType<FlareGitIntegrationWorkflow["sandbox"]>>|undefined;
@@ -125,8 +128,10 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
         const cfg=await stub.mirrorSecret();
         if(!cfg)return{skipped:true as const};
         mirror=await this.sandbox(`mirror-${candidate.id}`);
-        const canonical=await this.canonicalRemote(stub);
-        return await pushMirror({exec:mirror.exec},{target:cfg.target,githubToken:cfg.token,canonicalRemote:canonical.remote,canonicalToken:canonical.token,branch:integrated.branch,commit:integrated.commit});
+        const input=await stub.prepareRetainedInput(candidate.participatingTaskIds[0]!,event.instanceId,candidate.id,crypto.randomUUID(),true);
+        const canonical=await this.retainedRemote(stub,input,"canonical","read");
+        try { await this.fundedRetainedCommand(input,stub);return await pushMirror({exec:mirror.exec},{target:cfg.target,githubToken:cfg.token,canonicalRemote:canonical.remote,canonicalToken:canonical.token,branch:integrated.branch,commit:integrated.commit}); }
+        finally { await canonical.close(); }
       } finally {if(mirror)await mirror.destroy();}
     }));
     return { status: "accepted" as const, commit: integrated.commit, evidenceId: integrated.evidenceId };
@@ -137,59 +142,93 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
    * walking the stack downwards. A conflict stops that branch of the stack and flags the change for its author.
    */
   private async rebaseDependents(candidate: CandidateGeneration, landed: string, branch: string, stub: Stub): Promise<{ rebased: string[]; blocked: string[] }> {
-    const state = await stub.getState();
-    const accepted = new Set(candidate.participatingTaskIds);
-    const tasks = Object.values(state.tasks);
-    if (!tasks.some((t) => t.dependsOn && accepted.has(t.dependsOn))) return { rebased: [], blocked: [] };
-    const sb = await this.sandbox(`rebase-${candidate.id}`);
+    const workflowId = candidate.workflowInstanceId ?? this.computeWorkflowId;
+    if (!workflowId) throw new Error("Registered integration workflow required for dependent updates");
+    const state = await stub.getState(), tasks = Object.values(state.tasks);
+    const accepted = new Set(candidate.participatingTaskIds), visited = new Set<string>();
+    const queue: Array<{id:string;parentId:string;target:string}> = [];
+    const discover = async (parentId:string,target:string) => {
+      for (const task of tasks) {
+        if (visited.has(task.id) || accepted.has(task.id) || ["accepted","cancelled"].includes(task.status)) continue;
+        if (task.dependsOn === parentId) queue.push({id:task.id,parentId,target});
+        else if (!task.dependsOn && task.baseCommit === target) {
+          // A lost metadata ACK can leave an already-applied child without its old dependency.
+          const saved = await stub.rebaseApplication(task.id,workflowId,candidate.id,target);
+          if (saved?.status === "applied" && saved.input.dependsOn === parentId) queue.push({id:task.id,parentId,target});
+        }
+      }
+    };
+    for (const parentId of accepted) await discover(parentId,landed);
+    if (!queue.length) return {rebased:[],blocked:[]};
+    const sb = await this.sandbox(`rebase-${candidate.id}`), rebased:string[] = [], blocked:string[] = [];
     try {
-    const canonical = await this.canonicalRemote(stub);
-    const cloned = await sb.exec(`rm -rf ${WORK} && git clone --quiet ${q(canonical.remote)} ${WORK} && git -C ${WORK} config user.name FlareGit && git -C ${WORK} config user.email integrator@flaregit.com`, gitAuthEnv(canonical.token));
-    if (!cloned.success) throw new Error("Could not clone canonical repository for stack rebase");
-
-    const tip = new Map<string, string>(); // task id -> new tip (accepted tasks resolve to the landed commit)
-    const oldTip = new Map<string, string>(); // task id -> tip before the rebase
-    for (const id of accepted) { tip.set(id, landed); oldTip.set(id, state.tasks[id]!.currentCommit); }
-    const rebased: string[] = [];
-    const blocked: string[] = [];
-    const queue = tasks.filter((t) => t.dependsOn && accepted.has(t.dependsOn));
-    while (queue.length > 0) {
-      const child = queue.shift()!;
-      if (child.status === "cancelled" || child.status === "accepted") continue;
-      const parentId = child.dependsOn!;
-      const newParent = tip.get(parentId);
-      const oldParent = oldTip.get(parentId);
-      if (!newParent || !oldParent) continue; // parent was itself blocked: leave this subtree alone
-      const repo = await this.env.ARTIFACTS.get(child.workspace.repoName);
-      const remote = String((await repo.info()).remote);
-      const token = (await repo.createToken("write", 1800)).plaintext;
-      const ref = `refs/flaregit/rb/${child.id}`;
-      const fetch = await sb.exec(`git -C ${WORK} fetch --quiet ${q(remote)} ${q(`+refs/heads/${child.workspace.branch}:${ref}`)}`, gitAuthEnv(token));
-      const before = (await sb.exec(`git -C ${WORK} rev-parse ${q(ref)}`)).stdout.trim();
-      const reb = fetch.success ? await sb.exec(`git -C ${WORK} checkout --quiet -B rb-work ${q(ref)} && git -C ${WORK} rebase --onto ${q(newParent)} ${q(oldParent)} rb-work`) : fetch;
-      if (!reb.success) {
-        await sb.exec(`git -C ${WORK} rebase --abort`);
-        blocked.push(child.id);
-        await stub.applyRebase(child.id, { failed: `Could not rebase onto ${parentId}: resolve the conflict locally and push again` });
-        continue;
+      while (queue.length) {
+        const item = queue.shift()!; if (visited.has(item.id)) continue; visited.add(item.id);
+        let application = await stub.rebaseApplication(item.id,workflowId,candidate.id,item.target);
+        if (application?.status === "applied") {
+          rebased.push(item.id); await discover(item.id,application.commit); continue;
+        }
+        // Fresh credential identity for each attempt; old issuance intents are never reused.
+        const input = await stub.prepareRetainedInput(item.id,workflowId,candidate.id,crypto.randomUUID());
+        if (input.dependsOn !== item.parentId || (application && (input.commit !== application.input.commit || input.base !== application.input.base || input.workspaceRepoName !== application.input.workspaceRepoName))) throw new Error("Dependent checkpoint changed; its pushed branch is preserved");
+        const canonical = await this.canonicalRemote(stub,input);
+        let workspace: Awaited<ReturnType<FlareGitIntegrationWorkflow["retainedRemote"]>> | undefined;
+        try {
+          workspace = await this.retainedRemote(stub,input,"workspace","write");
+          const run = async (command:string,env?:Record<string,string>) => {
+            await this.fundedRetainedCommand(input,stub);
+            const result = await sb.exec(command,env);
+            await this.retainedAuthority(input,stub); return result;
+          };
+          const inspectBranch = async () => {
+            const result = await run(`git ls-remote --refs ${q(workspace!.remote)} ${q(`refs/heads/${input.branch}`)}`,gitAuthEnv(workspace!.token));
+            if (!result.success) throw new Error("Dependent branch read-back is unavailable");
+            const rows = result.stdout.trim().split("\n").filter(Boolean), suffix=`\trefs/heads/${input.branch}`;
+            if(rows.length!==1||!rows[0]!.endsWith(suffix)||!/^[a-f0-9]{40}$/.test(rows[0]!.slice(0,40)))throw new Error("Dependent branch identity is unconfirmed");
+            return rows[0]!.slice(0,40);
+          };
+          const before = await inspectBranch();
+          if (application && before === application.commit) {
+            await stub.recordRebaseRemoteOutcome(application.input.id,before);
+          } else {
+            if (before !== input.commit) throw new Error("Dependent branch moved; no newer work was overwritten");
+            let result = await run(`rm -rf ${WORK} && git clone --quiet ${q(canonical.remote)} ${WORK} && git -C ${WORK} config user.name FlareGit && git -C ${WORK} config user.email integrator@flaregit.com`,gitAuthEnv(canonical.token));
+            if (!result.success) throw new Error("Could not restore the preserved rebase workspace");
+            if (application) {
+              const ref = retainedGitInputRef(application.input.incarnation,item.id,application.commit);
+              result = await run(`git -C ${WORK} fetch --quiet ${q(canonical.remote)} ${q(`${ref}:refs/flaregit/rebase-result`)}`,gitAuthEnv(canonical.token));
+              if (!result.success || (await run(`git -C ${WORK} rev-parse refs/flaregit/rebase-result`)).stdout.trim() !== application.commit) throw new Error("Stored rebase result is unavailable; no alternate result was substituted");
+            } else {
+              result = await run(`git -C ${WORK} fetch --quiet ${q(workspace.remote)} ${q(`+refs/heads/${input.branch}:refs/flaregit/rb/${item.id}`)}`,gitAuthEnv(workspace.token));
+              if (!result.success || (await run(`git -C ${WORK} rev-parse ${q(`refs/flaregit/rb/${item.id}`)}`)).stdout.trim() !== input.commit) throw new Error("Dependent branch changed while loading its checkpoint");
+              await this.pinInput(input,WORK,canonical,stub,run);
+              const targetRef = accepted.has(item.parentId) ? `refs/heads/${branch}` : retainedGitInputRef(input.incarnation,item.parentId,item.target);
+              result = await run(`git -C ${WORK} fetch --quiet ${q(canonical.remote)} ${q(`${targetRef}:refs/flaregit/rebase-parent`)}`,gitAuthEnv(canonical.token));
+              if(!result.success || (await run("git -C /workspace/integration rev-parse refs/flaregit/rebase-parent")).stdout.trim()!==item.target)throw new Error("The recorded rebase target is unavailable; no newer parent was substituted");
+              result = await run(`git -C ${WORK} checkout --quiet --detach ${q(input.commit)} && git -C ${WORK} rebase --onto ${q(item.target)} ${q(input.base)}`);
+              if (!result.success) {
+                await run(`git -C ${WORK} rebase --abort`);
+                await stub.applyRebase(item.id,{failed:"Could not rebase onto the recorded parent; original checkpoint and base are protected",expected:input});
+                blocked.push(item.id); continue;
+              }
+              const newCommit=(await run(`git -C ${WORK} rev-parse HEAD`)).stdout.trim();
+              const beforeCommand=async(phase:"before"|"after")=>{if(phase==="before")await this.fundedRetainedCommand(input,stub);else await this.retainedAuthority(input,stub);};
+              // Preserve the result and target BEFORE persisting an intent or modifying the fork.
+              await retainGitInput({exec:run,directory:WORK,remote:canonical.remote,token:canonical.token,incarnation:input.incarnation,taskId:item.id,commit:newCommit,beforeCommand});
+              await retainGitInput({exec:run,directory:WORK,remote:canonical.remote,token:canonical.token,incarnation:input.incarnation,taskId:item.id,commit:item.target,beforeCommand});
+              application=await stub.prepareRebaseApplication(input,newCommit,item.target,accepted.has(item.parentId));
+            }
+            const pushed=await run(`git -C ${WORK} push --quiet --force-with-lease=${q(`refs/heads/${input.branch}:${input.commit}`)} ${q(workspace.remote)} ${q(`${application.commit}:refs/heads/${input.branch}`)}`,gitAuthEnv(workspace.token));
+            const observed=await inspectBranch();
+            if(observed!==application.commit)throw new Error(pushed.success?"The rebased remote head was not confirmed":"Rebase push outcome remains unconfirmed; protected originals and result are preserved");
+            await stub.recordRebaseRemoteOutcome(application.input.id,observed);
+          }
+          await stub.applyRebase(item.id,{commit:application.commit,base:application.base,parentAccepted:application.parentAccepted,expected:application.input,receiptId:application.input.id,applicationId:application.input.id});
+          rebased.push(item.id); await discover(item.id,application.commit);
+        } finally { await workspace?.close(); await canonical.close(); }
       }
-      const head = (await sb.exec(`git -C ${WORK} rev-parse HEAD`)).stdout.trim();
-      const push = await sb.exec(`git -C ${WORK} push --quiet --force-with-lease=${q(`refs/heads/${child.workspace.branch}:${before}`)} ${q(remote)} ${q(`HEAD:refs/heads/${child.workspace.branch}`)}`, gitAuthEnv(token));
-      if (!push.success) {
-        blocked.push(child.id);
-        await stub.applyRebase(child.id, { failed: "Rebased locally but the push was refused (the branch moved); push again to retry" });
-        continue;
-      }
-      oldTip.set(child.id, child.currentCommit);
-      tip.set(child.id, head);
-      rebased.push(child.id);
-      await stub.applyRebase(child.id, { commit: head, base: newParent, parentAccepted: accepted.has(parentId) });
-      queue.push(...tasks.filter((t) => t.dependsOn === child.id));
-    }
-    return { rebased, blocked };
-    } finally {
-      await sb.destroy();
-    }
+      return {rebased,blocked};
+    } finally { await sb.destroy(); }
   }
 
   private projectId = "";
@@ -218,10 +257,65 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     };
   }
 
-  private async canonicalRemote(stub: Stub): Promise<{ remote: string; token: string }> {
-    const repo = await this.env.ARTIFACTS.get((await stub.getState()).canonicalRepoName);
-    const info = await repo.info();
-    return { remote: String(info.remote), token: (await repo.createToken("write", 1800)).plaintext };
+  private async retainedAuthority(input: RetainedInput, stub: Stub) {
+    await assertManagedInitiator(this.env, stub, input.workflowId, this.computeAccountKey);
+    if (!await stub.assertRetainedInput(input)) throw new Error("Retained contribution authority changed");
+  }
+  private async fundedRetainedCommand(input: RetainedInput, stub: Stub) {
+    await this.retainedAuthority(input, stub);
+    const admission = await admitGitOperation(this.env, input.ownerId, `retain-${crypto.randomUUID()}`);
+    if (admission instanceof Response) throw new Error("Contribution preservation funding is unavailable");
+    await this.retainedAuthority(input, stub);
+  }
+  /** Issuance is recorded before use; failed revocation stays in the durable cleanup queue. */
+  private async retainedRemote(stub: Stub, input: RetainedInput, purpose: "canonical" | "workspace", scope: "read" | "write") {
+    const repoName = purpose === "canonical" ? input.canonicalRepoName : input.workspaceRepoName;
+    await this.fundedRetainedCommand(input, stub);
+    using repo = await this.env.ARTIFACTS.get(repoName);
+    await this.retainedAuthority(input, stub);
+    await this.fundedRetainedCommand(input, stub);
+    const remote = String((await repo.info()).remote);
+    validateRecoveryRemote(remote);
+    await this.retainedAuthority(input, stub);
+    const plannedExpiry = Date.now() + 900_000;
+    if (!await stub.beginRetainedCredential(input, purpose, plannedExpiry, scope)) throw new Error("A prior credential issuance remains recorded; no duplicate credential was created");
+    await this.fundedRetainedCommand(input, stub);
+    const issued = await repo.createToken(scope, 900);
+    const expiresAt = Date.parse(issued.expiresAt);
+    try {
+      // Record first even when expiry/scope is malformed: cleanup must not lose an issued secret.
+      await stub.recordRetainedCredential(input.id, purpose, repoName, issued.plaintext, expiresAt);
+    } catch {
+      // Keep the exact same issued capability on a lost receipt ACK; never issue another.
+      try { await stub.recordRetainedCredential(input.id, purpose, repoName, issued.plaintext, expiresAt); }
+      catch {
+        try {
+          // Revocation is restrictive cleanup and may continue after actor withdrawal,
+          // but its provider call still requires a funded conservative envelope.
+          const cleanup = await globalOf(this.env).reserveCoreGitOperation(`retained-cleanup-${crypto.randomUUID()}`,input.accountKey,{accountUsdMicros:null,globalUsdMicros:null});
+          if (cleanup.allowed && await repo.revokeToken(issued.plaintext)) await stub.markRetainedCredentialRevoked(input.id,purpose,issued.plaintext);
+        } catch { /* The saved issuance intent remains uncertain. */ }
+        throw new Error("Credential cleanup receipt is unavailable; no Git command used the credential");
+      }
+    }
+    const close = async () => {
+      const confirmed = await stub.revokeRetainedCredential(input.id, purpose).catch(() => false);
+      if (!confirmed) await stub.logActivity("FlareGit", "credential.cleanup_pending", "Contribution preservation credential cleanup is unconfirmed; its incident remains recorded for recovery").catch(() => undefined);
+    };
+    if (issued.scope !== scope || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now() || expiresAt > Date.now() + 905_000) {
+      await close(); throw new Error("Provider credential scope or expiry was not confirmed");
+    }
+    try { await this.retainedAuthority(input, stub); }
+    catch { await close(); throw new Error("Contribution authority changed before credential use"); }
+    return { remote, token: issued.plaintext, close };
+  }
+  private async canonicalRemote(stub: Stub, input: RetainedInput) { return this.retainedRemote(stub, input, "canonical", "write"); }
+  private async pinInput(input: RetainedInput, directory: string, remote: {remote:string;token:string}, stub: Stub, exec: (command:string,env?:Record<string,string>)=>Promise<{success:boolean;stdout:string}>) {
+    const beforeCommand = async (phase: "before" | "after") => { if (phase === "before") await this.fundedRetainedCommand(input, stub); else await this.retainedAuthority(input, stub); };
+    const original = await retainGitInput({ exec, directory, remote: remote.remote, token: remote.token, incarnation: input.incarnation, taskId: input.taskId, commit: input.commit, beforeCommand });
+    const base = await retainGitInput({ exec, directory, remote: remote.remote, token: remote.token, incarnation: input.incarnation, taskId: input.taskId, commit: input.base, beforeCommand });
+    if (original.ref !== input.protectedRef || base.ref !== input.protectedBaseRef) throw new Error("Protected contribution refs do not match the stored scope");
+    return stub.recordRetainedInput(input, { commit: original.commit, base: base.commit });
   }
 
   private async composeRepairVerify(
@@ -242,15 +336,20 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     } catch {
       return { ok: false, error: "Managed verification budget unavailable; saved contributor checkpoints remain available. Configure a budget or use external checks." };
     }
-    const sb = await this.sandbox(`integrate-${candidate.id}`);
-    try {
-    const run = async (cmd: string, env?: Record<string, string>) => sb.exec(cmd, env);
     const state = await stub.getState();
     const tasks = candidate.participatingTaskIds.map((id) => state.tasks[id]!);
+    const inputs = await Promise.all(tasks.map(task => stub.prepareRetainedInput(task.id, parentWorkflowId, candidate.id, crypto.randomUUID())));
+    if (!inputs.length || inputs.some(input => input.commit !== candidate.participatingCommits[input.taskId])) return { ok: false, error: "A frozen contribution advanced before preservation; no candidate was composed" };
+    const sb = await this.sandbox(`integrate-${candidate.id}`);
+    let canonical: Awaited<ReturnType<FlareGitIntegrationWorkflow["canonicalRemote"]>> | undefined;
+    try {
+    const run = async (cmd: string, env?: Record<string, string>) => sb.exec(cmd, env);
     if (externalOnly && (candidate.frozenContributorProofs!.length !== tasks.length || !candidate.participatingTaskIds.every((id) => candidate.frozenContributorProofs!.some((proof) => proof.id === id && proof.commit === candidate.participatingCommits[id] && proof.ref === `refs/flaregit/tasks/${id}`)))) return { ok: false, error: "Frozen contributor proofs do not match every participating checkpoint" };
-    const canonical = await this.canonicalRemote(stub);
+    canonical = await this.canonicalRemote(stub, inputs[0]!);
+    const activeCanonical = canonical;
 
-    let r = await run(`rm -rf ${WORK} && git clone --quiet ${q(canonical.remote)} ${WORK}`, gitAuthEnv(canonical.token));
+    await this.fundedRetainedCommand(inputs[0]!, stub);
+    let r = await run(`rm -rf ${WORK} && git clone --quiet ${q(activeCanonical.remote)} ${WORK}`, gitAuthEnv(activeCanonical.token));
     if (!r.success) return { ok: false, error: "Could not clone canonical repository" };
     // The clone's HEAD names the remote's real default branch (Artifacts metadata can differ for imported repos).
     const branch = (await run(`git -C ${WORK} symbolic-ref --short HEAD`)).stdout.trim() || state.defaultBranch || "main";
@@ -258,18 +357,23 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     if (!isSafeRef(branch)) throw new Error("Default branch name contains characters FlareGit does not accept");
     await run(`git -C ${WORK} config user.name FlareGit && git -C ${WORK} config user.email integrator@flaregit.com && git -C ${WORK} checkout --quiet --detach ${q(candidate.expectedAcceptedBase)}`);
 
-    for (const t of tasks) {
-      const repo = await this.env.ARTIFACTS.get(t.workspace.repoName);
-      const remote = String((await repo.info()).remote);
-      const token = (await repo.createToken("read", 900)).plaintext;
-      r = await run(`git -C ${WORK} fetch --quiet ${q(remote)} ${q(`+refs/heads/${t.workspace.branch}:refs/flaregit/tasks/${t.id}`)}`, gitAuthEnv(token));
-      const head = (await run(`git -C ${WORK} rev-parse refs/flaregit/tasks/${t.id}`)).stdout.trim();
-      if (!r.success || head !== candidate.participatingCommits[t.id]) return { ok: false, error: `Task ${t.id} head does not match the frozen checkpoint` };
-      const changed = await run(`git -C ${WORK} diff --name-only -z ${q(t.baseCommit)} ${q(head)}`);
-      if (!changed.success) return { ok: false, error: `Could not inspect contributor changes for ${t.id}` };
-      const touched = changed.stdout.split("\0").filter(Boolean);
-      const bad = touched.filter((f) => isProtectedPath(f, settings.protectedPaths) || !inAgentScope(t, f) || !inAgentScope({ allowedScope: settings.allowedScope }, f));
-      if (bad.length) return { ok: false, error: `Contributor change rejected: ${bad.join(", ")}` };
+    for (const input of inputs) {
+      const t = tasks.find(task => task.id === input.taskId)!;
+      const workspace = await this.retainedRemote(stub, input, "workspace", "read");
+      try {
+        await this.fundedRetainedCommand(input, stub);
+        r = await run(`git -C ${WORK} fetch --quiet ${q(workspace.remote)} ${q(`+refs/heads/${input.branch}:refs/flaregit/tasks/${input.taskId}`)}`, gitAuthEnv(workspace.token));
+        await this.retainedAuthority(input, stub);
+        const head = (await run(`git -C ${WORK} rev-parse refs/flaregit/tasks/${input.taskId}`)).stdout.trim();
+        if (!r.success || head !== input.commit) return { ok: false, error: `Task ${t.id} head does not match the frozen checkpoint` };
+        // Preserve both the original checkpoint and its recorded base before any squash or repair.
+        await this.pinInput(input, WORK, activeCanonical, stub, run);
+        const changed = await run(`git -C ${WORK} diff --name-only -z ${q(input.base)} ${q(input.commit)}`);
+        if (!changed.success) return { ok: false, error: `Could not inspect contributor changes for ${t.id}` };
+        const touched = changed.stdout.split("\0").filter(Boolean);
+        const bad = touched.filter((f) => isProtectedPath(f, settings.protectedPaths) || !inAgentScope(t, f) || !inAgentScope({ allowedScope: settings.allowedScope }, f));
+        if (bad.length) return { ok: false, error: `Contributor change rejected: ${bad.join(", ")}` };
+      } finally { await workspace.close(); }
     }
 
     const ai = new WorkersAIClient({ binding: this.env.AI, gatewayId: this.env.AI_GATEWAY_ID, model: DEFAULT_CODE_MODEL, maxOutputTokens: 8192, maxCalls: 8, beforeDispatch: async ({ model, inputBytes, maxOutputTokens }) => {
@@ -351,7 +455,8 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       await stub.recordVerification(candidate.id, commit, evidence);
       if (evidence.status === "passed") {
         // Retain the verified Git candidate before optional R2 copies.
-        const shared = await run(`git -C ${WORK} push --quiet ${q(canonical.remote)} ${q(`${commit}:refs/flaregit/candidates/${candidate.id}`)}`, gitAuthEnv(canonical.token));
+        await this.fundedRetainedCommand(inputs[0]!, stub);
+        const shared = await run(`git -C ${WORK} push --quiet ${q(activeCanonical.remote)} ${q(`${commit}:refs/flaregit/candidates/${candidate.id}`)}`, gitAuthEnv(activeCanonical.token));
         if (!shared.success) return { ok: false, error: "Could not store the candidate for review" };
         const previewKey=`build-${params.projectId}-${commit}`;
         try {
@@ -412,6 +517,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       if (!(await repair("behavior_failure", editable, evidence))) return { ok: false, error: "Protected verification failed and repair did not fix it" };
     }
     } finally {
+      await canonical?.close();
       await sb.destroy();
     }
   }
@@ -422,9 +528,12 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
    * stored candidate ref, proves it is the reviewed commit, and only moves the branch if it still equals the base.
    */
   private async casPush(candidate: CandidateGeneration, commit: string, stub: Stub, branch: string): Promise<{ ok: true } | { ok: false; error: string; stale?: boolean }> {
+    const input = await stub.prepareRetainedInput(candidate.participatingTaskIds[0]!,this.computeWorkflowId!,candidate.id,crypto.randomUUID());
     const sb = await this.sandbox(`publish-${candidate.id}`);
+    let credential: Awaited<ReturnType<FlareGitIntegrationWorkflow["canonicalRemote"]>> | undefined;
     try {
-    const canonical = await this.canonicalRemote(stub);
+    const canonical = credential = await this.canonicalRemote(stub,input);
+    await this.fundedRetainedCommand(input,stub);
     const dir = "/workspace/publish";
     const fetched = await sb.exec(
       `rm -rf ${dir} && git init --quiet ${dir} && git -C ${dir} fetch --quiet --filter=blob:none ${q(canonical.remote)} ${q(`refs/flaregit/candidates/${candidate.id}:refs/flaregit/candidate`)}`,
@@ -438,6 +547,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     const alreadyLanded = () => publicationInHistory((command, env) => sb.exec(command, env), dir, canonical.remote, canonical.token, branch, commit);
     if (await alreadyLanded()) return { ok: true };
     if (!await stub.authorizeCandidatePublication(candidate.id, commit)) return { ok: false, error: "The approving owner no longer authorizes this exact publication; nothing was pushed" };
+    await this.fundedRetainedCommand(input,stub);
     const res = await sb.exec(
       `git -C ${dir} push --quiet --force-with-lease=${q(`refs/heads/${branch}:${candidate.expectedAcceptedBase}`)} ${q(canonical.remote)} ${q(`${commit}:refs/heads/${branch}`)}`,
       gitAuthEnv(canonical.token)
@@ -447,6 +557,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     if (await alreadyLanded()) return { ok: true };
     return { ok: false, error: `Canonical ref update refused: ${res.stderr.replace(/Bearer [^\s"]+/g, "Bearer ***").slice(-300).trim()}`, stale: /stale info|rejected/i.test(res.stderr) };
     } finally {
+      await credential?.close();
       await sb.destroy();
     }
   }
