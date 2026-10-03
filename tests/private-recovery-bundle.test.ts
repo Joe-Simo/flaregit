@@ -17,9 +17,12 @@ test("native accepted bundle clones and fscks without private candidate objects"
   const mismatchDirectory = `/tmp/flaregit-private-recovery-${crypto.randomUUID()}`;
   const contaminatedDirectory = `/tmp/flaregit-private-recovery-${crypto.randomUUID()}`;
   const repo = join(root, "repo");
+  let passed=false;
+  const diagnostics:Array<{argv:string[];stdout:string;stderr:string;code:number}>=[];
   const native: BundleExecutor = { async exec(argv, options) {
-    const proc = Bun.spawn(argv, { env: { ...process.env, ...options?.env }, stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawn(argv, { env: { ...process.env, ...options?.env }, stdout: "pipe", stderr: "pipe", timeout:Math.min(options?.timeoutMs??15_000,15_000) });
     const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+    diagnostics.push({argv:[...argv],stdout,stderr,code});
     return { success: code === 0, stdout, stderr };
   } };
   const git = async (...argv: string[]) => {
@@ -76,5 +79,7 @@ test("native accepted bundle clones and fscks without private candidate objects"
     await git("-C", clone, "fsck", "--full");
     expect((await native.exec(["git", "-C", clone, "cat-file", "-e", privateBlob])).success).toBe(false);
     expect(await Bun.file(join(clone, "private.txt")).exists()).toBe(false);
-  } finally { await rm(root, { recursive: true, force: true }); await rm(directory, { recursive: true, force: true }); await rm(unknownTreeDirectory, { recursive: true, force: true }); await rm(mismatchDirectory, { recursive: true, force: true }); await rm(contaminatedDirectory, { recursive: true, force: true }); }
-});
+    passed=true;
+  } catch(error){try{await Bun.write(join(root,"native-command-diagnostics.json"),JSON.stringify(diagnostics,null,2));}catch{/* Retain original failure when storage is exhausted. */}console.error(`Failed accepted-bundle fixture retained: ${[root,directory,unknownTreeDirectory,mismatchDirectory,contaminatedDirectory].join(" | ")}`);throw error;}
+  finally { if(passed){await rm(root, { recursive: true, force: true }); await rm(directory, { recursive: true, force: true }); await rm(unknownTreeDirectory, { recursive: true, force: true }); await rm(mismatchDirectory, { recursive: true, force: true }); await rm(contaminatedDirectory, { recursive: true, force: true }); }}
+},60_000);
