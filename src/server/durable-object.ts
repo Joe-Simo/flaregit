@@ -62,7 +62,7 @@ import type {
 } from "../core/types.js";
 
 export interface ClaimResult { candidate?: CandidateGeneration; decision?: ProductDecision; reason?: string }
-export interface PrepareResult { ok: boolean; journal?: PublicationJournalEntry; error?: string; stale?: boolean }
+export interface PrepareResult { ok: boolean; journal?: PublicationJournalEntry; error?: string; stale?: boolean; recoveryRequired?: boolean }
 
 /** Plain-typed view of the ledger RPC surface used by Workflows and Queues. */
 export interface ProjectRow {
@@ -1964,6 +1964,8 @@ export class RepositoryController extends DurableObject<Env> {
     const known: WorkflowOutcome[] = ["started","awaiting_review","completed","skipped","accepted","needs_decision","not_started","blocked","stale","rejected","failed"];
     if (!known.includes(status)) throw new Error("Invalid integration outcome");
     this.integrationDispatchTable();
+    const uncertain=Object.values(this.load().candidates).some(candidate=>candidate.workflowInstanceId===eventId&&this.legacyPreparedPublication(candidate.id));
+    if(uncertain){await this.ensureRecoveryAlarm();return;}
     this.ctx.storage.transactionSync(() => {
       const old = this.ctx.storage.sql.exec<{outcome:WorkflowOutcome|null;terminal:number}>("SELECT outcome,terminal FROM integration_dispatch_receipts WHERE event_id=?",eventId).toArray()[0];
       if (!old) throw new Error("Integration dispatch identity was not admitted");
@@ -2700,6 +2702,11 @@ export class RepositoryController extends DurableObject<Env> {
     this.save();
   }
 
+  private legacyPreparedPublication(candidateId:string): boolean {
+    const state=this.load(),candidate=state.candidates[candidateId];
+    return !!candidate&&candidate.status!=="accepted"&&!!this.candidatePreservationFailure(candidate)&&state.journal.some(journal=>journal.candidateId===candidateId&&journal.state==="PREPARED");
+  }
+
   /** Applies only to NEW publication, never reconciliation of a confirmed Git update. */
   private candidatePreservationFailure(candidate: CandidateGeneration): string | null {
     const upgrade="This candidate needs the contribution preservation upgrade. Start a new integration from the saved changes; this review and candidate remain available.";
@@ -2719,6 +2726,7 @@ export class RepositoryController extends DurableObject<Env> {
 
   /** Ledger step 1: validate every invariant, then journal PREPARED. The workflow then pushes with a lease. */
   async preparePublish(candidateId: string): Promise<PrepareResult> {
+    if(this.legacyPreparedPublication(candidateId)){await this.ensureRecoveryAlarm();return {ok:false,recoveryRequired:true,error:"A previously prepared publication needs Git readback before recovery. Its journal, review and saved changes remain pending."};}
     const recorded = this.load().candidates[candidateId]?.review;
     if (!recorded?.actor) return { ok: false, error: "The previous approval has no verified owner identity. Run a new candidate and review it before publishing." };
     let assertCurrent: () => void;
@@ -2911,6 +2919,7 @@ export class RepositoryController extends DurableObject<Env> {
     const c = s.candidates[candidateId];
     if (!c) return;
     const j = journalId ? s.journal.find((e) => e.id === journalId) : undefined;
+    if(this.legacyPreparedPublication(candidateId))return;
     if (c.status === "accepted" || j?.state === "ACCEPTED") return;
     if (c.status === outcome && (!j || j.state === "ABORTED")) return;
     let deliveries: string[] = [];
