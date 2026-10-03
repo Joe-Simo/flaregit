@@ -1,5 +1,9 @@
+import {EVIDENCE_COPY_ID} from "./evidence-copy-id.js";
+import { EvidenceStorageLedger } from "./evidence-storage.js";
+import {PreviewStorageWriters,type PreviewCopyPlan} from "./preview-storage-writers.js";
+import { PreviewStorageAdmissionError, type PreviewStorageAdmission } from "./preview-storage.js";
 import { PreviewStorageLedger, previewStorageBudget } from "./preview-storage.js";
-import { validatePreviewStorageManifest, type PreviewStorageManifest } from "./preview-storage-upload.js";
+import { validatePreviewStorageManifest, type PreviewStorageIdentity, type PreviewStorageManifest } from "./preview-storage-upload.js";
 import { HealthProbeBudget, type HealthProbeAdmission } from "./health-probe-budget.js";
 import { z } from "zod";
 import { PublicGitPublicationLedger, type PublicGitPublication } from "./public-git-publication.js";
@@ -187,8 +191,21 @@ export interface ActivityRow {
 export interface ImportHistoryOperation { projectId: string; head: string; canonicalRepoName: string; ownerId: string; instanceId: string; createdAt: string }
 
 export interface Ledger {
+  previewStorageWriterState(key:string):Promise<{unfinished:boolean}>;
+  previewStorageReadmission(identity:PreviewStorageIdentity):Promise<PreviewStorageAdmission>;
+  reserveEvidenceStorage(identity:PreviewStorageIdentity,id:string,size:number,sha256:string):Promise<PreviewStorageAdmission>;
   reserveHealthProbe(): Promise<HealthProbeAdmission>;
-  reservePreviewStorage(manifest:PreviewStorageManifest):Promise<void>;
+  reservePreviewWriter(key:string,writerId:string):Promise<void>;
+  beginPreviewPut(key:string,writerId:string,assetPath:string):Promise<void>;
+  finishPreviewPut(key:string,writerId:string,assetPath:string):Promise<void>;
+  finishPreviewWriter(key:string,writerId:string):Promise<void>;
+  registerPreviewEvidenceCopy(identity:PreviewStorageManifest["identity"],id:string,size:number,sha256:string,writerId:string):Promise<string>;
+  recordScopedEvidenceCopy(id:string,key:string,incarnation:string):Promise<void>;
+  previewCleanupScope():Promise<{projectId:string;incarnation:string;legacyEvidence:boolean;legacyInventory:boolean}>;
+  fencePreviewCleanup(projectId:string,incarnation:string):Promise<PreviewCopyPlan[]>;
+  previewCopyCleanupReady(key:string):Promise<boolean>;
+  finishPreviewCopyCleanup(key:string):Promise<void>;
+  reservePreviewStorage(manifest:PreviewStorageManifest):Promise<PreviewStorageAdmission>;
   previewStorageScope(commit:string,canonicalRepoName:string):Promise<PreviewStorageManifest["identity"]>;
   reservePrivateRecoveryStorage(id:string,accountKey:string):Promise<void>;
   releasePrivateRecoveryStorage(id: string, accountKey: string): Promise<void>;
@@ -214,6 +231,8 @@ export interface Ledger {
   activePreviewOrigin(repository: string, appOrigin?: string): Promise<string | null>;
   registerPreviewOrigin(repository: string, origin: string, operator: string, appOrigin: string): Promise<PreviewOriginRegistration>;
   retirePreviewOrigin(repository: string, operator: string, appOrigin: string): Promise<PreviewOriginRegistration | null>;
+  nativeComputeFailureReason(key:string):Promise<string|null>;
+  setNativeComputeFailureReason(key:string,reason:"storage_capacity"|"storage_unconfigured"|"storage_retired"|"storage_reconciliation"|"build_failed"):Promise<void>;
   nativeComputeFailure(key: string): Promise<boolean>;
   setNativeComputeFailure(key: string, failed: boolean): Promise<void>;
   nativeComputeStatus(key: string): Promise<{ active: boolean; sandboxName: string; token: string; deadline: number } | null>;
@@ -488,7 +507,48 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   private state: FlareGitProjectState | null = null;
-  async reservePreviewStorage(manifest:PreviewStorageManifest):Promise<void>{await validatePreviewStorageManifest(manifest);new PreviewStorageLedger(this.ctx.storage).reserve(manifest,previewStorageBudget(this.env));}
+  async reservePreviewWriter(key:string,writerId:string):Promise<void>{const writers=new PreviewStorageWriters(this.ctx.storage);writers.registerPreview(key);writers.begin(key,writerId);}
+  async beginPreviewPut(key:string,writerId:string,assetPath:string):Promise<void>{new PreviewStorageWriters(this.ctx.storage).dispatch(key,writerId,assetPath?`${key}/${assetPath}`:key);}
+  async finishPreviewPut(key:string,writerId:string,assetPath:string):Promise<void>{new PreviewStorageWriters(this.ctx.storage).settled(key,writerId,assetPath?`${key}/${assetPath}`:key);}
+  async finishPreviewWriter(key:string,writerId:string):Promise<void>{new PreviewStorageWriters(this.ctx.storage).finish(key,writerId);}
+  async registerPreviewEvidenceCopy(identity:PreviewStorageManifest["identity"],id:string,size:number,sha256:string,writerId:string):Promise<string>{const writers=new PreviewStorageWriters(this.ctx.storage),key=writers.registerEvidence(identity,id,size,sha256);writers.begin(key,writerId);return key;}
+  private scopedEvidenceCopyTable():void{this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS scoped_evidence_copies(id TEXT PRIMARY KEY,object_key TEXT NOT NULL,legacy_pending INTEGER NOT NULL DEFAULT 1)");try{this.ctx.storage.sql.exec("ALTER TABLE scoped_evidence_copies ADD COLUMN legacy_pending INTEGER NOT NULL DEFAULT 1");}catch{/* Existing column. */}}
+  async recordScopedEvidenceCopy(id:string,key:string,incarnation:string):Promise<void>{
+    const state=this.load(),projectId=state.projectId;
+    if(this.repositoryDeleting()||!state.evidence[id]||new PrivateRecoveryOperations(this.ctx.storage).incarnation()!==incarnation||key!==`evidence/${projectId}/${incarnation}/${id}.json`||! EVIDENCE_COPY_ID.test(id))throw new Error("Evidence copy scope changed");
+    const legacyPresent=!!await this.env.EVIDENCE_BUCKET.head(`evidence/${id}.json`);
+    const current=this.load();
+    if(this.repositoryDeleting()||current.projectId!==projectId||!current.evidence[id]||new PrivateRecoveryOperations(this.ctx.storage).incarnation()!==incarnation)throw new Error("Evidence copy context changed");
+    this.scopedEvidenceCopyTable();
+    const previous=this.ctx.storage.sql.exec<{object_key:string}>("SELECT object_key FROM scoped_evidence_copies WHERE id=?",id).toArray()[0];
+    if(previous&&previous.object_key!==key)throw new Error("Evidence copy reference is immutable");
+    this.ctx.storage.sql.exec("INSERT INTO scoped_evidence_copies VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET legacy_pending=MAX(scoped_evidence_copies.legacy_pending,excluded.legacy_pending)",id,key,legacyPresent?1:0);
+  }
+  async previewCleanupScope():Promise<{projectId:string;incarnation:string;legacyEvidence:boolean;legacyInventory:boolean}>{if(!this.repositoryDeleting())throw new Error("Preview cleanup requires a deletion fence");const state=this.load(true);this.scopedEvidenceCopyTable();const tracked=new Set(this.ctx.storage.sql.exec<{id:string}>("SELECT id FROM scoped_evidence_copies WHERE legacy_pending=0").toArray().map(row=>row.id));this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS preview_copy_tracking_era(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL)");return{projectId:state.projectId,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation(),legacyEvidence:Object.keys(state.evidence).some(id=>!tracked.has(id)),legacyInventory:!this.ctx.storage.sql.exec("SELECT id FROM preview_copy_tracking_era WHERE id=1 AND version=1").toArray().length};}
+  async fencePreviewCleanup(projectId:string,incarnation:string):Promise<PreviewCopyPlan[]>{return new PreviewStorageWriters(this.ctx.storage).fence(projectId,incarnation);}
+  async previewCopyCleanupReady(key:string):Promise<boolean>{return new PreviewStorageWriters(this.ctx.storage).cleanupReady(key);}
+  async finishPreviewCopyCleanup(key:string):Promise<void>{
+    const writers=new PreviewStorageWriters(this.ctx.storage),plan=writers.plan(key);
+    if(!writers.cleanupReady(key))throw new Error("Preview cleanup writers are unconfirmed");
+    if(plan.keys.length<1||plan.keys.length>1000||plan.keys.some(objectKey=>objectKey.split("/").some(segment=>segment===".."||segment===".")||objectKey.includes("\\")||(plan.kind==="preview"?!objectKey.startsWith(`${plan.physicalKey}/`):objectKey!==plan.physicalKey)))throw new Error("Preview cleanup key scope is invalid");
+    // Independently prove every server-recorded object absent. A helper assertion
+    // or an unconfirmed delete response is never sufficient to release capacity.
+    for(const objectKey of plan.keys)if(await this.env.EVIDENCE_BUCKET.head(objectKey))throw new Error("Preview storage absence is unconfirmed");
+    this.ctx.storage.transactionSync(()=>{
+      if(!writers.cleanupReady(key))throw new Error("Preview cleanup writer scope changed");
+      this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS preview_copy_cleanup_receipts(physical_key TEXT PRIMARY KEY,keys_json TEXT NOT NULL,confirmed_at TEXT NOT NULL)");
+      this.ctx.storage.sql.exec("INSERT OR IGNORE INTO preview_copy_cleanup_receipts VALUES(?,?,?)",key,JSON.stringify(plan.keys),new Date().toISOString());
+      writers.retire(key);
+      if(plan.kind==="preview")this.ctx.storage.sql.exec("DELETE FROM preview_storage_reservations WHERE physical_key=?",key);
+      else this.ctx.storage.sql.exec("DELETE FROM evidence_storage_reservations WHERE physical_key=?",key);
+    });
+  }
+  async reserveEvidenceStorage(identity:PreviewStorageIdentity,id:string,size:number,sha256:string):Promise<PreviewStorageAdmission>{
+    try{new EvidenceStorageLedger(this.ctx.storage).reserve(identity,id,size,sha256,previewStorageBudget({PREVIEW_STORAGE_GLOBAL_BYTES:this.env.EVIDENCE_STORAGE_GLOBAL_BYTES,PREVIEW_STORAGE_ACCOUNT_BYTES:this.env.EVIDENCE_STORAGE_ACCOUNT_BYTES}));return{allowed:true};}
+    catch(error){if(error instanceof PreviewStorageAdmissionError)return{allowed:false,reason:error.reason};throw error;}
+  }
+  async previewStorageReadmission(identity:PreviewStorageIdentity):Promise<PreviewStorageAdmission>{return new PreviewStorageLedger(this.ctx.storage).readmit(identity,previewStorageBudget(this.env));}
+  async reservePreviewStorage(manifest:PreviewStorageManifest):Promise<PreviewStorageAdmission>{await validatePreviewStorageManifest(manifest);try{new PreviewStorageLedger(this.ctx.storage).reserve(manifest,previewStorageBudget(this.env));return{allowed:true};}catch(error){if(error instanceof PreviewStorageAdmissionError){if(error.reason!=="storage_retired")new PreviewStorageLedger(this.ctx.storage).rememberRefusal(manifest);return{allowed:false,reason:error.reason};}throw error;}}
   async previewStorageScope(commit:string,canonicalRepoName:string):Promise<PreviewStorageManifest["identity"]>{
     const retained=(state:FlareGitProjectState)=>state.acceptedState.currentCommit===commit||state.journal.some(entry=>entry.state==="ACCEPTED"&&entry.newHead===commit)||Object.values(state.candidates).some(candidate=>candidate.candidateCommit===commit&&candidate.evidenceId&&state.evidence[candidate.evidenceId]?.status==="passed");
     const selectedOwner=()=>this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY added_at,user_id LIMIT 1").toArray()[0]?.user_id;
@@ -1141,7 +1201,11 @@ export class RepositoryController extends DurableObject<Env> {
     };
     if (init.ownerId) await this.addMember(init.ownerId, "owner");
     await this.logActivity(init.ownerId ?? "system", "project.created", `Repository ${init.projectName} created`);
-    this.save();
+    this.ctx.storage.transactionSync(()=>{
+      this.save();
+      this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS preview_copy_tracking_era(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL)");
+      this.ctx.storage.sql.exec("INSERT INTO preview_copy_tracking_era VALUES(1,1)");
+    });
     return this.state;
   }
 
@@ -1902,6 +1966,22 @@ export class RepositoryController extends DurableObject<Env> {
   async reserveHealthProbe(): Promise<HealthProbeAdmission> {
     return new HealthProbeBudget(this.ctx.storage).reserve();
   }
+  async previewStorageWriterState(key:string):Promise<{unfinished:boolean}>{
+    if(!/^builds\/[a-z0-9]{12,16}\/[a-f0-9]{40}$/.test(key))throw new Error("Invalid preview scope");
+    new PreviewStorageWriters(this.ctx.storage);
+    const rows=this.ctx.storage.sql.exec<{closed:number;pending:string}>("SELECT closed,pending FROM preview_copy_writers WHERE physical_key=?",key).toArray();
+    return{unfinished:rows.some(row=>!row.closed||(JSON.parse(row.pending) as unknown[]).length>0)};
+  }
+  async nativeComputeFailureReason(key:string):Promise<string|null>{
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS preview_failure_reasons(key TEXT PRIMARY KEY,reason TEXT NOT NULL)");
+    return this.ctx.storage.sql.exec<{reason:string}>("SELECT reason FROM preview_failure_reasons WHERE key=?",key).toArray()[0]?.reason??null;
+  }
+  async setNativeComputeFailureReason(key:string,reason:"storage_capacity"|"storage_unconfigured"|"storage_retired"|"storage_reconciliation"|"build_failed"):Promise<void>{
+    if(!["storage_capacity","storage_unconfigured","storage_retired","storage_reconciliation","build_failed"].includes(reason))throw new Error("Invalid preview failure reason");
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS preview_failure_reasons(key TEXT PRIMARY KEY,reason TEXT NOT NULL)");
+    this.ctx.storage.sql.exec("INSERT INTO preview_failure_reasons VALUES(?,?) ON CONFLICT(key) DO UPDATE SET reason=excluded.reason",key,reason);
+    await this.setNativeComputeFailure(key,true);
+  }
   async nativeComputeFailure(key: string): Promise<boolean> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS native_compute_failures(key TEXT PRIMARY KEY)");
     return this.ctx.storage.sql.exec("SELECT key FROM native_compute_failures WHERE key=?",key).toArray().length>0;
@@ -1909,7 +1989,7 @@ export class RepositoryController extends DurableObject<Env> {
   async setNativeComputeFailure(key: string, failed: boolean): Promise<void> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS native_compute_failures(key TEXT PRIMARY KEY)");
     if(failed)this.ctx.storage.sql.exec("INSERT OR IGNORE INTO native_compute_failures VALUES(?)",key);
-    else this.ctx.storage.sql.exec("DELETE FROM native_compute_failures WHERE key=?",key);
+    else {this.ctx.storage.sql.exec("DELETE FROM native_compute_failures WHERE key=?",key);this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS preview_failure_reasons(key TEXT PRIMARY KEY,reason TEXT NOT NULL)");this.ctx.storage.sql.exec("DELETE FROM preview_failure_reasons WHERE key=?",key);}
   }
   async nativeComputeStatus(key: string): Promise<{ active: boolean; sandboxName: string; token: string; deadline: number } | null> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS native_compute(key TEXT PRIMARY KEY, token TEXT NOT NULL, active INTEGER NOT NULL, started_at INTEGER)");

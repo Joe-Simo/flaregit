@@ -1,3 +1,4 @@
+import {cleanupRepositoryCopies} from "./preview-storage-cleanup.js";
 import { z } from "zod";
 import type { PublicationModerationState } from "./publication-moderation.js";
 import { publicationModerationInput } from "./publication-moderation.js";
@@ -455,6 +456,8 @@ export default {
           if (!await stopRepositoryWorkflows(env, ledger)) return json({ deleted: false, status: "deleting", reason: "Repository workflow shutdown is unconfirmed; retry deletion" }, 202);
           const recoveryCleanup = await cleanupPrivateRecoveryRepositoryOutcome(env, ledger);
           if (!recoveryCleanup.deleted) return json({ ...recoveryCleanup, status: "deleting", reason: recoveryCleanup.detail }, 202);
+          const copiesCleanup=await cleanupRepositoryCopies(env,ledger);
+          if(!copiesCleanup.cleaned)return json({deleted:false,status:"deleting",...copiesCleanup,reason:copiesCleanup.detail},202);
         }
         if (!await reconcileSealedAllocations(env, account)) return json({ deleted: false, status: "deleting", reason: "An in-flight repository allocation remains unconfirmed; retry deletion" }, 202);
         for (const job of imports) {
@@ -872,6 +875,15 @@ export default {
           if(settingsFor(state.verificationPolicy).fixture!=="ticket-booking")return text("This repository uses external preview tooling",409);
           if(typeof input.commit!=="string"||input.commit!==state.acceptedState.currentCommit)return text("Preview retry must reference the current accepted commit",409);
           if(await project.roleOf(userId)!=="owner")return text("Owner access was revoked",403);
+          const fundingFailure=await globalOf(env).nativeComputeFailureReason(key);
+          if((await globalOf(env).previewStorageWriterState(buildPrefix(projectId,state.acceptedState.currentCommit))).unfinished)return text("Preview publication has unfinished upload receipts; retry requires storage reconciliation and no compute was started",409);
+          if(fundingFailure==="storage_capacity"||fundingFailure==="storage_unconfigured"||fundingFailure==="storage_retired"){
+            const scope=await project.previewStorageScope(state.acceptedState.currentCommit,state.canonicalRepoName);
+            const readmission=await globalOf(env).previewStorageReadmission(scope);
+            if(!readmission.allowed)return text("Preview storage allowance remains unavailable; no compute was started",409);
+            const freshScope=await project.previewStorageScope(state.acceptedState.currentCommit,state.canonicalRepoName);
+            if(JSON.stringify(scope)!==JSON.stringify(freshScope))return text("Preview ownership changed; reload before retrying",409);
+          }
           try {
             await recoverNativeCompute(env,key);
             await globalOf(env).setNativeComputeFailure(key,false);
@@ -1263,10 +1275,17 @@ export default {
           if (!ready) {
             const key=`build-${projectId}-${commit}`;
             const failed=await globalOf(env).nativeComputeFailure(key);
+            const failureReason=await globalOf(env).nativeComputeFailureReason(key);
+            const unfinishedWriter=(await globalOf(env).previewStorageWriterState(buildPrefix(projectId,commit))).unfinished;
+            const storageUnavailable=(unfinishedWriter&&failed)||failureReason==="storage_capacity"||failureReason==="storage_unconfigured"||failureReason==="storage_retired";
+            let fundingRetryEligible=false;
+            if(storageUnavailable&&!unfinishedWriter&&failureReason!=="storage_reconciliation"&&isOwner&&commit===state.acceptedState.currentCommit){
+              try{fundingRetryEligible=(await globalOf(env).previewStorageReadmission(await project.previewStorageScope(commit,state.canonicalRepoName))).allowed;}catch{/* Missing or stale scope never authorizes retry. */}
+            }
             const compute=await globalOf(env).nativeComputeStatus(key);
             const spending=await managedSpendStatus(env,accountKey,false);
-            const status=failed?"failed":spending.status!=="configured"?"unavailable":compute?.active?"pending":"not_started";
-            return json({ready:false,status,canRetry:isOwner&&commit===state.acceptedState.currentCommit&&settings.fixture==="ticket-booking",reason:failed?"Build failed; retry requires owner action":status==="unavailable"?"Compute budget unavailable":undefined});
+            const status=storageUnavailable?"unavailable":failed?"failed":spending.status!=="configured"?"unavailable":compute?.active?"pending":"not_started";
+            return json({ready:false,status,canRetry:!unfinishedWriter&&(!storageUnavailable||fundingRetryEligible)&&isOwner&&commit===state.acceptedState.currentCommit&&settings.fixture==="ticket-booking",reason:(unfinishedWriter&&failed)?"Preview publication has unfinished upload receipts; storage reconciliation is required":storageUnavailable?(fundingRetryEligible?"Preview storage allowance is available again; the owner can retry":"Preview storage allowance requires operator attention; retry cannot restore capacity"):failed?"Build failed; retry requires owner action":status==="unavailable"?"Compute budget unavailable":undefined});
           }
           const { exp, sig } = await signPreview(env, projectId, commit, previewOrigin);
           return Response.json({ ready: true, status:"available", url: `${previewOrigin}/preview/${commit}/${exp}/${sig}/`, expiresAt: new Date(exp * 1000).toISOString() }, { headers: { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff" } });
@@ -1514,6 +1533,8 @@ export default {
           if (!await stopRepositoryWorkflows(env, project)) return json({ deleted: false, status: "deleting", detail: "Repository workflow shutdown is unconfirmed. Retry deletion; metadata is preserved." }, 202);
           const recoveryCleanup = await cleanupPrivateRecoveryRepositoryOutcome(env, project);
           if (!recoveryCleanup.deleted) return json({ ...recoveryCleanup, status: "deleting" }, 202);
+          const copiesCleanup=await cleanupRepositoryCopies(env,project);
+          if(!copiesCleanup.cleaned)return json({deleted:false,status:"deleting",...copiesCleanup},202);
           if (!await reconcileSealedAllocations(env, project)) return json({ deleted: false, status: "deleting", detail: "An in-flight repository allocation remains unconfirmed. Retry deletion." }, 202);
           const manifest = await globalOf(env).artifactProjectManifest(projectId);
           const names = [...new Set([...Object.values(state.tasks).map((task) => task.workspace.repoName), state.canonicalRepoName, ...manifest.filter((allocation) => allocation.state !== "deleted").map((allocation) => allocation.name)])];

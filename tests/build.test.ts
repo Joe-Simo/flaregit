@@ -10,14 +10,14 @@ function fixture(failAsset = false) {
     ...nativeFunding(),
     EVIDENCE_BUCKET: {
       head: async () => null,
-      put: async (key: string) => { if (failAsset && key.endsWith("app.js")) throw new Error("R2 unavailable"); writes.push(key); },
+      put: async (key: string) => { if (failAsset && key.endsWith("app.js")) throw new Error("R2 unavailable"); writes.push(key); return {etag:"confirmed-fixture"}; },
     },
     ARTIFACTS: { get: async () => ({ info: async () => ({ remote: "https://repo.example/git" }), createToken: async () => ({ plaintext: "read-token" }), revokeToken: async (token: string) => { revoked.push(token); } }) },
     INTEGRATOR: { getByName: (name: string) => {
       names.push(name);
       return {
-        exec: async (argv: string[]) => ({ success: true, stderr: "", stdout: argv[2]?.includes("find .") ? "./index.html\n./app.js\n" : "" }),
-        readFile: async () => "asset", readFileBytes: async () => new TextEncoder().encode("asset"), destroy: async () => { destroyed++; },
+        exec: async (argv: string[]) => ({ success: true, stderr: "", stdout: argv[0]==="bun" && argv[1]==="-e" ? JSON.stringify(["index.html","app.js"].map(path=>({path,size:5,sha256:new Bun.CryptoHasher("sha256").update("asset").digest("hex")}))) : "" }),
+        readFile: async () => "asset", readFileBytes: async () => new TextEncoder().encode("asset"), destroy: async () => { destroyed++; }, lifetimeStatus:async()=>({state:"stopped"}),
       };
     } },
   } as unknown as Env;
@@ -26,7 +26,7 @@ function fixture(failAsset = false) {
 
 test("concurrent builds have isolated containers and publish readiness last", async () => {
   const f = fixture();
-  await Promise.all([ensureBuild(f.env, "p", "a".repeat(40), "repo", "test_account"), ensureBuild(f.env, "p", "b".repeat(40), "repo", "test_account")]);
+  await Promise.all([ensureBuild(f.env, "p123456789abc", "a".repeat(40), "repo", "b".repeat(12)), ensureBuild(f.env, "p123456789abc", "b".repeat(40), "repo", "b".repeat(12))]);
   expect(new Set(f.names).size).toBe(2);
   for (const commit of ["a".repeat(40), "b".repeat(40)]) {
     const outputs = f.writes.filter((key) => key.includes(commit));
@@ -38,7 +38,7 @@ test("concurrent builds have isolated containers and publish readiness last", as
 
 test("failed asset upload leaves preview unready and cleans credentials and container", async () => {
   const f = fixture(true);
-  await expect(ensureBuild(f.env, "p", "a".repeat(40), "repo", "test_account")).rejects.toThrow("R2 unavailable");
+  await expect(ensureBuild(f.env, "p123456789abc", "a".repeat(40), "repo", "b".repeat(12))).rejects.toThrow("R2 unavailable");
   expect(f.writes).toEqual([]);
   expect(f.revoked).toEqual(["read-token"]);
   expect(f.destroyed()).toBe(1);
@@ -46,20 +46,20 @@ test("failed asset upload leaves preview unready and cleans credentials and cont
 
 test("same committed preview uses one funded build despite concurrent readers", async () => {
   const f = fixture();
-  await Promise.all([ensureBuild(f.env,"p","a".repeat(40),"repo","test_account"),ensureBuild(f.env,"p","a".repeat(40),"repo","test_account")]);
+  await Promise.all([ensureBuild(f.env,"p123456789abc","a".repeat(40),"repo","b".repeat(12)),ensureBuild(f.env,"p123456789abc","a".repeat(40),"repo","b".repeat(12))]);
   expect(f.names).toHaveLength(1);
   expect(f.destroyed()).toBe(1);
 });
 
 test("exhausted native budget refuses build before VM allocation", async () => {
   const f=fixture(); f.env.MANAGED_ACCOUNT_MONTHLY_USD_MICROS="0";
-  await expect(ensureBuild(f.env,"p","a".repeat(40),"repo","test_account")).rejects.toThrow("budget unavailable");
+  await expect(ensureBuild(f.env,"p123456789abc","a".repeat(40),"repo","b".repeat(12))).rejects.toThrow("budget unavailable");
   expect(f.names).toHaveLength(0);
 });
 
 test("persisted failed preview cannot be relaunched by repeated page reads", async () => {
   const f=fixture(true);
-  await expect(ensureBuild(f.env,"p","a".repeat(40),"repo","test_account")).rejects.toThrow();
-  await expect(ensureBuild(f.env,"p","a".repeat(40),"repo","test_account")).rejects.toThrow("owner retry");
+  await expect(ensureBuild(f.env,"p123456789abc","a".repeat(40),"repo","b".repeat(12))).rejects.toThrow();
+  await expect(ensureBuild(f.env,"p123456789abc","a".repeat(40),"repo","b".repeat(12))).rejects.toThrow("owner retry");
   expect(f.names).toHaveLength(1);
 });

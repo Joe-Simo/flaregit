@@ -3,6 +3,8 @@ import type { AiBinding } from "../ai/workers-ai.js";
 
 export interface Env {
   /** Retained optional preview assets only; unset disables new storage reservations. */
+  EVIDENCE_STORAGE_GLOBAL_BYTES?: string;
+  EVIDENCE_STORAGE_ACCOUNT_BYTES?: string;
   PREVIEW_STORAGE_GLOBAL_BYTES?: string;
   PREVIEW_STORAGE_ACCOUNT_BYTES?: string;
   CORE_GIT_GLOBAL_MONTHLY_USD_MICROS?: string;

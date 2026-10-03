@@ -49,7 +49,7 @@ test("publication releases its ephemeral checkout while preserving the reviewed 
       }) },
     } as unknown as Env;
     const workflow = new FlareGitIntegrationWorkflow({} as ExecutionContext, env);
-    Object.assign(workflow,{projectId:"repo",computeAccountKey:await accountKeyFor("fixture-human"),computeWorkflowId:"registered-parent"});
+    Object.assign(workflow,{projectId:"p123456789abc",computeAccountKey:await accountKeyFor("fixture-human"),computeWorkflowId:"registered-parent"});
     const callable = workflow as unknown as { casPush(candidate: CandidateGeneration, commit: string, stub: Ledger, branch: string): Promise<{ ok: boolean }> };
     const result = await callable.casPush({ id: "test", expectedAcceptedBase: base } as CandidateGeneration, commit, { getState: async () => ({ canonicalRepoName: "repo" }) } as unknown as Ledger, "main");
     expect(result.ok).toBe(true);
@@ -72,7 +72,7 @@ test("operation error survives failed shutdown and cleanup failure becomes durab
     REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: (name: string) => name === "global" ? funding.REPOSITORY_CONTROLLER.get(funding.REPOSITORY_CONTROLLER.idFromName("global")) : ({ accountLifecycle:async()=>"active",getWorkflowRun:async()=>({actorId:"fixture-human"}),roleOf:async()=>"owner",logActivity: async (_actor: string, kind: string) => { activities.push(kind); } }) },
   } as unknown as Env;
   const workflow = new FlareGitIntegrationWorkflow({} as ExecutionContext, env);
-    Object.assign(workflow,{projectId:"repo",computeAccountKey:await accountKeyFor("fixture-human"),computeWorkflowId:"registered-parent"});
+    Object.assign(workflow,{projectId:"p123456789abc",computeAccountKey:await accountKeyFor("fixture-human"),computeWorkflowId:"registered-parent"});
   const callable = workflow as unknown as { casPush(candidate: CandidateGeneration, commit: string, stub: Ledger, branch: string): Promise<unknown> };
   await expect(callable.casPush({ id: "test", expectedAcceptedBase: "a".repeat(40) } as CandidateGeneration, "b".repeat(40), { getState: async () => ({ canonicalRepoName: "repo" }) } as unknown as Ledger, "main")).rejects.toBe(original);
   expect(destroyCalls).toBe(1);
@@ -101,14 +101,14 @@ test.each(["normal","evidence-failure","preview-failure"] as const)("candidate r
     const env = {
       ...nativeFunding(),
       ARTIFACTS: { get: async () => ({ info: async () => ({ remote: canonical }), createToken: async () => ({ plaintext: "fixture-token" }) }) },
-      EVIDENCE_BUCKET: { put: async (key: string) => { stored.push(key); if(uploadFails || (previewFails && key.endsWith("app.js")))throw new Error("R2 unavailable"); } }, AI: { run: async () => { aiCalls++; throw new Error("AI must not run"); } },
+      EVIDENCE_BUCKET: { head:async()=>null, put: async (key: string) => { stored.push(key); if(uploadFails || (previewFails && key.endsWith("app.js")))throw new Error("R2 unavailable"); return {etag:"confirmed-fixture"}; } }, AI: { run: async () => { aiCalls++; throw new Error("AI must not run"); } },
       INTEGRATOR: { getByName: () => ({ exec: async (argv: string[]) => {
         const original = argv[2]!; commands.push(original);
         // Synthetic verifier/build output isolates storage failure; Git refs remain real.
-        if(previewFails && original.includes("verification/cli.ts ticket-booking"))return {success:true,stderr:"",stdout:JSON.stringify({id:"synthetic-preview-proof",status:"passed",candidateTree:"a".repeat(40),verifierIdentity:"synthetic-test-only"})};
+        if(previewFails && original.includes("verification/cli.ts ticket-booking"))return {success:true,stderr:"",stdout:JSON.stringify({id:"ev_12345678-123",status:"passed",candidateTree:"a".repeat(40),verifierIdentity:"synthetic-test-only"})};
         if(previewFails && original.includes("test -f") && original.includes("index.html"))return {success:true,stderr:"",stdout:""};
         if(previewFails && original.includes("build-preview.ts"))return {success:true,stderr:"",stdout:""};
-        if(previewFails && original.includes("find . -type f"))return {success:true,stderr:"",stdout:"./index.html\n./app.js\n"};
+        if(previewFails && original.includes("const root="))return {success:true,stderr:"",stdout:JSON.stringify(["index.html","app.js"].map(path=>({path,size:15,sha256:new Bun.CryptoHasher("sha256").update("synthetic asset").digest("hex")})))};
         const command = original.replaceAll("/workspace/integration", work).replaceAll("/opt/flaregit", process.cwd());
         const child = Bun.spawn(["sh", "-c", command], { stdout: "pipe", stderr: "pipe" });
         const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
@@ -120,16 +120,16 @@ test.each(["normal","evidence-failure","preview-failure"] as const)("candidate r
     if(previewFails){delete candidate.frozenExternalChecksPolicy;candidate.frozenVerificationPolicy={};}
     const evidence: import("../src/core/types.js").VerificationEvidence[] = [];
     const activities:string[]=[];
-    const ledger = {getWorkflowRun:async()=>({actorId:"fixture-human"}),roleOf:async()=>"owner", logActivity:async(_actor:string,kind:string)=>{activities.push(kind);}, getState: async () => ({ canonicalRepoName: "repo", tasks: { one: task }, defaultBranch: "main" }), recordComposition: async () => {}, recordVerification: async (_id: string, _commit: string, proof: import("../src/core/types.js").VerificationEvidence) => { evidence.push(proof); } } as unknown as Ledger;
+    const ledger = {recordScopedEvidenceCopy:async()=>{},previewStorageScope:async(commit:string)=>({projectId:"p123456789abc",incarnation:"11111111-1111-4111-8111-111111111111",commit,accountKey:await accountKeyFor("fixture-human")}),getWorkflowRun:async()=>({actorId:"fixture-human"}),roleOf:async()=>"owner", logActivity:async(_actor:string,kind:string)=>{activities.push(kind);}, getState: async () => ({ canonicalRepoName: "repo", tasks: { one: task }, defaultBranch: "main" }), recordComposition: async () => {}, recordVerification: async (_id: string, _commit: string, proof: import("../src/core/types.js").VerificationEvidence) => { evidence.push(proof); } } as unknown as Ledger;
     const workflow = new FlareGitIntegrationWorkflow({} as ExecutionContext, env);
-    Object.assign(workflow,{projectId:"repo",computeAccountKey:await accountKeyFor("fixture-human"),computeWorkflowId:"registered-parent"});
+    Object.assign(workflow,{projectId:"p123456789abc",computeAccountKey:await accountKeyFor("fixture-human"),computeWorkflowId:"registered-parent"});
     const callable = workflow as unknown as { composeRepairVerify(candidate: CandidateGeneration, params: { projectId: string; taskIds: string[] }, ledger: Ledger,parentWorkflowId?:string): Promise<{ ok: boolean; commit?: string }> };
-    const result = await callable.composeRepairVerify(candidate, { projectId: "repo", taskIds: ["one"],accountKey:await accountKeyFor("fixture-human") } as {projectId:string;taskIds:string[]}, ledger,"registered-parent");
+    const result = await callable.composeRepairVerify(candidate, { projectId: "p123456789abc", taskIds: ["one"],accountKey:await accountKeyFor("fixture-human") } as {projectId:string;taskIds:string[]}, ledger,"registered-parent");
     expect(result.ok).toBe(true); expect(destroyed).toBe(1); expect(aiCalls).toBe(0);
     expect(evidence[0]?.verifierIdentity).toBe(previewFails?"synthetic-test-only":"flaregit-native-integrity-v1");
     expect(activities.includes("evidence.copy_failed")).toBe(uploadFails);
     expect(stored).toHaveLength(previewFails?2:1);
-    if(previewFails){expect(stored.some(key=>key.endsWith("index.html"))).toBe(false);expect(activities).toContain("preview.failed");expect(await (env.REPOSITORY_CONTROLLER.get(env.REPOSITORY_CONTROLLER.idFromName("global")) as unknown as Ledger).nativeComputeFailure(`build-repo-${result.commit}`)).toBe(true);}
+    if(previewFails){expect(stored.some(key=>key.endsWith("index.html"))).toBe(false);expect(activities).toContain("preview.failed");expect(await (env.REPOSITORY_CONTROLLER.get(env.REPOSITORY_CONTROLLER.idFromName("global")) as unknown as Ledger).nativeComputeFailure(`build-p123456789abc-${result.commit}`)).toBe(true);}
     else expect(stored[0]).toMatch(/^evidence\//);
     expect(commands.some((command) => command.includes("--native-integrity"))).toBe(!previewFails);
     expect(commands.some((command) => command.includes("build-preview") || command.includes("verification/cli.ts custom "))).toBe(previewFails);

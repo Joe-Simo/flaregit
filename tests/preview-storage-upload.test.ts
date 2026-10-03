@@ -1,3 +1,4 @@
+const testWriter={begin:async()=>{},beforePut:async()=>{},settledPut:async()=>{},finish:async()=>{}};
 import { expect, test } from "bun:test";
 import { createPreviewStorageManifest, inspectPreviewStorageManifest, publishPreviewStorageManifest, validatePreviewStorageManifest, MAX_PREVIEW_BYTES } from "../src/server/preview-storage-upload.js";
 const identity = { projectId: "project", incarnation: "incarnation", commit: "commit", accountKey: "owner" };
@@ -23,20 +24,20 @@ test("invalid paths, per-file and aggregate bounds fail closed", async () => {
 test("reservation denial causes no reads or writes", async () => {
   const manifest = await createPreviewStorageManifest(identity, [asset("index.html")]);
   const events: string[] = [];
-  await expect(publishPreviewStorageManifest(manifest, { prefix: "builds/project/commit", reserve: async () => { events.push("reserve"); throw Error("full"); }, authorize: async () => { events.push("authorize"); }, getFile: async () => { events.push("read"); return bytes; }, bucket: { head: async () => null, put: async () => { events.push("put"); } } })).rejects.toThrow("full");
+  await expect(publishPreviewStorageManifest(manifest, { prefix: "builds/project/commit", writer:testWriter,reserve: async () => { events.push("reserve"); throw Error("full"); }, authorize: async () => { events.push("authorize"); }, getFile: async () => { events.push("read"); return bytes; }, bucket: { head: async () => null, put: async () => { events.push("put"); } } })).rejects.toThrow("full");
   expect(events).toEqual(["reserve"]);
 });
 test("sequential uploads hash each buffer and publish index last", async () => {
   const manifest = await createPreviewStorageManifest(identity, [asset("index.html"), asset("a.js")]);
   const events: string[] = [];
-  await publishPreviewStorageManifest(manifest, { prefix: "builds/project/commit", reserve: async () => { events.push("reserve"); }, authorize: async () => { events.push("authorize"); }, getFile: async (path) => { events.push(`read:${path}`); return bytes; }, bucket: { head: async () => null, put: async (key, _bytes, options) => { events.push(`put:${key}`); expect(options.customMetadata.sha256).toBe(digest); expect(options.onlyIf).toEqual({ etagDoesNotMatch: "*" }); return {}; } } });
+  await publishPreviewStorageManifest(manifest, { prefix: "builds/project/commit", writer:testWriter,reserve: async () => { events.push("reserve"); }, authorize: async () => { events.push("authorize"); }, getFile: async (path) => { events.push(`read:${path}`); return bytes; }, bucket: { head: async () => null, put: async (key, _bytes, options) => { events.push(`put:${key}`); expect(options.customMetadata.sha256).toBe(digest); expect(options.onlyIf).toEqual({ etagDoesNotMatch: "*" }); return {}; } } });
   expect(events).toEqual(["reserve", "authorize", "read:/tmp/build-out/a.js", "authorize", "put:builds/project/commit/a.js", "authorize", "authorize", "read:/tmp/build-out/index.html", "authorize", "put:builds/project/commit/index.html", "authorize"]);
 });
 test("changed bytes and uncertain puts prevent index publication", async () => {
   const manifest = await createPreviewStorageManifest(identity, [asset("index.html"), asset("a.js")]);
   for (const changed of [true, false]) {
     const writes: string[] = [];
-    await expect(publishPreviewStorageManifest(manifest, { prefix: "builds/p/c", reserve: async () => {}, authorize: async () => {}, getFile: async () => changed ? new TextEncoder().encode("other") : bytes, bucket: { head: async () => null, put: async (key) => { writes.push(key); throw Error("unknown"); } } })).rejects.toThrow();
+    await expect(publishPreviewStorageManifest(manifest, { prefix: "builds/p/c", writer:testWriter,reserve: async () => {}, authorize: async () => {}, getFile: async () => changed ? new TextEncoder().encode("other") : bytes, bucket: { head: async () => null, put: async (key) => { writes.push(key); throw Error("unknown"); } } })).rejects.toThrow();
     expect(writes).toEqual(changed ? [] : ["builds/p/c/a.js"]);
   }
 });
@@ -72,7 +73,7 @@ test("actual inspector script hashes binaries and rejects filesystem symlinks", 
 test("matching retries skip uploads; legacy or mismatched assets are never overwritten", async () => {
   const manifest = await createPreviewStorageManifest(identity, [asset("index.html")]);
   let reads = 0, puts = 0, authorizations = 0;
-  const options = { prefix: "builds/p/c", reserve: async () => {}, authorize: async () => { authorizations++; }, getFile: async () => { reads++; return bytes; }, bucket: { head: async () => ({ size: bytes.length, customMetadata: { sha256: digest, manifestHash: manifest.manifestHash } }), put: async () => { puts++; return {}; } } };
+  const options = { prefix: "builds/p/c", writer:testWriter,reserve: async () => {}, authorize: async () => { authorizations++; }, getFile: async () => { reads++; return bytes; }, bucket: { head: async () => ({ size: bytes.length, customMetadata: { sha256: digest, manifestHash: manifest.manifestHash } }), put: async () => { puts++; return {}; } } };
   await publishPreviewStorageManifest(manifest, options);
   expect([reads, puts, authorizations]).toEqual([0, 0, 2]);
   for (const existing of [{ size: bytes.length }, { size: bytes.length, customMetadata: { sha256: "other", manifestHash: manifest.manifestHash } }, { size: bytes.length + 1, customMetadata: { sha256: digest, manifestHash: manifest.manifestHash } }]) {
@@ -83,6 +84,13 @@ test("matching retries skip uploads; legacy or mismatched assets are never overw
 test("conditional create conflict stops before index and retains the reservation", async () => {
   const manifest = await createPreviewStorageManifest(identity, [asset("a.js"), asset("index.html")]);
   const writes: string[] = [];
-  await expect(publishPreviewStorageManifest(manifest, { prefix: "builds/p/c", reserve: async () => {}, authorize: async () => {}, getFile: async () => bytes, bucket: { head: async () => null, put: async (key, _bytes, options) => { writes.push(key); expect(options.onlyIf.etagDoesNotMatch).toBe("*"); return null; } } })).rejects.toThrow("unconfirmed");
+  await expect(publishPreviewStorageManifest(manifest, { prefix: "builds/p/c", writer:testWriter,reserve: async () => {}, authorize: async () => {}, getFile: async () => bytes, bucket: { head: async () => null, put: async (key, _bytes, options) => { writes.push(key); expect(options.onlyIf.etagDoesNotMatch).toBe("*"); return null; } } })).rejects.toThrow("unconfirmed");
   expect(writes).toEqual(["builds/p/c/a.js"]);
+});
+
+test("unknown provider put retains active writer and pending marker",async()=>{
+ const events:string[]=[];const bytes=new TextEncoder().encode("asset"),digest=new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+ const manifest=await createPreviewStorageManifest(identity,[{path:"index.html",size:bytes.length,sha256:digest}]);
+ await expect(publishPreviewStorageManifest(manifest,{prefix:"builds/p/c",reserve:async()=>{},writer:{begin:async()=>{events.push("writer");},beforePut:async()=>{events.push("pending");},settledPut:async()=>{events.push("settled");},finish:async()=>{events.push("closed");}},authorize:async()=>{},getFile:async()=>bytes,bucket:{head:async()=>null,put:async()=>{events.push("put");throw new Error("unknown outcome");}}})).rejects.toThrow("unknown outcome");
+ expect(events).toEqual(["writer","pending","put"]);
 });

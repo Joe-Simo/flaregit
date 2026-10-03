@@ -1,3 +1,4 @@
+import { assertPreviewStorageAdmission, PreviewStorageAdmissionError } from "./preview-storage.js";
 import { inspectPreviewStorageManifest, publishPreviewStorageManifest } from "./preview-storage-upload.js";
 import { admitNativeCompute } from "./native-compute.js";
 import { isSafeRef } from "../core/sanitize.js";
@@ -360,17 +361,42 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
             const manifest=await inspectPreviewStorageManifest({exec:argv=>sb.exec(argv.map(q).join(" "))},scope);
             await publishPreviewStorageManifest(manifest,{
               prefix:buildPrefix(params.projectId,commit),bucket:this.env.EVIDENCE_BUCKET,
-              reserve:value=>globalOf(this.env).reservePreviewStorage(value),
+              reserve:async value=>assertPreviewStorageAdmission(await globalOf(this.env).reservePreviewStorage(value)),
+      writer:{begin:id=>globalOf(this.env).reservePreviewWriter(buildPrefix(params.projectId,commit),id),beforePut:(id,path)=>globalOf(this.env).beginPreviewPut(buildPrefix(params.projectId,commit),id,path),settledPut:(id,path)=>globalOf(this.env).finishPreviewPut(buildPrefix(params.projectId,commit),id,path),finish:id=>globalOf(this.env).finishPreviewWriter(buildPrefix(params.projectId,commit),id)},
               authorize:async()=>{const current=await stub.previewStorageScope(commit,state.canonicalRepoName);if(JSON.stringify(current)!==JSON.stringify(scope))throw new Error("Preview storage owner or incarnation changed");},
               getFile:path=>sb.readFileBytes(path),
             });
           }
-        } catch {
-          await globalOf(this.env).setNativeComputeFailure(previewKey,true).catch(()=>console.warn("Preview failure state unavailable"));
+        } catch(error) {
+          const unfinished=(await globalOf(this.env).previewStorageWriterState(buildPrefix(params.projectId,commit)).catch(()=>({unfinished:true}))).unfinished;
+          await globalOf(this.env).setNativeComputeFailureReason(previewKey,unfinished?"storage_reconciliation":error instanceof PreviewStorageAdmissionError?error.reason:"build_failed").catch(()=>console.warn("Preview failure state unavailable"));
           await stub.logActivity("FlareGit","preview.failed","Optional preview is unavailable; verified Git candidate and review evidence remain saved").catch(()=>console.warn("Preview failure activity unavailable"));
         }
         try {
-          await this.env.EVIDENCE_BUCKET.put(`evidence/${evidence.id}.json`, JSON.stringify(evidence), { httpMetadata: { contentType: "application/json" }, customMetadata: { commit, tree: evidence.candidateTree } });
+          const scope=await stub.previewStorageScope(commit,state.canonicalRepoName);
+          const bytes=new TextEncoder().encode(JSON.stringify(evidence));
+          const sha256=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",bytes)),byte=>byte.toString(16).padStart(2,"0")).join("");
+          const writerId=crypto.randomUUID(),controller=globalOf(this.env);
+          const plannedKey=`evidence/${scope.projectId}/${scope.incarnation}/${evidence.id}.json`;
+          await stub.recordScopedEvidenceCopy(evidence.id,plannedKey,scope.incarnation);
+          if(JSON.stringify(await stub.previewStorageScope(commit,state.canonicalRepoName))!==JSON.stringify(scope))throw new Error("Evidence copy owner scope changed before allocation");
+          assertPreviewStorageAdmission(await controller.reserveEvidenceStorage(scope,evidence.id,bytes.byteLength,sha256));
+          const evidenceKey=await controller.registerPreviewEvidenceCopy(scope,evidence.id,bytes.byteLength,sha256,writerId);
+          if(evidenceKey!==plannedKey)throw new Error("Evidence copy immutable key changed");
+          let pending=false;
+          try {
+            const existing=await this.env.EVIDENCE_BUCKET.head(evidenceKey);
+            if(existing){if(existing.size!==bytes.byteLength||existing.customMetadata?.sha256!==sha256||existing.customMetadata?.projectId!==scope.projectId||existing.customMetadata?.incarnation!==scope.incarnation)throw new Error("Immutable evidence copy scope changed");}
+            else {
+              const current=await stub.previewStorageScope(commit,state.canonicalRepoName);
+              if(JSON.stringify(current)!==JSON.stringify(scope))throw new Error("Evidence copy owner scope changed");
+              await controller.beginPreviewPut(evidenceKey,writerId,"");pending=true;
+              const stored=await this.env.EVIDENCE_BUCKET.put(evidenceKey,bytes,{onlyIf:{etagDoesNotMatch:"*"},httpMetadata:{contentType:"application/json"},customMetadata:{projectId:scope.projectId,incarnation:scope.incarnation,commit,tree:evidence.candidateTree,sha256}});
+              if(!stored)throw new Error("Evidence copy write is unconfirmed");
+              await controller.finishPreviewPut(evidenceKey,writerId,"");pending=false;
+            }
+          } finally {if(!pending)await controller.finishPreviewWriter(evidenceKey,writerId);}
+
         } catch {
           await stub.logActivity("FlareGit","evidence.copy_failed","Optional evidence storage copy failed; authoritative verification evidence remains in the repository ledger").catch(()=>console.warn("Evidence copy activity unavailable"));
         }

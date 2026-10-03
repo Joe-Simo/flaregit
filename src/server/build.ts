@@ -1,3 +1,4 @@
+import { assertPreviewStorageAdmission, PreviewStorageAdmissionError } from "./preview-storage.js";
 import { inspectPreviewStorageManifest, publishPreviewStorageManifest } from "./preview-storage-upload.js";
 import { globalOf, projectOf } from "./projects.js";
 import { admitNativeCompute, claimNativeCompute } from "./native-compute.js";
@@ -35,12 +36,14 @@ export async function ensureBuild(env: Env, projectId: string, commit: string, c
     const manifest=await inspectPreviewStorageManifest(sb,scope);
     await publishPreviewStorageManifest(manifest,{
       prefix, bucket:env.EVIDENCE_BUCKET,
-      reserve:value=>globalOf(env).reservePreviewStorage(value),
+      reserve:async value=>assertPreviewStorageAdmission(await globalOf(env).reservePreviewStorage(value)),
+      writer:{begin:id=>globalOf(env).reservePreviewWriter(prefix,id),beforePut:(id,path)=>globalOf(env).beginPreviewPut(prefix,id,path),settledPut:(id,path)=>globalOf(env).finishPreviewPut(prefix,id,path),finish:id=>globalOf(env).finishPreviewWriter(prefix,id)},
       authorize:async()=>{const current=await ledger.previewStorageScope(commit,canonicalRepo);if(JSON.stringify(current)!==JSON.stringify(scope))throw new Error("Preview storage owner or incarnation changed");},
       getFile:path=>sb.readFileBytes(path),
     });
   } catch(error) {
-    await globalOf(env).setNativeComputeFailure(operationKey,true);
+    const unfinished=(await globalOf(env).previewStorageWriterState(prefix).catch(()=>({unfinished:true}))).unfinished;
+    await globalOf(env).setNativeComputeFailureReason(operationKey,unfinished?"storage_reconciliation":error instanceof PreviewStorageAdmissionError?error.reason:"build_failed");
     throw error;
   } finally {
     if (token && repo) await repo.revokeToken(token).catch(() => false);

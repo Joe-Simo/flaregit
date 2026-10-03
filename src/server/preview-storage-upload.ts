@@ -60,6 +60,7 @@ const MIME: Record<string, string> = { html: "text/html; charset=utf-8", js: "te
 export async function publishPreviewStorageManifest(manifest: PreviewStorageManifest, options: {
   prefix: string;
   reserve(manifest: PreviewStorageManifest): Promise<void>;
+  writer: {begin(id:string):Promise<void>;beforePut(id:string,path:string):Promise<void>;settledPut(id:string,path:string):Promise<void>;finish(id:string):Promise<void>};
   authorize(): Promise<void>;
   getFile(path: string): Promise<Uint8Array>;
   bucket: { head(key: string): Promise<{ size: number; customMetadata?: Record<string, string> } | null>; put(key: string, bytes: Uint8Array, options: { httpMetadata: { contentType: string }; customMetadata: { sha256: string; manifestHash: string }; onlyIf: { etagDoesNotMatch: string } }): Promise<unknown> };
@@ -67,6 +68,10 @@ export async function publishPreviewStorageManifest(manifest: PreviewStorageMani
   const snapshot = await createPreviewStorageManifest(manifest.identity, manifest.assets);
   if (snapshot.manifestHash !== manifest.manifestHash || snapshot.totalBytes !== manifest.totalBytes) throw new Error("Preview manifest changed");
   await options.reserve(snapshot);
+  const writerId=crypto.randomUUID();
+  await options.writer.begin(writerId);
+  let pending=false;
+  try {
   for (const asset of snapshot.assets) {
     await options.authorize();
     const key = `${options.prefix}/${asset.path}`;
@@ -79,11 +84,16 @@ export async function publishPreviewStorageManifest(manifest: PreviewStorageMani
     const bytes = await options.getFile(`${ROOT}/${asset.path}`);
     if (bytes.byteLength !== asset.size || await sha256(bytes) !== asset.sha256) throw new Error("Preview asset changed before upload");
     await options.authorize();
+    await options.writer.beforePut(writerId,asset.path);
+    pending=true;
     const uploaded = await options.bucket.put(key, bytes, { httpMetadata: { contentType: MIME[asset.path.split(".").pop() ?? ""] ?? "application/octet-stream" }, customMetadata: { sha256: asset.sha256, manifestHash: snapshot.manifestHash }, onlyIf: { etagDoesNotMatch: "*" } });
     if (!uploaded) throw new Error("Preview upload outcome unconfirmed or conflicted");
     if (bytes.byteLength !== asset.size || await sha256(bytes) !== asset.sha256) throw new Error("Preview asset changed during upload");
+    await options.writer.settledPut(writerId,asset.path);
+    pending=false;
     await options.authorize();
   }
+  }finally{if(!pending)await options.writer.finish(writerId);}
 }
 
 export async function validatePreviewStorageManifest(manifest: PreviewStorageManifest): Promise<void> {
