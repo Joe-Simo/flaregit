@@ -1,3 +1,4 @@
+import { orderedPreviewAssets } from "./preview-assets.js";
 import { admitNativeCompute } from "./native-compute.js";
 import { isSafeRef } from "../core/sanitize.js";
 import { buildPrefix } from "./preview-access.js";
@@ -346,24 +347,32 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       const evidence = JSON.parse(v.stdout.trim().split("\n").at(-1)!) as VerificationEvidence;
       await stub.recordVerification(candidate.id, commit, evidence);
       if (evidence.status === "passed") {
-        // Build the exact verified commit and store it under that commit hash for immutable previews.
-        // Only web apps with an index.html get a stored preview; other repositories are verified and accepted without one.
-        const hasPage = !externalOnly && settings.fixture === "ticket-booking" && (await run(`test -f ${WORK}/index.html`)).success;
-        const built = hasPage
-          ? await run(`bun /opt/flaregit/src/core/verification/build-preview.ts ${q(WORK)} /tmp/build-out`)
-          : { success: true, stderr: "" };
-        if (!built.success) return { ok: false, error: `Build failed: ${built.stderr.slice(-400)}` };
-        const files = hasPage ? (await run("cd /tmp/build-out && find . -type f")).stdout.split("\n").filter(Boolean) : [];
-        for (const f of files) {
-          const rel = f.replace(/^\.\//, "");
-          const types: Record<string, string> = { html: "text/html; charset=utf-8", js: "text/javascript", css: "text/css", svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", avif: "image/avif", woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", otf: "font/otf" };
-          const type = types[rel.split(".").pop() ?? ""] ?? "application/octet-stream";
-          await this.env.EVIDENCE_BUCKET.put(`${buildPrefix(params.projectId, commit)}/${rel}`, await sb.readFileBytes(`/tmp/build-out/${rel}`), { httpMetadata: { contentType: type } });
-        }
-        await this.env.EVIDENCE_BUCKET.put(`evidence/${evidence.id}.json`, JSON.stringify(evidence), { httpMetadata: { contentType: "application/json" }, customMetadata: { commit, tree: evidence.candidateTree } });
-        // Publish the candidate under a private ref so reviewers can read exactly what would land, and it survives restarts.
+        // Retain the verified Git candidate before optional R2 copies.
         const shared = await run(`git -C ${WORK} push --quiet ${q(canonical.remote)} ${q(`${commit}:refs/flaregit/candidates/${candidate.id}`)}`, gitAuthEnv(canonical.token));
         if (!shared.success) return { ok: false, error: "Could not store the candidate for review" };
+        const previewKey=`build-${params.projectId}-${commit}`;
+        try {
+          const hasPage = !externalOnly && settings.fixture === "ticket-booking" && (await run(`test -f ${WORK}/index.html`)).success;
+          if (hasPage) {
+            const built = await run(`bun /opt/flaregit/src/core/verification/build-preview.ts ${q(WORK)} /tmp/build-out`);
+            if (!built.success) throw new Error("Optional preview build failed");
+            const listing=await run("cd /tmp/build-out && find . -type f");
+            if(!listing.success)throw new Error("Optional preview manifest unavailable");
+            for (const rel of orderedPreviewAssets(listing.stdout)) {
+              const types: Record<string, string> = { html: "text/html; charset=utf-8", js: "text/javascript", css: "text/css", svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", avif: "image/avif", woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", otf: "font/otf" };
+              const type = types[rel.split(".").pop() ?? ""] ?? "application/octet-stream";
+              await this.env.EVIDENCE_BUCKET.put(`${buildPrefix(params.projectId, commit)}/${rel}`, await sb.readFileBytes(`/tmp/build-out/${rel}`), { httpMetadata: { contentType: type } });
+            }
+          }
+        } catch {
+          await globalOf(this.env).setNativeComputeFailure(previewKey,true).catch(()=>console.warn("Preview failure state unavailable"));
+          await stub.logActivity("FlareGit","preview.failed","Optional preview is unavailable; verified Git candidate and review evidence remain saved").catch(()=>console.warn("Preview failure activity unavailable"));
+        }
+        try {
+          await this.env.EVIDENCE_BUCKET.put(`evidence/${evidence.id}.json`, JSON.stringify(evidence), { httpMetadata: { contentType: "application/json" }, customMetadata: { commit, tree: evidence.candidateTree } });
+        } catch {
+          await stub.logActivity("FlareGit","evidence.copy_failed","Optional evidence storage copy failed; authoritative verification evidence remains in the repository ledger").catch(()=>console.warn("Evidence copy activity unavailable"));
+        }
         return { ok: true, commit, evidenceId: evidence.id, branch };
       }
       if (externalOnly) return { ok: false, error: "Native Git integrity failed; no customer commands or automatic repairs ran" };

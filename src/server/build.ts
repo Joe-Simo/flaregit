@@ -1,3 +1,4 @@
+import { orderedPreviewAssets } from "./preview-assets.js";
 import { globalOf } from "./projects.js";
 import { admitNativeCompute, claimNativeCompute } from "./native-compute.js";
 import type { Env } from "./env.js";
@@ -33,11 +34,8 @@ export async function ensureBuild(env: Env, projectId: string, commit: string, c
     if (!built.success) throw new Error("Build failed; no preview was published");
     const listing = await run("cd /tmp/build-out && find . -type f");
     if (!listing.success) throw new Error("Could not inspect built assets; no preview was published");
-    const files = listing.stdout.split("\n").filter(Boolean).map((f) => f.replace(/^\.\//, ""));
-    if (!files.includes("index.html")) throw new Error("Build has no index.html; no preview was published");
-    // index.html is the readiness signal. Every dependent asset must be stored first.
-    for (const rel of [...files.filter((f) => f !== "index.html"), "index.html"]) {
-      if (rel.startsWith("/") || rel.split("/").some((part) => !part || part === ".." || part === ".")) throw new Error("Build returned an invalid asset path");
+    const files = orderedPreviewAssets(listing.stdout);
+    for (const rel of files) {
       const ext = rel.split(".").pop() ?? "";
       await env.EVIDENCE_BUCKET.put(`${prefix}/${rel}`, await sb.readFileBytes(`/tmp/build-out/${rel}`), { httpMetadata: { contentType: MIME[ext] ?? "application/octet-stream" } });
     }
