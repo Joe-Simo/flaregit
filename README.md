@@ -26,7 +26,9 @@ Cloudflare deployment messages record the exact source commit; check out that SH
 
 **Stacks.** A change can be stacked on another (`work ... --on <change>`). It cannot be marked ready until its parent is accepted; after a landing, downstream changes are rebased automatically.
 
-Owners can inspect saved branch updates in Integration and recover their base/dependency records when the workspace already contains the exact saved result. Recovery verifies protected Git refs, refuses newer work or active agents, and records the current recovery owner separately from original attribution. Applying a saved result to a branch that has not received it is not available yet.
+Owners can inspect saved branch updates in Integration and recover their base/dependency records when the workspace already contains the exact saved result. They can explicitly apply a protected saved result when the branch still contains its original commit. Recovery verifies protected Git refs, refuses newer work or active agents, and records the current recovery owner separately from original attribution. A durable attempt tracks execution and credential cleanup; uncertain outcomes remain visible and prevent unsafe replacement attempts. This requires the configured rebase-resume Workflow and funded execution capacity.
+
+Legacy prepared publications receive bounded, read-only Git verification before repository metadata can be reconciled. Missing or inconclusive proof keeps publication pending. Legacy candidates without preserved contribution inputs cannot be newly approved; an explicit owner upgrade/rerun flow remains unfinished.
 
 **Recovery.** Agents resume from their already pushed branch. Publication rehydrates from the stored candidate ref, so a crashed step does not need the original workspace. Webhook deliveries are written in the same transaction as the event (transactional outbox) and a Durable Object alarm re-sends anything not yet queued.
 
