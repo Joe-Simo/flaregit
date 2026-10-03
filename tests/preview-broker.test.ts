@@ -12,6 +12,7 @@ function fixture() {
   const env = {
     REPOSITORY_PREVIEW_ORIGINS: JSON.stringify({ [repository]: origin, "123456abcdef": "https://repo-b.account.workers.dev" }),
     PREVIEW_SIGNING_KEY: "unit-test-signing-key",
+    REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: () => ({ previewOrigin: async (id: string) => ({ status: "active", origin: id === repository ? origin : "https://repo-b.account.workers.dev" }) }) },
     CLERK_AUTHORIZED_PARTIES: "https://flaregit.com",
     EVIDENCE_BUCKET: {
       async get(key: string) {

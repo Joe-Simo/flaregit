@@ -1,6 +1,6 @@
 import { signPreview } from "../../src/server/preview-access";
 import type { Env } from "../../src/server/env";
-export { PreviewAssetBroker } from "../../src/server/worker";
+export { PreviewAssetBroker, RepositoryController } from "../../src/server/worker";
 
 // Synthetic assets in real emulator R2; no production content or credentials.
 export default {

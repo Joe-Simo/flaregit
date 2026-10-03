@@ -18,7 +18,8 @@ import { handleGitGateway } from "./git-gateway-handler.js";
 import { admitGitOperation } from "./core-git-budget.js";
 import { gitAuthEnv, q } from "./shell.js";
 import { ensureBuild } from "./build.js";
-import { buildPrefix, signPreview, repositoryPreviewOrigin } from "./preview-access.js";
+import { buildPrefix, signPreview, validPreviewRegistration } from "./preview-access.js";
+import { resolveRepositoryPreviewOrigin } from "./preview-registry.js";
 import { handlePreviewAsset } from "./preview-broker.js";
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { billingFromEvent, createCheckout, planLimits, reportUsage, verifyPolarWebhook } from "./polar.js";
@@ -497,6 +498,21 @@ export default {
       const operators = (env.OPERATOR_ACCOUNTS ?? "").split(",").map((x) => x.trim()).filter(Boolean);
       if (path.startsWith("/operator/")) {
         if (auth.viaToken || !operators.includes(accountKey)) return text("Not found", 404);
+        const previewRegistration = /^\/operator\/preview-origins\/([a-z0-9]{12,16})$/.exec(path);
+        if (previewRegistration) {
+          const repository = previewRegistration[1]!;
+          const registry = globalOf(env);
+          if (method === "GET") return json({ registration: await registry.previewOrigin(repository, url.origin) });
+          if (method === "PUT") {
+            const value = await body<{ origin?: unknown; remoteConfigurationVerified?: unknown }>();
+            if (typeof value.origin !== "string" || value.remoteConfigurationVerified !== true || validPreviewRegistration(env, repository, value.origin, url.origin) !== value.origin) return text("Confirm the remote child's exact repository, only its broker binding, and no secrets before registering its exact native origin", 400);
+            if (!(await projectOf(env, repository).getState().catch(() => null))) return text("Repository not found", 404);
+            try { return json({ registration: await registry.registerPreviewOrigin(repository, value.origin, accountKey, url.origin) }); }
+            catch (cause) { return text(cause instanceof Error ? cause.message : "Preview origin registration conflicts", 409); }
+          }
+          if (method === "DELETE") return json({ registration: await registry.retirePreviewOrigin(repository, accountKey, url.origin) });
+          return text("Method not allowed", 405);
+        }
         if (path === "/operator/reports" && method === "GET") return json(await globalOf(env).listReports({ status: url.searchParams.get("status") === "resolved" ? "resolved" : "open" }));
         const resolveRoute = /^\/operator\/reports\/(rpt_[a-z0-9-]+)\/resolve$/.exec(path);
         if (resolveRoute && method === "POST") {
@@ -1145,7 +1161,7 @@ export default {
         if (sub === "/preview" && method === "GET") {
           const commit = url.searchParams.get("commit") ?? state.acceptedState.currentCommit;
           if (!/^[0-9a-f]{40}$/.test(commit)) return text("Invalid commit", 400);
-          const previewOrigin = repositoryPreviewOrigin(env, projectId, url.origin);
+          const previewOrigin = await resolveRepositoryPreviewOrigin(env, projectId, url.origin);
           if (!previewOrigin || !env.PREVIEW_SIGNING_KEY) return json({ ready: false, status: "unavailable", canRetry: false, reason: "An isolated preview origin has not been configured for this repository. The platform operator must provision its preview Worker before a link can be opened." });
           const ready = Boolean(await env.EVIDENCE_BUCKET.head(`${buildPrefix(projectId, commit)}/index.html`));
           if (!ready && commit === state.acceptedState.currentCommit && settings.fixture === "ticket-booking") ctx.waitUntil(ensureBuild(env, projectId, commit, state.canonicalRepoName, accountKey).catch((e) => console.error("preview build failed", String(e))));

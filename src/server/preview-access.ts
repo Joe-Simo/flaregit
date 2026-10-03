@@ -30,7 +30,7 @@ function previewSite(hostname: string): string {
   return hostname.endsWith(".workers.dev") ? hostname.split(".").slice(-3).join(".") : hostname;
 }
 
-function previewOrigins(env: Env, appOrigin?: string): Map<string, string> | null {
+export function previewOrigins(env: Env, appOrigin?: string): Map<string, string> | null {
   if (!env.REPOSITORY_PREVIEW_ORIGINS) return null;
   try {
     const value: unknown = JSON.parse(env.REPOSITORY_PREVIEW_ORIGINS);
@@ -67,4 +67,10 @@ export function repositoryForPreviewOrigin(env: Env, origin: string, appOrigin?:
   if (!entries) return null;
   for (const [repository, configured] of entries) if (configured === origin) return repository;
   return null;
+}
+
+/** Validate a single operator-owned registration against authenticated sites. */
+export function validPreviewRegistration(env: Env, repository: string, origin: string, appOrigin?: string): string | null {
+  if (!/^[a-z0-9]{12,16}$/.test(repository)) return null;
+  return repositoryPreviewOrigin({ ...env, REPOSITORY_PREVIEW_ORIGINS: JSON.stringify({ [repository]: origin }) }, repository, appOrigin);
 }

@@ -16,7 +16,7 @@ test("real child binding invokes the main named broker and isolates real R2 repo
   const [mainScript, childScript] = await Promise.all([bundle("tests/support/preview-service-worker.ts"), bundle("tests/support/preview-service-child.ts")]);
   const repoA = "abcdef123456", repoB = "123456abcdef";
   const mf = new Miniflare(convertV4MiniflareOptions({ workers: [
-    { name: "preview-main", modules: true, script: mainScript, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], unsafeDirectSockets: [{ host: "127.0.0.1" }], r2Buckets: ["EVIDENCE_BUCKET"], bindings: { PREVIEW_SIGNING_KEY: "binding-test-only-secret", CLERK_AUTHORIZED_PARTIES: "https://flaregit.com", REPOSITORY_PREVIEW_ORIGINS: JSON.stringify({ [repoA]: "https://repo-a.preview-fixture.workers.dev", [repoB]: "https://repo-b.preview-fixture.workers.dev" }) } },
+    { name: "preview-main", modules: true, script: mainScript, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], unsafeDirectSockets: [{ host: "127.0.0.1" }], r2Buckets: ["EVIDENCE_BUCKET"], durableObjects: { REPOSITORY_CONTROLLER: { className: "RepositoryController", useSQLite: true } }, bindings: { PREVIEW_SIGNING_KEY: "binding-test-only-secret", CLERK_AUTHORIZED_PARTIES: "https://flaregit.com", REPOSITORY_PREVIEW_ORIGINS: JSON.stringify({ [repoA]: "https://repo-a.preview-fixture.workers.dev", [repoB]: "https://repo-b.preview-fixture.workers.dev" }) } },
     { name: "preview-child", modules: true, script: childScript, compatibilityDate: "2026-10-02", unsafeDirectSockets: [{ host: "127.0.0.1" }], bindings: { REPOSITORY_ID: repoA }, serviceBindings: { ASSET_BROKER: { name: "preview-main", entrypoint: "PreviewAssetBroker" } } },
   ] }));
   try {

@@ -1,3 +1,4 @@
+import { previewOrigins, validPreviewRegistration } from "./preview-access.js";
 import { PublicDirectory, type DirectoryState, type DirectoryRegistration } from "./public-directory.js";
 import { RepositoryDiscussions } from "./repository-discussions.js";
 import { ArtifactAllocationFence, type PendingArtifactAllocation } from "./allocation-fence.js";
@@ -175,6 +176,10 @@ export interface ActivityRow {
 export interface ImportHistoryOperation { projectId: string; head: string; canonicalRepoName: string; ownerId: string; instanceId: string; createdAt: string }
 
 export interface Ledger {
+  previewOrigin(repository: string, appOrigin?: string): Promise<PreviewOriginRegistration | null>;
+  registerPreviewOrigin(repository: string, origin: string, operator: string, appOrigin: string): Promise<PreviewOriginRegistration>;
+  retirePreviewOrigin(repository: string, operator: string, appOrigin: string): Promise<PreviewOriginRegistration | null>;
+
   nativeComputeFailure(key: string): Promise<boolean>;
   setNativeComputeFailure(key: string, failed: boolean): Promise<void>;
   nativeComputeStatus(key: string): Promise<{ active: boolean; sandboxName: string; token: string; deadline: number } | null>;
@@ -366,7 +371,60 @@ const LEASE_MS = 20 * 60_000;
  * landing lease, publication ledger, decisions — is validated and committed here, so duplicate or
  * late events and concurrent landings cannot corrupt accepted state.
  */
+export type PreviewOriginRegistration = { repository_id: string; origin: string; status: "active" | "retired"; registered_by: string; registered_at: string; retired_by: string | null; retired_at: string | null };
+
 export class RepositoryController extends DurableObject<Env> {
+  private previewOriginTable(appOrigin?: string): void {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS preview_origins(repository_id TEXT NOT NULL,origin TEXT PRIMARY KEY,status TEXT NOT NULL CHECK(status IN ('active','retired')),registered_by TEXT NOT NULL,registered_at TEXT NOT NULL,retired_by TEXT,retired_at TEXT); CREATE UNIQUE INDEX IF NOT EXISTS preview_origins_active_repository ON preview_origins(repository_id) WHERE status='active'");
+    // Reserve every legacy assignment before allowing registrations. Static config
+    // can never revive a tombstone or overwrite a durable reservation.
+    if (!this.env.REPOSITORY_PREVIEW_ORIGINS) return;
+    const legacy = previewOrigins(this.env, appOrigin);
+    if (!legacy) throw new Error("Legacy preview origin configuration is invalid");
+    this.ctx.storage.transactionSync(() => {
+      for (const [repository, origin] of legacy) {
+        if (!validPreviewRegistration(this.env, repository, origin, appOrigin)) throw new Error("Legacy preview origin configuration is invalid");
+        const rows = this.ctx.storage.sql.exec<PreviewOriginRegistration>("SELECT * FROM preview_origins WHERE origin=?", origin).toArray();
+        if (rows.some((row) => row.repository_id !== repository)) throw new Error("Preview origin reservation conflicts with legacy configuration");
+        if (!rows.length) {
+          const reserved = this.ctx.storage.sql.exec("SELECT origin FROM preview_origins WHERE repository_id=?", repository).toArray().length > 0;
+          const now = new Date().toISOString();
+          this.ctx.storage.sql.exec("INSERT INTO preview_origins(repository_id,origin,status,registered_by,registered_at,retired_by,retired_at) VALUES(?,?,?,'static-migration',?,?,?)", repository, origin, reserved ? "retired" : "active", now, reserved ? "static-migration" : null, reserved ? now : null);
+        }
+      }
+    });
+  }
+
+  async previewOrigin(repository: string, appOrigin?: string): Promise<PreviewOriginRegistration | null> {
+    this.previewOriginTable(appOrigin);
+    const row = this.ctx.storage.sql.exec<PreviewOriginRegistration>("SELECT * FROM preview_origins WHERE repository_id=? ORDER BY (status='active') DESC,registered_at DESC LIMIT 1", repository).toArray()[0];
+    if (!row) return null;
+    if (!validPreviewRegistration(this.env, repository, row.origin, appOrigin)) return { ...row, status: "retired" };
+    return row;
+  }
+
+  async registerPreviewOrigin(repository: string, origin: string, operator: string, appOrigin: string): Promise<PreviewOriginRegistration> {
+    const normalized = validPreviewRegistration(this.env, repository, origin, appOrigin);
+    if (!normalized || normalized !== origin) throw new Error("Use the exact HTTPS native Worker origin for this repository");
+    this.previewOriginTable(appOrigin);
+    return this.ctx.storage.transactionSync(() => {
+      const rows = this.ctx.storage.sql.exec<PreviewOriginRegistration>("SELECT * FROM preview_origins WHERE (repository_id=? AND status='active') OR origin=?", repository, origin).toArray();
+      if (rows.length) {
+        const row = rows[0]!;
+        if (rows.length !== 1 || row.repository_id !== repository || row.origin !== origin || row.status !== "active") throw new Error("Retire the active assignment before replacing it; retired origins cannot be reused");
+        return row;
+      }
+      this.ctx.storage.sql.exec("INSERT INTO preview_origins(repository_id,origin,status,registered_by,registered_at) VALUES(?,?,'active',?,?)", repository, origin, operator, new Date().toISOString());
+      return this.ctx.storage.sql.exec<PreviewOriginRegistration>("SELECT * FROM preview_origins WHERE origin=?", origin).one();
+    });
+  }
+
+  async retirePreviewOrigin(repository: string, operator: string, appOrigin: string): Promise<PreviewOriginRegistration | null> {
+    this.previewOriginTable(appOrigin);
+    this.ctx.storage.sql.exec("UPDATE preview_origins SET status='retired',retired_by=?,retired_at=? WHERE repository_id=? AND status='active'", operator, new Date().toISOString(), repository);
+    return this.previewOrigin(repository, appOrigin);
+  }
+
   private state: FlareGitProjectState | null = null;
 
   async acceptedDeploymentTarget(journalId:string):Promise<{canonicalRepoName:string;target:AcceptedDeploymentTarget}|null>{

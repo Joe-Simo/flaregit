@@ -1,5 +1,6 @@
+import { resolveRepositoryPreviewOrigin } from "./preview-registry.js";
 import type { Env } from "./env.js";
-import { buildPrefix, repositoryPreviewOrigin, verifyPreview } from "./preview-access.js";
+import { buildPrefix, verifyPreview } from "./preview-access.js";
 
 const securityHeaders = {
   "Cache-Control": "private, no-store",
@@ -12,7 +13,7 @@ const failure = (status: number) => new Response(status === 403 ? "Preview unava
 /** Bound service entrypoint: identity and audience must match the operator's origin map. */
 export async function handlePreviewAsset(request: Request, env: Env, repositoryId: string): Promise<Response> {
   const url = new URL(request.url);
-  const audience = repositoryPreviewOrigin(env, repositoryId);
+  const audience = await resolveRepositoryPreviewOrigin(env, repositoryId);
   if (!audience || url.origin !== audience) return failure(404);
   if (request.method !== "GET" && request.method !== "HEAD") {
     return new Response("Method not allowed", { status: 405, headers: { ...securityHeaders, Allow: "GET, HEAD" } });
