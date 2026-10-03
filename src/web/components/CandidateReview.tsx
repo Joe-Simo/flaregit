@@ -33,7 +33,7 @@ export function CandidatePurpose({ projectId, candidate, tasks }: { projectId: s
  * The explicit human gate: a verified candidate shows what would land, which checks passed, and asks for
  * Accept or Reject. Nothing becomes repository history without this decision on this exact commit.
  */
-export function CandidateReview({ projectId, candidate, evidence, tasks, onDone, showOpen = true, externalChecks, providerNames, onRetryExternalCheck, isOwner = false, reviewReady = true }: { projectId: string; candidate: CandidateGeneration; evidence?: VerificationEvidence; tasks?: Record<string, Task>; onDone: () => void; showOpen?: boolean; externalChecks?: ExternalCheckState; providerNames?: Record<string, string>; onRetryExternalCheck?: (checkId: string) => Promise<void>; isOwner?: boolean; reviewReady?: boolean }) {
+export function CandidateReview({ projectId, candidate, evidence, tasks, onDone, showOpen = true, externalChecks, providerNames, onRetryExternalCheck, isOwner = false, reviewReady = true, savedDecisionRecoveryInPanel = false, onRecoverSavedRun }: { projectId: string; candidate: CandidateGeneration; evidence?: VerificationEvidence; tasks?: Record<string, Task>; onDone: () => void; showOpen?: boolean; externalChecks?: ExternalCheckState; providerNames?: Record<string, string>; onRetryExternalCheck?: (checkId: string) => Promise<void>; isOwner?: boolean; reviewReady?: boolean; savedDecisionRecoveryInPanel?: boolean; onRecoverSavedRun?: () => void }) {
   const [rerunReserved, setRerunReserved] = useState(false);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
@@ -104,13 +104,15 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
     {(!checksKnown || checkError) && <div className="text-xs text-muted-foreground flex flex-wrap gap-2 items-center"><span role={checkError ? "alert" : "status"}>{checkError ? declaredRequiredChecks ? `Required check state unavailable: ${checkError}. Acceptance is paused; review remains available.` : `Required connected checks: none. Optional reports are unavailable: ${checkError}.` : declaredRequiredChecks ? "Reading required connected check evidence…" : "Required connected checks: none. Reading optional reports…"}</span>{checkError && <Button size="sm" variant="outline" disabled={checking || retryingCheck} onClick={() => void refreshChecks()}>{checking ? "Checking…" : "Retry check status"}</Button>}</div>}
   </>;
 
-  const decide = async (approved: boolean) => {
+  const decide = async (approved: boolean, resendSaved = false) => {
     if (!isOwner || rerunReserved || busy !== null || !candidate.candidateCommit || (approved && acceptanceBlocked)) return;
+    if (resendSaved && (!candidate.review || candidate.review.commit !== candidate.candidateCommit || candidate.review.approved !== approved)) return;
     const generation = decisionGeneration.current;
     setBusy(approved ? "approve" : "reject");
     setError(null);
     try {
-      await apiJson(`/p/${projectId}/candidates/${candidate.id}/review`, { method: "POST", json: { approved, note, expectedCommit: candidate.candidateCommit } });
+      const receipt = await apiJson<{ recorded: boolean; approved: boolean }>(`/p/${projectId}/candidates/${candidate.id}/review`, { method: "POST", json: { approved, note: resendSaved ? candidate.review?.note : note, expectedCommit: resendSaved ? candidate.review?.commit : candidate.candidateCommit } });
+      if (receipt.recorded !== true || receipt.approved !== approved) throw new Error("Review delivery was not confirmed. Reload the recorded decision before retrying.");
       if (generation === decisionGeneration.current) onDone();
     } catch (e) {
       if (generation === decisionGeneration.current) setError(e instanceof Error ? e.message : "Could not record the review");
@@ -121,14 +123,14 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
 
   if (candidate.review?.approved && candidate.status === "verified") {
     return (
-      <section aria-label="Publishing" className="rounded-lg border border-border p-4 space-y-2 text-sm">
-        <p><span className="font-semibold">Approved by {candidate.review.by}</span> {candidate.review.note ? `(${candidate.review.note})` : ""}: publishing <code>{candidate.candidateCommit?.slice(0, 7)}</code>.</p>
-        <p className="text-muted-foreground">If this does not move to Accepted within a minute, the run may not have received the decision. Resending is safe.</p>
+      <section aria-label="Saved approval awaiting integration" className="rounded-lg border border-border p-4 space-y-2 text-sm">
+        <p><span className="font-semibold">Approved by {candidate.review.by}</span> {candidate.review.note ? `(${candidate.review.note})` : ""}: approval saved for <code>{candidate.candidateCommit?.slice(0, 7)}</code>.</p>
+        <p className="text-muted-foreground">The decision is saved for this exact commit. A paused or unavailable run may still need recovery. Repository history changes only after confirmed acceptance.</p>
         {connectedRows}
         <LegacyCandidateRerun projectId={projectId} candidate={candidate} isOwner={isOwner} onDone={onDone} onReserved={setRerunReserved} />
         {identityMismatch && <p role="alert" className="text-destructive">Connected check evidence belongs to a different candidate or tree. Reload before accepting.</p>}
         {error && <p role="alert" className="text-destructive">{error}</p>}
-        <Button size="sm" variant="outline" disabled={!isOwner || busy !== null || acceptanceBlocked} onClick={() => decide(true)}>{busy ? "Resending…" : "Resend approval"}</Button>
+        {savedDecisionRecoveryInPanel ? <a href="#int-saved-runs" className="text-xs underline underline-offset-4" onClick={event => { event.preventDefault(); if (onRecoverSavedRun) { onRecoverSavedRun(); return; } const panel = document.getElementById("int-saved-runs"); panel?.scrollIntoView({ block: "start" }); panel?.focus({ preventScroll: true }); }}>Recover this saved run</a> : <Button size="sm" variant="outline" disabled={!isOwner || busy !== null || acceptanceBlocked} onClick={() => decide(true, true)}>{busy ? "Resending…" : "Resend saved approval"}</Button>}
       </section>
     );
   }

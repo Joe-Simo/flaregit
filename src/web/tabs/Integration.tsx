@@ -1,7 +1,10 @@
-import React, { useMemo, useState } from "react";
+import { summarizeIntegration } from "../integration-summary";
+import { savedWorkflowDecision, recordedWorkflowCandidates } from "../workflow-run-state";
+import { WorkflowRunControls } from "../components/WorkflowRunControls";
+import React, { useEffect, useMemo, useState } from "react";
 import { FileText, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { StatusBanner, type PipelineStage } from "../components/StatusBanner";
+import { StatusBanner } from "../components/StatusBanner";
 import { CandidateJournal } from "../components/CandidateJournal";
 import { LivePreview } from "../components/LivePreview";
 import { DecisionModal } from "../components/DecisionModal";
@@ -13,25 +16,8 @@ import { Badge } from "@/components/ui/badge";
 import { timeAgo } from "../router";
 import type { CandidateGeneration, FlareGitProjectState, ProductDecision } from "@/core/types";
 
-const IN_PROGRESS: Record<string, string> = { composing: "Combining", repairing: "AI repairing conflicts", verifying: "Running checks", verified: "Publishing" };
+const IN_PROGRESS: Record<string, string> = { composing: "Combining", repairing: "AI repairing conflicts", verifying: "Running checks", verified: "Approval saved; awaiting integration" };
 
-function summarize(state: FlareGitProjectState): { stage: PipelineStage; message: string; detail: string } {
-  const tasks = Object.values(state.tasks);
-  const candidates = Object.values(state.candidates);
-  if (Object.values(state.decisions).some((d) => d.status === "pending")) {
-    return { stage: "decision_needed", message: "Decision needed", detail: "Two requirements contradict each other. The last accepted version stays live until you choose." };
-  }
-  if (candidates.some((c) => c.status === "awaiting_review")) return { stage: "verifying", message: "Candidate waiting for your review", detail: "Read the candidate diff and native and connected check evidence before acceptance." };
-  if (candidates.some((c) => c.status === "repairing")) return { stage: "repairing", message: "Repairing", detail: "Workers AI proposes a fix; it is only accepted if your protected checks pass." };
-  if (candidates.some((c) => c.status === "verifying") || tasks.some((t) => t.status === "verifying")) {
-    return { stage: "verifying", message: "Verifying the exact candidate", detail: "Your protected checks run against the candidate commit in an isolated workspace." };
-  }
-  if (tasks.some((t) => t.status === "integrating")) return { stage: "analyzing", message: "Combining changes", detail: "Composing the candidate on top of the accepted version." };
-  const blocked = tasks.find((t) => t.status === "blocked");
-  if (blocked) return { stage: "blocked", message: "Blocked", detail: `${blocked.blockedReason ?? "Integration failed"} — the accepted version is unchanged.` };
-  if (tasks.some((t) => t.status === "working" || t.status === "checkpointed")) return { stage: "working", message: "Contributors are working", detail: "Changes are being prepared in isolated workspaces." };
-  return { stage: "accepted", message: "Accepted repository state is preserved", detail: "Prepare independent contributions, verify a candidate, then choose which commits enter repository history." };
-}
 
 export function IntegrationTab({
   projectId,
@@ -53,11 +39,17 @@ export function IntegrationTab({
   const [scenario, setScenario] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const summary = useMemo(() => summarize(state), [state]);
+  const summary = useMemo(() => summarizeIntegration(state), [state]);
   const describe = (c: CandidateGeneration) => c.participatingTaskIds.map((id) => state.tasks[id]?.goal ?? id).join(" + ");
   const all = Object.values(state.candidates);
   const reviewing = all.filter((c) => c.status === "awaiting_review" || (c.review?.approved && c.status === "verified" && !state.journal.some((j) => j.candidateId === c.id)));
   const running = all.filter((c) => (c.status === "composing" || c.status === "repairing" || c.status === "verifying" || c.status === "verified") && !reviewing.includes(c));
+  const savedRuns = useMemo(() => recordedWorkflowCandidates(Object.values(state.candidates)), [state.candidates]);
+  const [runPage, setRunPage] = useState(0);
+  useEffect(() => setRunPage(0), [projectId]);
+  const currentRunPage = Math.min(runPage, Math.max(0, Math.ceil(savedRuns.length / 10) - 1));
+  const visibleRuns = savedRuns.slice(currentRunPage * 10, currentRunPage * 10 + 10);
+  const savedRunPages = new Map(savedRuns.map((candidate, index) => [candidate.id, Math.floor(index / 10)]));
   const landed = all.filter((c) => c.status === "accepted").slice(-10).reverse();
   const failed = all.filter((c) => c.status === "failed" || c.status === "stale").slice(-10).reverse();
   const pendingDecisions = Object.values(state.decisions).filter(decision => decision.status === "pending");
@@ -110,10 +102,11 @@ export function IntegrationTab({
       </div>
       {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>}
       <RebaseRecovery projectId={projectId} isOwner={isOwner} tasks={state.tasks} onRecovered={reload} />
+      {isOwner && savedRuns.length > 0 && <section id="int-saved-runs" tabIndex={-1} aria-labelledby="int-saved-runs-title" className="space-y-3"><h2 id="int-saved-runs-title" className="text-sm font-semibold">Saved integration runs</h2><p className="text-xs text-muted-foreground">Check a saved run, pause it, or continue it after interruption. Review stays available.</p><ul className="space-y-3">{visibleRuns.map(candidate => <li key={`${projectId}:${candidate.workflowInstanceId}`} className="rounded-lg border border-border p-3 min-w-0"><a href={`/#/p/${projectId}/review?candidate=${encodeURIComponent(candidate.id)}`} className="text-sm font-medium break-words hover:underline">{describe(candidate)}</a><p className="mt-1 text-xs text-muted-foreground">Candidate {candidate.status.replaceAll("_", " ")} · {candidate.participatingTaskIds.length} {candidate.participatingTaskIds.length === 1 ? "recorded input" : "recorded inputs"} · base <code>{candidate.expectedAcceptedBase.slice(0, 12)}</code></p><WorkflowRunControls projectId={projectId} instanceId={candidate.workflowInstanceId!} savedDecision={savedWorkflowDecision(candidate, state.journal.some(entry => entry.candidateId === candidate.id))} isOwner={isOwner} onChange={reload} /></li>)}</ul><div className="flex flex-wrap gap-3 items-center"><p className="text-[11px] text-muted-foreground">Showing {currentRunPage * 10 + 1}–{currentRunPage * 10 + visibleRuns.length} of {savedRuns.length} saved runs</p>{savedRuns.length > 10 && <><Button size="sm" variant="outline" disabled={currentRunPage === 0} onClick={() => setRunPage(currentRunPage - 1)}>Newer runs</Button><Button size="sm" variant="outline" disabled={(currentRunPage + 1) * 10 >= savedRuns.length} onClick={() => setRunPage(currentRunPage + 1)}>Older runs</Button></>}</div></section>}
       <section aria-labelledby="int-review" className="space-y-2">
-        <h2 id="int-review" className="text-sm font-semibold">Waiting for your review ({reviewing.length})</h2>
-        {reviewing.length === 0 ? <p className="text-sm text-muted-foreground">No candidate is ready for acceptance.</p> :
-          reviewing.map((c) => <CandidateReview key={c.id} projectId={projectId} isOwner={isOwner} candidate={c} tasks={state.tasks} evidence={c.evidenceId ? state.evidence[c.evidenceId] : undefined} onDone={reload} />)}
+        <h2 id="int-review" className="text-sm font-semibold">Review & saved decisions ({reviewing.length})</h2>
+        {reviewing.length === 0 ? <p className="text-sm text-muted-foreground">No review or saved approval is awaiting integration.</p> :
+          reviewing.map((c) => <CandidateReview key={c.id} projectId={projectId} isOwner={isOwner} savedDecisionRecoveryInPanel={isOwner && savedRunPages.has(c.id) && Boolean(savedWorkflowDecision(c, state.journal.some(entry => entry.candidateId === c.id)))} onRecoverSavedRun={() => { setRunPage(savedRunPages.get(c.id) ?? 0); requestAnimationFrame(() => { const panel = document.getElementById("int-saved-runs"); panel?.scrollIntoView({ block: "start" }); panel?.focus({ preventScroll: true }); }); }} candidate={c} tasks={state.tasks} evidence={c.evidenceId ? state.evidence[c.evidenceId] : undefined} onDone={reload} />)}
       </section>
       <div className="grid gap-4 md:grid-cols-3">
         <section aria-labelledby="int-running" className="rounded-lg border border-border p-3 space-y-2 min-w-0">
