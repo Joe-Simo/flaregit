@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { structuredPatch } from "diff";
+import { downloadRecoveryBundle } from "../src/cli/recovery-download.js";
 import { readServiceCandidate, sendServiceReport } from "../src/cli/report.js";
 
 const CONFIG_DIR = path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"), "flaregit");
@@ -119,12 +120,25 @@ const HELP = `flaregit — JSON by default (--pretty for humans)
   accept|reject <repo> <candidate> [--note T]    decide what becomes history
   diff <repo> (--change ID | --commit SHA)
   review <repo> (--change ID | --commit SHA)   interactive terminal reviewer (j/k n/p c a q)
+  recovery download <repository-id> <snapshot-id> --output FILE   stream and verify a prepared private Git bundle
   clone <repo> [dir] | activity <repo> | status
 `;
 
 async function main() {
   const [cmd, sub, ...rest] = pos;
   if (!cmd || flags.has("help")) return console.log(HELP);
+
+  if (cmd === "recovery" && sub === "download") {
+    const repositoryId = rest[0] ?? fail("Specify the exact repository ID");
+    const snapshotId = rest[1] ?? fail("Specify the exact recovery snapshot ID");
+    const output = flag("output") ?? fail("--output requires a new bundle filename");
+    if (!TOKEN) fail("Sign in with a personal API token, or set FLAREGIT_TOKEN in your local environment");
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    process.once("SIGINT", abort); process.once("SIGTERM", abort);
+    try { return out(await downloadRecoveryBundle({ origin: API, repositoryId, snapshotId, token: TOKEN, output, signal: controller.signal })); }
+    finally { process.removeListener("SIGINT", abort); process.removeListener("SIGTERM", abort); }
+  }
 
   if (cmd === "service-candidate") {
     const secret = process.env.FLAREGIT_CONNECTION_SECRET;

@@ -1,3 +1,5 @@
+import { recoveryScopeId } from "../../src/server/private-recovery.js";
+import { accountKeyFor } from "../../src/server/projects.js";
 import { RepositoryController } from "../../src/server/durable-object.js";
 import { RepositoryConnections } from "../../src/server/connections";
 import type { PublicCommunityActor,PublicCommunityPolicy } from "../../src/server/public-community";
@@ -15,6 +17,7 @@ export class PublicationFixture extends RepositoryController {
   }
   failMembership(enabled:boolean) { if(enabled)this.ctx.storage.sql.exec("CREATE TRIGGER fail_member BEFORE INSERT ON members BEGIN SELECT RAISE(ABORT,'synthetic membership failure'); END"); else this.ctx.storage.sql.exec("DROP TRIGGER fail_member"); }
   failRegistry(enabled:boolean) {if(enabled)this.ctx.storage.sql.exec("CREATE TRIGGER fail_registry BEFORE INSERT ON projects BEGIN SELECT RAISE(ABORT,'synthetic registry failure'); END");else this.ctx.storage.sql.exec("DROP TRIGGER fail_registry");}
+  fixtureRecoverySlotCount() { return this.ctx.storage.sql.exec<{n: number}>("SELECT COUNT(*) AS n FROM private_recovery_slots").one().n; }
   async fixtureAlarm(){await this.alarm();}
   async visibilitySnapshot() { return { visibility: await this.repositoryVisibility(), grant: await this.publicGrant(), rows: this.ctx.storage.sql.exec("SELECT version FROM repository_visibility WHERE id=1").toArray() }; }
   fixtureDeploymentService(){return new RepositoryConnections(this.ctx.storage,"test").create("Deployment provider",["report-deployment"]);}
@@ -75,6 +78,20 @@ export default {
       if(url.pathname==="/member-role")return Response.json(await stub.roleOf(url.searchParams.get("user")!));
       if(url.pathname==="/fail-membership")await stub.failMembership(url.searchParams.get("enabled")==="true");
       if(url.pathname==="/deployment-service")return Response.json(await stub.fixtureDeploymentService());
+      if(url.pathname==="/recovery-targets")return Response.json(await stub.privateRecoveryTargets());
+      if(url.pathname==="/recovery-prepare"){const input=await request.json() as {id:string;commit:string;tree:string|null;ownerId:string;accountKey?:string};return Response.json(await stub.privateRecoveryPrepare(input.id,input.commit,input.tree,input.ownerId,input.accountKey??await accountKeyFor(input.ownerId)));}
+      if(url.pathname==="/recovery-storage"){const input=await request.json() as {id:string;accountKey:string;action:"reserve"|"release"};if(input.action==="reserve")await stub.reservePrivateRecoveryStorage(input.id,input.accountKey);else await stub.releasePrivateRecoveryStorage(input.id,input.accountKey);return Response.json(await stub.fixtureRecoverySlotCount());}
+      if(url.pathname==="/recovery-slot-count")return Response.json(await stub.fixtureRecoverySlotCount());
+      if(url.pathname==="/recovery-fail"){const input=await request.json() as {id:string};const operation=await stub.privateRecoveryOperation(input.id);if(!operation)throw new Error("Missing fixture operation");await stub.privateRecoveryFail(input.id,"fixture failure",recoveryScopeId(operation));return Response.json(await stub.privateRecoveryOperation(input.id));}
+      if(url.pathname==="/recovery-cache-finish"){const input=await request.json() as {id:string};await stub.privateRecoveryFinishDeletion(input.id);return Response.json(await stub.privateRecoveryOperation(input.id));}
+      if(url.pathname==="/recovery-list")return Response.json(await stub.privateRecoveryList());
+      if(url.pathname==="/recovery-operation")return Response.json(await stub.privateRecoveryOperation(url.searchParams.get("id")!));
+      if(url.pathname==="/recovery-cleanup-list")return Response.json(await stub.privateRecoveryCleanupList());
+      if(url.pathname==="/recovery-upload"){const input=await request.json() as {id:string;action:"begin"|"save"|"close";uploadId?:string};const operation=await stub.privateRecoveryOperation(input.id);if(!operation)throw new Error("Missing fixture operation");const scope=recoveryScopeId(operation);if(input.action==="begin")await stub.privateRecoveryBeginUpload(input.id,scope);else if(input.action==="save")await stub.privateRecoverySaveUpload(input.id,input.uploadId!,scope);else await stub.privateRecoveryCloseUpload(input.id,input.uploadId!,scope);return Response.json(await stub.privateRecoveryOperation(input.id));}
+      if(url.pathname==="/recovery-cache-delete"){const input=await request.json() as {id:string;ownerId:string};await stub.privateRecoveryBeginDeletion(input.id,input.ownerId);return Response.json(await stub.privateRecoveryOperation(input.id));}
+      if(url.pathname==="/recovery-complete"){const input=await request.json() as {id:string};const op=await stub.privateRecoveryOperation(input.id);if(!op?.tree)throw new Error("Missing recovery tree");await stub.privateRecoveryComplete(input.id,{projectId:op.projectId,incarnation:op.incarnation,commit:op.commit,tree:op.tree,journalId:op.journalId,size:1,sha256:"a".repeat(64),objectCount:1,objectScope:"exact-accepted-reachable-closure",createdAt:new Date().toISOString()});return Response.json(await stub.privateRecoveryOperation(input.id));}
+      if(url.pathname==="/recovery-record-tree"){const input=await request.json() as {id:string;tree:string};const operation=await stub.privateRecoveryOperation(input.id);if(!operation)throw new Error("Missing fixture operation");return Response.json(await stub.privateRecoveryRecordTree(input.id,input.tree,recoveryScopeId(operation)));}
+      if(url.pathname==="/recovery-authorize")return Response.json(await stub.privateRecoveryAuthorize(url.searchParams.get("id")!,url.searchParams.get("owner")!));
       if(url.pathname==="/deployment-target")return Response.json(await stub.acceptedDeploymentTarget(url.searchParams.get("journal")??"accepted-journal"));
       if(url.pathname==="/deployment-request"){const input=await request.json() as {target:AcceptedDeploymentTarget;serviceId:string;environment:string;key:string;actorId:string};return Response.json(await stub.requestDeployment(input.target,input.serviceId,input.environment,input.key,input.actorId));}
       if(url.pathname==="/deployment-list")return Response.json(await stub.listDeployments());

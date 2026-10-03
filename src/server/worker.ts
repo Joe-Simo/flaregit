@@ -2,6 +2,10 @@ import { z } from "zod";
 import type { PublicationModerationState } from "./publication-moderation.js";
 import { publicationModerationInput } from "./publication-moderation.js";
 import type { ReportPublicationTarget } from "./durable-object.js";
+import { cleanupPrivateRecovery, cleanupPrivateRecoveryOperation } from "./private-recovery-cleanup.js";
+import {FlareGitPrivateRecoveryWorkflow} from "./private-recovery-workflow.js";
+import {recoveryBundleKey,recoveryScopeId} from "./private-recovery.js";
+import {downloadPrivateRecovery} from "./private-recovery-download.js";
 import {admitCredentialLookup} from "./lookup-admission.js";
 import { directoryQuerySchema, directoryUpdateSchema, projectPublicDirectory } from "./public-directory.js";
 import { recoverNativeCompute, claimNativeCompute, admitNativeCompute, NativeComputeAdmissionError } from "./native-compute.js";
@@ -62,7 +66,7 @@ export class PreviewAssetBroker extends WorkerEntrypoint<Env> {
   }
 }
 
-export { RepositoryController, FlareGitIntegrationWorkflow, FlareGitScenarioWorkflow, FlareGitAgentWorkflow, FlareGitImportHistoryWorkflow };
+export { FlareGitPrivateRecoveryWorkflow, RepositoryController, FlareGitIntegrationWorkflow, FlareGitScenarioWorkflow, FlareGitAgentWorkflow, FlareGitImportHistoryWorkflow };
 export { IntegratorSandbox, AgentSandbox } from "./integrator.js";
 
 const TASK_ID = /^[a-z0-9][a-z0-9-]{2,40}$/;
@@ -448,7 +452,7 @@ export default {
           const ledger = projectOf(env, reference.id);
           if (await ledger.roleOf(userId) !== "owner") continue;
           await ledger.beginRepositoryDeletion();
-          if (!await stopRepositoryWorkflows(env, ledger)) return json({ deleted: false, status: "deleting", reason: "Repository workflow shutdown is unconfirmed; retry deletion" }, 202);
+          if (!await stopRepositoryWorkflows(env, ledger) || !await cleanupPrivateRecovery(env, ledger)) return json({ deleted: false, status: "deleting", reason: "Repository workflow shutdown is unconfirmed; retry deletion" }, 202);
         }
         if (!await reconcileSealedAllocations(env, account)) return json({ deleted: false, status: "deleting", reason: "An in-flight repository allocation remains unconfirmed; retry deletion" }, 202);
         for (const job of imports) {
@@ -698,6 +702,51 @@ export default {
         const canAdminister = !auth.viaToken || auth.tokenScope === "full";
         const isOwner = role === "owner" && canAdminister;
 
+
+        if(sub==="/recovery"&&method==="GET"){
+          const targets=await project.privateRecoveryTargets();
+          return Response.json({snapshots:(await project.privateRecoveryList()).map(op=>({id:op.id,commit:op.commit,tree:op.tree,status:op.status,createdAt:op.createdAt,error:op.error,size:op.receipt?.size,cacheState:op.cacheState,canRetry:isOwner&&op.ownerId===userId&&!op.cacheState})),target:targets.at(-1)??null,targets},{headers:{"Cache-Control":"no-store"}});
+        }
+        if(sub==="/recovery"&&method==="POST"){
+          if(!isOwner)return text("Only the owner can prepare recovery snapshots",403);
+          if(!env.PRIVATE_RECOVERY_WORKFLOW)return text("Private recovery preparation is not configured",503);
+          const b=await body<{commit:string;expectedTree:string|null;idempotencyKey:string}>();
+          if(Object.keys(b).some(key=>!["commit","expectedTree","idempotencyKey"].includes(key))||! /^[a-f0-9]{40}$/.test(b.commit)||(b.expectedTree!==null&&(typeof b.expectedTree!=="string"||! /^[a-f0-9]{40}$/.test(b.expectedTree)))||! /^[a-f0-9-]{36}$/.test(b.idempotencyKey))return text("Invalid recovery snapshot request",400);
+          try{
+            const op=await project.privateRecoveryPrepare(b.idempotencyKey,b.commit,b.expectedTree,userId,accountKey);
+            if (op.cacheState) return text("This recovery snapshot is being removed or has been removed", 409);
+            await globalOf(env).reservePrivateRecoveryStorage(recoveryScopeId(op),accountKey);
+            if(op.status==="ready")return json(op);
+            const existing=await env.PRIVATE_RECOVERY_WORKFLOW.get(recoveryScopeId(op)).then(async handle=>({handle,status:await handle.status()})).catch(()=>null);
+            if (!existing || existing.status.status === "errored" || existing.status.status === "terminated") {
+              await project.privateRecoveryMarkDispatch(op.id, "uncertain", recoveryScopeId(op));
+              if (!existing) await env.PRIVATE_RECOVERY_WORKFLOW.create({ id: recoveryScopeId(op), params: { projectId, operationId: op.id } });
+              else await existing.handle.restart();
+              await project.privateRecoveryMarkDispatch(op.id, "started", recoveryScopeId(op));
+            }
+            return json(op,202);
+          }catch{return text("Preparation was not confirmed. Retry the same request to reconcile its saved state.",409);}
+        }
+        const recoveryRemoval = /^\/recovery\/([a-f0-9-]{36})$/.exec(sub);
+        if (recoveryRemoval && method === "DELETE") {
+          if (!isOwner) return text("Only the owner can remove cached recovery bundles", 403);
+          const confirmation = await body<{ confirmation: string }>();
+          if (Object.keys(confirmation).some(key => key !== "confirmation") || confirmation.confirmation !== `DELETE CACHED BUNDLE ${recoveryRemoval[1]}`) return text("Exact cached-bundle deletion confirmation required", 400);
+          try {
+            const operation = await project.privateRecoveryBeginDeletion(recoveryRemoval[1]!, userId);
+            const deleted = await cleanupPrivateRecoveryOperation(env, project, operation);
+            return json({ deleted, status: deleted ? "deleted" : "deleting", detail: deleted ? "Cached recovery bundle removed. Repository history is preserved." : "Cached recovery cleanup is unconfirmed. Retry the same removal; storage admission remains reserved." }, deleted ? 200 : 202);
+          } catch { return text("Cached recovery removal was not confirmed", 409); }
+        }
+        const recoveryDownload=/^\/recovery\/([a-f0-9-]{36})\/bundle$/.exec(sub);
+        if(recoveryDownload&&(method==="GET"||method==="HEAD")){
+          const op=await project.privateRecoveryOperation(recoveryDownload[1]!);
+          if(!op?.receipt||op.status!=="ready")return text("Saved recovery bundle is not ready",409);
+          const receipt=op.receipt;
+          return downloadPrivateRecovery(request,{snapshot:receipt,receipt,objectKey:recoveryBundleKey(op),getObject:key=>env.EVIDENCE_BUCKET.get(key),authorize:async()=>{
+            try{const current=await authenticate(request,env);return !(current instanceof Response)&&current.id===userId&&(!current.tokenRepo||current.tokenRepo===projectId)&&await account.accountLifecycle()==="active"&&await project.canGitAccess(userId,null,false)&&await project.privateRecoveryReadable(op.id);}catch{return false;}
+          }});
+        }
         if (sub === "" && method === "GET") return json({ id: projectId, role, kind: state.kind ?? "demo", name: state.projectName, source: state.source ?? null, verification: state.verificationPolicy, protectedPaths: settings.protectedPaths, visibility: await project.repositoryVisibility(), ...(role === "owner" ? {moderation:ownerModerationNotice(await project.repositoryModerationState())} : {}) });
         if (sub === "/import-history" && method === "POST") {
           if (!isOwner) return text("Only the owner can inspect import history", 403);
@@ -1452,7 +1501,7 @@ export default {
         if (sub === "" && method === "DELETE") {
           if (!isOwner) return text("Only the owner can delete a repository", 403);
           await project.beginRepositoryDeletion();
-          if (!await stopRepositoryWorkflows(env, project)) return json({ deleted: false, status: "deleting", detail: "Repository workflow shutdown is unconfirmed. Retry deletion; metadata is preserved." }, 202);
+          if (!await stopRepositoryWorkflows(env, project) || !await cleanupPrivateRecovery(env, project)) return json({ deleted: false, status: "deleting", detail: "Repository workflow shutdown is unconfirmed. Retry deletion; metadata is preserved." }, 202);
           if (!await reconcileSealedAllocations(env, project)) return json({ deleted: false, status: "deleting", detail: "An in-flight repository allocation remains unconfirmed. Retry deletion." }, 202);
           const manifest = await globalOf(env).artifactProjectManifest(projectId);
           const names = [...new Set([...Object.values(state.tasks).map((task) => task.workspace.repoName), state.canonicalRepoName, ...manifest.filter((allocation) => allocation.state !== "deleted").map((allocation) => allocation.name)])];
@@ -1504,7 +1553,8 @@ async function createDemoRepository(env: Env, projectId: string, name: string, u
     );
     if (!r.success) throw new Error(`seed failed: ${r.stderr.slice(-400)}`);
     const head = (await run(`git -C ${seed} rev-parse HEAD`)).stdout.trim();
-    await ledger.initialize({ projectId, projectName: name, canonicalRepoName: canonicalName, head, verificationPolicy: { ...TICKET_BOOKING_POLICY }, kind: "demo", defaultBranch: "main", ownerId: userId });
+    const tree = (await run(`git -C ${seed} rev-parse HEAD^{tree}`)).stdout.trim();
+    await ledger.initialize({ projectId, projectName: name, canonicalRepoName: canonicalName, head, tree, verificationPolicy: { ...TICKET_BOOKING_POLICY }, kind: "demo", defaultBranch: "main", ownerId: userId });
     return { head, kind: "demo" };
   } catch (e) {
     const removed=await env.ARTIFACTS.delete(canonicalName).catch(() => false);

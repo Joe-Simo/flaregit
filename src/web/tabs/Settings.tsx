@@ -1,3 +1,4 @@
+import {PrivateGitRecovery} from "../components/PrivateGitRecovery";
 import React, { useCallback, useEffect, useState } from "react";
 import { Copy, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -163,6 +164,7 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
       {isOwner && <ConnectionsCard key={meta.id} projectId={meta.id} isOwner={isOwner} isCustom={meta.kind === "import" && isCommandPolicy(meta.verification)} />}
       {isOwner && <DeploymentCard key={`deployments:${meta.id}`} projectId={meta.id} />}
       <div id="deployment-deliveries"><WebhooksCard projectId={meta.id} isOwner={isOwner} /></div>
+      <PrivateGitRecovery projectId={meta.id} isOwner={isOwner} />
       <DomainsCard projectId={meta.id} isOwner={isOwner} />
       {isOwner && meta.kind === "import" && <ImportHistoryCard key={meta.id} projectId={meta.id} />}
       {isOwner && <MirrorCard projectId={meta.id} isOwner={isOwner} />}

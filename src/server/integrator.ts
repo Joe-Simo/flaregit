@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env.js";
 import {ContainerLifetime,MANAGED_CONTAINER_LIFETIME_MS,AGENT_CONTAINER_LIFETIME_MS} from "./container-lifetime.js";
 import { fileBytes, MAX_FILE_BYTES } from "./file-bytes.js";
+import { BUNDLE_CHUNK_BYTES, MAX_BUNDLE_BYTES } from "./private-recovery-bundle.js";
 
 const DEC = new TextDecoder();
 
@@ -71,6 +72,15 @@ export class IntegratorSandbox extends DurableObject<Env> {
   async readFileBytes(path: string): Promise<Uint8Array> {
     const proc = await this.execWhenReady(["head", "-c", String(MAX_FILE_BYTES + 1), "--", path], { signal: AbortSignal.timeout(30_000) });
     return fileBytes(await proc.output(), path);
+  }
+
+  /** Reads bounded binary chunks from a verified recovery artifact, never source files. */
+  async readFileChunk(path: string, offset: number, length: number): Promise<Uint8Array> {
+    if (!/^\/tmp\/flaregit-private-recovery-[a-f0-9-]{36}\/repository\.bundle$/.test(path) || !Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 1 || length > BUNDLE_CHUNK_BYTES || offset + length > MAX_BUNDLE_BYTES) throw new Error("Invalid recovery chunk");
+    const proc = await this.execWhenReady(["bun", "-e", "const [path,offset,length]=Bun.argv.slice(1);const file=Bun.file(path);await Bun.write(Bun.stdout,file.slice(Number(offset),Number(offset)+Number(length)));", path, String(offset), String(length)], { signal: AbortSignal.timeout(30_000) });
+    const output = await proc.output();
+    if (output.exitCode !== 0 || output.stdout.byteLength !== length) throw new Error("Recovery chunk unavailable");
+    return new Uint8Array(output.stdout);
   }
 
   async writeFile(path: string, content: string): Promise<void> {

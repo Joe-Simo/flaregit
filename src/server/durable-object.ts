@@ -1,4 +1,6 @@
 import { PublicationModeration, type PublicationModerationState, type PublicationModerationDecision, type PublicationModerationKind } from "./publication-moderation.js";
+import { isSafeSha } from "../core/sanitize.js";
+import {PrivateRecoveryOperations,PrivateRecoveryStorage,type PrivateRecoveryOperation,type PrivateRecoveryReceipt,type PrivateRecoveryTarget,recoveryScopeId} from "./private-recovery.js";
 import { previewOrigins, validPreviewRegistration } from "./preview-access.js";
 import { PublicDirectory, type DirectoryState, type DirectoryRegistration } from "./public-directory.js";
 import { RepositoryDiscussions } from "./repository-discussions.js";
@@ -179,6 +181,24 @@ export interface ActivityRow {
 export interface ImportHistoryOperation { projectId: string; head: string; canonicalRepoName: string; ownerId: string; instanceId: string; createdAt: string }
 
 export interface Ledger {
+  reservePrivateRecoveryStorage(id:string,accountKey:string):Promise<void>;
+  releasePrivateRecoveryStorage(id: string, accountKey: string): Promise<void>;
+  privateRecoveryCleanupList(): Promise<PrivateRecoveryOperation[]>;
+  privateRecoveryBeginDeletion(id: string, ownerId: string): Promise<PrivateRecoveryOperation>;
+  privateRecoveryFinishDeletion(id: string): Promise<void>;
+  privateRecoveryBeginUpload(id: string, expectedScope: string): Promise<void>;
+  privateRecoverySaveUpload(id: string, uploadId: string, expectedScope: string): Promise<void>;
+  privateRecoveryCloseUpload(id: string, uploadId: string, expectedScope: string): Promise<void>;
+  privateRecoveryMarkDispatch(id: string, dispatchState: "uncertain" | "started", expectedScope: string): Promise<void>;
+  privateRecoveryOperation(id:string):Promise<PrivateRecoveryOperation|null>;
+  privateRecoveryList():Promise<PrivateRecoveryOperation[]>;
+  privateRecoveryPrepare(id:string,commit:string,tree:string|null,ownerId:string,accountKey:string):Promise<PrivateRecoveryOperation>;
+  privateRecoveryAuthorize(id:string,ownerId:string):Promise<boolean>;
+  privateRecoveryRecordTree(id:string,tree:string,expectedScope:string):Promise<PrivateRecoveryOperation>;
+  privateRecoveryReadable(id:string):Promise<boolean>;
+  privateRecoveryComplete(id:string,receipt:PrivateRecoveryReceipt):Promise<void>;
+  privateRecoveryFail(id:string,message:string,expectedScope:string):Promise<void>;
+
   previewOrigin(repository: string, appOrigin?: string): Promise<PreviewOriginRegistration | null>;
   activePreviewOrigin(repository: string, appOrigin?: string): Promise<string | null>;
   registerPreviewOrigin(repository: string, origin: string, operator: string, appOrigin: string): Promise<PreviewOriginRegistration>;
@@ -199,6 +219,7 @@ export interface Ledger {
 
   acceptedDeploymentTarget(journalId:string):Promise<{canonicalRepoName:string;target:AcceptedDeploymentTarget}|null>;
   acceptedDeploymentTargets():Promise<AcceptedDeploymentTarget[]>;
+  privateRecoveryTargets():Promise<PrivateRecoveryTarget[]>;
   listDeployments():Promise<DeploymentRecord[]>;
   requestDeployment(target:AcceptedDeploymentTarget,serviceId:string,environment:string,key:string,actorId:string):Promise<{kind:"created"|"duplicate";deployment:DeploymentRecord}>;
   discussionList(publicOnly:boolean,actor?:PublicCommunityActor):Promise<ReturnType<RepositoryDiscussions["list"]>>;
@@ -336,7 +357,7 @@ export interface Ledger {
   beginRepositoryDeletion(): Promise<void>;
   repositoryArtifactDeleted(name: string): Promise<boolean>;
   recordRepositoryArtifactDeleted(name: string): Promise<void>;
-  initialize(init: { projectId: string; projectName: string; canonicalRepoName: string; head: string; verificationPolicy: Record<string, unknown>; kind?: "demo" | "import" | "empty"; defaultBranch?: string; ownerId?: string; source?: string }): Promise<FlareGitProjectState>;
+  initialize(init: { projectId: string; projectName: string; canonicalRepoName: string; head: string; tree?: string; verificationPolicy: Record<string, unknown>; kind?: "demo" | "import" | "empty"; defaultBranch?: string; ownerId?: string; source?: string }): Promise<FlareGitProjectState>;
   createTask(task: Task, actorId?: string): Promise<Task>;
   mintGitCapability(userId: string, taskId: string | null, write: boolean, parentTokenHash?: string): Promise<{token: string; expiresInSeconds: number}>;
   verifyGitCapability(secret: string, taskId: string | null, write: boolean): Promise<{userId:string;parentTokenHash:string|null}|null>;
@@ -455,6 +476,99 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   private state: FlareGitProjectState | null = null;
+  async reservePrivateRecoveryStorage(id:string,accountKey:string):Promise<void>{new PrivateRecoveryStorage(this.ctx.storage).reserve(id,accountKey);}
+  async releasePrivateRecoveryStorage(id: string, accountKey: string): Promise<void> { new PrivateRecoveryStorage(this.ctx.storage).release(id, accountKey); }
+  async privateRecoveryBeginUpload(id: string, expectedScope: string): Promise<void> {
+    const op = await this.privateRecoveryOperation(id);
+    if (!op || recoveryScopeId(op) !== expectedScope || !await this.privateRecoveryAuthorize(id, op.ownerId)) throw new Error("Recovery authorization changed");
+    const ops = new PrivateRecoveryOperations(this.ctx.storage), current = ops.get(id);
+    if (!current || recoveryScopeId(current) !== expectedScope || !this.privateRecoveryScopeCurrent(current)) throw new Error("Recovery authorization changed");
+    ops.beginUpload(id);
+  }
+  async privateRecoverySaveUpload(id: string, uploadId: string, expectedScope: string): Promise<void> {
+    const op = await this.privateRecoveryOperation(id);
+    if (!op || recoveryScopeId(op) !== expectedScope || !await this.privateRecoveryAuthorize(id, op.ownerId)) throw new Error("Recovery authorization changed");
+    const ops = new PrivateRecoveryOperations(this.ctx.storage), current = ops.get(id);
+    if (!current || recoveryScopeId(current) !== expectedScope || !this.privateRecoveryScopeCurrent(current)) throw new Error("Recovery authorization changed");
+    ops.saveUpload(id, uploadId);
+  }
+  async privateRecoveryCloseUpload(id: string, uploadId: string, expectedScope: string): Promise<void> { const ops=new PrivateRecoveryOperations(this.ctx.storage), op=ops.get(id); if(!op||recoveryScopeId(op)!==expectedScope)throw new Error("Recovery scope changed");ops.closeUpload(id, uploadId); }
+  async privateRecoveryBeginDeletion(id: string, ownerId: string): Promise<PrivateRecoveryOperation> {
+    if (await this.roleOf(ownerId) !== "owner") throw new Error("Owner recovery authorization required");
+    const ops = new PrivateRecoveryOperations(this.ctx.storage), op = ops.get(id);
+    const currentRole = this.ctx.storage.sql.exec<{role: string}>("SELECT role FROM members WHERE user_id=?", ownerId).toArray()[0]?.role;
+    if (!op || currentRole !== "owner" || op.incarnation !== ops.incarnation() || op.canonicalRepoName !== this.load().canonicalRepoName) throw new Error("Recovery scope changed");
+    ops.beginDeletion(id);
+    const retiring = ops.get(id);
+    if (!retiring) throw new Error("Unknown recovery operation");
+    return retiring;
+  }
+  async privateRecoveryFinishDeletion(id: string): Promise<void> {
+    const ops = new PrivateRecoveryOperations(this.ctx.storage);
+    if (this.repositoryDeleting()) ops.beginDeletion(id);
+    ops.finishDeletion(id);
+  }
+  async privateRecoveryCleanupList(): Promise<PrivateRecoveryOperation[]> { return new PrivateRecoveryOperations(this.ctx.storage).all(); }
+  async privateRecoveryOperation(id:string):Promise<PrivateRecoveryOperation|null>{return new PrivateRecoveryOperations(this.ctx.storage).get(id);}
+  async privateRecoveryList():Promise<PrivateRecoveryOperation[]>{return new PrivateRecoveryOperations(this.ctx.storage).list();}
+  async privateRecoveryPrepare(id:string,commit:string,tree:string|null,ownerId:string,accountKey:string):Promise<PrivateRecoveryOperation>{
+   if(!/^[a-f0-9-]{36}$/.test(id)||this.repositoryDeleting()||await this.roleOf(ownerId)!=="owner")throw new Error("Owner recovery authorization required");
+   const ops=new PrivateRecoveryOperations(this.ctx.storage),old=ops.get(id);
+   if (old?.cacheState) throw new Error("Recovery cache is retired");
+   if(tree===null&&old?.journalId==="baseline"&&old.commit===commit&&old.ownerId===ownerId)tree=old.tree;
+   const state=this.load(),target=(await this.privateRecoveryTargets()).find(item=>item.commit===commit&&item.tree===tree);
+   if(!target)throw new Error("Recovery requires an accepted journal or durable baseline target");
+   if(accountKey!==await accountKeyFor(ownerId))throw new Error("Recovery account scope mismatch");
+   if(this.repositoryDeleting()||await this.roleOf(ownerId)!=="owner")throw new Error("Recovery authorization changed");
+   const proposed: PrivateRecoveryOperation = {id,projectId:state.projectId,incarnation:ops.incarnation(),commit,tree,journalId:target.journalId,canonicalRepoName:state.canonicalRepoName,ownerId,accountKey,status:"pending",dispatchState:"not-started",uploadState:"not-started",createdAt:new Date().toISOString()};
+   return this.ctx.storage.transactionSync(() => {
+     if (!this.privateRecoveryScopeCurrent(proposed)) throw new Error("Recovery authorization changed");
+     if (!old && ops.all().some(operation => !operation.cacheState && operation.incarnation === proposed.incarnation && operation.canonicalRepoName === proposed.canonicalRepoName && operation.commit === proposed.commit && (operation.status === "pending" || operation.status === "ready"))) throw new Error("This accepted commit already has an active recovery snapshot");
+     return ops.create(proposed);
+   });
+  }
+  async privateRecoveryMarkDispatch(id: string, dispatchState: "uncertain" | "started", expectedScope: string): Promise<void> {
+    const op = await this.privateRecoveryOperation(id);
+    if (!op || recoveryScopeId(op) !== expectedScope || !await this.privateRecoveryAuthorize(id, op.ownerId)) throw new Error("Recovery authorization changed");
+    const current = new PrivateRecoveryOperations(this.ctx.storage).get(id);
+    if (!current || recoveryScopeId(current) !== expectedScope || !this.privateRecoveryScopeCurrent(current)) throw new Error("Recovery authorization changed");
+    new PrivateRecoveryOperations(this.ctx.storage).markDispatch(id, dispatchState);
+  }
+  async privateRecoveryAuthorize(id:string,ownerId:string):Promise<boolean>{
+   const ops=new PrivateRecoveryOperations(this.ctx.storage),op=ops.get(id);
+   if(!op||op.cacheState||op.ownerId!==ownerId||this.repositoryDeleting()||await this.roleOf(ownerId)!=="owner"||op.incarnation!==ops.incarnation()||op.canonicalRepoName!==this.load().canonicalRepoName)return false;
+   const target=(await this.privateRecoveryTargets()).find(item=>item.journalId===op.journalId);return target?.commit===op.commit&&target.tree===op.tree;
+  }
+  private privateRecoveryScopeCurrent(op:PrivateRecoveryOperation):boolean {
+    const state=this.load(),ops=new PrivateRecoveryOperations(this.ctx.storage);
+    const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",op.ownerId).toArray()[0]?.role;
+    if(op.cacheState||this.repositoryDeleting()||role!=="owner"||op.incarnation!==ops.incarnation()||op.projectId!==state.projectId||op.canonicalRepoName!==state.canonicalRepoName)return false;
+    if(op.journalId==="baseline")return state.acceptedBaseline?.commit===op.commit&&(state.acceptedBaseline.tree??null)===op.tree;
+    const journal=state.journal.find(item=>item.id===op.journalId&&item.state==="ACCEPTED"&&item.newHead===op.commit&&item.candidateTree===op.tree);
+    return !!journal&&state.acceptedState.history.some(item=>item.commit===journal.newHead&&item.candidateId===journal.candidateId);
+  }
+  async privateRecoveryRecordTree(id:string,tree:string,expectedScope:string):Promise<PrivateRecoveryOperation>{
+    const ops=new PrivateRecoveryOperations(this.ctx.storage),op=ops.get(id);
+    if(!op||recoveryScopeId(op)!==expectedScope||!isSafeSha(tree)||!await this.privateRecoveryAuthorize(id,op.ownerId))throw new Error("Recovery authorization changed");
+    return this.ctx.storage.transactionSync(()=>{
+      const current=ops.get(id);
+      if(!current||recoveryScopeId(current)!==expectedScope||!this.privateRecoveryScopeCurrent(current)||current.status!=="pending")throw new Error("Recovery authorization changed");
+      const state=this.load(),baseline=state.acceptedBaseline;
+      if(op.journalId!=="baseline"||!baseline||baseline.commit!==op.commit||(baseline.tree&&baseline.tree!==tree))throw new Error("Accepted baseline scope changed");
+      const updated=ops.recordTree(id,tree);baseline.tree=tree;this.save();return updated;
+    });
+  }
+  async privateRecoveryReadable(id:string):Promise<boolean>{
+   const ops=new PrivateRecoveryOperations(this.ctx.storage),op=ops.get(id);
+   if(!op||op.cacheState||op.status!=="ready"||!op.receipt||this.repositoryDeleting()||op.incarnation!==ops.incarnation()||op.canonicalRepoName!==this.load().canonicalRepoName)return false;
+   const target=(await this.privateRecoveryTargets()).find(item=>item.journalId===op.journalId);return target?.commit===op.commit&&target.tree===op.tree;
+  }
+  async privateRecoveryComplete(id:string,receipt:PrivateRecoveryReceipt):Promise<void>{
+    const op=await this.privateRecoveryOperation(id);if(!op||!await this.privateRecoveryAuthorize(id,op.ownerId))throw new Error("Recovery authorization changed");
+    this.ctx.storage.transactionSync(()=>{const ops=new PrivateRecoveryOperations(this.ctx.storage),current=ops.get(id);if(!current||recoveryScopeId(current)!==recoveryScopeId(op)||!this.privateRecoveryScopeCurrent(current))throw new Error("Recovery authorization changed");ops.complete(id,receipt);});
+  }
+  async privateRecoveryFail(id:string,_message:string,expectedScope:string):Promise<void>{const ops=new PrivateRecoveryOperations(this.ctx.storage),operation=ops.get(id);if(operation&&recoveryScopeId(operation)===expectedScope)ops.fail(id);}
+
 
   async acceptedDeploymentTarget(journalId:string):Promise<{canonicalRepoName:string;target:AcceptedDeploymentTarget}|null>{
     const state=this.load(),journal=state.journal.find(item=>item.id===journalId&&item.state==="ACCEPTED");
@@ -462,6 +576,11 @@ export class RepositoryController extends DurableObject<Env> {
     const accepted=state.acceptedState.history.find(item=>item.commit===journal.newHead&&item.candidateId===journal.candidateId);
     if(!accepted)return null;
     return {canonicalRepoName:state.canonicalRepoName,target:{journalId,candidateId:journal.candidateId,commit:journal.newHead,tree:journal.candidateTree,acceptedAt:accepted.acceptedAt,recoverableRef:`refs/flaregit/deployments/${journalId}`}};
+  }
+  async privateRecoveryTargets():Promise<PrivateRecoveryTarget[]>{
+    const state=this.load(),records=await Promise.all(state.journal.filter(entry=>entry.state==="ACCEPTED").map(entry=>this.acceptedDeploymentTarget(entry.id))),targets:PrivateRecoveryTarget[]=records.filter((entry):entry is NonNullable<typeof entry>=>entry!==null).map(({target})=>({journalId:target.journalId,commit:target.commit,tree:target.tree,acceptedAt:target.acceptedAt})),baseline=state.acceptedBaseline;
+    if(baseline&&isSafeSha(baseline.commit)&&(!baseline.tree||isSafeSha(baseline.tree)))targets.unshift({journalId:"baseline",commit:baseline.commit,tree:baseline.tree??null,acceptedAt:baseline.acceptedAt});
+    return targets;
   }
   async listDeployments():Promise<DeploymentRecord[]>{return new RepositoryDeployments(this.ctx.storage,this.load().projectId).list();}
   async acceptedDeploymentTargets():Promise<AcceptedDeploymentTarget[]>{
@@ -890,7 +1009,7 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   /** First-time setup with the real head of the canonical Artifacts repository. */
-  async initialize(init: { projectId: string; projectName: string; canonicalRepoName: string; head: string; verificationPolicy: Record<string, unknown>; kind?: "demo" | "import" | "empty"; defaultBranch?: string; ownerId?: string; source?: string }): Promise<FlareGitProjectState> {
+  async initialize(init: { projectId: string; projectName: string; canonicalRepoName: string; head: string; tree?: string; verificationPolicy: Record<string, unknown>; kind?: "demo" | "import" | "empty"; defaultBranch?: string; ownerId?: string; source?: string }): Promise<FlareGitProjectState> {
     if (this.repositoryDeleting()) throw new Error("Repository deletion has sealed this identity");
     const existing = this.ctx.storage.sql.exec("SELECT 1 FROM project WHERE id = 1").toArray();
     if (existing.length > 0) return this.load();
@@ -898,6 +1017,7 @@ export class RepositoryController extends DurableObject<Env> {
       projectId: init.projectId,
       projectName: init.projectName,
       canonicalRepoName: init.canonicalRepoName,
+      acceptedBaseline: { commit: init.head, tree: init.tree, acceptedAt: new Date().toISOString() },
       acceptedState: { currentCommit: init.head, acceptedAt: new Date().toISOString(), buildDigest: "seed", activeRequirements: [], history: [] },
       tasks: {},
       candidates: {},

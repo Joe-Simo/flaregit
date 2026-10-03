@@ -221,6 +221,8 @@ export interface FlareGitProjectState {
   projectName: string;
   canonicalRepoName: string;
   acceptedState: AcceptedState;
+  /** Immutable initial accepted snapshot; never inferred from a candidate or a later head. */
+  acceptedBaseline?: { commit: string; tree?: string; acceptedAt: string };
   tasks: Record<string, Task>;
   candidates: Record<string, CandidateGeneration>;
   evidence: Record<string, VerificationEvidence>;

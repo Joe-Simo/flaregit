@@ -11,6 +11,7 @@ export interface Env {
   AGENT_WORKFLOW: Workflow;
   INTEGRATION_WORKFLOW: Workflow;
   IMPORT_HISTORY_WORKFLOW: Workflow;
+  PRIVATE_RECOVERY_WORKFLOW?: Workflow;
   INTEGRATION_QUEUE: Queue<QueueMessage>;
   EVIDENCE_BUCKET: R2Bucket;
   ARTIFACTS: ArtifactsBinding;
