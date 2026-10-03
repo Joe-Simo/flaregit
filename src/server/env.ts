@@ -9,6 +9,9 @@ export interface Env {
   PREVIEW_STORAGE_ACCOUNT_BYTES?: string;
   CORE_GIT_GLOBAL_MONTHLY_USD_MICROS?: string;
   CORE_GIT_ACCOUNT_MONTHLY_USD_MICROS?: string;
+  /** Browsing reservations inside the shared Git-operation allowance. */
+  REPOSITORY_READ_GLOBAL_MONTHLY_USD_MICROS?: string;
+  REPOSITORY_READ_ACCOUNT_MONTHLY_USD_MICROS?: string;
   REPOSITORY_CONTROLLER: DurableObjectNamespace;
   INTEGRATOR: DurableObjectNamespace<import("./integrator.js").IntegratorSandbox>;
   AGENT: DurableObjectNamespace<import("./integrator.js").AgentSandbox>;

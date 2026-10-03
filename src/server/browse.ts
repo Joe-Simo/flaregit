@@ -1,4 +1,6 @@
 import type { ArtifactsRepoCapability } from "../artifacts/cloudflare.js";
+import { RepositoryReadError } from "./repository-read-budget.js";
+export type RepositoryReader = Pick<ArtifactsRepoCapability, "log" | "readCommit" | "readTree" | "readBlob">;
 
 export interface CommitInfo {
   hash: string;
@@ -19,7 +21,7 @@ export interface TreeEntry {
 const HEX40 = /^[0-9a-f]{40}$/;
 const MAX_BLOB_BYTES = 4 * 1024 * 1024;
 
-const asCommit = (c: Record<string, any>): CommitInfo => ({
+const asCommit = (c: ArtifactsCommitMetadata): CommitInfo => ({
   hash: c.hash,
   treeHash: c.treeHash,
   message: String(c.message ?? ""),
@@ -28,7 +30,7 @@ const asCommit = (c: Record<string, any>): CommitInfo => ({
   committedAt: c.committedAt ?? c.authoredAt ?? 0,
 });
 
-export async function listCommits(repo: ArtifactsRepoCapability, ref: string | undefined, limit: number, offset: number): Promise<CommitInfo[]> {
+export async function listCommits(repo: RepositoryReader, ref: string | undefined, limit: number, offset: number): Promise<CommitInfo[]> {
   const opts: Record<string, unknown> = { limit: Math.min(Math.max(limit, 1), 100), offset: Math.max(offset, 0) };
   if (ref && ref !== "HEAD") opts.ref = HEX40.test(ref) ? ref : ref;
   let rows = await repo.log(opts);
@@ -36,7 +38,7 @@ export async function listCommits(repo: ArtifactsRepoCapability, ref: string | u
   return rows.map(asCommit);
 }
 
-export async function resolveCommit(repo: ArtifactsRepoCapability, ref: string | undefined): Promise<CommitInfo | null> {
+export async function resolveCommit(repo: RepositoryReader, ref: string | undefined): Promise<CommitInfo | null> {
   if (ref && HEX40.test(ref)) {
     const c = await repo.readCommit(ref);
     return c ? asCommit(c) : null;
@@ -51,7 +53,7 @@ const cleanPath = (path: string | undefined): string[] => {
   return parts;
 };
 
-async function entriesAt(repo: ArtifactsRepoCapability, commit: CommitInfo, segments: string[]): Promise<TreeEntry[]> {
+async function entriesAt(repo: RepositoryReader, commit: CommitInfo, segments: string[]): Promise<TreeEntry[]> {
   let entries = (await repo.readTree(commit.treeHash)) as TreeEntry[] | null;
   if (!entries) throw new Error("Tree not found");
   for (const seg of segments) {
@@ -63,14 +65,14 @@ async function entriesAt(repo: ArtifactsRepoCapability, commit: CommitInfo, segm
   return entries;
 }
 
-export async function listDirectory(repo: ArtifactsRepoCapability, commit: CommitInfo, path: string | undefined): Promise<TreeEntry[]> {
+export async function listDirectory(repo: RepositoryReader, commit: CommitInfo, path: string | undefined): Promise<TreeEntry[]> {
   const entries = await entriesAt(repo, commit, cleanPath(path));
   // Folders first, then files, each alphabetical (the order people expect from a code browser).
   return [...entries].sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === "tree" ? -1 : 1));
 }
 
 export async function readFileText(
-  repo: ArtifactsRepoCapability,
+  repo: RepositoryReader,
   commit: CommitInfo,
   path: string
 ): Promise<{ binary: boolean; truncated: boolean; size: number; content: string }> {
@@ -97,42 +99,52 @@ export interface FileChange {
 }
 
 const MAX_CHANGED_FILES = 5000;
+const MAX_DIFF_RESULT_BYTES = 16 * 1024 * 1024;
 
 /** Tree-to-tree comparison using only hashes: unchanged subtrees are skipped without being read. */
 export async function diffTrees(
-  repo: ArtifactsRepoCapability,
+  repo: RepositoryReader,
   treeA: string | undefined,
   treeB: string | undefined,
   prefix = "",
   out: FileChange[] = []
 ): Promise<FileChange[]> {
-  if (out.length > MAX_CHANGED_FILES) throw new Error("Diff exceeds the supported 5,000-file inspection limit; no complete diff was recorded");
-  const [a, b] = await Promise.all([treeA ? repo.readTree(treeA) : Promise.resolve([]), treeB ? repo.readTree(treeB) : Promise.resolve([])]);
-  if ((treeA && !a) || (treeB && !b)) throw new Error("Could not read a repository tree; retry the diff");
-  const aMap = new Map((a ?? []).map((e) => [e.name, e as TreeEntry]));
-  const bMap = new Map((b ?? []).map((e) => [e.name, e as TreeEntry]));
-  const names = [...new Set([...aMap.keys(), ...bMap.keys()])].sort();
-  for (const name of names) {
-    const ea = aMap.get(name);
-    const eb = bMap.get(name);
-    const path = prefix ? `${prefix}/${name}` : name;
-    if (ea && eb && ea.hash === eb.hash && ea.type === eb.type) continue;
-    if (ea?.type === "tree" || eb?.type === "tree") {
-      if (ea?.type === "tree" || eb?.type === "tree") {
-        await diffTrees(repo, ea?.type === "tree" ? ea.hash : undefined, eb?.type === "tree" ? eb.hash : undefined, path, out);
-      }
-      if (ea?.type === "blob") out.push({ path, status: "deleted", aHash: ea.hash });
-      if (eb?.type === "blob") out.push({ path, status: "added", bHash: eb.hash, mode: eb.mode });
-      continue;
-    }
-    out.push({ path, status: !ea ? "added" : !eb ? "deleted" : "modified", aHash: ea?.hash, bHash: eb?.hash, mode: (eb ?? ea)?.mode });
+  let resultBytes = out.reduce((sum, change) => sum + new TextEncoder().encode(JSON.stringify(change)).length, 0);
+  if (resultBytes > MAX_DIFF_RESULT_BYTES) throw new RepositoryReadError(413, "metadata_capacity");
+  const append = (change: FileChange) => {
+    resultBytes += new TextEncoder().encode(JSON.stringify(change)).length;
+    if (resultBytes > MAX_DIFF_RESULT_BYTES) throw new RepositoryReadError(413, "metadata_capacity");
+    out.push(change);
     if (out.length > MAX_CHANGED_FILES) throw new Error("Diff exceeds the supported 5,000-file inspection limit; no complete diff was recorded");
-  }
+  };
   if (out.length > MAX_CHANGED_FILES) throw new Error("Diff exceeds the supported 5,000-file inspection limit; no complete diff was recorded");
+  type Frame = { kind: "trees"; a?: string; b?: string; path: string } | { kind: "change"; change: FileChange };
+  const pending: Frame[] = [{ kind: "trees", a: treeA, b: treeB, path: prefix }];
+  while (pending.length) {
+    const frame = pending.pop()!;
+    if (frame.kind === "change") { append(frame.change); continue; }
+    if (frame.a === frame.b) continue;
+    const [a, b] = await Promise.all([frame.a ? repo.readTree(frame.a) : Promise.resolve([]), frame.b ? repo.readTree(frame.b) : Promise.resolve([])]);
+    if ((frame.a && !a) || (frame.b && !b)) throw new Error("Could not read a repository tree; retry the diff");
+    const aMap = new Map((a ?? []).map(entry => [entry.name, entry as TreeEntry]));
+    const bMap = new Map((b ?? []).map(entry => [entry.name, entry as TreeEntry]));
+    const names = [...new Set([...aMap.keys(), ...bMap.keys()])].sort();
+    // Reverse insertion preserves the existing alphabetical depth-first result.
+    for (const name of names.reverse()) {
+      const ea = aMap.get(name), eb = bMap.get(name);
+      if (ea && eb && ea.hash === eb.hash && ea.type === eb.type) continue;
+      const path = frame.path ? `${frame.path}/${name}` : name;
+      if (ea?.type === "tree" || eb?.type === "tree") {
+        if (ea?.type === "blob") pending.push({ kind: "change", change: { path, status: "deleted", aHash: ea.hash } });
+        if (eb?.type === "blob") pending.push({ kind: "change", change: { path, status: "added", bHash: eb.hash, mode: eb.mode } });
+        pending.push({ kind: "trees", a: ea?.type === "tree" ? ea.hash : undefined, b: eb?.type === "tree" ? eb.hash : undefined, path });
+      } else pending.push({ kind: "change", change: { path, status: !ea ? "added" : !eb ? "deleted" : "modified", aHash: ea?.hash, bHash: eb?.hash, mode: (eb ?? ea)?.mode } });
+    }
+  }
   return out;
 }
 
-export async function readBlobByHash(repo: ArtifactsRepoCapability, hash: string): Promise<{ binary: boolean; truncated: boolean; size: number; content: string }> {
+export async function readBlobByHash(repo: RepositoryReader, hash: string): Promise<{ binary: boolean; truncated: boolean; size: number; content: string }> {
   const blob = await repo.readBlob(hash);
   if (!blob) throw new Error("Blob not found");
   if (blob.size > MAX_BLOB_BYTES) return { binary: false, truncated: true, size: blob.size, content: "" };

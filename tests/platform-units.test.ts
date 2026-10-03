@@ -59,6 +59,25 @@ describe("diffTrees", () => {
   test("identical trees produce no changes", async () => {
     expect(await diffTrees(repo, "A", "A")).toEqual([]);
   });
+  test("identical roots require no provider reads", async () => {
+    let reads = 0;
+    const unchanged = { readTree: async () => { reads++; throw new Error("Unnecessary provider read"); } } as unknown as Parameters<typeof diffTrees>[0];
+    expect(await diffTrees(unchanged, "same", "same")).toEqual([]);
+    expect(reads).toBe(0);
+  });
+  test("deep tree comparison preserves complete paths and type-change ordering", async () => {
+    const deep = { readTree: async (hash: string) => {
+      const [side, value] = hash.split(":"); const depth = Number(value);
+      return depth < 1000 ? [tree("d", `${side}:${depth + 1}`)] : [blob("leaf", side === "a" ? "old" : "new")];
+    } } as unknown as Parameters<typeof diffTrees>[0];
+    expect(await diffTrees(deep, "a:0", "b:0")).toEqual([{ path: `${"d/".repeat(1000)}leaf`, status: "modified", aHash: "old", bHash: "new", mode: "100644" }]);
+    const replacement = fakeRepo({ old: [blob("entry", "old-blob")], newer: [tree("entry", "child")], child: [blob("file", "new-blob")] });
+    expect((await diffTrees(replacement, "old", "newer")).map(change => `${change.status}:${change.path}`)).toEqual(["added:entry/file", "deleted:entry"]);
+  });
+  test("oversized path output fails explicitly before it can become a complete diff", async () => {
+    const largePaths = fakeRepo({ newer: [blob("x", "new")] });
+    await expect(diffTrees(largePaths, undefined, "newer", "p".repeat(16 * 1024 * 1024))).rejects.toMatchObject({ status: 413, reason: "metadata_capacity" });
+  });
   test("a missing side makes everything added", async () => {
     const out = await diffTrees(repo, undefined, "dB");
     expect(out.every((c) => c.status === "added")).toBe(true);

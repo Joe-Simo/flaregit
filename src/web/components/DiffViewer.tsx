@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronDown, ChevronRight, Keyboard } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ApiError } from "../api";
 import type { DiffRequest, DiffRow } from "../diff.worker";
 
 export interface FileChange {
@@ -42,6 +43,11 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented, onReadyCha
   const [state, setState] = useState<Record<number, FileState>>({});
   const [revision, setRevision] = useState(0);
   const [loadFailure, setLoadFailure] = useState(false);
+  const [retryAt, setRetryAt] = useState<number | null>(null);
+  const [,refreshRetry]=useState(0);
+  const loadedRows=useRef(new Map<string,DiffRow[]>());
+  const lastLoader=useRef(loadBlob);
+  useEffect(()=>{if(retryAt===null)return;const timer=setTimeout(()=>refreshRetry(value=>value+1),Math.min(2147483647,Math.max(0,retryAt-Date.now())));return()=>clearTimeout(timer);},[retryAt]);
   const [stateFiles, setStateFiles] = useState(files);
   const [helpOpen, setHelpOpen] = useState(false);
   const parentRef = useRef<HTMLDivElement>(null);
@@ -65,7 +71,9 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented, onReadyCha
 
   // Compute each file's diff in the worker, three at a time.
   useEffect(() => {
-    setState({}); setStateFiles(files); setLoadFailure(false);
+    if(lastLoader.current!==loadBlob){loadedRows.current.clear();lastLoader.current=loadBlob;}
+    const fileKey=(file:FileChange)=>JSON.stringify([file.path,file.aHash,file.bHash]);
+    setState(Object.fromEntries(files.flatMap((file,index)=>{const rows=loadedRows.current.get(fileKey(file));return rows ? [[index,{collapsed:false,rows}]] : [];}))); setStateFiles(files); setLoadFailure(false);setRetryAt(null);
     let worker: Worker;
     try { worker = new Worker("/diff.worker.js", { type: "module" }); }
     catch { setLoadFailure(true); setState(Object.fromEntries(files.map((_, index) => [index, { collapsed: false, note: "Could not start the background diff worker. Retry the diff." }]))); return; }
@@ -92,10 +100,12 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented, onReadyCha
       try { worker.postMessage({ id, a, b, path } satisfies DiffRequest); } catch { failWorker(); }
     });
 
-    const queue = files.map((_, i) => i);
+    let capacityFailure: string | null=null;
+    const queue = files.flatMap((file,index)=>loadedRows.current.has(fileKey(file)) ? [] : [index]);
     const runOne = async () => {
       for (let i = queue.shift(); i !== undefined && !cancelled; i = queue.shift()) {
         const f = files[i]!;
+        if(capacityFailure){setState(previous=>({...previous,[i]:{collapsed:false,note:capacityFailure+" This file was not loaded; retry after capacity becomes available."}}));continue;}
         if (workerFailure) { setState((previous) => ({ ...previous, [i]: { collapsed: false, note: workerFailure!.message } })); continue; }
         try {
           const [a, b] = await Promise.all([
@@ -107,10 +117,10 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented, onReadyCha
           else if (a.truncated || b.truncated) setState((s) => ({ ...s, [i]: { collapsed: false, note: `File is ${((Math.max(a.size, b.size)) / 1048576).toFixed(1)} MB, beyond the 4 MB inline limit. Fetch it with flaregit cat or clone the repository.` } }));
           else {
             const rows = await diffInWorker(i, a.content, b.content, f.path);
-            if (!cancelled) setState((s) => ({ ...s, [i]: { collapsed: false, rows } }));
+            if (!cancelled) {loadedRows.current.set(fileKey(f),rows);setState((s) => ({ ...s, [i]: { collapsed: false, rows } }));}
           }
         } catch (err) {
-          if (!cancelled) { setLoadFailure(true); setState((s) => ({ ...s, [i]: { collapsed: false, note: err instanceof Error ? err.message : "Could not load" } })); }
+          if (!cancelled) { if(err instanceof ApiError && [429,413,503].includes(err.status)){capacityFailure=err.message;if(err.retryAfter!==null)setRetryAt(Date.now()+err.retryAfter*1000);}setLoadFailure(true); setState((s) => ({ ...s, [i]: { collapsed: false, note: err instanceof Error ? err.message : "Could not load" } })); }
         }
       }
     };
@@ -169,9 +179,10 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented, onReadyCha
     <div className="rounded-lg border border-border overflow-hidden">
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-border text-xs text-muted-foreground bg-muted/20">
         <span>{files.length} file{files.length === 1 ? "" : "s"} changed</span>
-        {loadFailure && <Button size="sm" variant="outline" onClick={() => setRevision((value) => value + 1)}>Retry diff files</Button>}
+        {loadFailure && <Button size="sm" variant="outline" disabled={retryAt!==null && retryAt>Date.now()} onClick={() => setRevision((value) => value + 1)}>Retry diff files</Button>}
         <button className="flex items-center gap-1 hover:text-foreground" onClick={() => setHelpOpen((v) => !v)}><Keyboard className="h-3.5 w-3.5" /> shortcuts (?)</button>
       </div>
+      {retryAt!==null && retryAt>Date.now() && <p role="status" className="px-3 py-2 text-xs text-muted-foreground">Read capacity is temporarily unavailable. Retry after {new Date(retryAt).toLocaleTimeString()}.</p>}
       {helpOpen && (
         <div className="px-3 py-2 text-xs border-b border-border bg-muted/30 grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-1">
           <span><kbd>j</kbd>/<kbd>k</kbd> next/previous file</span>

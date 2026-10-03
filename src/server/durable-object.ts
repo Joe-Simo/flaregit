@@ -22,7 +22,7 @@ import { PublicDirectory, type DirectoryState, type DirectoryRegistration } from
 import { RepositoryDiscussions } from "./repository-discussions.js";
 import { ArtifactAllocationFence, type PendingArtifactAllocation } from "./allocation-fence.js";
 import { ArtifactStorageAdmission, type ArtifactKind, type StorageAdmissionPolicy, type StorageReservation } from "./storage-admission.js";
-import { CoreGitOperationLedger, type CoreGitBudget, type CoreGitAdmission } from "./core-git-budget.js";
+import { CoreGitOperationLedger, configuredGitCap, type CoreGitBudget, type CoreGitAdmission } from "./core-git-budget.js";
 import { ManagedSpendLedger, type ManagedEnvelope, type ManagedBudget, type ManagedAdmission, type ManagedReservation } from "./managed-spend-ledger.js";
 import { PlatformCommunity } from "./platform-community.js";
 import { safeContent } from "./public-community.js";
@@ -42,6 +42,7 @@ import type { ImportJob } from "./import-job.js";
 import type { PublicRepositoryGrant } from "./public-repositories.js";
 import { AgentRunLedger, type AgentRunInput, type AgentRunRecord, type AgentRunClaim } from "./agent-run-ledger.js";
 import { actorName, RepositoryPublicCommunity, type PublicCommunityActor, type PublicCommunityPolicy, type PublicPost, type ContributionRequest } from "./public-community.js";
+export interface RepositoryReadContext { projectId:string; incarnation:string|null; canonicalRepoName:string; repoName:string; ownerId:string; accountKey:string; publicationVersion?:number; acceptedCommit?:string; taskBase?:string; taskCommit?:string; taskBranch?:string; candidateId?:string; candidateCommit?:string; candidateBase?:string }
 export type PublicGrantMetadata = PublicRepositoryGrant & { name: string; version: number; canonicalRepoName: string };
 import type {
   CandidateGeneration,
@@ -289,6 +290,9 @@ export interface Ledger {
   existingDeploymentRequest(target: AcceptedDeploymentTarget, serviceId: string, environment: string, key: string, actorId: string): Promise<DeploymentRecord | null>;
   claimNativeCompute(key: string): Promise<string | null>;
   finishNativeCompute(key: string, token: string): Promise<void>;
+  reserveRepositoryReadOperation(operationId:string,accountKey:string):Promise<CoreGitAdmission>;
+  repositoryReadContext(userId:string|null,taskId?:string|null,candidateId?:string|null):Promise<RepositoryReadContext>;
+  assertRepositoryReadContext(context:RepositoryReadContext,userId:string|null,taskId?:string|null,credentialHash?:string,candidateId?:string|null):Promise<boolean>;
   reserveCoreGitOperation(operationId: string, accountKey: string, budget: CoreGitBudget): Promise<CoreGitAdmission>;
   markManagedDispatchAttempted(runIds: string[], accountKey: string): Promise<void>;
   cancelUnstartedManagedSpend(runIds: string[], accountKey: string): Promise<void>;
@@ -450,6 +454,7 @@ export interface Ledger {
   verifyGitCapability(secret: string, taskId: string | null, write: boolean): Promise<{userId:string;parentTokenHash:string|null}|null>;
   canGitAccess(userId: string, taskId: string | null, write: boolean): Promise<boolean>;
   apiTokenHashActive(hash: string): Promise<boolean>;
+  apiTokenHashCanRead(hash:string,userId:string,projectId:string,write?:boolean):Promise<boolean>;
   apiTokenHashCanAdminister(hash: string, userId: string, projectId: string): Promise<boolean>;
   beginArtifactAllocation(input:Omit<PendingArtifactAllocation,"phase">,scope:"account"|"project"):Promise<void>;
   activateArtifactAllocation(name:string,operationId:string,scope:"account"|"project"):Promise<void>;
@@ -482,6 +487,7 @@ export interface Ledger {
   setBilling(b: { plan: "free" | "pro"; status: string; subscriptionId?: string; updatedAt: string }): Promise<void>;
   usageToday(): Promise<number>;
   consumeRun(limit: number, admissionKey?: string): Promise<{ allowed: boolean; used: number }>;
+  ingestMemberCheckpoint(ev:{eventId:string;taskId:string;commit:string;ready:boolean;filesChanged?:string[]},userId:string,context:RepositoryReadContext,credentialHash?:string,sessionExpiresAt?:number):Promise<{applied:boolean}>;
   ingestCheckpoint(ev: { eventId: string; taskId: string; commit: string; ready: boolean; filesChanged?: string[] }): Promise<{ applied: boolean }>;
 }
 
@@ -1451,6 +1457,9 @@ export class RepositoryController extends DurableObject<Env> {
 
   async ingestCheckpoint(ev: { eventId: string; taskId: string; commit: string; ready: boolean; filesChanged?: string[] }): Promise<{ applied: boolean }> {
     await this.ensureRecoveryAlarm();
+    return this.applyCheckpoint(ev);
+  }
+  private async applyCheckpoint(ev:{eventId:string;taskId:string;commit:string;ready:boolean;filesChanged?:string[]},fence?:()=>void):Promise<{applied:boolean}>{
     const s = this.load();
     const task = s.tasks[ev.taskId];
     if (!task || task.status === "cancelled" || task.status === "accepted") return { applied: false };
@@ -1458,6 +1467,7 @@ export class RepositoryController extends DurableObject<Env> {
     let applied = false;
     try {
       this.ctx.storage.transactionSync(() => {
+        fence?.();
         if (!this.firstDelivery(ev.eventId)) return;
         // A push that arrives while the task is being integrated is newer work; it applies after the landing.
         task.currentCommit = ev.commit;
@@ -1703,6 +1713,10 @@ export class RepositoryController extends DurableObject<Env> {
     return this.ctx.storage.sql.exec("SELECT id FROM api_tokens WHERE hash=? AND (expires_at IS NULL OR expires_at>?)",hash,Date.now()).toArray().length===1;
   }
 
+  async apiTokenHashCanRead(hash:string,userId:string,projectId:string,write=false):Promise<boolean>{
+    if(!/^[a-f0-9]{64}$/.test(hash)||this.accountLifecycleState()!=="active")return false;
+    return this.ctx.storage.sql.exec("SELECT id FROM api_tokens WHERE hash=? AND user_id=? AND scope IN ("+(write?"'write','full'":"'read','write','full'")+") AND (repo IS NULL OR repo=?) AND (expires_at IS NULL OR expires_at>?)",hash,userId,projectId,Date.now()).toArray().length===1;
+  }
   async apiTokenHashCanAdminister(hash: string, userId: string, projectId: string): Promise<boolean> {
     if (!/^[a-f0-9]{64}$/.test(hash) || this.accountLifecycleState() !== "active") return false;
     return this.ctx.storage.sql.exec("SELECT id FROM api_tokens WHERE hash=? AND user_id=? AND scope='full' AND (repo IS NULL OR repo=?) AND (expires_at IS NULL OR expires_at>?)",hash,userId,projectId,Date.now()).toArray().length === 1;
@@ -2356,7 +2370,56 @@ export class RepositoryController extends DurableObject<Env> {
     return new ManagedSpendLedger(this.ctx.storage).used(month, accountKey);
   }
   async reserveCoreGitOperation(operationId: string, accountKey: string, budget: CoreGitBudget): Promise<CoreGitAdmission> {
-    return new CoreGitOperationLedger(this.ctx.storage).reserve(operationId, accountKey, budget);
+    void budget;
+    return new CoreGitOperationLedger(this.ctx.storage).reserve(operationId, accountKey, this.currentGitBudget());
+  }
+  private currentGitBudget(): CoreGitBudget {
+    if(configuredGitCap(this.env.REPOSITORY_READ_ACCOUNT_MONTHLY_USD_MICROS)===null||configuredGitCap(this.env.REPOSITORY_READ_GLOBAL_MONTHLY_USD_MICROS)===null)return {accountUsdMicros:null,globalUsdMicros:null};
+    return {accountUsdMicros:configuredGitCap(this.env.CORE_GIT_ACCOUNT_MONTHLY_USD_MICROS),globalUsdMicros:configuredGitCap(this.env.CORE_GIT_GLOBAL_MONTHLY_USD_MICROS),readAccountUsdMicros:configuredGitCap(this.env.REPOSITORY_READ_ACCOUNT_MONTHLY_USD_MICROS),readGlobalUsdMicros:configuredGitCap(this.env.REPOSITORY_READ_GLOBAL_MONTHLY_USD_MICROS)};
+  }
+  async reserveRepositoryReadOperation(operationId:string,accountKey:string):Promise<CoreGitAdmission>{return new CoreGitOperationLedger(this.ctx.storage).reserve(operationId,accountKey,this.currentGitBudget(),new Date(),"read");}
+  private readRepositoryIncarnation():string|null {return this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='private_recovery_incarnation'").toArray().length?this.ctx.storage.sql.exec<{value:string}>("SELECT value FROM private_recovery_incarnation WHERE id=1").toArray()[0]?.value??null:null;}
+  async repositoryReadContext(userId:string|null,taskId:string|null=null,candidateId:string|null=null):Promise<RepositoryReadContext>{
+    if(this.repositoryDeleting())throw new Error("Repository unavailable");
+    const state=this.load(),incarnation=this.readRepositoryIncarnation();
+    const ownerId=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id;
+    if(!ownerId)throw new Error("Repository owner unavailable");
+    const grant=userId===null?await this.publicGrant():null;
+    if(userId===null&&(!grant||taskId!==null||candidateId!==null))throw new Error("Repository is not public");
+    if(userId!==null&& !await this.canGitAccess(userId,taskId,false))throw new Error("Repository access denied");
+    const accountKey=await accountKeyFor(ownerId);
+    if(await accountOf(this.env,accountKey).accountLifecycle()!=="active")throw new Error("Repository owner unavailable");
+    if(userId!==null&&await accountOf(this.env,await accountKeyFor(userId)).accountLifecycle()!=="active")throw new Error("Account unavailable");
+    const fresh=this.load();
+    if(this.repositoryDeleting()||fresh.canonicalRepoName!==state.canonicalRepoName||fresh.projectId!==state.projectId||this.readRepositoryIncarnation()!==incarnation||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==ownerId)throw new Error("Repository authority changed");
+    if(userId!==null&&!await this.canGitAccess(userId,taskId,false))throw new Error("Repository access changed");
+    if(userId===null&&JSON.stringify(await this.publicGrant())!==JSON.stringify(grant))throw new Error("Public repository changed");
+    const latest=this.load();
+    if(this.repositoryDeleting()||latest.canonicalRepoName!==state.canonicalRepoName||latest.projectId!==state.projectId||this.readRepositoryIncarnation()!==incarnation||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==ownerId||(userId!==null&&!this.ctx.storage.sql.exec("SELECT role FROM members WHERE user_id=?",userId).toArray().length))throw new Error("Repository authority changed");
+    const repoName=taskId?latest.tasks[taskId]?.workspace.repoName:latest.canonicalRepoName;if(!repoName)throw new Error("Workspace unavailable");
+    const candidate=candidateId?latest.candidates[candidateId]:null;
+    if(candidateId&&(!candidate||!candidate.candidateCommit))throw new Error("Candidate unavailable");
+    return {projectId:fresh.projectId,incarnation,canonicalRepoName:fresh.canonicalRepoName,repoName,ownerId,accountKey,...(candidate?{candidateId:candidate.id,candidateCommit:candidate.candidateCommit,candidateBase:candidate.expectedAcceptedBase}:{}),...(taskId?{taskBase:latest.tasks[taskId]!.baseCommit,taskCommit:latest.tasks[taskId]!.currentCommit,taskBranch:latest.tasks[taskId]!.workspace.branch}:{}),...(grant?{publicationVersion:grant.version,acceptedCommit:grant.acceptedCommit}:{})};
+  }
+  private assertReadLocal(context:RepositoryReadContext,userId:string|null,taskId:string|null,write=false):void {
+    const state=this.load(),task=taskId?state.tasks[taskId]:null;
+    const role=userId?this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",userId).toArray()[0]?.role:null;
+    if(this.repositoryDeleting()||state.projectId!==context.projectId||state.canonicalRepoName!==context.canonicalRepoName||this.readRepositoryIncarnation()!==context.incarnation||(userId&&!role)||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==context.ownerId)throw new Error("Repository read authority changed");
+    if(taskId&&(!task||task.workspace.repoName!==context.repoName||task.baseCommit!==context.taskBase||task.currentCommit!==context.taskCommit||task.workspace.branch!==context.taskBranch))throw new Error("Contribution checkpoint changed");
+    if(context.candidateId){const candidate=state.candidates[context.candidateId];if(!candidate||candidate.candidateCommit!==context.candidateCommit||candidate.expectedAcceptedBase!==context.candidateBase)throw new Error("Candidate review changed");}
+    if(write){this.gitTables();if(!task||["accepted","cancelled"].includes(task.status)||(role!=="owner"&&!this.ctx.storage.sql.exec("SELECT task_id FROM git_task_writers WHERE task_id=? AND user_id=?",taskId!,userId!).toArray().length))throw new Error("Contribution writer authority changed");}
+    if(userId===null){this.requirePublicRepository();const visibility=this.ctx.storage.sql.exec<{version:number}>("SELECT version FROM repository_visibility WHERE id=1").toArray()[0];if(visibility?.version!==context.publicationVersion||state.acceptedState.currentCommit!==context.acceptedCommit)throw new Error("Public read scope changed");}
+  }
+  async assertRepositoryReadContext(context:RepositoryReadContext,userId:string|null,taskId:string|null=null,credentialHash?:string,candidateId:string|null=null):Promise<boolean>{try{
+    if(JSON.stringify(await this.repositoryReadContext(userId,taskId,candidateId))!==JSON.stringify(context))return false;
+    if(credentialHash&&(!userId||!await accountOf(this.env,await accountKeyFor(userId)).apiTokenHashCanRead(credentialHash,userId,context.projectId)))return false;
+    this.assertReadLocal(context,userId,taskId);return true;
+  }catch{return false;}}
+  async ingestMemberCheckpoint(ev:{eventId:string;taskId:string;commit:string;ready:boolean;filesChanged?:string[]},userId:string,context:RepositoryReadContext,credentialHash?:string,sessionExpiresAt?:number):Promise<{applied:boolean}>{
+    await this.ensureRecoveryAlarm();
+    if(!await this.assertRepositoryReadContext(context,userId,ev.taskId))throw new Error("Checkpoint authority changed");
+    if(credentialHash&&!await accountOf(this.env,await accountKeyFor(userId)).apiTokenHashCanRead(credentialHash,userId,context.projectId,true))throw new Error("Checkpoint credential changed");
+    return this.applyCheckpoint(ev,()=>{if(!credentialHash&&(!Number.isFinite(sessionExpiresAt)||Date.now()>=sessionExpiresAt!))throw new Error("Checkpoint session expired");this.assertReadLocal(context,userId,ev.taskId,true);});
   }
   async reserveManagedSpendBatch(inputs: ManagedEnvelope[], budget: ManagedBudget): Promise<ManagedAdmission[]> {
     return new ManagedSpendLedger(this.ctx.storage).reserveBatch(inputs, budget);

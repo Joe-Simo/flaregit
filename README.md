@@ -151,7 +151,7 @@ RACE_BRANCHES=500 RACE_TIMEOUT_MS=7200000 bun test tests/landing-race.test.ts
 - One landing at a time per project; the landing lease is 20 minutes.
 - A candidate waits up to 7 days for review, then goes stale and must be re-run.
 - At most 8 changes per integration.
-- Tree diffs currently support at most 5,000 changed files. Larger diffs fail explicitly rather than presenting incomplete coordination evidence as complete.
+- Tree diffs retain the 5,000 changed-file ceiling, with a 16 MiB result envelope and bounded provider work. Large or unfunded inspections fail explicitly rather than presenting partial coordination evidence as complete. Repository browsing has a protected allowance inside the configured Git-operation budget; metadata cache hits still recheck current access.
 - Individual preview assets are limited to 16 MiB. Binary images and fonts are preserved as bytes; oversized or linked output assets fail explicitly.
 - The diff renderer virtualizes visible rows and computes diffs in a separate browser worker. Current release verification covers worker execution and responsive signed-out layouts; authenticated large-repository latency and frame-rate measurements remain an acceptance gate.
 - Syntax highlighting is per line, so multi-line constructs can be colored incorrectly.

@@ -88,6 +88,14 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
   return guarded;
 }
 
+export function apiRetryAfterSeconds(value: string | null, now = Date.now()): number | null {
+  if(value===null)return null;
+  const seconds=/^[0-9]+$/.test(value) ? Number(value) : (Date.parse(value)-now)/1000;
+  return Number.isFinite(seconds) && seconds>=0 && seconds<=Number.MAX_SAFE_INTEGER ? Math.ceil(seconds) : null;
+}
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number, readonly retryAfter: number | null) { super(message); this.name="ApiError"; }
+}
 /** JSON helper: throws an Error carrying the server's message on any non-2xx response. */
 export async function apiJson<T>(path: string, init: RequestInit & { json?: unknown } = {}): Promise<T> {
   const { json, ...rest } = init;
@@ -97,6 +105,10 @@ export async function apiJson<T>(path: string, init: RequestInit & { json?: unkn
   });
   const text = await res.text();
   responseGuards.get(res)?.();
-  if (!res.ok) throw new Error(text || `Request failed (${res.status})`);
+  if (!res.ok) {
+    let message=text || `Request failed (${res.status})`;
+    try { const problem: unknown=JSON.parse(text); if(problem && typeof problem==="object" && "error" in problem && typeof problem.error==="string")message=problem.error; } catch { /* Plain-text failure messages remain supported. */ }
+    throw new ApiError(message,res.status,apiRetryAfterSeconds(res.headers.get("Retry-After")));
+  }
   return (text ? JSON.parse(text) : {}) as T;
 }

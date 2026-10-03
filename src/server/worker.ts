@@ -1,3 +1,4 @@
+import { openRepositoryRead, RepositoryReadError } from "./repository-read-budget.js";
 import {taskCreationInputSchema} from "./task-creation.js";
 import {storageReconciliationReport,type StorageReconciliationSnapshot} from "./storage-reconciliation-report.js";
 import {createHash} from "node:crypto";
@@ -62,7 +63,7 @@ import { integrationCapabilities, verifyIntegrationCallback } from "./integratio
 import type { ExternalCheckPolicy } from "../core/external-checks.js";
 import { verifyServiceRead } from "./service-read-auth.js";
 import { publicProfileProjection, type PublicContribution } from "./public-profile.js";
-import { parsePublicBrowseRequest, readPublicRepository } from "./public-repositories.js";
+import { parsePublicBrowseRequest, readPublicRepository, RepositoryBrowseRequestError, parseSignedRepositoryBrowseRequest } from "./public-repositories.js";
 
 function ownerModerationNotice(state: PublicationModerationState | undefined) { return state ? {suppressed:state.suppressed,version:state.version,reason:state.reason,reportId:state.reportId,decidedAt:state.decidedAt} : undefined; }
 
@@ -79,6 +80,8 @@ export { IntegratorSandbox, AgentSandbox } from "./integrator.js";
 const TASK_ID = /^[a-z0-9][a-z0-9-]{2,40}$/;
 const json = (data: unknown, status = 200) => Response.json(data, { status });
 const text = (message: string, status: number) => new Response(message, { status });
+const repositoryReadJson = (data: unknown, status = 200) => Response.json(data, { status, headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
+const repositoryReadText = (message: string, status: number) => new Response(message, { status, headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
 const clean = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
 class RequestBodyError extends Error {}
 
@@ -207,27 +210,45 @@ export default {
       }
       const ip = request.headers.get("CF-Connecting-IP");
       if (!ip) return publicResponse({ error: "Public browsing unavailable" }, 503);
-      const limited = await env.API_LIMITER.limit({ key: `public:${projectId}:${ip}` });
+      let limited;
+      try { limited = await env.API_LIMITER.limit({ key: `public:${projectId}:${ip}` }); }
+      catch { return publicResponse({ error: "Public request admission is unavailable; retry" }, 503); }
       if (!limited.success) return publicResponse({ error: "Too many requests" }, 429);
       let browseRequest;
       try { browseRequest = parsePublicBrowseRequest(publicRoute[2]!, url.searchParams); }
-      catch { return publicResponse({ error: "Invalid public browse request" }, 400); }
+      catch (error) { return publicResponse({ error: error instanceof RepositoryBrowseRequestError ? error.message : "Invalid public browse request" }, error instanceof RepositoryBrowseRequestError ? error.status : 400); }
       const project = projectOf(env, projectId);
-      const grant = await project.publicGrant();
+      let grant;
+      try { grant = await project.publicGrant(); }
+      catch { return publicResponse({ error: "Published repository scope is unavailable; retry" }, 503); }
       if (!grant) return publicResponse({ error: "Repository not found" }, 404);
       try {
         let result: unknown;
+        let authorizeRepositoryRead: (() => Promise<void>) | undefined;
         if (browseRequest.kind === "meta") result = { id: projectId, name: grant.name, acceptedCommit: grant.acceptedCommit, visibility: "public", version: grant.version };
         else {
-          using repo = await env.ARTIFACTS.get(grant.canonicalRepoName);
+          const readContext = await project.repositoryReadContext(null, null);
+          if (!readContext || readContext.canonicalRepoName !== grant.canonicalRepoName || readContext.publicationVersion !== grant.version || readContext.acceptedCommit !== grant.acceptedCommit) return publicResponse({ error: "Published repository scope changed; reload" }, 409);
+          const authorize = async () => {
+            if (!await project.assertRepositoryReadContext(readContext, null, null)) throw new RepositoryReadError(503, "authorization");
+          };
+          authorizeRepositoryRead = authorize;
+          using repo = await openRepositoryRead(env, { repoName: grant.canonicalRepoName, authorize, reserveGroup: (operationId) => globalOf(env).reserveRepositoryReadOperation(operationId, readContext.accountKey), ...(browseRequest.kind === "diff" ? { limits: { maxProviderCalls: 10_016, deadlineMs: 120_000 } } : {}) });
           result = await readPublicRepository(repo, grant, browseRequest);
         }
-        const current = await project.publicGrant();
-        if (!current || current.version !== grant.version || current.acceptedCommit !== grant.acceptedCommit || current.canonicalRepoName !== grant.canonicalRepoName) {
-          return publicResponse({ error: "Repository visibility or accepted history changed; reload" }, 409);
+        if (authorizeRepositoryRead) await authorizeRepositoryRead();
+        else {
+          const current = await project.publicGrant();
+          if (!current || current.version !== grant.version || current.acceptedCommit !== grant.acceptedCommit || current.canonicalRepoName !== grant.canonicalRepoName) return publicResponse({ error: "Repository visibility or accepted history changed; reload" }, 409);
         }
         return publicResponse(result);
-      } catch { return publicResponse({ error: "Repository content unavailable; retry" }, 404); }
+      } catch (error) {
+        if (error instanceof RepositoryReadError) return publicResponse({ error: error.message, reason: error.reason }, error.status);
+        if (error instanceof RepositoryBrowseRequestError) return publicResponse({ error: error.message }, error.status);
+        if (error instanceof Error && error.message.includes("5,000-file inspection limit")) return publicResponse({ error: "Diff exceeds the supported 5,000-file inspection limit; no complete diff is available" }, 413);
+        if (error instanceof Error && ["Path not found", "File not found"].includes(error.message)) return publicResponse({ error: "Repository content not found" }, 404);
+        return publicResponse({ error: "Repository content unavailable; no complete response is available. Retry." }, 503);
+      }
     }
 
     const serviceReadRoute = /^\/api\/p\/([a-z0-9]{12,16})\/connections\/(svc_[a-f0-9-]{36})\/candidates\/([a-z0-9_-]+)$/.exec(url.pathname);
@@ -1056,74 +1077,62 @@ export default {
           try { return json({ checks: await project.registerExternalRun(checksRoute[1]!, value.checkId, `run_${crypto.randomUUID()}`) }, 201); } catch { return text("Unknown candidate or check", 404); }
         }
 
-        // ----- code browser -----
-        if (sub === "/commits" && method === "GET") {
-          const repo = await env.ARTIFACTS.get(state.canonicalRepoName);
-          const ref = url.searchParams.get("ref") ?? undefined;
-          if (ref !== undefined && !isSafeRef(ref)) return text("Invalid ref", 400);
-          return json(await listCommits(repo, ref, Number(url.searchParams.get("limit") ?? 30), Number(url.searchParams.get("offset") ?? 0)));
-        }
-        if ((sub === "/tree" || sub === "/blob") && method === "GET") {
-          const repo = await env.ARTIFACTS.get(state.canonicalRepoName);
-          const refParam = url.searchParams.get("ref") ?? undefined;
-          if (refParam !== undefined && !isSafeRef(refParam)) return text("Invalid ref", 400);
-          const commit = await resolveCommit(repo, refParam);
-          if (!commit) return text("Nothing here yet", 404);
-          const p = url.searchParams.get("path") ?? "";
+        // Repository reads validate the entire request before acquiring storage.
+        if (method === "GET" && ["/commits", "/tree", "/blob", "/diff", "/blob-by-hash"].includes(sub)) {
+          let browseRequest;
+          try { browseRequest = parseSignedRepositoryBrowseRequest(sub, url.searchParams); }
+          catch (error) { return repositoryReadJson({ error: error instanceof Error ? error.message : "Invalid repository request" }, error instanceof RepositoryBrowseRequestError ? error.status : 400); }
+          const taskId = "task" in browseRequest ? browseRequest.task : undefined;
+          const candidateId = "candidate" in browseRequest ? browseRequest.candidate : undefined;
+          const task = taskId && Object.hasOwn(state.tasks, taskId) ? state.tasks[taskId] : undefined;
+          const candidate = candidateId && Object.hasOwn(state.candidates, candidateId) ? state.candidates[candidateId] : undefined;
+          if (taskId && !task) return repositoryReadText("Unknown change", 404);
+          if (candidateId && !candidate?.candidateCommit) return repositoryReadText("Unknown candidate", 404);
+          const repoName = task?.workspace.repoName ?? state.canonicalRepoName;
+          let readContext;
+          try { readContext = await project.repositoryReadContext(userId, taskId ?? null, candidateId ?? null); }
+          catch { return repositoryReadJson({ error: "Repository read scope is unavailable", reason: "authorization" }, 503); }
+          if (!readContext || readContext.repoName !== repoName || readContext.canonicalRepoName !== state.canonicalRepoName) return repositoryReadText("Repository read scope is unavailable", 503);
+          const reserveRepositoryBrowse = (operationId: string) => globalOf(env).reserveRepositoryReadOperation(operationId, readContext.accountKey);
+          const credentialHash = auth.viaToken ? await gitParentTokenHash(request) : undefined;
+          const authorizeRead = async () => {
+            const sessionValid = () => auth.viaToken ? Boolean(credentialHash) : Boolean(auth.expiresAt && auth.expiresAt > Date.now());
+            if (!sessionValid() || !await project.assertRepositoryReadContext(readContext, userId, taskId ?? null, credentialHash, candidateId ?? null) || !sessionValid()) throw new RepositoryReadError(503, "authorization");
+          };
           try {
-            return json(sub === "/tree" ? { commit, entries: await listDirectory(repo, commit, p) } : { commit, path: p, ...(await readFileText(repo, commit, p)) });
-          } catch (e) {
-            return text(e instanceof Error ? e.message : "Not found", 404);
+            await authorizeRead();
+            using repo = await openRepositoryRead(env, { repoName, authorize: authorizeRead, reserveGroup: reserveRepositoryBrowse, ...(browseRequest.kind === "diff" ? { limits: { maxProviderCalls: 10_016, deadlineMs: 120_000 } } : {}) });
+            let result: unknown;
+            if (browseRequest.kind === "history") result = await listCommits(repo, browseRequest.ref, browseRequest.limit, browseRequest.offset);
+            else if (browseRequest.kind === "directory" || browseRequest.kind === "file") {
+              const commit = await resolveCommit(repo, browseRequest.ref);
+              if (!commit) return repositoryReadText("Nothing here yet", 404);
+              result = browseRequest.kind === "directory" ? { commit, entries: await listDirectory(repo, commit, browseRequest.path) } : { commit, path: browseRequest.path, ...(await readFileText(repo, commit, browseRequest.path)) };
+            } else if (browseRequest.kind === "blob") result = await readBlobByHash(repo, browseRequest.hash);
+            else {
+              let headCommit = candidate?.candidateCommit ?? task?.currentCommit ?? browseRequest.commit;
+              const baseCommit = candidate?.expectedAcceptedBase ?? task?.baseCommit;
+              if (browseRequest.commit && browseRequest.commit.length < 40) {
+                const recent = await listCommits(repo, undefined, 100, 0);
+                const matches = recent.filter((commit) => commit.hash.startsWith(browseRequest.commit!));
+                if (matches.length !== 1) return repositoryReadText(matches.length ? "Abbreviated hash is ambiguous" : "No recent commit matches that hash", matches.length ? 400 : 404);
+                headCommit = matches[0]!.hash;
+              }
+              const head = await resolveCommit(repo, headCommit);
+              if (!head) return repositoryReadText("Commit not found", 404);
+              const base = baseCommit ? await resolveCommit(repo, baseCommit) : head.parents[0] ? await resolveCommit(repo, head.parents[0]) : null;
+              if ((baseCommit || head.parents[0]) && !base) return repositoryReadText("The comparison base could not be read; no complete diff is available. Retry.", 503);
+              result = { repo: taskId ? `task:${taskId}` : "canonical", base: base?.hash ?? null, head, files: await diffTrees(repo, base?.treeHash, head.treeHash) };
+            }
+            await authorizeRead();
+            return Response.json(result, { headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
+          } catch (error) {
+            if (error instanceof RepositoryReadError) return repositoryReadJson({ error: error.message, reason: error.reason }, error.status);
+            if (error instanceof RepositoryBrowseRequestError) return repositoryReadJson({ error: error.message }, error.status);
+            if (error instanceof Error && error.message.includes("5,000-file inspection limit")) return repositoryReadJson({ error: "Diff exceeds the supported 5,000-file inspection limit; no complete diff is available" }, 413);
+            if (error instanceof Error && ["Path not found", "File not found", "Blob not found"].includes(error.message)) return repositoryReadJson({ error: "Repository content not found" }, 404);
+            return repositoryReadJson({ error: "Repository content unavailable; no complete response is available. Retry." }, 503);
           }
-        }
-
-        // ----- diffs: a commit against its parent, or a change against the commit it started from -----
-        if (sub === "/diff" && method === "GET") {
-          const commitParam = url.searchParams.get("commit");
-          const taskParam = url.searchParams.get("task");
-          let repoName = state.canonicalRepoName;
-          let baseCommit: string | undefined;
-          let headCommit: string | undefined;
-          const candidateParam = url.searchParams.get("candidate");
-          if (candidateParam) {
-            const c = state.candidates[candidateParam];
-            if (!c?.candidateCommit) return text("Unknown candidate", 404);
-            baseCommit = c.expectedAcceptedBase;
-            headCommit = c.candidateCommit;
-          } else if (taskParam) {
-            const task = state.tasks[taskParam];
-            if (!task) return text("Unknown change", 404);
-            repoName = task.workspace.repoName;
-            baseCommit = task.baseCommit;
-            headCommit = task.currentCommit;
-          } else if (commitParam && /^[0-9a-f]{40}$/.test(commitParam)) {
-            headCommit = commitParam;
-          } else if (commitParam && /^[0-9a-f]{7,39}$/.test(commitParam)) {
-            // Abbreviated hash, as `git log --oneline` prints it: resolve against recent history.
-            const recent = await listCommits(await env.ARTIFACTS.get(state.canonicalRepoName), undefined, 500, 0);
-            const matches = recent.filter((c) => c.hash.startsWith(commitParam));
-            if (matches.length !== 1) return text(matches.length ? "Abbreviated hash is ambiguous" : "No recent commit matches that hash", matches.length ? 400 : 404);
-            headCommit = matches[0]!.hash;
-          } else {
-            return text("Pass ?commit=<sha> or ?task=<id>", 400);
-          }
-          const repo = await env.ARTIFACTS.get(repoName);
-          const head = await resolveCommit(repo, headCommit);
-          if (!head) return text("Commit not found", 404);
-          const base = baseCommit ? await resolveCommit(repo, baseCommit) : head.parents[0] ? await resolveCommit(repo, head.parents[0]) : null;
-          if ((baseCommit || head.parents[0]) && !base) return text("The comparison base could not be read; no complete diff is available. Retry.", 503);
-          const files = await diffTrees(repo, base?.treeHash, head.treeHash);
-          return json({ repo: taskParam ? `task:${taskParam}` : "canonical", base: base?.hash ?? null, head, files });
-        }
-        if (sub === "/blob-by-hash" && method === "GET") {
-          const hash = url.searchParams.get("hash") ?? "";
-          const taskParam = url.searchParams.get("task");
-          if (!/^[0-9a-f]{40}$/.test(hash)) return text("Invalid hash", 400);
-          const repoName = taskParam ? state.tasks[taskParam]?.workspace.repoName : state.canonicalRepoName;
-          if (!repoName) return text("Unknown change", 404);
-          const repo = await env.ARTIFACTS.get(repoName);
-          // Content-addressed: the bytes behind a hash never change, so the browser may keep them forever.
-          return Response.json(await readBlobByHash(repo, hash), { headers: { "Cache-Control": "private, max-age=31536000, immutable" } });
         }
 
         // Revoke only this actor's opaque Git credentials; other contributors retain access.
@@ -1237,15 +1246,29 @@ export default {
           }
           if (action === "ready") {
             const parent = task.dependsOn ? state.tasks[task.dependsOn] : undefined;
-            if (parent && parent.status !== "accepted") return text(`Stacked on "${parent.id}", which is ${parent.status}; it must be accepted first`, 409);
-            const repo = await env.ARTIFACTS.get(task.workspace.repoName);
-            const head = (await repo.log({ ref: `refs/heads/${task.workspace.branch}`, limit: 1 }))[0]?.hash ?? (await repo.log({ ref: task.workspace.branch, limit: 1 }))[0]?.hash;
-            if (!head) return text(`Nothing pushed to ${task.workspace.branch} yet`, 409);
-            const [base, tip] = await Promise.all([resolveCommit(repo, task.baseCommit), resolveCommit(repo, head)]);
-            if (!base || !tip) return text("Could not read the saved change and base; retry without marking ready", 503);
-            const filesChanged = (await diffTrees(repo, base.treeHash, tip.treeHash)).map((file) => file.path);
-            const { applied } = await project.ingestCheckpoint({ eventId: `ready-${task.id}-${head}`, taskId: task.id, commit: head, ready: true, filesChanged });
-            return json({ task: task.id, commit: head, applied });
+            if (parent && parent.status !== "accepted") return repositoryReadText(`Stacked on "${parent.id}", which is ${parent.status}; it must be accepted first`, 409);
+            if (!isSafeRef(task.workspace.branch)) return repositoryReadText("The saved workspace branch is unavailable; Git work is preserved", 503);
+            try {
+              const readContext = await project.repositoryReadContext(userId, task.id);
+              const credentialHash = auth.viaToken ? await gitParentTokenHash(request) : undefined;
+              const authorize = async () => {
+                const sessionValid = () => auth.viaToken ? Boolean(credentialHash) : Boolean(auth.expiresAt && auth.expiresAt > Date.now());
+                if (!sessionValid() || !await project.assertRepositoryReadContext(readContext, userId, task.id, credentialHash) || !sessionValid()) throw new RepositoryReadError(503, "authorization");
+              };
+              using repo = await openRepositoryRead(env, { repoName: task.workspace.repoName, authorize, reserveGroup: (operationId) => globalOf(env).reserveRepositoryReadOperation(operationId, readContext.accountKey), limits: { maxProviderCalls: 10_016, deadlineMs: 120_000 } });
+              const head = (await repo.log({ ref: `refs/heads/${task.workspace.branch}`, limit: 1 }))[0]?.hash ?? (await repo.log({ ref: task.workspace.branch, limit: 1 }))[0]?.hash;
+              if (!head) return repositoryReadText(`Nothing pushed to ${task.workspace.branch} yet`, 409);
+              const [base, tip] = await Promise.all([resolveCommit(repo, task.baseCommit), resolveCommit(repo, head)]);
+              if (!base || !tip) return repositoryReadText("Could not read the saved change and base; retry without marking ready", 503);
+              const filesChanged = (await diffTrees(repo, base.treeHash, tip.treeHash)).map((file) => file.path);
+              await authorize();
+              const { applied } = await project.ingestMemberCheckpoint({ eventId: `ready-${task.id}-${head}`, taskId: task.id, commit: head, ready: true, filesChanged }, userId, readContext, credentialHash, auth.expiresAt);
+              return Response.json({ task: task.id, commit: head, applied }, { headers: { "Cache-Control": "no-store" } });
+            } catch (error) {
+              if (error instanceof RepositoryReadError) return repositoryReadJson({ error: error.message, reason: error.reason, detail: "Pushed Git work is preserved; readiness was not confirmed" }, error.status);
+              if (error instanceof Error && error.message.includes("5,000-file inspection limit")) return repositoryReadJson({ error: "Diff exceeds the supported 5,000-file inspection limit; no readiness was recorded. Pushed Git work is preserved." }, 413);
+              return repositoryReadJson({ error: "Change inspection is unavailable. Pushed Git work is preserved; retry without creating another workspace." }, 503);
+            }
           }
           // AI agent works on this change
           if (["accepted", "cancelled", "integrating", "verifying"].includes(task.status)) return text("This change cannot start an agent in its current state", 409);

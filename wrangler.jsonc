@@ -4,6 +4,7 @@
   "main": "src/server/worker.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
+  "limits": { "subrequests": 50000 },
   "assets": { "directory": "./dist", "binding": "ASSETS", "run_worker_first": ["/api/*", "/git/*", "/preview/*", "/webhooks/*", "/auth-config", "/pricing", "/plan-price", "/status", "/status.json", "/health"], "not_found_handling": "single-page-application" },
   "vars": {
     "EVIDENCE_STORAGE_GLOBAL_BYTES": "67108864",
@@ -20,6 +21,8 @@
     "MANAGED_ACCOUNT_MONTHLY_USD_MICROS": "5000000",
     "CORE_GIT_GLOBAL_MONTHLY_USD_MICROS": "5000000",
     "CORE_GIT_ACCOUNT_MONTHLY_USD_MICROS": "2500000",
+    "REPOSITORY_READ_GLOBAL_MONTHLY_USD_MICROS": "2000000",
+    "REPOSITORY_READ_ACCOUNT_MONTHLY_USD_MICROS": "1000000",
     "OPERATOR_ACCOUNTS": "d169eecdcf6e",
     "RUNS_ENABLED": "true",
     "FREE_RUNS_PER_DAY": "10",
