@@ -25,6 +25,19 @@ export async function verifyPreview(env: Env, projectId: string, commit: string,
   return crypto.subtle.verify("HMAC", await key(env), bytes, enc.encode(JSON.stringify(["preview-v2", audience, projectId, commit, exp])));
 }
 
+export const generationBuildPrefix = (projectId: string, commit: string, incarnation: string, generation: string) => `build-generations/${projectId}/${incarnation}/${commit}/${generation}`;
+
+export async function signPreviewGeneration(env: Env, projectId: string, commit: string, incarnation: string, generation: string, audience: string, ttlSeconds = 3600): Promise<{ exp: number; sig: string }> {
+  const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
+  return { exp, sig: hex(await crypto.subtle.sign("HMAC", await key(env), enc.encode(JSON.stringify(["preview-v3", audience, projectId, commit, incarnation, generation, exp])))) };
+}
+
+export async function verifyPreviewGeneration(env: Env, projectId: string, commit: string, incarnation: string, generation: string, audience: string, exp: number, sig: string): Promise<boolean> {
+  if (!Number.isInteger(exp) || exp < Date.now() / 1000 || !/^[0-9a-f]{64}$/.test(sig)) return false;
+  const bytes = Uint8Array.from(sig.match(/../g)!.map((h) => parseInt(h, 16)));
+  return crypto.subtle.verify("HMAC", await key(env), bytes, enc.encode(JSON.stringify(["preview-v3", audience, projectId, commit, incarnation, generation, exp])));
+}
+
 /** Configuration is trusted operator input; malformed or ambiguous mappings fail closed. */
 function previewSite(hostname: string): string {
   return hostname.endsWith(".workers.dev") ? hostname.split(".").slice(-3).join(".") : hostname;

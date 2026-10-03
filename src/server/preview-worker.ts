@@ -7,7 +7,7 @@ export interface PreviewWorkerEnv {
 export default {
   async fetch(request: Request, env: PreviewWorkerEnv): Promise<Response> {
     const url = new URL(request.url);
-    if (!/^[a-z0-9]{12,16}$/.test(env.REPOSITORY_ID) || !/^\/preview\/[0-9a-f]{40}\/[0-9]+\/[0-9a-f]{64}\//.test(url.pathname)) {
+    if (!/^[a-z0-9]{12,16}$/.test(env.REPOSITORY_ID) || !/^\/(?:preview\/[0-9a-f]{40}|preview-v3\/[0-9a-f]{40}\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/[0-9]+\/[0-9a-f]{64}\/.*$/.test(url.pathname)) {
       return new Response("Not found", { status: 404, headers: { "Cache-Control": "no-store" } });
     }
     if (request.method !== "GET" && request.method !== "HEAD") {

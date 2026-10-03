@@ -1,10 +1,12 @@
 import {ownerStorageContext,copyReportPage,privateRecoveryReportPage,type OwnerStorageContext,type CopyReportPage} from "./storage-reconciliation-ledger.js";
+import {PreviewCredentialIncidents,type PreviewCredentialIncidentStatus} from "./preview-credential-incidents.js";
+import {RepositoryPreviewGenerations,type PreviewGenerationRecord} from "./preview-generations.js";
 import {EVIDENCE_COPY_ID} from "./evidence-copy-id.js";
 import { EvidenceStorageLedger } from "./evidence-storage.js";
 import {PreviewStorageWriters,type PreviewCopyPlan} from "./preview-storage-writers.js";
 import { PreviewStorageAdmissionError, type PreviewStorageAdmission } from "./preview-storage.js";
-import { PreviewStorageLedger, previewStorageBudget } from "./preview-storage.js";
-import { validatePreviewStorageManifest, type PreviewStorageIdentity, type PreviewStorageManifest } from "./preview-storage-upload.js";
+import { PreviewStorageLedger, previewStorageBudget, previewManifestPrefix } from "./preview-storage.js";
+import { validatePreviewStorageManifest, createPreviewStorageManifest, type PreviewStorageIdentity, type PreviewStorageManifest } from "./preview-storage-upload.js";
 import { HealthProbeBudget, type HealthProbeAdmission } from "./health-probe-budget.js";
 import { z } from "zod";
 import { PublicGitPublicationLedger, type PublicGitPublication } from "./public-git-publication.js";
@@ -192,6 +194,26 @@ export interface ActivityRow {
 export interface ImportHistoryOperation { projectId: string; head: string; canonicalRepoName: string; ownerId: string; instanceId: string; createdAt: string }
 
 export interface Ledger {
+  previewGenerationCredentialIncident(g:string,repoName:string,token:string,expiresAt:number):Promise<void>;
+  previewGenerationCredentialSummary(g:string):Promise<{status:PreviewCredentialIncidentStatus;expiresAt:number}|null>;
+
+  previewGenerationStorageReady(key:string,hash:string):Promise<boolean>;
+  previewGenerationBegin(commit:string,canonicalRepo:string,actorId:string,expected:string|null,key:string,sourceKey?:string):Promise<{status:"created"|"duplicate";record:PreviewGenerationRecord}>;
+  previewGenerationGet(generation:string):Promise<PreviewGenerationRecord|null>;
+  previewGenerationLatest(commit:string):Promise<PreviewGenerationRecord|null>;
+  previewGenerationActive(commit:string):Promise<PreviewGenerationRecord|null>;
+  previewGenerationScope(generation:string):Promise<PreviewStorageIdentity>;
+  previewGenerationClaim(generation:string):Promise<boolean>;
+  previewGenerationFail(generation:string,reason:string):Promise<void>;
+  previewGenerationPromote(generation:string,manifestHash:string):Promise<void>;
+  previewGenerationForRead(commit:string,incarnation:string,generation:string):Promise<boolean>;
+  previewLegacyGenerationAllowed(commit:string):Promise<boolean>;
+  previewGenerationEstimate(sourceKey:string,identity:PreviewStorageIdentity,generation:string):Promise<PreviewStorageManifest>;
+  previewGenerationCapacity(sourceKey:string,identity:PreviewStorageIdentity):Promise<PreviewStorageAdmission>;
+  reservePreviewGenerationEstimate(manifest:PreviewStorageManifest):Promise<PreviewStorageAdmission>;
+  finalizePreviewGenerationManifest(manifest:PreviewStorageManifest):Promise<PreviewStorageAdmission>;
+  quarantinePreviewStorage(key:string,identity:PreviewStorageIdentity):Promise<void>;
+
   previewStorageWriterState(key:string):Promise<{unfinished:boolean}>;
   previewStorageReadmission(identity:PreviewStorageIdentity):Promise<PreviewStorageAdmission>;
   reserveEvidenceStorage(identity:PreviewStorageIdentity,id:string,size:number,sha256:string):Promise<PreviewStorageAdmission>;
@@ -511,6 +533,80 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   private state: FlareGitProjectState | null = null;
+  async previewGenerationCredentialIncident(g:string,repoName:string,token:string,expiresAt:number){
+    const record=new RepositoryPreviewGenerations(this.ctx.storage).get(g);
+    if(!record||repoName!==`flaregit-${record.identity.projectId}`||record.identity.projectId!==this.load().projectId)throw new Error("Preview credential incident repository mismatch");
+    await new PreviewCredentialIncidents(this.ctx.storage).record(g,repoName,token,expiresAt,undefined,()=>{
+      const current=new RepositoryPreviewGenerations(this.ctx.storage).get(g);
+      if(!current||current.identity.projectId!==record.identity.projectId||current.identity.incarnation!==record.identity.incarnation||repoName!==`flaregit-${current.identity.projectId}`||this.load().canonicalRepoName!==repoName)throw new Error("Preview credential incident scope changed");
+    });
+    await this.ensureRecoveryAlarm();
+  }
+  async previewGenerationCredentialSummary(g:string){const incidents=new PreviewCredentialIncidents(this.ctx.storage);incidents.pendingBatch();return incidents.summary(g);}
+  private async retryPreviewCredentialIncidents(){
+    const incidents=new PreviewCredentialIncidents(this.ctx.storage),pending=incidents.pendingBatch();
+    for(const incident of pending){
+      if(!incidents.markAttempt(incident.generation))continue;
+      try{using repo=await this.env.ARTIFACTS.get(incident.repoName);if(await repo.revokeToken(incident.token))await incidents.markRevoked(incident.generation,incident.token);}catch{console.error("Preview credential revocation retry unavailable");}
+    }
+    if(this.ctx.storage.sql.exec("SELECT generation FROM preview_credential_incidents WHERE status='pending' LIMIT 1").toArray().length)await this.ensureRecoveryAlarm();
+  }
+  async previewGenerationBegin(commit:string,canonicalRepo:string,actorId:string,expected:string|null,key:string,sourceKey?:string){
+    if(await this.roleOf(actorId)!=="owner"||await accountOf(this.env,await accountKeyFor(actorId)).accountLifecycle()!=="active")throw new Error("Active preview owner required");
+    const identity=await this.previewStorageScope(commit,canonicalRepo);
+    if(await this.roleOf(actorId)!=="owner")throw new Error("Preview owner access changed");
+    return new RepositoryPreviewGenerations(this.ctx.storage).begin(identity,actorId,expected,key,sourceKey);
+  }
+  async previewGenerationGet(g:string){return new RepositoryPreviewGenerations(this.ctx.storage).get(g);}
+  async previewGenerationLatest(commit:string){return new RepositoryPreviewGenerations(this.ctx.storage).latest(commit);}
+  async previewGenerationActive(commit:string){return new RepositoryPreviewGenerations(this.ctx.storage).active(commit);}
+  async previewGenerationScope(g:string){
+    const generations=new RepositoryPreviewGenerations(this.ctx.storage),record=generations.get(g);
+    if(!record||record.state==="quarantined"||generations.latest(record.identity.commit)?.generation!==g)throw new Error("Preview generation was superseded");
+    if(await this.roleOf(record.actorId)!=="owner"||await accountOf(this.env,await accountKeyFor(record.actorId)).accountLifecycle()!=="active")throw new Error("Preview actor access changed");
+    const scope=await this.previewStorageScope(record.identity.commit,this.load().canonicalRepoName);
+    if(JSON.stringify(scope)!==JSON.stringify(record.identity))throw new Error("Preview generation owner or incarnation changed");
+    return{...scope,generation:g};
+  }
+  async previewGenerationClaim(g:string){await this.previewGenerationScope(g);return new RepositoryPreviewGenerations(this.ctx.storage).markBuilding(g);}
+  async previewGenerationFail(g:string,reason:string){new RepositoryPreviewGenerations(this.ctx.storage).fail(g,reason);}
+  async previewGenerationPromote(g:string,hash:string){
+    const before=await this.previewGenerationScope(g);
+    if(!await globalOf(this.env).previewGenerationStorageReady(previewManifestPrefix(before),hash))throw new Error("Preview generation upload receipts are unconfirmed");
+    const scope=await this.previewGenerationScope(g),{generation:_,...identity}=scope;void _;
+    new RepositoryPreviewGenerations(this.ctx.storage).promote(g,identity,hash);
+  }
+  async previewGenerationStorageReady(key:string,hash:string){
+    new PreviewStorageWriters(this.ctx.storage);
+    const row=this.ctx.storage.sql.exec<{payload:string}>("SELECT payload FROM preview_storage_reservations WHERE physical_key=?",key).toArray()[0];
+    if(!row)return false;
+    const manifest=JSON.parse(row.payload) as PreviewStorageManifest;
+    if(!manifest.identity.generation||manifest.manifestHash!==hash||previewManifestPrefix(manifest.identity)!==key)return false;
+    if(this.ctx.storage.sql.exec("SELECT physical_key FROM preview_generation_quarantines WHERE physical_key=?",key).toArray().length)return false;
+    const writers=this.ctx.storage.sql.exec<{closed:number;pending:string}>("SELECT closed,pending FROM preview_copy_writers WHERE physical_key=?",key).toArray();
+    if(!writers.length||writers.some(writer=>!writer.closed||(JSON.parse(writer.pending) as unknown[]).length))return false;
+    for(const asset of manifest.assets){const object=await this.env.EVIDENCE_BUCKET.head(`${key}/${asset.path}`);if(!object||object.size!==asset.size||object.customMetadata?.manifestHash!==hash||object.customMetadata?.sha256!==asset.sha256)return false;}
+    return !(await this.previewStorageWriterState(key)).unfinished;
+  }
+  async previewGenerationForRead(commit:string,inc:string,g:string){
+    const generations=new RepositoryPreviewGenerations(this.ctx.storage),record=generations.get(g);
+    if(!record||record.state!=="ready"||record.identity.commit!==commit||record.identity.incarnation!==inc||!record.manifestHash)return false;
+    try{const scope=await this.previewStorageScope(commit,this.load().canonicalRepoName);return JSON.stringify(scope)===JSON.stringify(record.identity);}catch{return false;}
+  }
+  async previewLegacyGenerationAllowed(commit:string){return !new RepositoryPreviewGenerations(this.ctx.storage).latest(commit);}
+  private savedPreviewManifest(key:string,identity:PreviewStorageIdentity){
+    new PreviewStorageLedger(this.ctx.storage);
+    const row=this.ctx.storage.sql.exec<{payload:string}>("SELECT payload FROM preview_storage_reservations WHERE physical_key=?",key).toArray()[0];
+    if(!row)throw new Error("Saved funded preview manifest unavailable");
+    const manifest=JSON.parse(row.payload) as PreviewStorageManifest;
+    if(previewManifestPrefix(manifest.identity)!==key||["projectId","commit","incarnation","accountKey"].some(field=>manifest.identity[field as keyof PreviewStorageIdentity]!==identity[field as keyof PreviewStorageIdentity]))throw new Error("Preview recovery storage scope changed");
+    return manifest;
+  }
+  async previewGenerationEstimate(key:string,identity:PreviewStorageIdentity,g:string){const manifest=this.savedPreviewManifest(key,identity);return createPreviewStorageManifest({...identity,generation:g},manifest.assets);}
+  async previewGenerationCapacity(key:string,identity:PreviewStorageIdentity){const manifest=this.savedPreviewManifest(key,identity);return new PreviewStorageLedger(this.ctx.storage).capacity(manifest.totalBytes,identity.accountKey,previewStorageBudget(this.env));}
+  async reservePreviewGenerationEstimate(manifest:PreviewStorageManifest):Promise<PreviewStorageAdmission>{await validatePreviewStorageManifest(manifest);try{this.ctx.storage.transactionSync(()=>{new PreviewStorageLedger(this.ctx.storage).estimate(manifest,previewStorageBudget(this.env));new PreviewStorageWriters(this.ctx.storage).registerPreview(previewManifestPrefix(manifest.identity));});return{allowed:true};}catch(error){if(error instanceof PreviewStorageAdmissionError)return{allowed:false,reason:error.reason};throw error;}}
+  async finalizePreviewGenerationManifest(manifest:PreviewStorageManifest):Promise<PreviewStorageAdmission>{await validatePreviewStorageManifest(manifest);try{this.ctx.storage.transactionSync(()=>{new PreviewStorageLedger(this.ctx.storage).finalize(manifest,previewStorageBudget(this.env));const key=previewManifestPrefix(manifest.identity);if(this.ctx.storage.sql.exec("SELECT physical_key FROM preview_copy_writers WHERE physical_key=?",key).toArray().length)throw new Error("Generation already has upload activity");const writers=new PreviewStorageWriters(this.ctx.storage),plan=writers.plan(key);this.ctx.storage.sql.exec("UPDATE preview_copy_plans SET doc=? WHERE physical_key=?",JSON.stringify({...plan,keys:manifest.assets.map(asset=>`${key}/${asset.path}`),bytes:manifest.totalBytes}),key);});return{allowed:true};}catch(error){if(error instanceof PreviewStorageAdmissionError)return{allowed:false,reason:error.reason};throw error;}}
+  async quarantinePreviewStorage(key:string,identity:PreviewStorageIdentity){this.savedPreviewManifest(key,identity);new PreviewStorageWriters(this.ctx.storage);this.ctx.storage.sql.exec("INSERT OR IGNORE INTO preview_generation_quarantines VALUES(?)",key);}
   async reservePreviewWriter(key:string,writerId:string):Promise<void>{const writers=new PreviewStorageWriters(this.ctx.storage);writers.registerPreview(key);writers.begin(key,writerId);}
   async beginPreviewPut(key:string,writerId:string,assetPath:string):Promise<void>{new PreviewStorageWriters(this.ctx.storage).dispatch(key,writerId,assetPath?`${key}/${assetPath}`:key);}
   async finishPreviewPut(key:string,writerId:string,assetPath:string):Promise<void>{new PreviewStorageWriters(this.ctx.storage).settled(key,writerId,assetPath?`${key}/${assetPath}`:key);}
@@ -1418,6 +1514,7 @@ export class RepositoryController extends DurableObject<Env> {
 
   /** Recovery sweep: re-send deliveries whose queue message was never sent or was lost, until none are pending. */
   override async alarm(): Promise<void> {
+    await this.retryPreviewCredentialIncidents();
     await this.reconcileDirectoryRegistration();
     await this.reconcileContributorRegistrations();
     const now = Date.now();
@@ -1974,7 +2071,7 @@ export class RepositoryController extends DurableObject<Env> {
     return new HealthProbeBudget(this.ctx.storage).reserve();
   }
   async previewStorageWriterState(key:string):Promise<{unfinished:boolean}>{
-    if(!/^builds\/[a-z0-9]{12,16}\/[a-f0-9]{40}$/.test(key))throw new Error("Invalid preview scope");
+    if(!/^(?:builds\/[a-z0-9]{12,16}\/[a-f0-9]{40}|build-generations\/[a-z0-9]{12,16}\/[a-f0-9-]{36}\/[a-f0-9]{40}\/[a-f0-9-]{36})$/.test(key))throw new Error("Invalid preview scope");
     new PreviewStorageWriters(this.ctx.storage);
     const rows=this.ctx.storage.sql.exec<{closed:number;pending:string}>("SELECT closed,pending FROM preview_copy_writers WHERE physical_key=?",key).toArray();
     return{unfinished:rows.some(row=>!row.closed||(JSON.parse(row.pending) as unknown[]).length>0)};

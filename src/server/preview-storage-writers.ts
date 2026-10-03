@@ -1,3 +1,4 @@
+import {previewManifestPrefix} from "./preview-storage.js";
 import {EVIDENCE_COPY_ID} from "./evidence-copy-id.js";
 import {EvidenceStorageLedger} from "./evidence-storage.js";
 import type {PreviewStorageManifest,PreviewStorageIdentity} from "./preview-storage-upload.js";
@@ -5,13 +6,13 @@ export interface PreviewCopyPlan {physicalKey:string;identity:PreviewStorageIden
 const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 /** PUT dispatch receipts are durable before network dispatch. Unknown writes cannot be inferred absent. */
 export class PreviewStorageWriters {
- constructor(private storage:DurableObjectStorage){storage.sql.exec("CREATE TABLE IF NOT EXISTS preview_copy_plans(physical_key TEXT PRIMARY KEY,project_id TEXT NOT NULL,incarnation TEXT NOT NULL,doc TEXT NOT NULL); CREATE INDEX IF NOT EXISTS preview_copy_project ON preview_copy_plans(project_id,incarnation); CREATE TABLE IF NOT EXISTS preview_copy_writers(physical_key TEXT NOT NULL,writer_id TEXT NOT NULL,closed INTEGER NOT NULL,pending TEXT NOT NULL,PRIMARY KEY(physical_key,writer_id)); CREATE TABLE IF NOT EXISTS preview_copy_fences(project_id TEXT NOT NULL,incarnation TEXT NOT NULL,PRIMARY KEY(project_id,incarnation)); CREATE TABLE IF NOT EXISTS preview_copy_retirements(physical_key TEXT PRIMARY KEY,doc TEXT NOT NULL)");}
+ constructor(private storage:DurableObjectStorage){storage.sql.exec("CREATE TABLE IF NOT EXISTS preview_copy_plans(physical_key TEXT PRIMARY KEY,project_id TEXT NOT NULL,incarnation TEXT NOT NULL,doc TEXT NOT NULL); CREATE INDEX IF NOT EXISTS preview_copy_project ON preview_copy_plans(project_id,incarnation); CREATE TABLE IF NOT EXISTS preview_copy_writers(physical_key TEXT NOT NULL,writer_id TEXT NOT NULL,closed INTEGER NOT NULL,pending TEXT NOT NULL,PRIMARY KEY(physical_key,writer_id)); CREATE TABLE IF NOT EXISTS preview_copy_fences(project_id TEXT NOT NULL,incarnation TEXT NOT NULL,PRIMARY KEY(project_id,incarnation)); CREATE TABLE IF NOT EXISTS preview_copy_retirements(physical_key TEXT PRIMARY KEY,doc TEXT NOT NULL); CREATE TABLE IF NOT EXISTS preview_generation_quarantines(physical_key TEXT PRIMARY KEY)");}
  plan(key:string):PreviewCopyPlan {const row=this.storage.sql.exec<{doc:string}>("SELECT doc FROM preview_copy_plans WHERE physical_key=?",key).toArray()[0];if(!row)throw new Error("Unknown preview copy scope");return JSON.parse(row.doc) as PreviewCopyPlan;}
- private writable(plan:PreviewCopyPlan){if(this.storage.sql.exec("SELECT project_id FROM preview_copy_fences WHERE project_id=? AND incarnation=?",plan.identity.projectId,plan.identity.incarnation).toArray().length||this.storage.sql.exec("SELECT physical_key FROM preview_copy_retirements WHERE physical_key=?",plan.physicalKey).toArray().length)throw new Error("Preview copy is fenced or retired");}
+ private writable(plan:PreviewCopyPlan){if(this.storage.sql.exec("SELECT physical_key FROM preview_generation_quarantines WHERE physical_key=?",plan.physicalKey).toArray().length)throw new Error("Preview generation is quarantined");if(this.storage.sql.exec("SELECT project_id FROM preview_copy_fences WHERE project_id=? AND incarnation=?",plan.identity.projectId,plan.identity.incarnation).toArray().length||this.storage.sql.exec("SELECT physical_key FROM preview_copy_retirements WHERE physical_key=?",plan.physicalKey).toArray().length)throw new Error("Preview copy is fenced or retired");}
  registerPreview(key:string):void{
   const row=this.storage.sql.exec<{payload:string}>("SELECT payload FROM preview_storage_reservations WHERE physical_key=?",key).toArray()[0];if(!row)throw new Error("Preview storage was not reserved");
   const manifest=JSON.parse(row.payload) as PreviewStorageManifest;
-  if(key!==`builds/${manifest.identity.projectId}/${manifest.identity.commit}`)throw new Error("Preview prefix scope changed");
+  if(key!==previewManifestPrefix(manifest.identity))throw new Error("Preview prefix scope changed");
   this.register({physicalKey:key,identity:manifest.identity,keys:manifest.assets.map(asset=>`${key}/${asset.path}`),bytes:manifest.totalBytes,kind:"preview"});
  }
  registerEvidence(identity:PreviewStorageIdentity,id:string,size:number,sha256:string):string{

@@ -1,5 +1,8 @@
 import {storageReconciliationReport,type StorageReconciliationSnapshot} from "./storage-reconciliation-report.js";
 import {createHash} from "node:crypto";
+import type {PreviewGenerationRecord} from "./preview-generations.js";
+import type {PreviewStorageIdentity} from "./preview-storage-upload.js";
+import {buildPreviewGeneration} from "./preview-generation-build.js";
 import {cleanupRepositoryCopies} from "./preview-storage-cleanup.js";
 import { z } from "zod";
 import type { PublicationModerationState } from "./publication-moderation.js";
@@ -29,7 +32,7 @@ import { handleGitGateway } from "./git-gateway-handler.js";
 import { admitGitOperation } from "./core-git-budget.js";
 import { gitAuthEnv, q } from "./shell.js";
 import { ensureBuild } from "./build.js";
-import { buildPrefix, signPreview, validPreviewRegistration } from "./preview-access.js";
+import { buildPrefix, generationBuildPrefix, signPreviewGeneration, signPreview, validPreviewRegistration } from "./preview-access.js";
 import { lookupRepositoryPreviewOrigin } from "./preview-registry.js";
 import { handlePreviewAsset } from "./preview-broker.js";
 import { WorkerEntrypoint } from "cloudflare:workers";
@@ -902,6 +905,36 @@ export default {
           return json({ request },request.registrationStatus==="pending"?202:200);
         }
 
+        if(sub==="/preview/recover-generation"&&method==="POST"){
+          if(!isOwner)return text("Only the owner can replace a preview",403);
+          const input=await body<{commit?:unknown;expectedGeneration?:unknown;idempotencyKey?:unknown}>();
+          const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+          if(Object.keys(input).some(key=>!["commit","expectedGeneration","idempotencyKey"].includes(key))||typeof input.commit!=="string"||input.commit!==state.acceptedState.currentCommit||typeof input.idempotencyKey!=="string"||!uuid.test(input.idempotencyKey)||(input.expectedGeneration!==null&&(typeof input.expectedGeneration!=="string"||!uuid.test(input.expectedGeneration))))return text("Exact accepted commit, generation and stable request key required",400);
+          if(settings.fixture!=="ticket-booking")return text("This repository uses external preview tooling",409);
+          try{
+            await project.previewStorageScope(input.commit,state.canonicalRepoName);
+            const previous=input.expectedGeneration===null?null:await project.previewGenerationGet(input.expectedGeneration);
+            if(previous&&previous.identity.commit!==input.commit)return text("Preview generation belongs to another commit",409);
+            const freshIdentity=await project.previewStorageScope(input.commit,state.canonicalRepoName);
+            const source=await fundedPreviewSource(env,freshIdentity,previous),sourceKey=source.key;
+            const operation=await project.previewGenerationBegin(input.commit,state.canonicalRepoName,userId,input.expectedGeneration,input.idempotencyKey,sourceKey);
+            const record=operation.record;
+            if(operation.status==="duplicate"&&record.state!=="requested")return json({generationId:record.generation,status:record.state},202);
+            const manifest=await globalOf(env).previewGenerationEstimate(sourceKey,record.identity,record.generation);
+            const funding=await globalOf(env).reservePreviewGenerationEstimate(manifest);
+            if(!funding.allowed){await project.previewGenerationFail(record.generation,"storage_unavailable");return text("Replacement preview storage allowance is unavailable; existing upload holds were preserved and no compute was started",409);}
+            await project.previewGenerationScope(record.generation);
+            await globalOf(env).quarantinePreviewStorage(sourceKey,record.identity);
+            const oldOperation=previous?`build-generation-${previous.generation}`:`build-${projectId}-${input.commit}`;
+            const freshRecoveryScope=await project.previewGenerationScope(record.generation);
+            if(JSON.stringify({...record.identity,generation:record.generation})!==JSON.stringify(freshRecoveryScope))throw new Error("Preview recovery owner or incarnation changed");
+            try{if((await globalOf(env).nativeComputeStatus(oldOperation))?.active)await recoverNativeCompute(env,oldOperation);}
+            catch{await project.previewGenerationFail(record.generation,"previous_compute_stop_unconfirmed");return text("Previous preview workspace stop is unconfirmed; replacement was not dispatched and all storage holds remain reserved",409);}
+            await project.previewGenerationScope(record.generation);
+            ctx.waitUntil(buildPreviewGeneration(env,projectId,record.generation).catch(()=>console.error("Replacement preview could not start; generation remains recoverable")));
+            return json({generationId:record.generation,status:"requested"},202);
+          }catch{return text("Replacement preview was not confirmed; reload and retry the identical request key",409);}
+        }
         if(sub==="/preview/retry"&&method==="POST"){
           if(!isOwner)return text("Only the owner can retry preview compute",403);
           const input=await body<{commit?:unknown}>();
@@ -1304,6 +1337,18 @@ export default {
           if (registration.status === "unavailable") return Response.json({ ready: false, status: "pending", canRetry: false, reason: "Preview service is temporarily unavailable. Status checks will continue shortly." }, { headers: { "Cache-Control": "no-store" } });
           const previewOrigin = registration.status === "active" ? registration.origin : null;
           if (!previewOrigin || !env.PREVIEW_SIGNING_KEY) return json({ ready: false, status: "unavailable", canRetry: false, reason: "An isolated preview origin has not been configured for this repository. The platform operator must provision its preview Worker before a link can be opened." });
+          const latestGeneration=await project.previewGenerationLatest(commit);
+          if(latestGeneration){
+            const active=await project.previewGenerationActive(commit);
+            if(active&&await project.previewGenerationForRead(commit,active.identity.incarnation,active.generation)){
+              const origin=previewOrigin;
+              const {exp,sig}=await signPreviewGeneration(env,projectId,commit,active.identity.incarnation,active.generation,origin);
+              return Response.json({ready:true,status:"available",generationId:active.generation,credentialCleanup:await project.previewGenerationCredentialSummary(active.generation),url:`${origin}/preview-v3/${commit}/${active.identity.incarnation}/${active.generation}/${exp}/${sig}/`,expiresAt:new Date(exp*1000).toISOString()},{headers:{"Cache-Control":"no-store"}});
+            }
+            let canRecover=false;
+            if(isOwner&&commit===state.acceptedState.currentCommit){try{const scope=await project.previewStorageScope(commit,state.canonicalRepoName);canRecover=(await fundedPreviewSource(env,scope,latestGeneration)).capacity.allowed;}catch{/* Unknown storage funding never enables recovery. */}}
+            return json({ready:false,status:["requested","building"].includes(latestGeneration.state)?"pending":"unavailable",canRetry:false,generationId:latestGeneration.generation,generationRecovery:{canRecover,expectedGeneration:latestGeneration.generation,detail:"A replacement uses separate storage funding; prior uncertain upload holds remain reserved"}});
+          }
           const ready = Boolean(await env.EVIDENCE_BUCKET.head(`${buildPrefix(projectId, commit)}/index.html`));
           if (!ready && commit === state.acceptedState.currentCommit && settings.fixture === "ticket-booking") ctx.waitUntil(ensureBuild(env, projectId, commit, state.canonicalRepoName, accountKey).catch((e) => console.error("preview build failed", String(e))));
           if (!ready) {
@@ -1318,8 +1363,10 @@ export default {
             }
             const compute=await globalOf(env).nativeComputeStatus(key);
             const spending=await managedSpendStatus(env,accountKey,false);
+            let generationRecovery;
+            if(unfinishedWriter&&isOwner&&commit===state.acceptedState.currentCommit){let canRecover=false;try{canRecover=(await globalOf(env).previewGenerationCapacity(buildPrefix(projectId,commit),await project.previewStorageScope(commit,state.canonicalRepoName))).allowed;}catch{/* Preserve unknown holds. */}generationRecovery={canRecover,expectedGeneration:null,detail:"Create a separately funded preview while retaining the unresolved upload reservation"};}
             const status=storageUnavailable?"unavailable":failed?"failed":spending.status!=="configured"?"unavailable":compute?.active?"pending":"not_started";
-            return json({ready:false,status,canRetry:!unfinishedWriter&&(!storageUnavailable||fundingRetryEligible)&&isOwner&&commit===state.acceptedState.currentCommit&&settings.fixture==="ticket-booking",reason:(unfinishedWriter&&failed)?"Preview publication has unfinished upload receipts; storage reconciliation is required":storageUnavailable?(fundingRetryEligible?"Preview storage allowance is available again; the owner can retry":"Preview storage allowance requires operator attention; retry cannot restore capacity"):failed?"Build failed; retry requires owner action":status==="unavailable"?"Compute budget unavailable":undefined});
+            return json({ready:false,status,generationRecovery,canRetry:!unfinishedWriter&&(!storageUnavailable||fundingRetryEligible)&&isOwner&&commit===state.acceptedState.currentCommit&&settings.fixture==="ticket-booking",reason:(unfinishedWriter&&failed)?"Preview publication has unfinished upload receipts; storage reconciliation is required":storageUnavailable?(fundingRetryEligible?"Preview storage allowance is available again; the owner can retry":"Preview storage allowance requires operator attention; retry cannot restore capacity"):failed?"Build failed; retry requires owner action":status==="unavailable"?"Compute budget unavailable":undefined});
           }
           const { exp, sig } = await signPreview(env, projectId, commit, previewOrigin);
           return Response.json({ ready: true, status:"available", url: `${previewOrigin}/preview/${commit}/${exp}/${sig}/`, expiresAt: new Date(exp * 1000).toISOString() }, { headers: { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff" } });
@@ -1704,4 +1751,10 @@ async function reconcileSealedAllocations(env: Env, ledger: Ledger): Promise<boo
     await accountOf(env, allocation.accountKey).settleArtifactAllocation(allocation.name, allocation.operationId);
   }
   return (await ledger.pendingArtifactAllocations()).length === 0;
+}
+
+async function fundedPreviewSource(env:Env,identity:PreviewStorageIdentity,previous:PreviewGenerationRecord|null):Promise<{key:string;capacity:import("./preview-storage.js").PreviewStorageAdmission}>{
+ const keys=previous?[generationBuildPrefix(identity.projectId,identity.commit,previous.identity.incarnation,previous.generation),previous.sourceKey]:[buildPrefix(identity.projectId,identity.commit)];
+ for(const key of new Set(keys)){try{return{key,capacity:await globalOf(env).previewGenerationCapacity(key,identity)};}catch{/* A failed unfunded generation retains its immutable funded ancestor key. */}}
+ throw new Error("Funded preview source is unavailable");
 }

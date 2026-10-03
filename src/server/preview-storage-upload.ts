@@ -2,7 +2,7 @@ import { orderedPreviewAssets } from "./preview-assets.js";
 import { MAX_FILE_BYTES } from "./file-bytes.js";
 export const MAX_PREVIEW_ASSETS = 1000;
 export const MAX_PREVIEW_BYTES = 64 * 1024 * 1024;
-export interface PreviewStorageIdentity { projectId: string; incarnation: string; commit: string; accountKey: string }
+export interface PreviewStorageIdentity { generation?:string; projectId: string; incarnation: string; commit: string; accountKey: string }
 export interface PreviewStorageAsset { path: string; size: number; sha256: string }
 export interface PreviewStorageManifest { version: 1; identity: PreviewStorageIdentity; assets: PreviewStorageAsset[]; totalBytes: number; manifestHash: string }
 interface Inspector { exec(argv: string[]): Promise<{ success: boolean; stdout: string }> }
@@ -41,7 +41,8 @@ export async function createPreviewStorageManifest(identity: PreviewStorageIdent
     return { path, size: asset.size, sha256: asset.sha256 };
   });
   if (totalBytes > MAX_PREVIEW_BYTES) throw new Error("Preview exceeds storage limit");
-  const trustedIdentity = { projectId: identity.projectId, incarnation: identity.incarnation, commit: identity.commit, accountKey: identity.accountKey };
+  if(identity.generation&&!/^[a-f0-9-]{36}$/.test(identity.generation))throw new Error("Invalid preview generation");
+  const trustedIdentity = { ...(identity.generation?{generation:identity.generation}:{}), projectId: identity.projectId, incarnation: identity.incarnation, commit: identity.commit, accountKey: identity.accountKey };
   const payload = { version: 1 as const, identity: trustedIdentity, assets, totalBytes };
   const manifest = { ...payload, manifestHash: await sha256(new TextEncoder().encode(JSON.stringify(payload))) };
   for (const asset of assets) Object.freeze(asset);

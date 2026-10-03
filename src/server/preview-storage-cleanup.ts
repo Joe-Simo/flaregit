@@ -1,3 +1,4 @@
+import {previewManifestPrefix} from "./preview-storage.js";
 import {EVIDENCE_COPY_ID} from "./evidence-copy-id.js";
 import {orderedPreviewAssets} from "./preview-assets.js";
 import type {PreviewCopyPlan} from "./preview-storage-writers.js";
@@ -13,7 +14,7 @@ function strictPlan(plan:PreviewCopyPlan,scope:{projectId:string;incarnation:str
     const prefix=`evidence/${scope.projectId}/${scope.incarnation}/`;
     return plan.keys.length===1&&plan.keys[0]===plan.physicalKey&&plan.physicalKey.startsWith(prefix)&&plan.physicalKey.endsWith(".json")&&EVIDENCE_COPY_ID.test(plan.physicalKey.slice(prefix.length,-5));
   }
-  if(plan.kind!=="preview"||plan.physicalKey!==`builds/${scope.projectId}/${plan.identity.commit}`||plan.keys.some(key=>!key.startsWith(`${plan.physicalKey}/`)))return false;
+  if(plan.kind!=="preview"||plan.physicalKey!==previewManifestPrefix(plan.identity)||plan.keys.some(key=>!key.startsWith(`${plan.physicalKey}/`)))return false;
   orderedPreviewAssets(plan.keys.map(key=>key.slice(plan.physicalKey.length+1)).join("\n"));return true;
  }catch{return false;}
 }
@@ -28,7 +29,7 @@ export async function cleanupRepositoryCopies(env:Env,ledger:Ledger):Promise<Pre
   for(const plan of plans){
    if(!strictPlan(plan,scope)||!await controller.previewCopyCleanupReady(plan.physicalKey))return{cleaned:false,recoveryAction:"provider-reconciliation",detail:"A preview or evidence writer has an unresolved storage dispatch. Saved records and capacity reservations are preserved; provider reconciliation is required."};
    if(plan.kind==="preview"){
-    const key=`build-${scope.projectId}-${plan.identity.commit}`;
+    const key=plan.identity.generation?`build-generation-${plan.identity.generation}`:`build-${scope.projectId}-${plan.identity.commit}`;
     const active=await controller.nativeComputeStatus(key);
     if(active?.active)await recoverNativeCompute(env,key);
     if((await controller.nativeComputeStatus(key))?.active)return{cleaned:false,recoveryAction:"retry",detail:"Preview native workspace shutdown is not yet confirmed. Saved copies and capacity reservations are preserved."};
