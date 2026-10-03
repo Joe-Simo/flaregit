@@ -1,3 +1,4 @@
+import { StorageReconciliation } from "../components/StorageReconciliation";
 import {PrivateGitRecovery} from "../components/PrivateGitRecovery";
 import React, { useCallback, useEffect, useState } from "react";
 import { Copy, Trash2 } from "lucide-react";
@@ -165,6 +166,7 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
       {isOwner && <DeploymentCard key={`deployments:${meta.id}`} projectId={meta.id} />}
       <div id="deployment-deliveries"><WebhooksCard projectId={meta.id} isOwner={isOwner} /></div>
       <PrivateGitRecovery projectId={meta.id} isOwner={isOwner} />
+      {isOwner && <StorageReconciliation projectId={meta.id} />}
       <DomainsCard projectId={meta.id} isOwner={isOwner} />
       {isOwner && meta.kind === "import" && <ImportHistoryCard key={meta.id} projectId={meta.id} />}
       {isOwner && <MirrorCard projectId={meta.id} isOwner={isOwner} />}

@@ -1,3 +1,5 @@
+import {storageReconciliationReport,type StorageReconciliationSnapshot} from "./storage-reconciliation-report.js";
+import {createHash} from "node:crypto";
 import {cleanupRepositoryCopies} from "./preview-storage-cleanup.js";
 import { z } from "zod";
 import type { PublicationModerationState } from "./publication-moderation.js";
@@ -293,7 +295,8 @@ export default {
     if (!withinLimit) return new Response("Too many requests. Please slow down.", { status: 429, headers: { "Retry-After": "60" } });
     const account = accountOf(env, accountKey);
     const lifecycle=await account.accountLifecycle();
-    if(lifecycle!=="active"&&!(lifecycle==="deleting"&&url.pathname==="/api/account"&&request.method==="DELETE"))return text(lifecycle==="deleted"?"Account was deleted":"Account deletion is in progress; retry deletion from Account",403);
+    const storageReportRequest=request.method==="GET"&&/^\/api\/p\/[a-z0-9]{12,16}\/storage-reconciliation$/.test(url.pathname)&&!auth.viaToken;
+    if(lifecycle!=="active"&&!(lifecycle==="deleting"&&((url.pathname==="/api/account"&&request.method==="DELETE")||storageReportRequest)))return text(lifecycle==="deleted"?"Account was deleted":"Account deletion is in progress; retry deletion from Account",403);
     const path = url.pathname.slice(4); // strip "/api"
     const method = request.method;
     // Scoped tokens: read-only tokens may only read (and ask for a read-only clone credential); repo-pinned tokens see one repository.
@@ -698,7 +701,38 @@ export default {
         const project = projectOf(env, projectId);
         const role = await project.roleOf(userId).catch(() => null);
         if (!role) return text("Not found", 404);
-        if (await project.repositoryDeletionPending() && !(sub === "" && method === "DELETE")) return json({ status: "deleting", detail: "Repository storage cleanup is pending; the owner can retry deletion." }, 409);
+        if(sub==="/storage-reconciliation"&&method==="GET"){
+          if(auth.viaToken||role!=="owner")return text("A signed-in repository owner must inspect storage",403);
+          if([...url.searchParams.keys()].some(key=>key!=="cursor"&&key!=="plansCursor")||url.searchParams.getAll("cursor").length>1||url.searchParams.getAll("plansCursor").length>1)return text("Invalid storage report query",400);
+          if(["cursor","plansCursor"].some(key=>url.searchParams.has(key)&&(!url.searchParams.get(key)||url.searchParams.get(key)!.length>1000)))return text("Invalid storage report cursor",400);
+          const planCursor=url.searchParams.get("plansCursor"),parsed=planCursor?/^(copy|private):(0|[1-9][0-9]*):([a-f0-9]{64})$/.exec(planCursor):null;
+          if(planCursor&&!parsed)return text("Invalid storage report cursor",400);
+          const phase=parsed?.[1]??"copy",after=parsed?Number(parsed[2]):0;
+          if(!Number.isSafeInteger(after))return text("Invalid storage report cursor",400);
+          try{
+            const context=await project.ownerStorageContext(userId);
+            if(!context||context.projectId!==projectId)return text("Not found",404);
+            if(!context.incarnation)return text("This legacy repository has no recorded storage incarnation. No state was created; provider reconciliation is required.",409);
+            const global=globalOf(env),copies=await global.storageCopyReportPage(projectId,context.incarnation,phase==="copy"?after:0);
+            if(!context.metadataComplete||!copies.complete)return text("Stored metadata exceeds this report's bounded epoch capacity. No reconciliation or hold release was performed.",503);
+            const epoch=createHash("sha256").update(JSON.stringify([context.epoch,copies.epoch])).digest("hex");
+            if(parsed&&parsed[3]!==epoch)return text("Storage report context changed; refresh from the first page",409);
+            const privatePage=phase==="private"?await project.storagePrivateReportPage(projectId,context.incarnation,after):null;
+            const next=phase==="copy"?(copies.nextCursor??(context.privateOperations?"private:0":null)):privatePage?.nextCursor??null;
+            const snapshot:StorageReconciliationSnapshot={scope:{projectId,incarnation:context.incarnation,epoch},plans:privatePage?.plans??copies.plans,legacyInventory:context.legacyInventory,legacyEvidence:context.legacyEvidence,plansComplete:next===null,plansNextCursor:next?`${next}:${epoch}`:undefined};
+            const authorize=async()=>{
+              const freshAuth=await authenticate(request,env);if(freshAuth instanceof Response||freshAuth.viaToken||freshAuth.id!==userId)return false;
+              const life=await account.accountLifecycle();if(life!=="active"&&life!=="deleting")return false;
+              const fresh=await project.ownerStorageContext(userId);return !!fresh&&fresh.projectId===projectId&&fresh.incarnation===context.incarnation&&fresh.canonicalRepoName===context.canonicalRepoName&&fresh.epoch===context.epoch;
+            };
+            const report=await storageReconciliationReport({snapshot,cursor:url.searchParams.get("cursor")??undefined},{authorize,head:key=>env.EVIDENCE_BUCKET.head(key),list:options=>env.EVIDENCE_BUCKET.list(options)});
+            const finalCopies=await global.storageCopyReportPage(projectId,context.incarnation,phase==="copy"?after:0);
+            if(finalCopies.epoch!==copies.epoch||!await authorize())return text("Storage report context changed; refresh",409);
+            return Response.json({...report,deletionPending:context.deletionPending,workflows:context.workflows,native:copies.native,coverage:"Recorded plans and bounded provider observations; no hold release or cancellation proof"},{headers:{"Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
+          }catch{return text("Storage report is unavailable or its scope changed. Refresh; saved holds remain intact.",409);}
+        }
+
+        if (await project.repositoryDeletionPending() && !(sub === "" && method === "DELETE")) return json({ status: "deleting", detail: "Repository storage cleanup is pending; the owner can retry deletion.",canInspectStorage:!auth.viaToken&&role==="owner" }, 409);
         const state = await project.getState().catch(() => null);
         if (!state) return text("Not found", 404);
         const settings = settingsFor(state.verificationPolicy);

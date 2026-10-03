@@ -1,3 +1,4 @@
+import { StorageReconciliation } from "../components/StorageReconciliation";
 import React, { useCallback, useEffect, useState } from "react";
 import { Copy, Trash2 } from "lucide-react";
 import { useUser } from "@clerk/clerk-react";
@@ -229,6 +230,7 @@ export function Account() {
         </CardContent>
       </Card>
       </fieldset>
+      <StorageReconciliation />
       <Card>
         <CardHeader><CardTitle className="text-base text-destructive">Delete account</CardTitle></CardHeader>
         <CardContent className="space-y-3">

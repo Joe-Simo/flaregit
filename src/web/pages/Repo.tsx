@@ -1,3 +1,5 @@
+import { StorageReconciliation } from "../components/StorageReconciliation";
+import { repositoryDeletionNotice } from "../repository-deletion-notice";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Copy, Lock, Globe } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -67,7 +69,10 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
     return () => { clearInterval(t); metaRequest.current++; stateRequest.current++; lifetime.current++; };
   }, [projectId, reload, loadState]);
 
-  if (error) return <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10 text-sm text-destructive" role="alert">{error === "Not found" ? "Repository not found, or you don't have access." : error}</div>;
+  if (error) {
+    const deletion = repositoryDeletionNotice(error);
+    return <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10 space-y-4"><p className="text-sm text-destructive" role="alert">{deletion?.detail ?? (error === "Not found" ? "Repository not found, or you don't have access." : error)}</p>{deletion?.canInspectStorage && <StorageReconciliation projectId={projectId} />}</div>;
+  }
   if (!meta || !state) {
     if (stateError) return <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10 text-sm text-destructive" role="alert">Could not load repository state: {stateError}</div>;
     return <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10 text-sm text-muted-foreground" role="status">Loading repository…</div>;

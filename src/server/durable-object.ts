@@ -1,3 +1,4 @@
+import {ownerStorageContext,copyReportPage,privateRecoveryReportPage,type OwnerStorageContext,type CopyReportPage} from "./storage-reconciliation-ledger.js";
 import {EVIDENCE_COPY_ID} from "./evidence-copy-id.js";
 import { EvidenceStorageLedger } from "./evidence-storage.js";
 import {PreviewStorageWriters,type PreviewCopyPlan} from "./preview-storage-writers.js";
@@ -205,6 +206,9 @@ export interface Ledger {
   fencePreviewCleanup(projectId:string,incarnation:string):Promise<PreviewCopyPlan[]>;
   previewCopyCleanupReady(key:string):Promise<boolean>;
   finishPreviewCopyCleanup(key:string):Promise<void>;
+  ownerStorageContext(ownerId:string):Promise<OwnerStorageContext|null>;
+  storageCopyReportPage(projectId:string,incarnation:string,after:number):Promise<CopyReportPage>;
+  storagePrivateReportPage(projectId:string,incarnation:string,after:number):Promise<ReturnType<typeof privateRecoveryReportPage>>;
   reservePreviewStorage(manifest:PreviewStorageManifest):Promise<PreviewStorageAdmission>;
   previewStorageScope(commit:string,canonicalRepoName:string):Promise<PreviewStorageManifest["identity"]>;
   reservePrivateRecoveryStorage(id:string,accountKey:string):Promise<void>;
@@ -548,6 +552,9 @@ export class RepositoryController extends DurableObject<Env> {
     catch(error){if(error instanceof PreviewStorageAdmissionError)return{allowed:false,reason:error.reason};throw error;}
   }
   async previewStorageReadmission(identity:PreviewStorageIdentity):Promise<PreviewStorageAdmission>{return new PreviewStorageLedger(this.ctx.storage).readmit(identity,previewStorageBudget(this.env));}
+  async ownerStorageContext(ownerId:string):Promise<OwnerStorageContext|null>{return ownerStorageContext(this.ctx.storage,ownerId);}
+  async storageCopyReportPage(projectId:string,incarnation:string,after:number):Promise<CopyReportPage>{return copyReportPage(this.ctx.storage,projectId,incarnation,after);}
+  async storagePrivateReportPage(projectId:string,incarnation:string,after:number):Promise<ReturnType<typeof privateRecoveryReportPage>>{return privateRecoveryReportPage(this.ctx.storage,projectId,incarnation,after);}
   async reservePreviewStorage(manifest:PreviewStorageManifest):Promise<PreviewStorageAdmission>{await validatePreviewStorageManifest(manifest);try{new PreviewStorageLedger(this.ctx.storage).reserve(manifest,previewStorageBudget(this.env));return{allowed:true};}catch(error){if(error instanceof PreviewStorageAdmissionError){if(error.reason!=="storage_retired")new PreviewStorageLedger(this.ctx.storage).rememberRefusal(manifest);return{allowed:false,reason:error.reason};}throw error;}}
   async previewStorageScope(commit:string,canonicalRepoName:string):Promise<PreviewStorageManifest["identity"]>{
     const retained=(state:FlareGitProjectState)=>state.acceptedState.currentCommit===commit||state.journal.some(entry=>entry.state==="ACCEPTED"&&entry.newHead===commit)||Object.values(state.candidates).some(candidate=>candidate.candidateCommit===commit&&candidate.evidenceId&&state.evidence[candidate.evidenceId]?.status==="passed");
