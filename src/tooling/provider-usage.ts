@@ -11,6 +11,9 @@ const count = number.int();
 const artifacts = z.array(z.object({ count, dimensions: z.object({ eventType: z.string().max(64), eventKind: z.string().max(64) }) })).max(LIMIT);
 const workers = z.array(z.object({ sum: z.object({ requests: count, errors: count, subrequests: count, cpuTimeUs: number }) })).max(LIMIT);
 const containers = z.array(z.object({ sum: z.object({ cpuTimeSec: number, allocatedMemory: number, allocatedDisk: number, txBytes: number }) })).max(LIMIT);
+const DO_NAMESPACES = ["5cb86768f9da4eb498ee83094d460673", "97d1841bb721479cb1a7461229b8609f", "7007f9d022ef4d90a4fd7eeef367ebb1"] as const;
+const doInvocations = z.array(z.object({ sum: z.object({ requests: count, errors: count }) })).max(LIMIT);
+const doPeriodic = z.array(z.object({ sum: z.object({ cpuTime: number, duration: number, rowsRead: count, rowsWritten: count }) })).max(LIMIT);
 const r2 = z.array(z.object({ sum: z.object({ requests: count }) })).max(LIMIT);
 const workflows = z.array(z.object({ sum: z.object({ cpuTime: number, wallTime: number, storageRate: number }) })).max(LIMIT);
 const WORKFLOWS = ["integration", "scenario", "agent", "import-history", "rebase-resume", "private-recovery"].map(kind => `flaregit-${kind}-workflow`);
@@ -20,6 +23,10 @@ const definitions = [
   { resource: "worker:flaregit", dataset: "workersInvocationsAdaptive", filter: 'scriptName:"flaregit"', fields: "sum {requests errors subrequests cpuTimeUs}", schema: workers },
   { resource: "r2:flaregit-evidence", dataset: "r2OperationsAdaptiveGroups", filter: 'bucketName:"flaregit-evidence"', fields: "sum {requests}", schema: r2 },
   ...WORKFLOWS.map(name => ({ resource: `workflow:${name}`, dataset: "workflowsAdaptiveGroups", filter: `workflowName:"${name}"`, fields: "sum {cpuTime wallTime storageRate}", schema: workflows, hourly: true })),
+  ...DO_NAMESPACES.flatMap(id => [
+    { resource: `do-invocations:${id}`, dataset: "durableObjectsInvocationsAdaptiveGroups", filter: `namespaceId:"${id}"`, fields: "sum {requests errors}", schema: doInvocations },
+    { resource: `do-periodic:${id}`, dataset: "durableObjectsPeriodicGroups", filter: `namespaceId:"${id}"`, fields: "sum {cpuTime duration rowsRead rowsWritten}", schema: doPeriodic },
+  ]),
   ...CONTAINERS.map(id => ({ resource: `container:${id}`, dataset: "containersUsageAdaptiveGroups", filter: `applicationId:"${id}"`, fields: "sum {cpuTimeSec allocatedMemory allocatedDisk txBytes}", schema: containers })),
 ];
 export type UsageFetcher = (url: string, init: RequestInit) => Promise<Response>;
@@ -49,7 +56,10 @@ export function sanitizeUsage(resource: string, raw: unknown, start: string, end
   const units: Record<string, number> = {};
   for (const row of rows.data) {
     if ("count" in row) units.events = (units.events ?? 0) + row.count;
-    else for (const [key, value] of Object.entries(row.sum)) units[key] = (units[key] ?? 0) + value;
+    else for (const [key, value] of Object.entries(row.sum)) {
+      const unit = resource.startsWith("do-periodic:") && key === "cpuTime" ? "doCpuTimeUs" : key;
+      units[unit] = (units[unit] ?? 0) + value;
+    }
   }
   if (Object.values(units).some(value => !Number.isFinite(value))) return { ...base, status: "unavailable", reason: "invalid_response" };
   // An explicitly present empty dataset is zero; missing account/data is never zero.
@@ -101,8 +111,8 @@ export async function collectProviderUsage(options: { token: string; start: stri
   const receipt = { version: 1, capturedAt: new Date().toISOString(), window: { start: new Date(start).toISOString(), end: new Date(end).toISOString() }, observations,
     completeness: observations.every(row => row.status === "observed" || row.status === "zero") ? "complete_for_selected_metrics" : "incomplete",
     measurement: "provider_adaptive_analytics_may_be_sampled", reservations: "not_measured_by_this_collector", invoice: "unverified", billingZero: "never_inferred_from_empty_metrics",
-    units: { events: "operational_events_not_verified_billable_operations", requests: "requests", errors: "errors", subrequests: "subrequests", cpuTimeSec: "CPU_seconds", allocatedMemory: "memory_byte_seconds", allocatedDisk: "disk_byte_seconds", txBytes: "transmitted_bytes", cpuTimeUs: "CPU_microseconds", cpuTime: "CPU_milliseconds", wallTime: "provider_native_wall_time_unit_unverified", storageRate: "provider_native_storage_growth_rate_unit_unverified" },
-    gaps: ["Artifacts stored bytes and GB-months", "DO namespaces and metrics", "Workflow billed storage/duration and wall-time units", "R2 stored bytes and GB-months", "R2 operation billing classification (Class A/B)", "AI model billing", "invoice authorization and shared allowances", "per-workflow attribution"] };
+    units: { events: "operational_events_not_verified_billable_operations", requests: "requests", errors: "errors", subrequests: "subrequests", cpuTimeSec: "CPU_seconds", allocatedMemory: "memory_byte_seconds", allocatedDisk: "disk_byte_seconds", txBytes: "transmitted_bytes", cpuTimeUs: "CPU_microseconds", cpuTime: "CPU_milliseconds", doCpuTimeUs: "CPU_microseconds", duration: "GB_seconds", rowsRead: "SQLite_rows", rowsWritten: "SQLite_rows", wallTime: "provider_native_wall_time_unit_unverified", storageRate: "provider_native_storage_growth_rate_unit_unverified" },
+    gaps: ["Artifacts stored bytes and GB-months", "DO stored bytes/GB-months and billed allowances", "Workflow billed storage/duration and wall-time units", "R2 stored bytes and GB-months", "R2 operation billing classification (Class A/B)", "AI model billing", "invoice authorization and shared allowances", "per-workflow attribution"] };
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(receipt)));
   return { ...receipt, receiptHash: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("") };
 }

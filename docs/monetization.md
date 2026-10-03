@@ -103,6 +103,16 @@ For scoped operational evidence, run `bun src/tooling/provider-usage.ts` with an
 
 The expanded collector observed October 2, 2026 UTC through eleven scoped queries: 2,782 Worker requests and 7,531,116 CPU microseconds, 1,556 evidence-bucket R2 requests, and 336 Artifacts operational events. Integration and scenario Workflow datasets returned 143 and 26 CPU milliseconds respectively; the four other Workflow datasets were explicitly empty. Empty analytics do not establish zero billing. Workflow wall-time and storage-rate units remain unverified, and R2 operation totals do not distinguish billable Class A/B operations. Storage GB-months, DO and model billing, shared allowances, invoices and per-workflow attribution remain outside this receipt. These measurements do not establish profitable pricing.
 
+A subsequent read verified the deployed Worker’s three Durable Object namespace bindings and added six namespace-specific queries, bringing the collector to seventeen fixed queries. For the same October 2 UTC window, it observed:
+
+| Namespace role | Requests / errors | CPU microseconds | Duration GB-seconds | SQLite rows read / written |
+|---|---:|---:|---:|---:|
+| Agent | 46 / 0 | 40,134 | 157.355 | 0 / 0 |
+| Integrator | 161 / 0 | 165,049 | 615.463 | 0 / 0 |
+| Repository controller | 7,328 / 0 | 5,552,433 | 76.721 | 3,149,470 / 7,080 |
+
+DO CPU microseconds are kept distinct from Workflow CPU milliseconds. These adaptive observations still exclude stored GB-months, billing allowances and invoice reconciliation. No maximum storage snapshot is converted into a monthly storage charge, and no other project’s namespace is queried.
+
 A signed-in read on October 3 covered October 2 at 15:13:54 UTC through October 3 at 15:13:54 UTC. It observed 67 Artifacts events, 2,347 Worker requests, zero Worker errors, 9,596 subrequests and about 65.01 container CPU seconds across the two applications. Memory/disk byte-seconds and transmitted bytes were also returned. These are adaptive operational aggregates for the selected resources, not billable-operation counts, per-workflow attribution, invoice reconciliation, customer-cohort costs or evidence of profitable pricing. Artifacts stored bytes, Worker CPU, DO/Workflow/R2/model charges, shared allowances and payment/support costs remain outside this receipt. Checkout remains disabled.
 
 Default output matches the tables: light/base/heavy contribution $2.70/$1.60/−$1.10; base break-even 2,500; ten-minute container $0.021504; model $0.01075; combined 100 runs $3.2254. Set `seatsPerInvoice` to 5 to reproduce the 2,000-seat base threshold. Set `paymentAdditionalPerSeat` for measured payouts/refunds/disputes rather than treating the zero placeholder as evidence.
