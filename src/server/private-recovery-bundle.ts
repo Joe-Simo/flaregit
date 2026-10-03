@@ -18,11 +18,13 @@ export async function createAcceptedBundle(executor: BundleExecutor, input: { re
   await run(["git","init","--quiet","--bare",source]);
   await run(["git","--git-dir",source,"-c","http.followRedirects=false","-c","protocol.allow=never","-c","protocol.https.allow=always","fetch","--quiet","--no-tags","--",input.remote,input.commit],{...cleanEnv,...gitAuthEnv(input.token)});
   await run(["git","--git-dir",source,"update-ref","refs/heads/main",input.commit]);
+  await run(["git","--git-dir",source,"symbolic-ref","HEAD","refs/heads/main"]);
   if(await run(["git","--git-dir",source,"rev-parse","--is-shallow-repository"])!=="false")throw new Error("Accepted export requires full ancestry; shallow source refused");
   if (await run(["git", "--git-dir", source, "cat-file", "-t", input.commit]) !== "commit" || (input.tree !== null && await run(["git", "--git-dir", source, "rev-parse", `${input.commit}^{tree}`]) !== input.tree)) throw new Error("Accepted commit or tree does not match immutable receipt");
-  await run(["git","--git-dir",source,"-c","pack.window=0","bundle","create",bundle,"refs/heads/main"]);
+  await run(["git","--git-dir",source,"-c","pack.window=0","bundle","create",bundle,"refs/heads/main","HEAD"]);
   const heads=await run(["git","bundle","list-heads",bundle]);
-  if(heads!==`${input.commit} refs/heads/main`)throw new Error("Bundle ref scope differs from accepted history");
+  const expectedHeads=[`${input.commit} HEAD`,`${input.commit} refs/heads/main`].sort().join("\n");
+  if(heads.split("\n").sort().join("\n")!==expectedHeads)throw new Error("Bundle ref scope differs from accepted history");
   await run(["git","init","--quiet","--bare",verify]);
   await run(["git","--git-dir",verify,"bundle","unbundle",bundle]);
   await run(["bash","-e","-o","pipefail","-c",`git --git-dir ${q(source)} rev-list --objects --no-object-names refs/heads/main | sort > ${q(`${dir}/expected`)} && git --git-dir ${q(verify)} cat-file --batch-all-objects --batch-check='%(objectname)' | sort > ${q(`${dir}/actual`)} && cmp -s ${q(`${dir}/expected`)} ${q(`${dir}/actual`)}`]);
