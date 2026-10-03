@@ -522,9 +522,20 @@ export class RepositoryController extends DurableObject<Env> {
    if(this.repositoryDeleting()||await this.roleOf(ownerId)!=="owner")throw new Error("Recovery authorization changed");
    const proposed: PrivateRecoveryOperation = {id,projectId:state.projectId,incarnation:ops.incarnation(),commit,tree,journalId:target.journalId,canonicalRepoName:state.canonicalRepoName,ownerId,accountKey,status:"pending",dispatchState:"not-started",uploadState:"not-started",createdAt:new Date().toISOString()};
    return this.ctx.storage.transactionSync(() => {
-     if (!this.privateRecoveryScopeCurrent(proposed)) throw new Error("Recovery authorization changed");
+     const currentState = this.load(), legacy = this.legacyRecoveryTarget();
+     const currentRole = this.ctx.storage.sql.exec<{role: string}>("SELECT role FROM members WHERE user_id=?", ownerId).toArray()[0]?.role;
+     const captureLegacy = !currentState.acceptedBaseline && target.journalId === "baseline";
+     if (captureLegacy) {
+       if (!legacy || tree !== null || legacy.commit !== commit || legacy.acceptedAt !== target.acceptedAt || currentRole !== "owner" || proposed.projectId !== currentState.projectId || proposed.canonicalRepoName !== currentState.canonicalRepoName || proposed.incarnation !== ops.incarnation()) throw new Error("Legacy accepted baseline changed");
+     } else if (!this.privateRecoveryScopeCurrent(proposed)) throw new Error("Recovery authorization changed");
      if (!old && ops.all().some(operation => !operation.cacheState && operation.incarnation === proposed.incarnation && operation.canonicalRepoName === proposed.canonicalRepoName && operation.commit === proposed.commit && (operation.status === "pending" || operation.status === "ready"))) throw new Error("This accepted commit already has an active recovery snapshot");
-     return ops.create(proposed);
+     const operation = ops.create(proposed);
+     if (captureLegacy) {
+       const previous = currentState.acceptedBaseline;
+       try { currentState.acceptedBaseline = { commit: legacy!.commit, acceptedAt: legacy!.acceptedAt }; this.save(); }
+       catch (error) { currentState.acceptedBaseline = previous; throw error; }
+     }
+     return operation;
    });
   }
   async privateRecoveryMarkDispatch(id: string, dispatchState: "uncertain" | "started", expectedScope: string): Promise<void> {
@@ -577,9 +588,18 @@ export class RepositoryController extends DurableObject<Env> {
     if(!accepted)return null;
     return {canonicalRepoName:state.canonicalRepoName,target:{journalId,candidateId:journal.candidateId,commit:journal.newHead,tree:journal.candidateTree,acceptedAt:accepted.acceptedAt,recoverableRef:`refs/flaregit/deployments/${journalId}`}};
   }
+  private legacyRecoveryTarget(): PrivateRecoveryTarget | null {
+    const state = this.load();
+    if (state.acceptedBaseline || state.journal.some(entry => entry.state === "ACCEPTED") || !/^[a-f0-9]{40}$/.test(state.acceptedState.currentCommit) || typeof state.canonicalRepoName !== "string" || !state.canonicalRepoName || !Number.isFinite(Date.parse(state.acceptedState.acceptedAt))) return null;
+    const history = state.acceptedState.history;
+    if (!Array.isArray(history) || (history.length && history.at(-1)?.commit !== state.acceptedState.currentCommit)) return null;
+    return { journalId: "baseline", commit: state.acceptedState.currentCommit, tree: null, acceptedAt: state.acceptedState.acceptedAt };
+  }
+
   async privateRecoveryTargets():Promise<PrivateRecoveryTarget[]>{
     const state=this.load(),records=await Promise.all(state.journal.filter(entry=>entry.state==="ACCEPTED").map(entry=>this.acceptedDeploymentTarget(entry.id))),targets:PrivateRecoveryTarget[]=records.filter((entry):entry is NonNullable<typeof entry>=>entry!==null).map(({target})=>({journalId:target.journalId,commit:target.commit,tree:target.tree,acceptedAt:target.acceptedAt})),baseline=state.acceptedBaseline;
     if(baseline&&isSafeSha(baseline.commit)&&(!baseline.tree||isSafeSha(baseline.tree)))targets.unshift({journalId:"baseline",commit:baseline.commit,tree:baseline.tree??null,acceptedAt:baseline.acceptedAt});
+    else { const legacy = this.legacyRecoveryTarget(); if (legacy) targets.unshift(legacy); }
     return targets;
   }
   async listDeployments():Promise<DeploymentRecord[]>{return new RepositoryDeployments(this.ctx.storage,this.load().projectId).list();}

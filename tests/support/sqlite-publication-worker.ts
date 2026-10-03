@@ -15,6 +15,11 @@ export class PublicationFixture extends RepositoryController {
     this.ctx.storage.sql.exec("INSERT INTO lease (id, holder, expires_at) VALUES (1, ?, ?)", holder, Date.now() + 60_000);
     this.ctx.storage.sql.exec("INSERT INTO webhooks (id,url,secret,events,active,created_at) VALUES ('hook','https://example.com/hook','test-secret','change.accepted,change.ready,change.blocked,decision.needed',1,'now')");
   }
+  async fixtureRecoveryHead(commit:string) {
+    const state=await this.getState();
+    state.acceptedState.currentCommit=commit;
+    this.ctx.storage.sql.exec("UPDATE project SET doc=? WHERE id=1",JSON.stringify(state));
+  }
   failMembership(enabled:boolean) { if(enabled)this.ctx.storage.sql.exec("CREATE TRIGGER fail_member BEFORE INSERT ON members BEGIN SELECT RAISE(ABORT,'synthetic membership failure'); END"); else this.ctx.storage.sql.exec("DROP TRIGGER fail_member"); }
   failRegistry(enabled:boolean) {if(enabled)this.ctx.storage.sql.exec("CREATE TRIGGER fail_registry BEFORE INSERT ON projects BEGIN SELECT RAISE(ABORT,'synthetic registry failure'); END");else this.ctx.storage.sql.exec("DROP TRIGGER fail_registry");}
   fixtureRecoverySlotCount() { return this.ctx.storage.sql.exec<{n: number}>("SELECT COUNT(*) AS n FROM private_recovery_slots").one().n; }
@@ -78,6 +83,8 @@ export default {
       if(url.pathname==="/member-role")return Response.json(await stub.roleOf(url.searchParams.get("user")!));
       if(url.pathname==="/fail-membership")await stub.failMembership(url.searchParams.get("enabled")==="true");
       if(url.pathname==="/deployment-service")return Response.json(await stub.fixtureDeploymentService());
+      if(url.pathname==="/fixture-recovery-head"){const input=await request.json() as {commit:string};await stub.fixtureRecoveryHead(input.commit);}
+      if(url.pathname==="/fixture-repository-deletion")await stub.beginRepositoryDeletion();
       if(url.pathname==="/recovery-targets")return Response.json(await stub.privateRecoveryTargets());
       if(url.pathname==="/recovery-prepare"){const input=await request.json() as {id:string;commit:string;tree:string|null;ownerId:string;accountKey?:string};return Response.json(await stub.privateRecoveryPrepare(input.id,input.commit,input.tree,input.ownerId,input.accountKey??await accountKeyFor(input.ownerId)));}
       if(url.pathname==="/recovery-storage"){const input=await request.json() as {id:string;accountKey:string;action:"reserve"|"release"};if(input.action==="reserve")await stub.reservePrivateRecoveryStorage(input.id,input.accountKey);else await stub.releasePrivateRecoveryStorage(input.id,input.accountKey);return Response.json(await stub.fixtureRecoverySlotCount());}

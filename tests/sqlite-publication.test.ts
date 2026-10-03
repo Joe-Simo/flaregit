@@ -47,8 +47,61 @@ test("local workerd SQLite executes production publication rollback and recovery
     expect((await request("/recovery-prepare?name=recovery-authority",{id:newOwnerId,commit:baseCommit,tree:baseTree,ownerId:"new-owner"})).status).toBe(200);
     const replacement=await(await request(`/recovery-operation?name=recovery-authority&id=${newOwnerId}`)).json() as {accountKey:string};
     expect(replacement.accountKey).not.toBe((originalOperation as {accountKey:string}).accountKey);
-    await request("/seed?name=legacy-no-baseline",{state:{...recoveryState,acceptedBaseline:undefined,journal:[],acceptedState:{...recoveryState.acceptedState,history:[]}},holder:"holder"});
-    expect(await(await request("/recovery-targets?name=legacy-no-baseline")).json()).toEqual([]);
+    const legacyAcceptedAt="2026-10-02T00:00:00.000Z";
+    const legacyState={...recoveryState,acceptedBaseline:undefined,journal:[],acceptedState:{...recoveryState.acceptedState,acceptedAt:legacyAcceptedAt,history:[]}};
+    await request("/seed?name=legacy-no-baseline",{state:legacyState,holder:"holder"});
+    await request("/member?name=legacy-no-baseline&user=owner&role=owner");
+    const legacyBefore=await(await request("/snapshot?name=legacy-no-baseline")).json();
+    const legacyTargets=await(await request("/recovery-targets?name=legacy-no-baseline")).json();
+    expect(legacyTargets).toEqual([{journalId:"baseline",commit:tip,tree:null,acceptedAt:legacyAcceptedAt}]);
+    expect(await(await request("/recovery-targets?name=legacy-no-baseline")).json()).toEqual(legacyTargets);
+    expect(await(await request("/snapshot?name=legacy-no-baseline")).json()).toEqual(legacyBefore);
+    const legacyId=crypto.randomUUID(),legacyPrepare={id:legacyId,commit:tip,tree:null,ownerId:"owner"};
+    expect((await request("/recovery-prepare?name=legacy-no-baseline",{...legacyPrepare,commit:baseCommit})).status).toBe(500);
+    expect((await request("/recovery-prepare?name=legacy-no-baseline",{...legacyPrepare,tree:tipTree})).status).toBe(500);
+    expect((await request("/recovery-prepare?name=legacy-no-baseline",legacyPrepare)).status).toBe(200);
+    const legacyCaptured=await(await request("/snapshot?name=legacy-no-baseline")).json() as {state:{acceptedBaseline:unknown;candidates:unknown;journal:unknown}};
+    expect(legacyCaptured.state.acceptedBaseline).toEqual({commit:tip,acceptedAt:legacyAcceptedAt});
+    expect(legacyCaptured.state.candidates).toEqual(legacyState.candidates);
+    expect(legacyCaptured.state.journal).toEqual([]);
+    expect((await request("/recovery-record-tree?name=legacy-no-baseline",{id:legacyId,tree:tipTree})).status).toBe(200);
+    for(const [label,acceptedState,journal] of [
+      ["initial-pending",{...legacyState.acceptedState,currentCommit:"pending"},[]],
+      ["malformed-head",{...legacyState.acceptedState,currentCommit:"a".repeat(39)},[]],
+      ["malformed-date",{...legacyState.acceptedState,acceptedAt:"not-a-date"},[]],
+      ["missing-date",{...legacyState.acceptedState,acceptedAt:undefined},[]],
+      ["ambiguous-history",{...legacyState.acceptedState,history:[{commit:baseCommit,acceptedAt:legacyAcceptedAt}]},[]],
+      ["accepted-journal",legacyState.acceptedState,recoveryState.journal],
+    ] as const){
+      await request(`/seed?name=legacy-${label}`,{state:{...legacyState,acceptedState,journal},holder:"holder"});
+      await request(`/member?name=legacy-${label}&user=owner&role=owner`);
+      const rejectedTargets=await(await request(`/recovery-targets?name=legacy-${label}`)).json() as Array<{journalId:string}>;
+      expect(rejectedTargets.some(target=>target.journalId==="baseline")).toBe(false);
+      expect((await request(`/recovery-prepare?name=legacy-${label}`,{...legacyPrepare,id:crypto.randomUUID()})).status).toBe(500);
+    }
+    await request("/seed?name=legacy-history",{state:{...legacyState,acceptedState:{...legacyState.acceptedState,history:[{commit:tip,acceptedAt:legacyAcceptedAt}]}},holder:"holder"});
+    expect(await(await request("/recovery-targets?name=legacy-history")).json()).toEqual(legacyTargets);
+    await request("/seed?name=legacy-save-rollback",{state:legacyState,holder:"holder"});
+    await request("/member?name=legacy-save-rollback&user=owner&role=owner");
+    await request("/fail?name=legacy-save-rollback&enabled=true");
+    const rollbackPrepare={...legacyPrepare,id:crypto.randomUUID()};
+    expect((await request("/recovery-prepare?name=legacy-save-rollback",rollbackPrepare)).status).toBe(500);
+    expect(await(await request(`/recovery-operation?name=legacy-save-rollback&id=${rollbackPrepare.id}`)).json()).toBeNull();
+    expect(await(await request("/recovery-targets?name=legacy-save-rollback")).json()).toEqual(legacyTargets);
+    await request("/fail?name=legacy-save-rollback&enabled=false");
+    expect((await request("/recovery-prepare?name=legacy-save-rollback",rollbackPrepare)).status).toBe(200);
+    for(const change of ["head","owner","deletion"] as const){
+      const name=`legacy-change-${change}`;
+      await request(`/seed?name=${name}`,{state:legacyState,holder:"holder"});
+      await request(`/member?name=${name}&user=owner&role=owner`);
+      expect(await(await request(`/recovery-targets?name=${name}`)).json()).toEqual(legacyTargets);
+      if(change==="head")await request(`/fixture-recovery-head?name=${name}`,{commit:baseCommit});
+      else if(change==="owner")await request(`/member?name=${name}&user=owner&role=member`);
+      else await request(`/fixture-repository-deletion?name=${name}`);
+      expect((await request(`/recovery-prepare?name=${name}`,{...legacyPrepare,id:crypto.randomUUID()})).status).toBe(500);
+      const afterChange=await(await request(`/snapshot?name=${name}`)).json() as {state:{acceptedBaseline?:unknown}};
+      expect(afterChange.state.acceptedBaseline).toBeUndefined();
+    }
     await request("/seed?name=import-baseline",{state:{...recoveryState,acceptedBaseline:{commit:baseCommit,acceptedAt:"import-time"},journal:[],acceptedState:{...recoveryState.acceptedState,currentCommit:baseCommit,history:[]}},holder:"holder"});
     await request("/member?name=import-baseline&user=owner&role=owner");
     const importId=crypto.randomUUID(),prepareImport={id:importId,commit:baseCommit,tree:null,ownerId:"owner"};
