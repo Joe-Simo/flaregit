@@ -9,10 +9,11 @@ const commit = "a".repeat(40);
 const origin = "https://repo-a.account.workers.dev";
 function fixture() {
   const keys: string[] = [];
+  const lookups: string[] = [];
   const env = {
     REPOSITORY_PREVIEW_ORIGINS: JSON.stringify({ [repository]: origin, "123456abcdef": "https://repo-b.account.workers.dev" }),
     PREVIEW_SIGNING_KEY: "unit-test-signing-key",
-    REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: () => ({ previewOrigin: async (id: string) => ({ status: "active", origin: id === repository ? origin : "https://repo-b.account.workers.dev" }) }) },
+    REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: () => ({ activePreviewOrigin: async (id: string) => { lookups.push(id); return id === repository ? origin : "https://repo-b.account.workers.dev"; } }) },
     CLERK_AUTHORIZED_PARTIES: "https://flaregit.com",
     EVIDENCE_BUCKET: {
       async get(key: string) {
@@ -21,7 +22,7 @@ function fixture() {
       },
     },
   } as unknown as Env;
-  return { env, keys };
+  return { env, keys, lookups };
 }
 async function link(env: Env, asset = "", ttl = 3600) {
   const { exp, sig } = await signPreview(env, repository, commit, origin, ttl);
@@ -29,6 +30,26 @@ async function link(env: Env, asset = "", ttl = 3600) {
 }
 
 describe("repository preview broker", () => {
+  test("invalid capabilities and malformed paths never invoke the global registry", async () => {
+    const { env, keys, lookups } = fixture();
+    const valid = await link(env);
+    for (const target of [valid.replace(/\/[0-9a-f]{64}\/$/, `/${"0".repeat(64)}/`), await link(env, "", -10), valid.replace(commit, "b".repeat(40)), `${valid}x/%2e%2e%2fsecret`, `${origin}/not-a-preview`]) {
+      expect((await handlePreviewAsset(new Request(target), env, repository)).status).toBeGreaterThanOrEqual(400);
+    }
+    expect((await handlePreviewAsset(new Request(valid, { method: "POST" }), env, repository)).status).toBe(405);
+    expect(lookups).toEqual([]);
+    expect(keys).toEqual([]);
+  });
+  test("registry outage returns sanitized retryable 503 without reading private assets", async () => {
+    const { env, keys } = fixture();
+    env.REPOSITORY_CONTROLLER = { idFromName: (name: string) => name, get: () => ({ activePreviewOrigin: async () => { throw new Error("provider secret=test-private-value"); } }) } as unknown as DurableObjectNamespace;
+    const response = await handlePreviewAsset(new Request(await link(env)), env, repository);
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Cache-Control")).toContain("no-store");
+    expect(await response.text()).not.toContain("test-private-value");
+    expect(keys).toEqual([]);
+  });
+
   test("serves only the signed repository commit prefix and supplies private browser boundaries", async () => {
     const { env, keys } = fixture();
     const response = await handlePreviewAsset(new Request(await link(env)), env, repository);

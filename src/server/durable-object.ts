@@ -177,6 +177,7 @@ export interface ImportHistoryOperation { projectId: string; head: string; canon
 
 export interface Ledger {
   previewOrigin(repository: string, appOrigin?: string): Promise<PreviewOriginRegistration | null>;
+  activePreviewOrigin(repository: string, appOrigin?: string): Promise<string | null>;
   registerPreviewOrigin(repository: string, origin: string, operator: string, appOrigin: string): Promise<PreviewOriginRegistration>;
   retirePreviewOrigin(repository: string, operator: string, appOrigin: string): Promise<PreviewOriginRegistration | null>;
   nativeComputeFailure(key: string): Promise<boolean>;
@@ -374,12 +375,21 @@ const LEASE_MS = 20 * 60_000;
 export type PreviewOriginRegistration = { repository_id: string; origin: string; status: "active" | "retired"; registered_by: string; registered_at: string; retired_by: string | null; retired_at: string | null };
 
 export class RepositoryController extends DurableObject<Env> {
+  private previewOriginSchemaReady = false;
+  private previewMigrationFingerprint: string | null = null;
+
   private previewOriginTable(appOrigin?: string): void {
-    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS preview_origins(repository_id TEXT NOT NULL,origin TEXT PRIMARY KEY,status TEXT NOT NULL CHECK(status IN ('active','retired')),registered_by TEXT NOT NULL,registered_at TEXT NOT NULL,retired_by TEXT,retired_at TEXT); CREATE UNIQUE INDEX IF NOT EXISTS preview_origins_active_repository ON preview_origins(repository_id) WHERE status='active'");
+    if (!this.previewOriginSchemaReady) {
+      this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS preview_origins(repository_id TEXT NOT NULL,origin TEXT PRIMARY KEY,status TEXT NOT NULL CHECK(status IN ('active','retired')),registered_by TEXT NOT NULL,registered_at TEXT NOT NULL,retired_by TEXT,retired_at TEXT); CREATE UNIQUE INDEX IF NOT EXISTS preview_origins_active_repository ON preview_origins(repository_id) WHERE status='active'; CREATE INDEX IF NOT EXISTS preview_origins_repository_history ON preview_origins(repository_id,registered_at DESC); CREATE TABLE IF NOT EXISTS preview_origin_migration(id INTEGER PRIMARY KEY CHECK(id=1),fingerprint TEXT NOT NULL)");
+      this.previewOriginSchemaReady = true;
+    }
+    const fingerprint = JSON.stringify([this.env.REPOSITORY_PREVIEW_ORIGINS ?? "{}", this.env.CLERK_ISSUER ?? "", this.env.CLERK_AUTHORIZED_PARTIES ?? ""]);
+    if (this.previewMigrationFingerprint === fingerprint) return;
+    const previous = this.ctx.storage.sql.exec<{ fingerprint: string }>("SELECT fingerprint FROM preview_origin_migration WHERE id=1").toArray()[0];
+    if (previous?.fingerprint === fingerprint) { this.previewMigrationFingerprint = fingerprint; return; }
     // Reserve every legacy assignment before allowing registrations. Static config
     // can never revive a tombstone or overwrite a durable reservation.
-    if (!this.env.REPOSITORY_PREVIEW_ORIGINS) return;
-    const legacy = previewOrigins(this.env, appOrigin);
+    const legacy = previewOrigins({ ...this.env, REPOSITORY_PREVIEW_ORIGINS: this.env.REPOSITORY_PREVIEW_ORIGINS ?? "{}" }, appOrigin);
     if (!legacy) throw new Error("Legacy preview origin configuration is invalid");
     this.ctx.storage.transactionSync(() => {
       for (const [repository, origin] of legacy) {
@@ -392,12 +402,21 @@ export class RepositoryController extends DurableObject<Env> {
           this.ctx.storage.sql.exec("INSERT INTO preview_origins(repository_id,origin,status,registered_by,registered_at,retired_by,retired_at) VALUES(?,?,?,'static-migration',?,?,?)", repository, origin, reserved ? "retired" : "active", now, reserved ? "static-migration" : null, reserved ? now : null);
         }
       }
+      this.ctx.storage.sql.exec("INSERT INTO preview_origin_migration VALUES(1,?) ON CONFLICT(id) DO UPDATE SET fingerprint=excluded.fingerprint", fingerprint);
     });
+    this.previewMigrationFingerprint = fingerprint;
+  }
+
+  async activePreviewOrigin(repository: string, appOrigin?: string): Promise<string | null> {
+    this.previewOriginTable(appOrigin);
+    const row = this.ctx.storage.sql.exec<{ origin: string }>("SELECT origin FROM preview_origins WHERE repository_id=? AND status='active' LIMIT 1", repository).toArray()[0];
+    return row ? validPreviewRegistration(this.env, repository, row.origin, appOrigin) : null;
   }
 
   async previewOrigin(repository: string, appOrigin?: string): Promise<PreviewOriginRegistration | null> {
     this.previewOriginTable(appOrigin);
-    const row = this.ctx.storage.sql.exec<PreviewOriginRegistration>("SELECT * FROM preview_origins WHERE repository_id=? ORDER BY (status='active') DESC,registered_at DESC LIMIT 1", repository).toArray()[0];
+    const active = this.ctx.storage.sql.exec<PreviewOriginRegistration>("SELECT * FROM preview_origins WHERE repository_id=? AND status='active' LIMIT 1", repository).toArray()[0];
+    const row = active ?? this.ctx.storage.sql.exec<PreviewOriginRegistration>("SELECT * FROM preview_origins WHERE repository_id=? ORDER BY registered_at DESC LIMIT 1", repository).toArray()[0];
     if (!row) return null;
     if (!validPreviewRegistration(this.env, repository, row.origin, appOrigin)) return { ...row, status: "retired" };
     return row;

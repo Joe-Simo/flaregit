@@ -19,7 +19,7 @@ import { admitGitOperation } from "./core-git-budget.js";
 import { gitAuthEnv, q } from "./shell.js";
 import { ensureBuild } from "./build.js";
 import { buildPrefix, signPreview, validPreviewRegistration } from "./preview-access.js";
-import { resolveRepositoryPreviewOrigin } from "./preview-registry.js";
+import { lookupRepositoryPreviewOrigin } from "./preview-registry.js";
 import { handlePreviewAsset } from "./preview-broker.js";
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { billingFromEvent, createCheckout, planLimits, reportUsage, verifyPolarWebhook } from "./polar.js";
@@ -1162,7 +1162,9 @@ export default {
         if (sub === "/preview" && method === "GET") {
           const commit = url.searchParams.get("commit") ?? state.acceptedState.currentCommit;
           if (!/^[0-9a-f]{40}$/.test(commit)) return text("Invalid commit", 400);
-          const previewOrigin = await resolveRepositoryPreviewOrigin(env, projectId, url.origin);
+          const registration = await lookupRepositoryPreviewOrigin(env, projectId, url.origin);
+          if (registration.status === "unavailable") return Response.json({ ready: false, status: "pending", canRetry: false, reason: "Preview service is temporarily unavailable. Status checks will continue shortly." }, { headers: { "Cache-Control": "no-store" } });
+          const previewOrigin = registration.status === "active" ? registration.origin : null;
           if (!previewOrigin || !env.PREVIEW_SIGNING_KEY) return json({ ready: false, status: "unavailable", canRetry: false, reason: "An isolated preview origin has not been configured for this repository. The platform operator must provision its preview Worker before a link can be opened." });
           const ready = Boolean(await env.EVIDENCE_BUCKET.head(`${buildPrefix(projectId, commit)}/index.html`));
           if (!ready && commit === state.acceptedState.currentCommit && settings.fixture === "ticket-booking") ctx.waitUntil(ensureBuild(env, projectId, commit, state.canonicalRepoName, accountKey).catch((e) => console.error("preview build failed", String(e))));

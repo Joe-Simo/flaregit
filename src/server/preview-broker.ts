@@ -1,4 +1,4 @@
-import { resolveRepositoryPreviewOrigin } from "./preview-registry.js";
+import { lookupRepositoryPreviewOrigin } from "./preview-registry.js";
 import type { Env } from "./env.js";
 import { buildPrefix, verifyPreview } from "./preview-access.js";
 
@@ -8,13 +8,11 @@ const securityHeaders = {
   "Referrer-Policy": "no-referrer",
   "Cross-Origin-Resource-Policy": "same-origin",
 };
-const failure = (status: number) => new Response(status === 403 ? "Preview unavailable or expired" : "Not found", { status, headers: securityHeaders });
+const failure = (status: number) => new Response(status === 503 ? "Preview service temporarily unavailable. Try again shortly." : status === 403 ? "Preview unavailable or expired" : "Not found", { status, headers: securityHeaders });
 
 /** Bound service entrypoint: identity and audience must match the operator's origin map. */
 export async function handlePreviewAsset(request: Request, env: Env, repositoryId: string): Promise<Response> {
   const url = new URL(request.url);
-  const audience = await resolveRepositoryPreviewOrigin(env, repositoryId);
-  if (!audience || url.origin !== audience) return failure(404);
   if (request.method !== "GET" && request.method !== "HEAD") {
     return new Response("Method not allowed", { status: 405, headers: { ...securityHeaders, Allow: "GET, HEAD" } });
   }
@@ -25,7 +23,11 @@ export async function handlePreviewAsset(request: Request, env: Env, repositoryI
   try { asset = decodeURIComponent(rawAsset!); } catch { return failure(404); }
   // Reject ambiguous separators, traversal, control bytes and repeated decoding before touching R2.
   if (/[\\%\u0000-\u001f\u007f]/.test(asset) || asset.startsWith("/") || asset.split("/").some((part) => part === "." || part === ".." || part === "" && asset !== "")) return failure(404);
-  if (!(await verifyPreview(env, repositoryId, commit!, audience, Number(expiry), signature!))) return failure(403);
+  if (!env.PREVIEW_SIGNING_KEY) return failure(503);
+  if (!(await verifyPreview(env, repositoryId, commit!, url.origin, Number(expiry), signature!))) return failure(403);
+  const registration = await lookupRepositoryPreviewOrigin(env, repositoryId);
+  if (registration.status === "unavailable") return failure(503);
+  if (registration.status !== "active" || registration.origin !== url.origin) return failure(404);
   const object = await env.EVIDENCE_BUCKET.get(`${buildPrefix(repositoryId, commit!)}/${asset || "index.html"}`);
   if (!object) return failure(404);
   const allowedParents = (env.CLERK_AUTHORIZED_PARTIES ?? "").split(",").map((origin) => origin.trim()).filter((origin) => {
