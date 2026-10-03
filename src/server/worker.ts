@@ -1416,10 +1416,26 @@ export default {
         const me = async () => (await account.getProfile()).displayName || `member-${userId.slice(-6)}`;
         if (sub === "/issues" && method === "GET") return json(await project.listIssues(url.searchParams.get("state") === "closed" ? "closed" : "open"));
         if (sub === "/issues" && method === "POST") {
-          const b = await body<{ title?: string; body?: string }>();
-          const title = clean(b.title, 200);
+          const b = await body<{ title?: string; body?: string; labels?:unknown;idempotencyKey?:unknown }>();
+          const title = clean(b.title, 200),description=clean(b.body,20_000);
           if (!title) return text("A title is required", 400);
-          return json(await project.createIssue({ title, body: clean(b.body, 20_000), author: await me() }), 201);
+          if(b.labels!==undefined&&(!Array.isArray(b.labels)||b.labels.length>0))return text("Issue labels are not supported",400);
+          const key=b.idempotencyKey;
+          if(key!==undefined&&(typeof key!=="string"||!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(key)))return text("Invalid issue creation request key",400);
+          const authorizeIssue=async()=>{const current=await authenticate(request,env);return !(current instanceof Response)&&current.id===userId&&current.viaToken===auth.viaToken&&(!current.tokenRepo||current.tokenRepo===projectId)&&(!current.viaToken||current.tokenScope!=="read")&&await account.accountLifecycle()==="active"&&Boolean(await project.roleOf(userId))&&!await project.repositoryDeletionPending();};
+          if(!await authorizeIssue())return text("Issue creation access was revoked",403);
+          const author=await me();
+          if(!await authorizeIssue())return text("Issue creation access was revoked",403);
+          let saved;
+          try{
+            if(key===undefined)saved=await project.createIssue({title,body:description,author});
+            else {
+
+              saved=await project.createMemberIssue(userId,{title,body:description,author,idempotencyKey:key});
+            }
+          }catch(error){const message=String(error);return text(message.includes("different content")?"Issue creation request key was used for different content":message.includes("cannot be recreated")?"The recorded issue is unavailable; it cannot be recreated with this request key":"Issue creation unavailable",message.includes("different content")?409:message.includes("cannot be recreated")?410:message.includes("access was revoked")?403:503);}
+          if(!await authorizeIssue())return text("Issue result unavailable because access was revoked",403);
+          return json(saved,201);
         }
         const issueRoute = /^\/issues\/(\d{1,7})$/.exec(sub);
         if (issueRoute && method === "GET") {

@@ -136,6 +136,7 @@ export interface CommentRow {
 }
 
 export interface CommentPage { comments: CommentRow[]; nextCursor: string | null; hasMore: boolean }
+export interface MemberIssueInput {title:string;body:string;author:string;idempotencyKey:string}
 export interface MemberCommentInput { subject: string; author: string; body: string; path?: string; line?: number; commit?: string; idempotencyKey?: string }
 
 export interface Profile {
@@ -362,6 +363,7 @@ export interface Ledger {
   listIssues(state: "open" | "closed"): Promise<IssueRow[]>;
   getIssue(n: number): Promise<IssueRow | null>;
   createIssue(i: { title: string; body: string; author: string }): Promise<IssueRow>;
+  createMemberIssue(userId:string,input:MemberIssueInput):Promise<IssueRow>;
   setIssueState(n: number, state: "open" | "closed", by: string): Promise<IssueRow | null>;
   listComments(subject: string): Promise<CommentRow[]>;
   listMemberCommentsPage(userId: string, subject: string, cursor?: string): Promise<CommentPage>;
@@ -1256,6 +1258,7 @@ export class RepositoryController extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS issues (number INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', author TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, closed_by TEXT);
       CREATE TABLE IF NOT EXISTS comments (id INTEGER PRIMARY KEY AUTOINCREMENT, subject TEXT NOT NULL, author TEXT NOT NULL, body TEXT NOT NULL, path TEXT, line INTEGER, "commit" TEXT, created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS comments_subject ON comments (subject, id);
+      CREATE TABLE IF NOT EXISTS member_issue_receipts(actor_id TEXT NOT NULL,event_key TEXT NOT NULL,payload TEXT NOT NULL,issue_number INTEGER NOT NULL,PRIMARY KEY(actor_id,event_key));
       CREATE TABLE IF NOT EXISTS member_comment_receipts(actor_id TEXT NOT NULL,event_key TEXT NOT NULL,payload TEXT NOT NULL,comment_id INTEGER NOT NULL,PRIMARY KEY(actor_id,event_key));
       CREATE TABLE IF NOT EXISTS mirror (id INTEGER PRIMARY KEY CHECK (id = 1), target TEXT NOT NULL, token TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS mirror_runs (id TEXT PRIMARY KEY, commit_sha TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL, at TEXT NOT NULL);
@@ -1848,6 +1851,25 @@ export class RepositoryController extends DurableObject<Env> {
   }
   async getIssue(n: number): Promise<IssueRow | null> {
     return this.issueRow(n);
+  }
+  async createMemberIssue(userId:string,input:MemberIssueInput):Promise<IssueRow>{
+    if(typeof input.title!=="string"||typeof input.body!=="string"||typeof input.author!=="string"||!input.title.trim()||input.title.trim().length>200||input.body.trim().length>20_000||!input.author.trim()||input.author.trim().length>120)throw new Error("Invalid issue creation content");
+    const normalized={...input,title:input.title.trim(),body:input.body.trim(),author:input.author.trim()};
+    let opened=false;
+    const issue=this.ctx.storage.transactionSync(()=>{
+      if(this.repositoryDeleting()||!this.ctx.storage.sql.exec("SELECT 1 FROM members WHERE user_id=?",userId).toArray().length)throw new Error("Issue creation access was revoked");
+      if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(normalized.idempotencyKey))throw new Error("Invalid issue creation request key");
+      const payload=JSON.stringify([normalized.title,normalized.body]);
+      const receipt=this.ctx.storage.sql.exec<{payload:string;issue_number:number}>("SELECT payload,issue_number FROM member_issue_receipts WHERE actor_id=? AND event_key=?",userId,normalized.idempotencyKey).toArray()[0];
+      if(receipt){if(receipt.payload!==payload)throw new Error("Issue creation request key was used for different content");const existing=this.issueRow(receipt.issue_number);if(!existing)throw new Error("The recorded issue is unavailable; it cannot be recreated with this request key");return existing;}
+      const at=new Date().toISOString();
+      const number=this.ctx.storage.sql.exec<{number:number}>("INSERT INTO issues(title,body,author,created_at,updated_at) VALUES(?,?,?,?,?) RETURNING number",normalized.title,normalized.body,normalized.author,at,at).one().number;
+      this.ctx.storage.sql.exec("INSERT INTO member_issue_receipts VALUES(?,?,?,?)",userId,normalized.idempotencyKey,payload,number);
+      this.ctx.storage.sql.exec("INSERT INTO activity(at,actor,type,summary) VALUES(?,?,?,?)",at,normalized.author,"issue.opened",`#${number} opened: ${normalized.title}`.slice(0,300));opened=true;
+      return this.issueRow(number)!;
+    });
+    if(opened)await this.notifyMembers("issue.opened",`#${issue.number} opened: ${issue.title}`).catch(()=>undefined);
+    return issue;
   }
   async createIssue(i: { title: string; body: string; author: string }): Promise<IssueRow> {
     const now = new Date().toISOString();
