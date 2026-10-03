@@ -712,7 +712,7 @@ export default {
           try{
             const context=await project.ownerStorageContext(userId);
             if(!context||context.projectId!==projectId)return text("Not found",404);
-            if(!context.incarnation)return text("This legacy repository has no recorded storage incarnation. No state was created; provider reconciliation is required.",409);
+            if(!context.incarnation)return text("This repository has no recorded storage incarnation, so its report is unavailable. No state was created. Older untracked copies, if any, require provider reconciliation.",409);
             const global=globalOf(env),copies=await global.storageCopyReportPage(projectId,context.incarnation,phase==="copy"?after:0);
             if(!context.metadataComplete||!copies.complete)return text("Stored metadata exceeds this report's bounded epoch capacity. No reconciliation or hold release was performed.",503);
             const epoch=createHash("sha256").update(JSON.stringify([context.epoch,copies.epoch])).digest("hex");
