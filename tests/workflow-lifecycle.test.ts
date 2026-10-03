@@ -51,9 +51,21 @@ test("publication releases its ephemeral checkout while preserving the reviewed 
     const workflow = new FlareGitIntegrationWorkflow({} as ExecutionContext, env);
     Object.assign(workflow,{projectId:"p123456789abc",computeAccountKey:await accountKeyFor("fixture-human"),computeWorkflowId:"registered-parent"});
     const callable = workflow as unknown as { casPush(candidate: CandidateGeneration, commit: string, stub: Ledger, branch: string): Promise<{ ok: boolean }> };
-    const result = await callable.casPush({ id: "test", expectedAcceptedBase: base } as CandidateGeneration, commit, { getState: async () => ({ canonicalRepoName: "repo" }) } as unknown as Ledger, "main");
+    let authorized = false, authorizationCalls = 0;
+    const ledger = { getState: async () => ({ canonicalRepoName: "repo" }), authorizeCandidatePublication: async () => { authorizationCalls++; return authorized; } } as unknown as Ledger;
+    const publication = { id: "test", expectedAcceptedBase: base } as CandidateGeneration;
+    const denied = await callable.casPush(publication, commit, ledger, "main");
+    expect(denied.ok).toBe(false);
+    expect(await git(["--git-dir", canonical, "rev-parse", "main"])).toBe(base);
+    authorized = true;
+    const result = await callable.casPush(publication, commit, ledger, "main");
     expect(result.ok).toBe(true);
-    expect(destroyed).toBe(1);
+    authorized = false;
+    // Lost-ACK recovery proves the already committed SHA before checking new-dispatch authority.
+    const recovered = await callable.casPush(publication, commit, ledger, "main");
+    expect(recovered.ok).toBe(true);
+    expect(authorizationCalls).toBe(2);
+    expect(destroyed).toBe(3);
     expect(await Bun.file(join(workspace, ".git", "HEAD")).exists()).toBe(false);
     expect(await git(["--git-dir", canonical, "rev-parse", "refs/flaregit/candidates/test"])).toBe(commit);
     expect(await git(["--git-dir", canonical, "rev-parse", "main"])).toBe(commit);

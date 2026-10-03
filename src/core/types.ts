@@ -129,7 +129,7 @@ export interface CandidateGeneration {
   /** The integration run waiting for a human decision on this exact candidate commit. */
   workflowInstanceId?: string;
   /** A human's decision. It is bound to the commit they saw; any other commit needs a new review. */
-  review?: { approved: boolean; by: string; note?: string; at: string; commit: string };
+  review?: { approved: boolean; by: string; note?: string; at: string; commit: string; actor?: HumanDecisionActor };
   createdAt: string;
   updatedAt: string;
 }
@@ -178,6 +178,7 @@ export interface PublicationJournalEntry {
   state: JournalState;
   timestamp: string;
   error?: string;
+  publicationAuthority?: { actor: HumanDecisionActor; reviewedAt: string; commit: string; tree: string; policyVersion: number; authorizedAt: string };
 }
 
 export interface DecisionOption {
@@ -186,6 +187,9 @@ export interface DecisionOption {
   description: string;
   concreteExample: string;
 }
+
+/** Server-derived identity for consequential human choices. Missing on legacy records. */
+export interface HumanDecisionActor { userId: string; displayName: string; viaToken: boolean }
 
 export interface ProductDecision {
   id: string;
@@ -197,6 +201,8 @@ export interface ProductDecision {
   status: "pending" | "resolved" | "dismissed";
   createdAt: string;
   resolvedAt?: string;
+  resolvedBy?: HumanDecisionActor;
+  resolvedTaskIds?: string[];
 }
 
 export interface AcceptanceRecord {

@@ -12,6 +12,7 @@ import type { FlareGitProjectState } from "../../src/core/types.js";
 export class PublicationFixture extends RepositoryController {
   seed(state: FlareGitProjectState, holder: string) {
     this.ctx.storage.sql.exec("INSERT INTO project (id, doc) VALUES (1, ?)", JSON.stringify(state));
+    for (const candidate of Object.values(state.candidates)) if (candidate.review?.actor) this.ctx.storage.sql.exec("INSERT OR IGNORE INTO members(user_id,role,added_at,label) VALUES (?,'owner','synthetic-review-time',?)",candidate.review.actor.userId,candidate.review.actor.displayName);
     this.ctx.storage.sql.exec("INSERT INTO lease (id, holder, expires_at) VALUES (1, ?, ?)", holder, Date.now() + 60_000);
     this.ctx.storage.sql.exec("INSERT INTO webhooks (id,url,secret,events,active,created_at) VALUES ('hook','https://example.com/hook','test-secret','change.accepted,change.ready,change.blocked,decision.needed',1,'now')");
   }
@@ -119,7 +120,7 @@ export default {
       if (url.pathname === "/await-review") await stub.awaitReview("candidate", url.searchParams.get("commit") ?? "landed", "old-holder");
       if (url.pathname === "/checks") return Response.json(await stub.externalChecks("candidate"));
       if (url.pathname === "/external") await stub.injectExternal(await request.json() as ExternalCheckState);
-      if (url.pathname === "/review") return Response.json(await stub.recordReview("candidate", { approved: true, by: "test-reviewer" }, url.searchParams.get("expected") ?? "b".repeat(40)));
+      if (url.pathname === "/review") { await stub.addMember("test-reviewer", "owner"); return Response.json(await stub.recordReview("candidate", { approved: true, actor: { userId: "test-reviewer", displayName: "test-reviewer", viaToken: false } }, url.searchParams.get("expected") ?? "b".repeat(40))); }
       if (url.pathname === "/prepare") return Response.json(await stub.preparePublish("candidate"));
       return Response.json(await stub.snapshot());
     } catch (error) { return Response.json({ error: String(error) }, { status: 500 }); }

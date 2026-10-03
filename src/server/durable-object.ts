@@ -43,6 +43,7 @@ import { actorName, RepositoryPublicCommunity, type PublicCommunityActor, type P
 export type PublicGrantMetadata = PublicRepositoryGrant & { name: string; version: number; canonicalRepoName: string };
 import type {
   CandidateGeneration,
+  HumanDecisionActor,
   FlareGitProjectState,
   ProductDecision,
   PublicationJournalEntry,
@@ -380,6 +381,8 @@ export interface Ledger {
   listRepositoryWorkflows(): Promise<Array<{ instanceId: string; kind: "agent" | "integration" | "scenario" }>>;
   registerWorkflow(instanceId: string, kind: "agent" | "integration" | "scenario", taskId?: string, actorId?: string): Promise<void>;
   getWorkflowRun(instanceId: string): Promise<{ instanceId: string; kind: "agent" | "integration" | "scenario"; actorId: string | null } | null>;
+  admitIntegrationDispatch(eventId: string, taskIds: string[]): Promise<{ terminal: boolean; actorId: string | null }>;
+  recordIntegrationDispatchOutcome(eventId: string, status: WorkflowOutcome): Promise<void>;
   getMirror(): Promise<{ target: string | null; enabled: boolean; hasToken: boolean; runs: Array<{ id: string; commit: string; status: string; detail: string; at: string }> }>;
   /** Server-side only (workflow and mirror route); never returned to clients. */
   mirrorSecret(): Promise<{ target: string; token: string } | null>;
@@ -422,6 +425,7 @@ export interface Ledger {
   verifyGitCapability(secret: string, taskId: string | null, write: boolean): Promise<{userId:string;parentTokenHash:string|null}|null>;
   canGitAccess(userId: string, taskId: string | null, write: boolean): Promise<boolean>;
   apiTokenHashActive(hash: string): Promise<boolean>;
+  apiTokenHashCanAdminister(hash: string, userId: string, projectId: string): Promise<boolean>;
   beginArtifactAllocation(input:Omit<PendingArtifactAllocation,"phase">,scope:"account"|"project"):Promise<void>;
   activateArtifactAllocation(name:string,operationId:string,scope:"account"|"project"):Promise<void>;
   settleArtifactAllocation(name:string,operationId:string):Promise<void>;
@@ -435,14 +439,15 @@ export interface Ledger {
   artifactStorageSnapshot():Promise<ReturnType<ArtifactStorageAdmission["snapshot"]>>;
 
   revokeGitCapabilities(userId: string): Promise<void>;
-  resolveDecision(decisionId: string, selectedOptionId: string): Promise<{ taskIds: string[] }>;
+  resolveDecision(decisionId: string, selectedOptionId: string, actor: HumanDecisionActor, credentialHash?: string): Promise<{ taskIds: string[] }>;
   getState(): Promise<FlareGitProjectState>;
   claimLanding(req: { holder: string; taskIds: string[] }): Promise<ClaimResult>;
   recordVerification(candidateId: string, commit: string, evidence: VerificationEvidence): Promise<void>;
   recordComposition(candidateId: string, attempts: RepairAttempt[]): Promise<void>;
   awaitReview(candidateId: string, commit: string, workflowInstanceId: string): Promise<void>;
-  recordReview(candidateId: string, review: { approved: boolean; by: string; note?: string }, expectedCommit: string): Promise<{ ok: boolean; instanceId?: string; error?: string }>;
+  recordReview(candidateId: string, review: { approved: boolean; actor: HumanDecisionActor; note?: string }, expectedCommit: string, credentialHash?: string): Promise<{ ok: boolean; instanceId?: string; error?: string; review?: CandidateGeneration["review"] }>;
   preparePublish(candidateId: string): Promise<PrepareResult>;
+  authorizeCandidatePublication(candidateId: string, commit: string): Promise<boolean>;
   completePublish(journalId: string): Promise<void>;
   abortPublish(candidateId: string, journalId: string | undefined, reason: string, outcome: "failed" | "stale"): Promise<void>;
   cancelTask(taskId: string): Promise<void>;
@@ -1619,6 +1624,11 @@ export class RepositoryController extends DurableObject<Env> {
     return this.ctx.storage.sql.exec("SELECT id FROM api_tokens WHERE hash=? AND (expires_at IS NULL OR expires_at>?)",hash,Date.now()).toArray().length===1;
   }
 
+  async apiTokenHashCanAdminister(hash: string, userId: string, projectId: string): Promise<boolean> {
+    if (!/^[a-f0-9]{64}$/.test(hash) || this.accountLifecycleState() !== "active") return false;
+    return this.ctx.storage.sql.exec("SELECT id FROM api_tokens WHERE hash=? AND user_id=? AND scope='full' AND (repo IS NULL OR repo=?) AND (expires_at IS NULL OR expires_at>?)",hash,userId,projectId,Date.now()).toArray().length === 1;
+  }
+
   // ---- personal API tokens (stored as SHA-256 hashes; the secret is shown once) ----
   private async sha256(value: string): Promise<string> {
     const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -1688,6 +1698,54 @@ export class RepositoryController extends DurableObject<Env> {
       state.tasks[taskId]!.agentWorkflowInstanceId = instanceId;
       this.save();
     }
+  }
+  private integrationDispatchTable(): void {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS integration_dispatch_receipts(event_id TEXT PRIMARY KEY,payload TEXT NOT NULL,actor_id TEXT,outcome TEXT,terminal INTEGER NOT NULL DEFAULT 0)");
+  }
+  async admitIntegrationDispatch(eventId: string, taskIds: string[]): Promise<{terminal:boolean;actorId:string|null}> {
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(eventId) || !Array.isArray(taskIds) || taskIds.length < 1 || taskIds.length > 8 || new Set(taskIds).size !== taskIds.length || !taskIds.every(id => typeof id === "string" && /^[a-z0-9][a-z0-9-]{0,100}$/.test(id))) throw new Error("Invalid integration dispatch identity");
+    this.integrationDispatchTable();
+    const payload = JSON.stringify(taskIds);
+    const admission = this.ctx.storage.transactionSync(() => {
+      const old = this.ctx.storage.sql.exec<{payload:string;actor_id:string|null;terminal:number}>("SELECT payload,actor_id,terminal FROM integration_dispatch_receipts WHERE event_id=?",eventId).toArray()[0];
+      if (old) {
+        if (old.payload !== payload) throw new Error("Integration event was already bound to different changes");
+        if (!old.terminal && this.repositoryDeleting()) throw new Error("Integration dispatch is blocked by repository deletion");
+        return { terminal: old.terminal === 1, actorId: old.actor_id };
+      }
+      const run = this.ctx.storage.sql.exec<{kind:string;actor_id:string|null}>("SELECT kind,actor_id FROM project_workflows WHERE instance_id=?",eventId).toArray()[0];
+      if (!run || run.kind !== "integration" || this.repositoryDeleting()) throw new Error("Integration dispatch registration is unavailable");
+      const state = this.load();
+      if (!taskIds.every(id => !!state.tasks[id])) throw new Error("Integration changes are unavailable");
+      this.ctx.storage.sql.exec("INSERT INTO integration_dispatch_receipts(event_id,payload,actor_id) VALUES(?,?,?)",eventId,payload,run.actor_id);
+      return { terminal: false, actorId: run.actor_id };
+    });
+    if (admission.terminal) return admission;
+    if (!admission.actorId) throw new Error("Integration dispatch has no accountable requesting contributor");
+    const accountKey = await accountKeyFor(admission.actorId);
+    const active = await accountOf(this.env,accountKey).accountLifecycle() === "active";
+    const latest = this.ctx.storage.sql.exec<{actor_id:string|null;terminal:number}>("SELECT actor_id,terminal FROM integration_dispatch_receipts WHERE event_id=?",eventId).one();
+    if (latest.terminal) return { terminal: true, actorId: latest.actor_id };
+    if (!active) throw new Error("Integration requesting account is unavailable");
+    const role = this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",admission.actorId).toArray()[0]?.role;
+    if (this.repositoryDeleting() || (role !== "owner" && role !== "member")) throw new Error("Integration requesting contributor no longer has repository access");
+    return admission;
+  }
+  async recordIntegrationDispatchOutcome(eventId: string, status: WorkflowOutcome): Promise<void> {
+    const known: WorkflowOutcome[] = ["started","awaiting_review","completed","skipped","accepted","needs_decision","not_started","blocked","stale","rejected","failed"];
+    if (!known.includes(status)) throw new Error("Invalid integration outcome");
+    this.integrationDispatchTable();
+    this.ctx.storage.transactionSync(() => {
+      const old = this.ctx.storage.sql.exec<{outcome:WorkflowOutcome|null;terminal:number}>("SELECT outcome,terminal FROM integration_dispatch_receipts WHERE event_id=?",eventId).toArray()[0];
+      if (!old) throw new Error("Integration dispatch identity was not admitted");
+      const terminal = status !== "started" && status !== "awaiting_review";
+      if (old.terminal) {
+        if (terminal && old.outcome !== status) throw new Error("A terminal integration outcome cannot be replaced");
+        return;
+      }
+      if (old.outcome === "awaiting_review" && status === "started") return;
+      this.ctx.storage.sql.exec("UPDATE integration_dispatch_receipts SET outcome=?,terminal=? WHERE event_id=?",status,terminal?1:0,eventId);
+    });
   }
   async getWorkflowRun(instanceId: string): Promise<{ instanceId: string; kind: "agent" | "integration" | "scenario"; actorId: string | null } | null> {
     const registered = this.ctx.storage.sql.exec<{ instanceId: string; kind: "agent" | "integration" | "scenario"; actorId: string | null }>("SELECT instance_id AS instanceId, kind, actor_id AS actorId FROM project_workflows WHERE instance_id = ?", instanceId).toArray()[0];
@@ -2288,12 +2346,17 @@ export class RepositoryController extends DurableObject<Env> {
 
   /** Ledger step 1: validate every invariant, then journal PREPARED. The workflow then pushes with a lease. */
   async preparePublish(candidateId: string): Promise<PrepareResult> {
+    const recorded = this.load().candidates[candidateId]?.review;
+    if (!recorded?.actor) return { ok: false, error: "The previous approval has no verified owner identity. Run a new candidate and review it before publishing." };
+    let assertCurrent: () => void;
+    try { assertCurrent = await this.authorizeHumanDecision(recorded.actor); assertCurrent(); }
+    catch { return { ok: false, error: "The approving owner no longer has publication authority" }; }
     const s = this.load();
     const c = s.candidates[candidateId];
     const ev = c?.evidenceId ? s.evidence[c.evidenceId] : undefined;
     if (!c || !ev || !c.candidateCommit) return { ok: false, error: "No verified candidate" };
     // Nothing becomes accepted history without a human approving this exact commit.
-    if (!c.review?.approved || c.review.commit !== c.candidateCommit) return { ok: false, error: "No human approval for this candidate commit" };
+    if (!c.review?.approved || c.review.commit !== c.candidateCommit || c.review.actor?.userId !== recorded.actor.userId) return { ok: false, error: "No current owner approval for this candidate commit" };
     if (ev.status !== "passed" || ev.candidateCommit !== c.candidateCommit) return { ok: false, error: "Evidence does not match candidate" };
     const external = this.connections().candidateState(candidateId);
     if (external && (external.frozen.repositoryId !== s.projectId || external.frozen.candidateId !== candidateId || external.frozen.commit !== c.candidateCommit || external.frozen.tree !== ev.candidateTree || externalCheckGate(external) !== "passed")) return { ok: false, error: "Required external checks have not passed for this exact candidate" };
@@ -2309,6 +2372,8 @@ export class RepositoryController extends DurableObject<Env> {
       this.save();
       return { ok: false, stale: true, error: "Accepted head moved" };
     }
+    const prepared = s.journal.find(item => item.candidateId === candidateId && item.state === "PREPARED" && item.newHead === c.candidateCommit && item.expectedHead === c.expectedAcceptedBase && item.candidateTree === ev.candidateTree && item.publicationAuthority?.actor.userId === recorded.actor!.userId && item.publicationAuthority.policyVersion === c.frozenPolicyVersion);
+    if (prepared) return { ok: true, journal: prepared };
     const journal: PublicationJournalEntry = {
       id: `jrnl_${crypto.randomUUID()}`,
       candidateId,
@@ -2318,11 +2383,27 @@ export class RepositoryController extends DurableObject<Env> {
       newHead: c.candidateCommit,
       outputDigest: ev.builtOutputDigest,
       state: "PREPARED",
+      publicationAuthority: { actor: { ...recorded.actor }, reviewedAt: recorded.at, commit: c.candidateCommit, tree: ev.candidateTree, policyVersion: c.frozenPolicyVersion, authorizedAt: new Date().toISOString() },
       timestamp: new Date().toISOString(),
     };
-    s.journal.push(journal);
-    this.save();
+    try {
+      this.ctx.storage.transactionSync(() => { assertCurrent(); s.journal.push(journal); this.save(); });
+    } catch (cause) { this.state = null; throw cause; }
     return { ok: true, journal };
+  }
+
+  /** Fresh authorization for a new Git dispatch; confirmed ref updates reconcile independently. */
+  async authorizeCandidatePublication(candidateId: string, commit: string): Promise<boolean> {
+    const recorded = this.load().candidates[candidateId]?.review;
+    if (!recorded?.approved || recorded.commit !== commit || !recorded.actor) return false;
+    let assertCurrent: () => void;
+    try { assertCurrent = await this.authorizeHumanDecision(recorded.actor); assertCurrent(); }
+    catch { return false; }
+    const state = this.load(), candidate = state.candidates[candidateId];
+    const evidence = candidate?.evidenceId ? state.evidence[candidate.evidenceId] : undefined;
+    const journal = state.journal.find(item => item.candidateId === candidateId && item.state === "PREPARED" && item.newHead === commit);
+    const authority = journal?.publicationAuthority;
+    return !!candidate && candidate.candidateCommit === commit && candidate.review?.approved === true && candidate.review.commit === commit && candidate.review.actor?.userId === recorded.actor.userId && !!authority && authority.actor.userId === recorded.actor.userId && authority.commit === commit && authority.tree === evidence?.candidateTree && authority.policyVersion === candidate.frozenPolicyVersion;
   }
 
   /** Ledger step 2: the Artifacts ref update succeeded (or was found already applied). */
@@ -2401,26 +2482,50 @@ export class RepositoryController extends DurableObject<Env> {
     this.save();
     await this.logActivity("FlareGit", "review.requested", `Verified candidate ${commit.slice(0, 7)} (${c.participatingTaskIds.join(" + ")}) is waiting for review`);
   }
-  async recordReview(candidateId: string, review: { approved: boolean; by: string; note?: string }, expectedCommit: string): Promise<{ ok: boolean; instanceId?: string; error?: string }> {
+  private async authorizeHumanDecision(actor: HumanDecisionActor, credentialHash?: string, requireCredential = false): Promise<() => void> {
+    if (!actor || typeof actor.userId !== "string" || !actor.userId || typeof actor.displayName !== "string" || !actor.displayName || actor.displayName.length > 120 || typeof actor.viaToken !== "boolean") throw new Error("Server-derived owner identity is required");
+    const initial = this.load();
+    const projectId = initial.projectId, canonicalRepoName = initial.canonicalRepoName;
+    const assertCurrent = () => {
+      const current = this.load();
+      const role = this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?", actor.userId).toArray()[0]?.role;
+      if (this.repositoryDeleting() || role !== "owner" || current.projectId !== projectId || current.canonicalRepoName !== canonicalRepoName) throw new Error("Repository owner authority changed");
+    };
+    assertCurrent();
+    const accountKey = await accountKeyFor(actor.userId);
+    const account = accountOf(this.env, accountKey);
+    if (await account.accountLifecycle() !== "active") throw new Error("Repository owner account is unavailable");
+    if (requireCredential && actor.viaToken && (!credentialHash || !await account.apiTokenHashCanAdminister(credentialHash, actor.userId, projectId))) throw new Error("Repository owner token authority changed");
+    assertCurrent();
+    return assertCurrent;
+  }
+  async recordReview(candidateId: string, review: { approved: boolean; actor: HumanDecisionActor; note?: string }, expectedCommit: string, credentialHash?: string): Promise<{ ok: boolean; instanceId?: string; error?: string; review?: CandidateGeneration["review"] }> {
+    const assertCurrent = await this.authorizeHumanDecision(review.actor, credentialHash, true);
+    assertCurrent();
     const s = this.load();
     const c = s.candidates[candidateId];
     if (!c || !c.candidateCommit || !c.workflowInstanceId) return { ok: false, error: "This candidate is not waiting for review" };
     if (!/^[a-f0-9]{40}$/.test(expectedCommit ?? "") || expectedCommit !== c.candidateCommit) return { ok: false, error: "The candidate changed from the commit you reviewed. Refresh and inspect its diff before deciding." };
     // Idempotent: the same decision can be re-sent if notifying the integration run failed the first time.
     if (c.review && c.review.commit === c.candidateCommit && (c.status === "verified" || c.status === "failed") && !s.journal.some((j) => j.candidateId === c.id)) {
-      return c.review.approved === review.approved ? { ok: true, instanceId: c.workflowInstanceId } : { ok: false, error: `Already ${c.review.approved ? "approved" : "rejected"} by ${c.review.by}` };
+      return c.review.approved === review.approved && (c.review.note ?? "") === (review.note ?? "") ? { ok: true, instanceId: c.workflowInstanceId, review: c.review } : { ok: false, error: `Already ${c.review.approved ? "approved" : "rejected"} by ${c.review.by}` };
     }
     if (c.status !== "awaiting_review") return { ok: false, error: "This candidate is not waiting for review" };
     const external = this.connections().candidateState(candidateId);
     const evidence = c.evidenceId ? s.evidence[c.evidenceId] : undefined;
     if (review.approved && c.frozenExternalChecksPolicy?.checks.some((check) => check.required) && !external) return { ok: false, error: "Required external check evidence is unavailable" };
     if (review.approved && external && (external.frozen.repositoryId !== s.projectId || external.frozen.candidateId !== candidateId || external.frozen.commit !== c.candidateCommit || external.frozen.tree !== evidence?.candidateTree || externalCheckGate(external) !== "passed")) return { ok: false, error: "Required external checks must pass for this exact candidate before acceptance" };
-    c.review = { ...review, at: new Date().toISOString(), commit: c.candidateCommit };
-    c.status = review.approved ? "verified" : "failed";
-    c.updatedAt = new Date().toISOString();
-    this.save();
-    await this.logActivity(review.by, review.approved ? "review.approved" : "review.rejected", `${review.approved ? "Approved" : "Rejected"} ${c.candidateCommit.slice(0, 7)}${review.note ? `: ${review.note.slice(0, 160)}` : ""}`);
-    return { ok: true, instanceId: c.workflowInstanceId };
+    try {
+      this.ctx.storage.transactionSync(() => {
+        assertCurrent();
+        c.review = { ...review, actor: { ...review.actor }, by: review.actor.displayName, at: new Date().toISOString(), commit: c.candidateCommit! };
+        c.status = review.approved ? "verified" : "failed";
+        c.updatedAt = new Date().toISOString();
+        this.save();
+      });
+    } catch (cause) { this.state = null; throw cause; }
+    await this.logActivity(review.actor.displayName, review.approved ? "review.approved" : "review.rejected", `${review.approved ? "Approved" : "Rejected"} ${c.candidateCommit.slice(0, 7)}${review.note ? `: ${review.note.slice(0, 160)}` : ""}`);
+    return { ok: true, instanceId: c.workflowInstanceId, review: c.review };
   }
 
   async abortPublish(candidateId: string, journalId: string | undefined, reason: string, outcome: "failed" | "stale"): Promise<void> {
@@ -2452,31 +2557,44 @@ export class RepositoryController extends DurableObject<Env> {
     await this.logActivity("FlareGit", outcome === "stale" ? "integration.stale" : "integration.blocked", outcome === "stale" ? "Base moved; will recompose" : `Blocked: ${reason}`.slice(0, 280));
   }
 
-  async resolveDecision(decisionId: string, selectedOptionId: string): Promise<{ taskIds: string[] }> {
+  async resolveDecision(decisionId: string, selectedOptionId: string, actor: HumanDecisionActor, credentialHash?: string): Promise<{ taskIds: string[] }> {
+    const assertCurrent = await this.authorizeHumanDecision(actor, credentialHash, true);
+    assertCurrent();
     const s = this.load();
     const d = s.decisions[decisionId];
     if (!d) throw new Error("Unknown decision");
-    if (d.status === "resolved") return { taskIds: [] };
+    if (d.status === "resolved") {
+      if (d.selectedOptionId !== selectedOptionId) throw new Error("This decision was already resolved with a different option");
+      return { taskIds: [...(d.resolvedTaskIds ?? [])] };
+    }
+    if (d.status !== "pending") throw new Error("This decision is not awaiting a choice");
     const [idA, idB] = d.conflictingRequirementIds;
     if (selectedOptionId !== idA && selectedOptionId !== idB) throw new Error("Unknown option");
-    d.selectedOptionId = selectedOptionId;
-    d.status = "resolved";
-    d.resolvedAt = new Date().toISOString();
     const taskIds: string[] = [];
-    for (const t of Object.values(s.tasks)) {
-      for (const r of t.requirements) {
-        if (r.id === (selectedOptionId === idA ? idB : idA)) r.status = "superseded";
-        if (r.id === selectedOptionId && r.policyPatch) {
-          s.verificationPolicy = { ...s.verificationPolicy, ...r.policyPatch };
-          s.policyVersion += 1;
+    try {
+      this.ctx.storage.transactionSync(() => {
+        assertCurrent();
+        d.selectedOptionId = selectedOptionId;
+        d.status = "resolved";
+        d.resolvedAt = new Date().toISOString();
+        d.resolvedBy = { ...actor };
+        for (const t of Object.values(s.tasks)) {
+          for (const r of t.requirements) {
+            if (r.id === (selectedOptionId === idA ? idB : idA)) r.status = "superseded";
+            if (r.id === selectedOptionId && r.policyPatch) {
+              s.verificationPolicy = { ...s.verificationPolicy, ...r.policyPatch };
+              s.policyVersion += 1;
+            }
+          }
+          if (t.status === "needs_decision") {
+            t.status = "ready";
+            taskIds.push(t.id);
+          }
         }
-      }
-      if (t.status === "needs_decision") {
-        t.status = "ready";
-        taskIds.push(t.id);
-      }
-    }
-    this.save();
+        d.resolvedTaskIds = [...taskIds];
+        this.save();
+      });
+    } catch (cause) { this.state = null; throw cause; }
     return { taskIds };
   }
 }

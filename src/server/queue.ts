@@ -21,16 +21,22 @@ export async function handleQueueBatch(batch: MessageBatch<QueueMessage>, env: E
         }
       } else {
         const repository = ledgerOf(env, body.projectId);
-        const run = await repository.getWorkflowRun(body.eventId);
-        let accountKey: string | undefined;
-        if (run?.kind === "integration" && run.actorId && await repository.roleOf(run.actorId)) {
-          const key = await accountKeyFor(run.actorId);
-          if (await accountOf(env, key).accountLifecycle() === "active") accountKey = key;
-        }
+        if(!/^[a-z0-9]{12,16}$/.test(body.projectId)||!/^[a-zA-Z0-9_-]{1,128}$/.test(body.eventId)||!Array.isArray(body.taskIds)||body.taskIds.length<1||body.taskIds.length>8||new Set(body.taskIds).size!==body.taskIds.length||body.taskIds.some(id=>typeof id!=="string"||!/^[a-z0-9][a-z0-9-]{0,100}$/.test(id)))throw new Error("Invalid integration dispatch");
+        const dispatch=await repository.admitIntegrationDispatch(body.eventId,body.taskIds);
+        if(dispatch.terminal){msg.ack();continue;}
+        const actorId=dispatch.actorId;
+        if(!actorId||!await repository.roleOf(actorId))throw new Error("Integration dispatch actor is unavailable");
+        const accountKey=await accountKeyFor(actorId);
+        if(await accountOf(env,accountKey).accountLifecycle()!=="active")throw new Error("Integration dispatch account is unavailable");
+        const current=await repository.admitIntegrationDispatch(body.eventId,body.taskIds);
+        if(current.terminal){msg.ack();continue;}
+        if(current.actorId!==actorId)throw new Error("Integration dispatch authority changed");
         // Billing authority comes from the stored authenticated request, never queue payload data.
-        // Legacy native-only integration can proceed without managed funding.
         const params: IntegrationParams = { projectId: body.projectId, taskIds: body.taskIds, accountKey };
-        await env.INTEGRATION_WORKFLOW.create({ id: body.eventId, params });
+        // Documented batch creation skips retained duplicate IDs. Errors still
+        // retry; a lost acknowledgment never becomes an inferred successful start.
+        const created=await env.INTEGRATION_WORKFLOW.createBatch([{ id: body.eventId, params }]);
+        if(!Array.isArray(created)||created.length>1||created.some(instance=>instance.id!==body.eventId))throw new Error("Integration dispatch acknowledgment is invalid");
       }
       msg.ack();
     } catch (err) {

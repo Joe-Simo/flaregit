@@ -1287,15 +1287,22 @@ export default {
         // ----- human review of a verified candidate -----
         const reviewRoute = /^\/candidates\/([a-z0-9_-]+)\/review$/.exec(sub);
         if (reviewRoute && method === "POST") {
-          if (!canAdminister) return text("Approving or rejecting needs a signed-in session or a full-access token", 403);
+          if (!isOwner) return text("Only the repository owner with a signed-in session or full-access token can review", 403);
           const b = await body<{ approved?: boolean; note?: string; expectedCommit?: string }>();
           if (typeof b.approved !== "boolean") return text("approved (true or false) is required", 400);
           if (typeof b.expectedCommit !== "string" || !/^[a-f0-9]{40}$/.test(b.expectedCommit)) return text("The exact commit you reviewed is required. Refresh the page and inspect the candidate.", 400);
-          const by = (await account.getProfile()).displayName || `member-${accountKey.slice(0, 6)}`;
-          const r = await project.recordReview(reviewRoute[1]!, { approved: b.approved, by, note: clean(b.note, 500) || undefined }, b.expectedCommit);
+          const profile = await account.getProfile();
+          const currentAuth = await authenticate(request, env);
+          if (currentAuth instanceof Response) return currentAuth;
+          if (currentAuth.id !== userId || (currentAuth.viaToken === true) !== (auth.viaToken === true) || (currentAuth.viaToken && (currentAuth.tokenScope !== "full" || (currentAuth.tokenRepo && currentAuth.tokenRepo !== projectId)))) return text("Owner authentication changed before the decision was saved",403);
+          const credentialHash = currentAuth.viaToken ? await gitParentTokenHash(request) : undefined;
+          const actor = { userId, displayName: clean(profile.displayName, 120) || "Repository owner", viaToken: auth.viaToken === true };
+          let r;
+          try { r = await project.recordReview(reviewRoute[1]!, { approved: b.approved, actor, note: clean(b.note, 500) || undefined }, b.expectedCommit, credentialHash); }
+          catch { return text("Review could not be confirmed. Refresh the candidate before retrying.", 409); }
           if (!r.ok || !r.instanceId) return text(r.error ?? "Review failed", 409);
           try {
-            await (await env.INTEGRATION_WORKFLOW.get(r.instanceId)).sendEvent({ type: "review", payload: { approved: b.approved, by, note: clean(b.note, 500) || undefined } });
+            await (await env.INTEGRATION_WORKFLOW.get(r.instanceId)).sendEvent({ type: "review", payload: { approved: r.review?.approved ?? b.approved, by: r.review?.by ?? actor.displayName, note: r.review?.note, actor: r.review?.actor } });
           } catch (e) {
             console.error("review notify failed", e instanceof Error ? e.message : String(e));
             return text("Your decision is saved, but the integration run did not receive it yet. Press the same button again to resend.", 502);
@@ -1304,9 +1311,19 @@ export default {
         }
 
         if (sub === "/decisions/resolve" && method === "POST") {
+          if (!isOwner) return text("Only the repository owner with a signed-in session or full-access token can resolve decisions", 403);
           const b = await body<{ decisionId?: string; selectedOptionId?: string }>();
-          if (!b.decisionId || !b.selectedOptionId) return text("decisionId and selectedOptionId required", 400);
-          const { taskIds } = await project.resolveDecision(b.decisionId, b.selectedOptionId);
+          if (typeof b.decisionId !== "string" || typeof b.selectedOptionId !== "string" || !b.decisionId || !b.selectedOptionId || b.decisionId.length > 120 || b.selectedOptionId.length > 120) return text("decisionId and selectedOptionId required", 400);
+          const profile = await account.getProfile();
+          const currentAuth = await authenticate(request, env);
+          if (currentAuth instanceof Response) return currentAuth;
+          if (currentAuth.id !== userId || (currentAuth.viaToken === true) !== (auth.viaToken === true) || (currentAuth.viaToken && (currentAuth.tokenScope !== "full" || (currentAuth.tokenRepo && currentAuth.tokenRepo !== projectId)))) return text("Owner authentication changed before the decision was saved",403);
+          const credentialHash = currentAuth.viaToken ? await gitParentTokenHash(request) : undefined;
+          const actor = { userId, displayName: clean(profile.displayName, 120) || "Repository owner", viaToken: auth.viaToken === true };
+          let result;
+          try { result = await project.resolveDecision(b.decisionId, b.selectedOptionId, actor, credentialHash); }
+          catch (cause) { return text(cause instanceof Error ? cause.message : "Decision was not saved", 409); }
+          const { taskIds } = result;
           if (taskIds.length > 0) {
             const eventId = `decision-${projectId}-${b.decisionId}`;
             await project.registerWorkflow(eventId, "integration", undefined, userId);

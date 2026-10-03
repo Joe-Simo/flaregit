@@ -31,19 +31,22 @@ type Stub = Ledger;
 
 export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, IntegrationParams> {
   override async run(event: WorkflowEvent<IntegrationParams>, step: WorkflowStep) {
+    const repository = ledgerOf(this.env, event.payload.projectId) as Stub;
+    const admitted = await step.do("repository-dispatch-identity", () => repository.admitIntegrationDispatch(event.instanceId,event.payload.taskIds));
+    if (admitted.terminal) return { status: "skipped" as const, duplicate: true };
     const record = async (status: WorkflowOutcome) => {
+      await step.do(`repository-outcome-${status}`, () => repository.recordIntegrationDispatchOutcome(event.instanceId,status));
       try { await step.do(`outcome-${status}`, async () => globalOf(this.env).recordWorkflowOutcome("integration", event.instanceId, status)); }
       catch { console.error("Workflow outcome recording unavailable"); }
     };
     await record("started");
-    try {
-      const result = await this.execute(event, step);
-      await record(result.status);
-      return result;
-    } catch (error) {
-      await record("failed");
-      throw error;
-    }
+    let result: Awaited<ReturnType<FlareGitIntegrationWorkflow["execute"]>>;
+    try { result = await this.execute(event, step); }
+    catch (error) { await record("failed"); throw error; }
+    // A receipt delivery failure after successful publication must retry that
+    // outcome, rather than overwrite accepted work with a fabricated failure.
+    await record(result.status);
+    return result;
   }
   private async execute(event: WorkflowEvent<IntegrationParams>, step: WorkflowStep) {
     const stub = ledgerOf(this.env, event.payload.projectId) as Stub;
@@ -79,6 +82,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
 
     // Human control over history: the verified candidate waits until a person accepts this exact commit.
     await step.do("await-review", async () => stub.awaitReview(candidate.id, integrated.commit, event.instanceId));
+    await step.do("repository-outcome-awaiting-review", () => stub.recordIntegrationDispatchOutcome(event.instanceId,"awaiting_review"));
     await step.do("outcome-awaiting-review", async () => globalOf(this.env).recordWorkflowOutcome("integration", event.instanceId, "awaiting_review"));
     let review: { approved: boolean; by: string; note?: string };
     try {
@@ -435,6 +439,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     // canonical branch before retrying, including when another contributor advanced it.
     const alreadyLanded = () => publicationInHistory((command, env) => sb.exec(command, env), dir, canonical.remote, canonical.token, branch, commit);
     if (await alreadyLanded()) return { ok: true };
+    if (!await stub.authorizeCandidatePublication(candidate.id, commit)) return { ok: false, error: "The approving owner no longer authorizes this exact publication; nothing was pushed" };
     const res = await sb.exec(
       `git -C ${dir} push --quiet --force-with-lease=${q(`refs/heads/${branch}:${candidate.expectedAcceptedBase}`)} ${q(canonical.remote)} ${q(`${commit}:refs/heads/${branch}`)}`,
       gitAuthEnv(canonical.token)

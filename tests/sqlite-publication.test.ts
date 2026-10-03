@@ -192,7 +192,7 @@ test("local workerd SQLite executes production publication rollback and recovery
     const publishable = {
       ...state(),
       evidence: { evidence: { id: "evidence", candidateCommit: "landed", candidateTree: "tree", status: "passed", verifierIdentity: "flaregit-ticket-booking-protected-verifier-v2", expectedAcceptedBase: "base", requirementsVersion: 1, builtOutputDigest: "build" } },
-      candidates: { candidate: { ...state().candidates.candidate, candidateCommit: "landed", expectedAcceptedBase: "base", frozenVerificationPolicy: {}, review: { approved: true, commit: "landed", by: "reviewer" } } },
+      candidates: { candidate: { ...state().candidates.candidate, candidateCommit: "landed", expectedAcceptedBase: "base", frozenVerificationPolicy: {}, review: { approved: true, commit: "landed", by: "reviewer", at: "2026-10-03T00:00:00.000Z", actor: { userId: "test-reviewer", displayName: "reviewer", viaToken: false } } } },
     };
     const reviewedCommit = "b".repeat(40);
     await request("/seed?name=exact-review", { state: { ...publishable, journal: [], candidates: { candidate: { ...publishable.candidates.candidate, candidateCommit: reviewedCommit, status: "awaiting_review", review: undefined } } }, holder: "old-holder" });
