@@ -1,4 +1,4 @@
-import { CloudflareBadge } from "./components/CloudflareBadge";
+import { CloudflareBadgeFooter } from "./components/CloudflareBadge";
 import React, { useEffect, useRef, useState } from "react";
 import { GitBranch, Search, Menu, X, Inbox as InboxIcon, Settings, FolderGit2, Plus, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -83,7 +83,7 @@ export function App() {
       <footer className="px-4 sm:px-6 py-3 text-xs text-muted-foreground flex flex-wrap items-center gap-x-4 gap-y-3 border-t border-border">
         <a href="/terms" className="hover:underline">Terms</a>
         <a href="/privacy" className="hover:underline">Privacy</a>
-        <CloudflareBadge className="ml-auto" />
+        <CloudflareBadgeFooter />
       </footer>
       </div>
       <SearchDialog open={searchOpen} onOpenChange={setSearchOpen} load={loadSearch} onNavigate={href => { setSidebarOpen(false); if (href.startsWith("/#/")) navigate(href.slice(2)); else window.location.assign(href); }} />

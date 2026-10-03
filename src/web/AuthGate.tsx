@@ -11,7 +11,7 @@ import { PublicProfile } from "./pages/PublicProfile";
 import { Pricing } from "./pages/Pricing";
 import { About } from "./pages/About";
 import { Community } from "./pages/Community";
-import { CloudflareBadge } from "./components/CloudflareBadge";
+import { CloudflareBadgeFooter } from "./components/CloudflareBadge";
 import { safeSignInReturn } from "./sign-in-return";
 import { navigate, useRoute } from "./router";
 
@@ -35,8 +35,8 @@ function SessionWorkspace({ principal, session, children }: { principal: string;
 }
 
 function Entry({ children }: { children: React.ReactNode }) {
-  return <div className="entry-shell min-h-screen grid lg:grid-cols-2">
-    <section className="flex min-h-screen min-w-0 flex-col bg-background">
+  return <div className="entry-shell min-h-screen grid grid-rows-[minmax(0,1fr)_auto] lg:grid-cols-2">
+    <section className="flex min-w-0 flex-col bg-background">
       <header className="flex items-center justify-between px-6 py-7 sm:px-8">
         <a href="/" className="inline-flex items-center gap-2 text-base font-semibold tracking-tight rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
           <GitBranch className="h-7 w-7 text-primary" aria-hidden="true" />FlareGit
@@ -46,11 +46,6 @@ function Entry({ children }: { children: React.ReactNode }) {
       <main className="flex flex-1 items-center justify-center px-6 py-12 sm:px-10">
         <div className="entry-auth w-full max-w-[450px] min-w-0">{children}</div>
       </main>
-      <footer className="flex flex-wrap items-center justify-between gap-x-4 gap-y-4 px-6 py-6 sm:px-8 text-xs text-muted-foreground">
-        <a href="/status" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Service status</a>
-        <nav aria-label="Legal" className="flex items-center gap-5"><a href="/terms" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Terms</a><a href="/privacy" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Privacy</a></nav>
-        <CloudflareBadge className="basis-full sm:basis-auto" />
-      </footer>
     </section>
     <aside className="hidden min-w-0 bg-muted/30 lg:flex lg:flex-col" aria-labelledby="entry-story">
       <div className="relative min-h-[58vh] overflow-hidden bg-[#ef510c] text-white">
@@ -63,6 +58,11 @@ function Entry({ children }: { children: React.ReactNode }) {
         </div>
       </div>
     </aside>
+    <footer className="col-span-full flex flex-wrap items-center justify-between gap-x-4 gap-y-4 px-6 py-6 sm:px-8 text-xs text-muted-foreground">
+        <a href="/status" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Service status</a>
+        <nav aria-label="Legal" className="flex items-center gap-5"><a href="/terms" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Terms</a><a href="/privacy" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Privacy</a></nav>
+        <CloudflareBadgeFooter />
+    </footer>
   </div>;
 }
 
@@ -100,7 +100,12 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   if (docsPage) return <Docs />;
   if (pricingPage) return <Pricing onSignIn={() => window.location.assign("/#/?signin=1")} />;
   if (aboutPage) return <About onSignIn={() => window.location.assign("/#/?signin=1")} />;
-  if (communityPage) return <Community onSignIn={() => window.location.assign("/#/community-post?signin=1")} />;
+  if (communityPage) return <Community onSignIn={() => {
+    const hash = window.location.hash.slice(1);
+    const query = hash.startsWith("/") ? hash.split("?")[1] ?? "" : hash;
+    const destination = safeSignInReturn(`/community${query ? `?${query}` : ""}`) ?? "/community";
+    window.location.assign(`/#${destination}${destination.includes("?") ? "&" : "?"}signin=1`);
+  }} />;
   if (route.name === "profile") return <PublicProfile key={route.handle} handle={route.handle} />;
   if (route.name === "public") return <PublicRepo key={route.projectId} projectId={route.projectId} params={route.params} onSignIn={() => { beginSignIn(`/participate/${route.projectId}`); navigate(`/participate/${route.projectId}`); }} />;
 

@@ -1,4 +1,4 @@
-import { CloudflareBadge } from "../components/CloudflareBadge";
+import { CloudflareBadgeFooter } from "../components/CloudflareBadge";
 import { PublicSearchButton } from "../components/SearchDialog";
 import { ArrowRight, ArrowUpRight, GitBranch } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -58,6 +58,6 @@ export function Landing({ onSignIn }: { onSignIn: () => void }) {
         <section className="flex flex-col justify-between gap-5 border-t border-border/60 px-6 py-8 sm:px-9 md:flex-row md:items-center"><p className="max-w-[640px] text-xs leading-6 text-muted-foreground">Core collaboration and basic private repositories are free. Bring your own editor and agents. Integrations run in FlareGit containers with daily limits; connected checks supplement repository verification.</p><a href="https://github.com/Joe-Simo/flaregit" className="flex shrink-0 items-center gap-2 text-xs">View source <ArrowUpRight className="h-3.5 w-3.5" aria-hidden /></a></section>
       </div>
     </main>
-    <footer className="border-t border-border/60"><div className="mx-auto flex max-w-[1100px] flex-wrap justify-between gap-4 px-6 py-6 text-[11px] text-muted-foreground lg:px-0"><div className="flex flex-col items-start gap-3"><span>FlareGit</span><CloudflareBadge /></div><div className="flex flex-wrap gap-5"><a href="/status">Status</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="mailto:support@flaregit.com">Support</a></div></div></footer>
+    <footer className="border-t border-border/60"><div className="mx-auto flex max-w-[1100px] flex-wrap justify-between gap-4 px-6 py-6 text-[11px] text-muted-foreground lg:px-0"><span>FlareGit</span><div className="flex flex-wrap gap-5"><a href="/status">Status</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="mailto:support@flaregit.com">Support</a></div><CloudflareBadgeFooter /></div></footer>
   </div>;
 }
