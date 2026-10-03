@@ -80,7 +80,7 @@ Requirements:
 Steps:
 
 ```bash
-bun install
+bun install --frozen-lockfile
 bunx wrangler login
 bunx wrangler r2 bucket create flaregit-evidence
 bunx wrangler queues create flaregit-integration-events
@@ -114,8 +114,15 @@ bun run build && bunx wrangler deploy
 
 Clone the [public Apache-2.0 repository](https://github.com/Joe-Simo/flaregit), then run these commands from its root. Git and Bun are required for the local controller and proof runner. Cloudflare credentials are needed only for the live model demo or hosted deployment.
 
+The hosted prototype source is on `codex/docs-community-and-delivery`. Select that branch when cloning:
+
 ```bash
-bun install
+git clone --branch codex/docs-community-and-delivery https://github.com/Joe-Simo/flaregit.git
+cd flaregit
+```
+
+```bash
+bun install --frozen-lockfile
 bun run typecheck && bun run lint && bun test
 ```
 
