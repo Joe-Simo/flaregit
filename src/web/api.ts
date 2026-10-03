@@ -26,9 +26,21 @@ function requestGuard(binding: SessionBinding | null, requestEpoch: number): () 
   };
 }
 
+type ResponseMetadata = Readonly<Pick<Response, "url" | "redirected" | "type" | "status" | "statusText">>;
+
 /** Guard delayed consumption too: a small response may already be buffered before a switch. */
 class SessionResponse extends Response {
-  constructor(body: BodyInit | null, init: ResponseInit, private readonly assertCurrent: () => void) { super(body, init); }
+  constructor(body: BodyInit | null, init: ResponseInit, private readonly assertCurrent: () => void, private readonly metadata: ResponseMetadata) {
+    // Opaque/error responses have status 0, which ResponseInit cannot construct.
+    // Preserve their observable status while retaining guarded body consumption.
+    super(body, { ...init, status: init.status === 0 ? 200 : init.status });
+  }
+  override get url(): string { return this.metadata.url; }
+  override get redirected(): boolean { return this.metadata.redirected; }
+  override get type(): ResponseType { return this.metadata.type; }
+  override get status(): number { return this.metadata.status; }
+  override get statusText(): string { return this.metadata.statusText; }
+  override get ok(): boolean { return this.metadata.status >= 200 && this.metadata.status < 300; }
   override async text(): Promise<string> { this.assertCurrent(); const value = await super.text(); this.assertCurrent(); return value; }
   override async json(): Promise<unknown> { this.assertCurrent(); const value: unknown = await super.json(); this.assertCurrent(); return value; }
   override async blob(): Promise<Blob> { this.assertCurrent(); const value = await super.blob(); this.assertCurrent(); return value; }
@@ -38,7 +50,7 @@ class SessionResponse extends Response {
   override clone(): Response {
     this.assertCurrent();
     const copy = super.clone();
-    const guarded = new SessionResponse(copy.body, { status: copy.status, statusText: copy.statusText, headers: copy.headers }, this.assertCurrent);
+    const guarded = new SessionResponse(copy.body, { status: copy.status, statusText: copy.statusText, headers: copy.headers }, this.assertCurrent, this.metadata);
     responseGuards.set(guarded, this.assertCurrent);
     return guarded;
   }
@@ -71,7 +83,7 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
     },
     async cancel(reason) { await reader.cancel(reason); },
   }) : null;
-  const guarded = new SessionResponse(body, { status: response.status, statusText: response.statusText, headers: response.headers }, assertCurrent);
+  const guarded = new SessionResponse(body, { status: response.status, statusText: response.statusText, headers: response.headers }, assertCurrent, { url: response.url, redirected: response.redirected, type: response.type, status: response.status, statusText: response.statusText });
   responseGuards.set(guarded, assertCurrent);
   return guarded;
 }

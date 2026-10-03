@@ -91,3 +91,22 @@ test("already buffered private responses cannot be consumed or cloned after swit
   await expect(clone.json()).rejects.toMatchObject({ name: "AbortError" });
   expect(() => response.clone()).toThrow("Your signed-in session changed");
 });
+
+test("authenticated responses and clones preserve original fetch metadata with identity guards", async () => {
+  const source = Response.json({ synthetic: true }, { status: 201, statusText: "Created" });
+  Object.defineProperties(source, { url: { value: "https://synthetic.invalid/final" }, redirected: { value: true }, type: { value: "cors" } });
+  globalThis.fetch = Object.assign(async () => source, { preconnect: originalFetch.preconnect });
+  bind("A"); const response = await apiFetch("/synthetic-metadata"); const clone = response.clone();
+  for (const item of [response, clone]) {
+    expect({ url: item.url, redirected: item.redirected, type: item.type, status: item.status, statusText: item.statusText, ok: item.ok }).toEqual({ url: "https://synthetic.invalid/final", redirected: true, type: "cors", status: 201, statusText: "Created", ok: true });
+  }
+  bind("B"); await expect(clone.text()).rejects.toMatchObject({ name: "AbortError" });
+});
+
+test("status-zero responses retain error metadata without bypassing identity guards", async () => {
+  globalThis.fetch = Object.assign(async () => Response.error(), { preconnect: originalFetch.preconnect });
+  bind("A"); const response = await apiFetch("/synthetic-error"); const clone = response.clone();
+  expect(response.status).toBe(0); expect(response.type).toBe("error"); expect(response.ok).toBe(false);
+  expect(clone.status).toBe(0); expect(clone.type).toBe("error");
+  bind("B"); await expect(clone.text()).rejects.toMatchObject({ name: "AbortError" });
+});
