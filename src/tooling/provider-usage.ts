@@ -9,19 +9,24 @@ const WINDOW_LIMIT = 86_400_000;
 const number = z.number().finite().nonnegative();
 const count = number.int();
 const artifacts = z.array(z.object({ count, dimensions: z.object({ eventType: z.string().max(64), eventKind: z.string().max(64) }) })).max(LIMIT);
-const workers = z.array(z.object({ sum: z.object({ requests: count, errors: count, subrequests: count }) })).max(LIMIT);
+const workers = z.array(z.object({ sum: z.object({ requests: count, errors: count, subrequests: count, cpuTimeUs: number }) })).max(LIMIT);
 const containers = z.array(z.object({ sum: z.object({ cpuTimeSec: number, allocatedMemory: number, allocatedDisk: number, txBytes: number }) })).max(LIMIT);
+const r2 = z.array(z.object({ sum: z.object({ requests: count }) })).max(LIMIT);
+const workflows = z.array(z.object({ sum: z.object({ cpuTime: number, wallTime: number, storageRate: number }) })).max(LIMIT);
+const WORKFLOWS = ["integration", "scenario", "agent", "import-history", "rebase-resume", "private-recovery"].map(kind => `flaregit-${kind}-workflow`);
 const envelope = z.object({ data: z.object({ viewer: z.object({ accounts: z.array(z.record(z.string(), z.unknown())).max(1).nullable() }).nullable() }).nullable().optional(), errors: z.array(z.object({ message: z.string().max(4096) })).nullable().optional() });
 const definitions = [
   { resource: "artifacts:flaregit-default", dataset: "artifactsEventsAdaptiveGroups", filter: 'repositoryNamespace:"flaregit-default"', fields: "count dimensions {eventType eventKind}", schema: artifacts },
-  { resource: "worker:flaregit", dataset: "workersInvocationsAdaptive", filter: 'scriptName:"flaregit"', fields: "sum {requests errors subrequests}", schema: workers },
+  { resource: "worker:flaregit", dataset: "workersInvocationsAdaptive", filter: 'scriptName:"flaregit"', fields: "sum {requests errors subrequests cpuTimeUs}", schema: workers },
+  { resource: "r2:flaregit-evidence", dataset: "r2OperationsAdaptiveGroups", filter: 'bucketName:"flaregit-evidence"', fields: "sum {requests}", schema: r2 },
+  ...WORKFLOWS.map(name => ({ resource: `workflow:${name}`, dataset: "workflowsAdaptiveGroups", filter: `workflowName:"${name}"`, fields: "sum {cpuTime wallTime storageRate}", schema: workflows, hourly: true })),
   ...CONTAINERS.map(id => ({ resource: `container:${id}`, dataset: "containersUsageAdaptiveGroups", filter: `applicationId:"${id}"`, fields: "sum {cpuTimeSec allocatedMemory allocatedDisk txBytes}", schema: containers })),
 ];
 export type UsageFetcher = (url: string, init: RequestInit) => Promise<Response>;
 export type Observation = {
   resource: string; start: string; end: string;
   status: "observed" | "zero" | "incomplete" | "unavailable";
-  reason?: "access_denied" | "schema_unavailable" | "provider_unavailable" | "invalid_response" | "row_limit" | "response_limit";
+  reason?: "access_denied" | "schema_unavailable" | "provider_unavailable" | "invalid_response" | "row_limit" | "response_limit" | "unsupported_granularity";
   units?: Record<string, number>;
 };
 export function sanitizeUsage(resource: string, raw: unknown, start: string, end: string, httpStatus = 200): Observation {
@@ -76,8 +81,12 @@ export async function collectProviderUsage(options: { token: string; start: stri
   for (let cursor = start; cursor < end; cursor += WINDOW_LIMIT) {
     const from = new Date(cursor).toISOString(), until = new Date(Math.min(cursor + WINDOW_LIMIT, end)).toISOString();
     for (const definition of definitions) {
+      if ("hourly" in definition && (cursor % 3_600_000 !== 0 || Math.min(cursor + WINDOW_LIMIT, end) % 3_600_000 !== 0)) {
+        observations.push({ resource: definition.resource, start: from, end: until, status: "unavailable", reason: "unsupported_granularity" }); continue;
+      }
       // One bounded window uses only previously confirmed filter fields. Row-limit results remain incomplete.
-      const query = `query { viewer { accounts(filter:{accountTag:"${ACCOUNT}"}) { ${definition.dataset}(limit:${LIMIT},filter:{datetime_geq:"${from}",datetime_leq:"${until}",${definition.filter}}) { ${definition.fields} } } } }`;
+      const timeField = "hourly" in definition ? "datetimeHour" : "datetime";
+      const query = `query { viewer { accounts(filter:{accountTag:"${ACCOUNT}"}) { ${definition.dataset}(limit:${LIMIT},filter:{${timeField}_geq:"${from}",${timeField}_lt:"${until}",${definition.filter}}) { ${definition.fields} } } } }`;
       try {
         const response = await fetcher("https://api.cloudflare.com/client/v4/graphql", { method: "POST", headers: { Authorization: `Bearer ${options.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ query }), redirect: "error", signal: AbortSignal.timeout(15_000) });
         if (response.status === 401 || response.status === 403) {
@@ -91,9 +100,9 @@ export async function collectProviderUsage(options: { token: string; start: stri
   }
   const receipt = { version: 1, capturedAt: new Date().toISOString(), window: { start: new Date(start).toISOString(), end: new Date(end).toISOString() }, observations,
     completeness: observations.every(row => row.status === "observed" || row.status === "zero") ? "complete_for_selected_metrics" : "incomplete",
-    measurement: "provider_adaptive_analytics_may_be_sampled", reservations: "not_measured_by_this_collector", invoice: "unverified",
-    units: { events: "operational_events_not_verified_billable_operations", requests: "requests", errors: "errors", subrequests: "subrequests", cpuTimeSec: "CPU_seconds", allocatedMemory: "memory_byte_seconds", allocatedDisk: "disk_byte_seconds", txBytes: "transmitted_bytes" },
-    gaps: ["Artifacts stored bytes and GB-months", "Worker CPU", "DO namespaces and metrics", "Workflow metrics", "R2 storage and operations", "AI model billing", "invoice authorization and shared allowances", "per-workflow attribution"] };
+    measurement: "provider_adaptive_analytics_may_be_sampled", reservations: "not_measured_by_this_collector", invoice: "unverified", billingZero: "never_inferred_from_empty_metrics",
+    units: { events: "operational_events_not_verified_billable_operations", requests: "requests", errors: "errors", subrequests: "subrequests", cpuTimeSec: "CPU_seconds", allocatedMemory: "memory_byte_seconds", allocatedDisk: "disk_byte_seconds", txBytes: "transmitted_bytes", cpuTimeUs: "CPU_microseconds", cpuTime: "CPU_milliseconds", wallTime: "provider_native_wall_time_unit_unverified", storageRate: "provider_native_storage_growth_rate_unit_unverified" },
+    gaps: ["Artifacts stored bytes and GB-months", "DO namespaces and metrics", "Workflow billed storage/duration and wall-time units", "R2 stored bytes and GB-months", "R2 operation billing classification (Class A/B)", "AI model billing", "invoice authorization and shared allowances", "per-workflow attribution"] };
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(receipt)));
   return { ...receipt, receiptHash: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("") };
 }

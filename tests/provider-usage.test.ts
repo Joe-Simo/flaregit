@@ -13,18 +13,18 @@ test("missing data, denied scopes, truncation and malformed quantities never bec
   expect(sanitizeUsage("worker:flaregit", {data:{viewer:{accounts:[]}}}, from, until).status).toBe("unavailable");
   const denied = sanitizeUsage("worker:flaregit", {errors:[{message:"not authorized secret"}]}, from, until);
   expect(denied.reason).toBe("access_denied"); expect(JSON.stringify(denied)).not.toContain("secret");
-  expect(sanitizeUsage("worker:flaregit", data("workersInvocationsAdaptive", Array.from({length:100},()=>({sum:{requests:1,errors:0,subrequests:0}}))), from, until).status).toBe("incomplete");
-  expect(sanitizeUsage("worker:flaregit", data("workersInvocationsAdaptive", [{sum:{requests:-1,errors:0,subrequests:0}}]), from, until).status).toBe("unavailable");
+  expect(sanitizeUsage("worker:flaregit", data("workersInvocationsAdaptive", Array.from({length:100},()=>({sum:{requests:1,errors:0,subrequests:0,cpuTimeUs:0}}))), from, until).status).toBe("incomplete");
+  expect(sanitizeUsage("worker:flaregit", data("workersInvocationsAdaptive", [{sum:{requests:-1,errors:0,subrequests:0,cpuTimeUs:0}}]), from, until).status).toBe("unavailable");
   expect(()=>sanitizeUsage("worker:other-project", {}, from, until)).toThrow();
 });
-test("collector makes only four scoped queries, hashes receipts, rejects unbounded windows and classifies response limits", async () => {
+test("collector makes only eleven scoped queries, hashes receipts, rejects unbounded windows and classifies response limits", async () => {
   const queries: string[] = [];
   const fetcher: UsageFetcher = async (_input, init) => {
     queries.push(String(init?.body));
     return new Response(JSON.stringify({errors:[{message:"Unknown field provider secret"}]}), {headers:{"content-type":"application/json"}});
   };
   const receipt = await collectProviderUsage({token:"opaque",start:from,end:until,fetcher});
-  expect(queries).toHaveLength(4); expect(queries.every(query=>query.includes("9888fed381861dcc35a37b026ff176e9"))).toBeTrue();
+  expect(queries).toHaveLength(11); expect(queries.every(query=>query.includes("9888fed381861dcc35a37b026ff176e9"))).toBeTrue();
   expect(receipt.receiptHash).toMatch(/^[a-f0-9]{64}$/); expect(receipt.invoice).toBe("unverified"); expect(receipt.completeness).toBe("incomplete");
   expect(JSON.stringify(receipt)).not.toContain("secret");
   await expect(collectProviderUsage({token:"opaque",start:from,end:"2026-10-04T00:00:00Z",fetcher})).rejects.toThrow();
@@ -34,10 +34,33 @@ test("collector makes only four scoped queries, hashes receipts, rejects unbound
 });
 
  test("GraphQL nullable error/data envelopes distinguish successful metrics from failed queries", () => {
-  const success = {...data("workersInvocationsAdaptive", [{sum:{requests:4,errors:0,subrequests:9}}]), errors:null};
-  expect(sanitizeUsage("worker:flaregit", success, from, until).units).toEqual({requests:4,errors:0,subrequests:9});
+  const success = {...data("workersInvocationsAdaptive", [{sum:{requests:4,errors:0,subrequests:9,cpuTimeUs:6}}]), errors:null};
+  expect(sanitizeUsage("worker:flaregit", success, from, until).units).toEqual({requests:4,errors:0,subrequests:9,cpuTimeUs:6});
   const denied = {data:null,errors:[{message:"not authorized private provider context"}]};
   expect(sanitizeUsage("worker:flaregit", denied, from, until).reason).toBe("access_denied");
   expect(sanitizeUsage("worker:flaregit", {data:null,errors:null}, from, until).status).toBe("unavailable");
   expect(sanitizeUsage("worker:flaregit", {data:{viewer:null},errors:null}, from, until).status).toBe("unavailable");
  });
+
+ test("new exact-resource metrics preserve CPU units and never equate empty observations with billing", async () => {
+  expect(sanitizeUsage("worker:flaregit", data("workersInvocationsAdaptive", [{sum:{requests:1,errors:0,subrequests:0,cpuTimeUs:245}}]), from, until).units?.cpuTimeUs).toBe(245);
+  expect(sanitizeUsage("r2:flaregit-evidence", data("r2OperationsAdaptiveGroups", [{sum:{requests:7}}]), from, until).units).toEqual({requests:7});
+  expect(sanitizeUsage("workflow:flaregit-integration-workflow", data("workflowsAdaptiveGroups", [{sum:{cpuTime:2,wallTime:3,storageRate:4}}]), from, until).units).toEqual({cpuTime:2,wallTime:3,storageRate:4});
+  expect(sanitizeUsage("workflow:flaregit-agent-workflow", data("workflowsAdaptiveGroups", []), from, until).status).toBe("zero");
+  expect(()=>sanitizeUsage("workflow:unrelated", {}, from, until)).toThrow();
+  const queries:string[]=[];const receipt=await collectProviderUsage({token:"opaque",start:from,end:until,fetcher:async (_url,init)=>{queries.push(String(init.body));return new Response(JSON.stringify({data:null}));}});
+  expect(queries.filter(query=>query.includes("workflowName:"))).toHaveLength(6);
+  expect(queries.filter(query=>query.includes("bucketName:"))).toHaveLength(1);
+  expect(queries.filter(query=>query.includes("workflowsAdaptiveGroups")).every(query=>query.includes("datetimeHour_geq"))).toBeTrue();
+  expect(receipt.billingZero).toBe("never_inferred_from_empty_metrics");expect(receipt.units.cpuTime).toBe("CPU_milliseconds");
+ });
+
+test("granularity and requested CPU gaps remain explicit and interval ends exclude duplicates", async()=> {
+ expect(sanitizeUsage("worker:flaregit",data("workersInvocationsAdaptive",[{sum:{requests:1,errors:0,subrequests:0}}]),from,until).status).toBe("unavailable");
+ const queries:string[]=[];const fetcher:UsageFetcher=async(_url,init)=>{queries.push(String(init.body));return new Response(JSON.stringify({data:null}));};
+ const receipt=await collectProviderUsage({token:"opaque",start:"2026-10-02T00:15:00Z",end:until,fetcher});
+ expect(queries).toHaveLength(5);expect(receipt.observations.filter(row=>row.reason==="unsupported_granularity")).toHaveLength(6);
+ expect(receipt.completeness).toBe("incomplete");expect(queries.every(query=>query.includes("datetime_lt:")&&!query.includes("_leq:"))).toBeTrue();
+ queries.length=0;await collectProviderUsage({token:"opaque",start:from,end:until,fetcher});
+ expect(queries.filter(query=>query.includes("workflowsAdaptiveGroups")).every(query=>query.includes("datetimeHour_lt:")&&!query.includes("_leq:"))).toBeTrue();
+});
