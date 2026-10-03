@@ -44,6 +44,7 @@ import { RepositoryDeployments,type AcceptedDeploymentTarget,type DeploymentReco
 import { RepositoryConnections, type ConnectionMetadata, type CallbackReceipt } from "./connections.js";
 import type { IntegrationCallback, IntegrationCapability } from "./integration-auth.js";
 import { externalCheckGate, type ExternalCheckPolicy, type ExternalCheckState } from "../core/external-checks.js";
+import { CommunityPeople, type PeopleSnapshot, type PeopleRegistration, type FollowingRecord } from "./community-people.js";
 import type { PublicProfileState } from "./public-profile.js";
 import type { ImportJob } from "./import-job.js";
 import type { PublicRepositoryGrant } from "./public-repositories.js";
@@ -393,6 +394,18 @@ export interface Ledger {
   domainsFor(projectId: string): Promise<DomainRow[]>;
   getProfile(): Promise<Profile>;
   publicProfileState(): Promise<PublicProfileState>;
+  peopleSnapshot():Promise<PeopleSnapshot>;
+  configureDiscovery(input:unknown,userId:string):Promise<ReturnType<CommunityPeople["state"]>>;
+  registerPerson(value:PeopleRegistration):Promise<void>;
+  deliveredDiscovery(version:number):Promise<void>;
+  peoplePage(cursor?:string):Promise<ReturnType<CommunityPeople["page"]>>;
+  followingForHandle(handle:string):Promise<FollowingRecord|null>;
+  replayFollowing(handle:string,input:unknown):Promise<ReturnType<CommunityPeople["replayFollowing"]>>;
+  followingRecord(targetAccount:string):Promise<FollowingRecord|null>;
+  followingPage(cursor?:string):Promise<ReturnType<CommunityPeople["followingPage"]>>;
+  setFollowing(target:{accountKey:string;ownerId:string;handle:string},input:unknown):Promise<ReturnType<CommunityPeople["setFollowing"]>>;
+  publicAcceptedActivity(userId:string):Promise<{directory:DirectoryState;grant:PublicGrantMetadata|null;contributions:Array<{commit:string;acceptedAt:string}>}>;
+  publicActivityProjects():Promise<Array<{id:string}>>;
   setPublicProfileVisibility(visibility: "public" | "private", confirmed: boolean, ownerId: string, expectedVersion?: number): Promise<void>;
   listIssues(state: "open" | "closed"): Promise<IssueRow[]>;
   getIssue(n: number): Promise<IssueRow | null>;
@@ -2413,6 +2426,31 @@ export class RepositoryController extends DurableObject<Env> {
   async moderateProfile(ownerId: string, input: unknown, operatorAccountKey: string): Promise<PublicationModerationDecision> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS profile_publication(id INTEGER PRIMARY KEY CHECK(id=1),visibility TEXT,version INTEGER,owner_id TEXT)");
     return new PublicationModeration(this.ctx.storage).moderate("profile",ownerId,input,operatorAccountKey,()=>{this.ctx.storage.sql.exec("INSERT INTO profile_publication VALUES(1,'private',1,?) ON CONFLICT(id) DO UPDATE SET version=version+1",ownerId);});
+  }
+  private profileSnapshot():PublicProfileState {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS profile_publication(id INTEGER PRIMARY KEY CHECK(id=1),visibility TEXT,version INTEGER,owner_id TEXT)");
+    const publication=this.ctx.storage.sql.exec<{visibility:"public"|"private";version:number;owner_id:string}>("SELECT visibility,version,owner_id FROM profile_publication WHERE id=1").toArray()[0];
+    const row=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM profile WHERE id=1").toArray()[0];
+    const profile:Profile=row?JSON.parse(row.doc) as Profile:{handle:"",displayName:"",bio:"",joinedAt:""};
+    return {profile,visibility:publication?.visibility??"private",version:publication?.version??0,ownerId:publication?.owner_id??null,moderation:publication?.owner_id?new PublicationModeration(this.ctx.storage).state("profile",publication.owner_id):undefined};
+  }
+  async peopleSnapshot():Promise<PeopleSnapshot>{return {profile:this.profileSnapshot(),discovery:new CommunityPeople(this.ctx.storage).state(),active:this.accountLifecycleState()==="active"};}
+  async configureDiscovery(input:unknown,userId:string){if(this.accountLifecycleState()!=="active")throw new Error("Account unavailable");const profile=this.profileSnapshot();if(profile.ownerId&&profile.ownerId!==userId)throw new Error("Profile owner changed");return new CommunityPeople(this.ctx.storage).configure(input,profile);}
+  async registerPerson(value:PeopleRegistration){new CommunityPeople(this.ctx.storage).register(value);}
+  async deliveredDiscovery(version:number){new CommunityPeople(this.ctx.storage).delivered(version);}
+  async peoplePage(cursor?:string){return new CommunityPeople(this.ctx.storage).page(cursor);}
+  async followingForHandle(handle:string){return new CommunityPeople(this.ctx.storage).followingForHandle(handle);}
+  async replayFollowing(handle:string,input:unknown){return new CommunityPeople(this.ctx.storage).replayFollowing(handle,input);}
+  async followingRecord(targetAccount:string){return new CommunityPeople(this.ctx.storage).followingRecord(targetAccount);}
+  async followingPage(cursor?:string){return new CommunityPeople(this.ctx.storage).followingPage(cursor);}
+  async setFollowing(target:{accountKey:string;ownerId:string;handle:string},input:unknown){if(this.accountLifecycleState()!=="active")throw new Error("Account unavailable");return new CommunityPeople(this.ctx.storage).setFollowing(target,input);}
+  async publicActivityProjects(){return this.ctx.storage.sql.exec<{id:string}>("SELECT id FROM projects ORDER BY id LIMIT 3").toArray();}
+  async publicAcceptedActivity(userId:string){
+    const directory=new PublicDirectory(this.ctx.storage).state(),grant=this.publicGrantSnapshot();
+    if(!directory.enabled||!grant||!userId||!this.ctx.storage.sql.exec("SELECT 1 FROM members WHERE user_id=?",userId).toArray().length)return {directory,grant,contributions:[]};
+    this.gitTables();const state=this.load();const tasks=new Set(this.ctx.storage.sql.exec<{task_id:string}>("SELECT task_id FROM git_task_writers WHERE user_id=? ORDER BY task_id LIMIT 1000",userId).toArray().filter(row=>state.tasks[row.task_id]?.contributor.type==="human").map(row=>row.task_id));
+    const contributions=state.acceptedState.history.slice(-100).filter(record=>/^[a-f0-9]{40}$/.test(record.commit)&&record.participatingTasks.some(task=>tasks.has(task))).slice(-3).map(record=>({commit:record.commit,acceptedAt:record.acceptedAt}));
+    return {directory,grant,contributions};
   }
   async publicProfileState(): Promise<PublicProfileState> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS profile_publication(id INTEGER PRIMARY KEY CHECK(id=1),visibility TEXT,version INTEGER,owner_id TEXT)");

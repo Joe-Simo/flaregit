@@ -33,3 +33,18 @@ test("community sign-in resumes exact public repository or help conversation", (
   expect(safeSignInReturn("#/community?view=help&topic=forum_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee&signin=1")).toBe("/community?view=help&topic=forum_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
   for (const value of ["/community?redirect_url=https://evil.example", "/community?repo=private-url", "/community?view=help&repo=pabcdef012345", "/community?view=anything", "/community?topic=forum_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "/community?repo=pabcdef012345&topic=forum_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "/community?view=help&topic=discussion_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "/community?repo=pabcdef012345&repo=pabcdef012346"]) expect(safeSignInReturn(value)).toBeNull();
 });
+
+
+test("community sign-in retains social section intent without broadening return URLs", () => {
+  for (const view of ["activity", "following", "repositories", "people", "help"]) {
+    expect(safeSignInReturn(`#/community?view=${view}&signin=1`)).toBe(`/community?view=${view}`);
+    expect(safeSignInReturn(`/community?view=${view}&repo=pabcdef012345`)).toBeNull();
+    expect(safeSignInReturn(`/community?view=${view}&view=help`)).toBeNull();
+    expect(safeSignInReturn(`/community?view=${view}&redirect_url=https://evil.example`)).toBeNull();
+  }
+  for (const view of ["activity", "following", "repositories", "people"]) {
+    expect(safeSignInReturn(`/community?view=${view}&topic=forum_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`)).toBeNull();
+    expect(safeSignInReturn(`/community?view=${view}&topic=discussion_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`)).toBeNull();
+  }
+  for (const value of ["/community?view=https%3A%2F%2Fevil.example", "/community?view=people&signin=2", "/community?view=people&token=secret", "/community?view=people&handle=https://evil.example", "/community?view=following&cursor=1", "/community?view=people&signin=1&signin=1"]) expect(safeSignInReturn(value)).toBeNull();
+});

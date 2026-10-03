@@ -22,7 +22,7 @@ export function safeSignInReturn(value: string): string | null {
   } else if (path === "/community") {
     allowed.add("repo"); allowed.add("topic"); allowed.add("view");
     const repo = query.get("repo"), topic = query.get("topic"), view = query.get("view");
-    if (view !== null) { if (view !== "help" || repo !== null) return null; destination.set("view", view); }
+    if (view !== null) { if (!["activity", "following", "repositories", "people", "help"].includes(view) || repo !== null) return null; destination.set("view", view); }
     if (repo !== null) { if (!projectId.test(repo)) return null; destination.set("repo", repo); }
     if (topic !== null) {
       const valid = repo ? /^discussion_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(topic) : view === "help" && topicId.test(topic);

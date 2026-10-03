@@ -17,6 +17,7 @@ import {recoveryBundleKey,recoveryScopeId} from "./private-recovery.js";
 import {downloadPrivateRecovery} from "./private-recovery-download.js";
 import {admitCredentialLookup} from "./lookup-admission.js";
 import { directoryQuerySchema, directoryUpdateSchema, projectPublicDirectory } from "./public-directory.js";
+import { publicPeople, privatePeople } from "./community-people-http.js";
 import { projectPublicCommunityActivity } from "./public-community-activity.js";
 import { recoverNativeCompute, claimNativeCompute, admitNativeCompute, NativeComputeAdmissionError } from "./native-compute.js";
 import { allocateArtifact } from "./storage-allocation.js";
@@ -315,6 +316,11 @@ export default {
       }catch{return respond({error:"Community is temporarily unavailable; retry"},503);}
     }
 
+    if(url.pathname==="/api/community/people"&&request.method==="GET"){
+      const ip=request.headers.get("CF-Connecting-IP");if(!ip)return Response.json({error:"People discovery unavailable"},{status:503,headers:{"Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
+      if(!(await env.API_LIMITER.limit({key:`people:${ip}`})).success)return Response.json({error:"Too many requests"},{status:429,headers:{"Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
+      return publicPeople(env,url);
+    }
     const auth = await authenticate(request, env);
     if (auth instanceof Response) return auth;
     const userId = auth.id;
@@ -357,6 +363,9 @@ export default {
     };
 
     try {
+      if(path==="/profile/discovery"||path.startsWith("/following")||path==="/community/following-activity"){
+        const social=await privatePeople({env,url,accountKey,userId,viaToken:auth.viaToken===true,method,body:()=>body<unknown>()});if(social)return social;
+      }
       if (path.startsWith("/community")) {
         if(auth.viaToken && (auth.tokenScope !== "full" || auth.tokenRepo)) return text("Community publishing requires an account session or full account token",403);
         const profile=await account.getProfile(),actor={userId,accountKey,displayName:profile.displayName||"Contributor"};

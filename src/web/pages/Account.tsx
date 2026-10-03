@@ -1,3 +1,4 @@
+import { ProfileDiscoverySettings } from "./CommunityPeople";
 import { StorageReconciliation } from "../components/StorageReconciliation";
 import React, { useCallback, useEffect, useState } from "react";
 import { Copy, Trash2 } from "lucide-react";
@@ -159,6 +160,7 @@ export function Account() {
               finally { setBusy(null); }
             }}>{busy === "visibility" ? "Saving…" : profile.visibility === "public" ? "Make profile private" : "Publish profile"}</Button>{profile.visibility === "public" && !profile.moderation?.suppressed && <a className="text-xs underline underline-offset-4" href={`/#/profile/${encodeURIComponent(savedProfile?.handle ?? profile.handle)}`}>View public profile</a>}</div>
           </div>}
+          {profile && <ProfileDiscoverySettings key={user?.id ?? "signed-out"} published={profile.visibility === "public"} suppressed={profile.moderation?.suppressed ?? false} profileVersion={profile.version} disabled={busy !== null || visibilityUnknown || deletionStarted} onBusyChange={value => setBusy(value ? "discovery" : null)} />}
         </CardContent>
       </Card>
       <Card>
