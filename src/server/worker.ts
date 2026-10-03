@@ -452,7 +452,8 @@ export default {
           const ledger = projectOf(env, reference.id);
           if (await ledger.roleOf(userId) !== "owner") continue;
           await ledger.beginRepositoryDeletion();
-          if (!await stopRepositoryWorkflows(env, ledger) || !await cleanupPrivateRecovery(env, ledger)) return json({ deleted: false, status: "deleting", reason: "Repository workflow shutdown is unconfirmed; retry deletion" }, 202);
+          if (!await stopRepositoryWorkflows(env, ledger)) return json({ deleted: false, status: "deleting", reason: "Repository workflow shutdown is unconfirmed; retry deletion" }, 202);
+          if (!await cleanupPrivateRecovery(env, ledger)) return json({ deleted: false, status: "deleting", reason: "Private recovery storage cleanup is unconfirmed; saved records and capacity reservations are preserved." }, 202);
         }
         if (!await reconcileSealedAllocations(env, account)) return json({ deleted: false, status: "deleting", reason: "An in-flight repository allocation remains unconfirmed; retry deletion" }, 202);
         for (const job of imports) {
@@ -1501,7 +1502,8 @@ export default {
         if (sub === "" && method === "DELETE") {
           if (!isOwner) return text("Only the owner can delete a repository", 403);
           await project.beginRepositoryDeletion();
-          if (!await stopRepositoryWorkflows(env, project) || !await cleanupPrivateRecovery(env, project)) return json({ deleted: false, status: "deleting", detail: "Repository workflow shutdown is unconfirmed. Retry deletion; metadata is preserved." }, 202);
+          if (!await stopRepositoryWorkflows(env, project)) return json({ deleted: false, status: "deleting", detail: "Repository workflow shutdown is unconfirmed. Retry deletion; metadata is preserved." }, 202);
+          if (!await cleanupPrivateRecovery(env, project)) return json({ deleted: false, status: "deleting", detail: "Private recovery storage cleanup is unconfirmed. Saved records and capacity reservations are preserved." }, 202);
           if (!await reconcileSealedAllocations(env, project)) return json({ deleted: false, status: "deleting", detail: "An in-flight repository allocation remains unconfirmed. Retry deletion." }, 202);
           const manifest = await globalOf(env).artifactProjectManifest(projectId);
           const names = [...new Set([...Object.values(state.tasks).map((task) => task.workspace.repoName), state.canonicalRepoName, ...manifest.filter((allocation) => allocation.state !== "deleted").map((allocation) => allocation.name)])];
