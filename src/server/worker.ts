@@ -145,20 +145,15 @@ export default {
       for (const reference of references) {
         try {
           const repository = projectOf(env, reference.id);
-          const grant = await repository.publicGrant();
-          if (!grant || !(await repository.roleOf(publication.ownerId!))) continue;
-          const members = await repository.listMembers();
-          const suffix = publication.ownerId!.slice(-12);
-          if (members.filter((member) => member.user_id.slice(-12) === suffix).length !== 1) continue;
-          const state = await repository.getState();
-          const mine = new Set(Object.values(state.tasks).filter((task) => task.contributor.type === "human" && task.contributor.id === suffix).map((task) => task.id));
-          const records = state.acceptedState.history.slice(-100).filter((record) => record.participatingTasks.some((task) => mine.has(task)));
-          for (const record of records) if (/^[a-f0-9]{40}$/.test(record.commit)) contributions.push({ repository: { id: reference.id, name: grant.name }, commit: record.commit, acceptedAt: record.acceptedAt });
+          const publicContributions = await repository.publicContributionsFor(publication.ownerId!);
+          if (!publicContributions) continue;
+          const { grant, contributions: records } = publicContributions;
+          for (const record of records) contributions.push({ repository: { id: reference.id, name: grant.name }, commit: record.commit, acceptedAt: record.acceptedAt });
           observed.push({ id: reference.id, version: grant.version, commit: grant.acceptedCommit });
         } catch { /* Unavailable public repositories contribute no private or inferred counts. */ }
       }
       for (const value of observed) {
-        const current = await projectOf(env, value.id).publicGrant();
+        const current = (await projectOf(env, value.id).publicContributionsFor(publication.ownerId!))?.grant;
         if (!current || current.version !== value.version || current.acceptedCommit !== value.commit) return respond({ error: "Public contribution visibility changed; reload" }, 409);
       }
       const current = await profileAccount.publicProfileState();
@@ -516,11 +511,17 @@ export default {
         if (path === "/operator/reports" && method === "GET") return json(await globalOf(env).listReports({ status: url.searchParams.get("status") === "resolved" ? "resolved" : "open" }));
         const resolveRoute = /^\/operator\/reports\/(rpt_[a-z0-9-]+)\/resolve$/.exec(path);
         if (resolveRoute && method === "POST") {
-          const b = await body<{ resolution?: string }>();
+          const b = await body<{ resolution?: string; expectedStatus?: string }>();
+          if (b.expectedStatus !== undefined && b.expectedStatus !== "open") return text("Resolve an open report", 400);
           const resolution = clean(b.resolution, 2000);
           if (!resolution) return text("Write what was done", 400);
-          const r = await globalOf(env).resolveReport(resolveRoute[1]!, resolution, (await account.getProfile()).displayName || accountKey);
-          return r ? json(r) : text("Unknown report", 404);
+          try {
+            const r = await globalOf(env).resolveReport(resolveRoute[1]!, resolution, accountKey);
+            return r ? json(r) : text("Unknown report", 404);
+          } catch (error) {
+            if (error instanceof Error && error.message === "Report was already resolved") return text("Report was already resolved; reload its saved resolution", 409);
+            throw error;
+          }
         }
         return text("Not found", 404);
       }

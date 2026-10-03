@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@clerk/clerk-react";
 import { Button } from "@/components/ui/button";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { apiJson } from "../api";
 import { safeReportTarget } from "../report-target";
@@ -10,7 +11,7 @@ interface Report { id: string; at: string; kind: string; target: string; details
 const KINDS: Array<[string, string]> = [["impersonation", "Impersonation"], ["namespace_squatting", "Name or domain squatting"], ["malware", "Malware or extortion"], ["harassment", "Harassment"], ["security", "Security vulnerability"], ["other", "Other"]];
 const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm";
 
-function ReportList({ reports }: { reports: Report[] }) {
+function ReportList({ reports, actions }: { reports: Report[]; actions?: (report: Report) => React.ReactNode }) {
   if (reports.length === 0) return <p className="text-sm text-muted-foreground">No reports.</p>;
   return (
     <ul className="space-y-2">
@@ -19,6 +20,7 @@ function ReportList({ reports }: { reports: Report[] }) {
           <div className="flex flex-wrap items-center gap-2"><Badge variant={r.status === "open" ? "warning" : "success"}>{r.status}</Badge><span className="font-medium">{KINDS.find((k) => k[0] === r.kind)?.[1] ?? r.kind}</span><span className="text-muted-foreground break-all">{r.target}</span><span className="text-xs text-muted-foreground">{r.id} · {timeAgo(r.at)}</span></div>
           <p className="whitespace-pre-wrap break-words">{r.details}</p>
           {r.resolution && <p className="text-muted-foreground">Resolution by {r.resolved_by}{r.resolved_at ? ` ${timeAgo(r.resolved_at)}` : ""}: {r.resolution}</p>}
+          {actions?.(r)}
         </li>
       ))}
     </ul>
@@ -85,31 +87,67 @@ function ReportForm({ actor, initialTarget, initialKind }: { actor: string; init
 /** The operator queue: open reports oldest first, each closed only with a written resolution. */
 export function OperatorPage() {
   const [status, setStatus] = useState<"open" | "resolved">("open");
-  const [reports, setReports] = useState<Report[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [queues, setQueues] = useState<Partial<Record<"open" | "resolved", Report[]>>>({});
+  const [loading, setLoading] = useState(true);
+  const [loadErrors, setLoadErrors] = useState<Partial<Record<"open" | "resolved", string | null>>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const load = useCallback(() => { setReports(null); apiJson<Report[]>(`/operator/reports?status=${status}`).then((r) => setReports(status === "open" ? [...r].reverse() : r)).catch((e: Error) => setError(e.message)); }, [status]);
-  useEffect(load, [load]);
+  const [errors, setErrors] = useState<Record<string, string | null>>({});
+  const [pending, setPending] = useState<Record<string, boolean>>({});
+  const pendingIds = useRef(new Set<string>());
+  const sequence = useRef(0);
+  const [refresh, setRefresh] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    const request = ++sequence.current;
+    setLoading(true);
+    setLoadErrors(previous => ({ ...previous, [status]: null }));
+    void apiJson<Report[]>(`/operator/reports?status=${status}`, { signal: controller.signal }).then(reports => {
+      if (controller.signal.aborted || request !== sequence.current) return;
+      setQueues(previous => ({ ...previous, [status]: reports }));
+    }).catch(error => {
+      if (controller.signal.aborted || request !== sequence.current) return;
+      setLoadErrors(previous => ({ ...previous, [status]: error instanceof Error ? error.message : "Reports could not be loaded" }));
+    }).finally(() => {
+      if (!controller.signal.aborted && request === sequence.current) setLoading(false);
+    });
+    return () => controller.abort();
+  }, [status, refresh]);
   const resolve = async (id: string) => {
-    setError(null);
-    try { await apiJson(`/operator/reports/${id}/resolve`, { method: "POST", json: { resolution: drafts[id] ?? "" } }); load(); } catch (e) { setError(e instanceof Error ? e.message : "Not saved"); }
+    if (pendingIds.current.has(id)) return;
+    const resolution = (drafts[id] ?? "").trim();
+    if (!resolution) return;
+    pendingIds.current.add(id);
+    setPending(previous => ({ ...previous, [id]: true }));
+    setErrors(previous => ({ ...previous, [id]: null }));
+    try {
+      await apiJson(`/operator/reports/${id}/resolve`, { method: "POST", json: { resolution, expectedStatus: "open" } });
+      setQueues(previous => ({ ...previous, open: previous.open?.filter(report => report.id !== id) }));
+      setDrafts(previous => { const next = { ...previous }; delete next[id]; return next; });
+      setRefresh(previous => previous + 1);
+    } catch (error) {
+      setErrors(previous => ({ ...previous, [id]: error instanceof Error ? error.message : "Resolution not saved" }));
+    } finally {
+      pendingIds.current.delete(id);
+      setPending(previous => ({ ...previous, [id]: false }));
+    }
   };
+  const reports = queues[status];
+  const loadError = loadErrors[status];
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8 space-y-4">
       <h1 className="text-xl font-bold">Report queue</h1>
-      <div className="flex gap-1 text-sm" role="tablist">{(["open", "resolved"] as const).map((s) => <button key={s} role="tab" aria-selected={status === s} className={`px-3 py-1 rounded-md capitalize ${status === s ? "bg-muted font-medium" : "text-muted-foreground"}`} onClick={() => setStatus(s)}>{s}</button>)}</div>
-      {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-      {!reports ? <p role="status" className="text-sm text-muted-foreground">Loading…</p> : (
-        <>
-          <ReportList reports={reports} />
-          {status === "open" && reports.map((r) => (
-            <form key={r.id} className="flex gap-2" onSubmit={(e) => { e.preventDefault(); void resolve(r.id); }}>
-              <input className={field} aria-label={`Resolution for ${r.id}`} placeholder={`What was done about ${r.id}`} value={drafts[r.id] ?? ""} onChange={(e) => setDrafts({ ...drafts, [r.id]: e.target.value })} />
-              <Button type="submit" size="sm" disabled={!(drafts[r.id] ?? "").trim()}>Resolve</Button>
-            </form>
-          ))}
-        </>
-      )}
+      <Tabs value={status} onValueChange={value => { if (value !== status && (value === "open" || value === "resolved")) { sequence.current++; setLoading(true); setStatus(value); } }}>
+        <TabsList><TabsTrigger value="open">Open</TabsTrigger><TabsTrigger value="resolved">Resolved</TabsTrigger></TabsList>
+      </Tabs>
+      {loadError && <div className="flex flex-wrap items-center gap-2"><p role="alert" className="text-sm text-destructive">{loadError}</p><Button variant="outline" size="sm" disabled={loading} onClick={() => setRefresh(previous => previous + 1)}>Retry</Button></div>}
+      {loading && <p role="status" className="text-sm text-muted-foreground">Loading reports…</p>}
+      {reports && <ReportList reports={reports} actions={status === "open" ? report => (
+        <form className="space-y-2 pt-2" onSubmit={event => { event.preventDefault(); void resolve(report.id); }}>
+          <label className="block"><span className="font-medium">Resolution</span><textarea className={field} rows={2} maxLength={2000} placeholder="What was done about this report" value={drafts[report.id] ?? ""} disabled={pending[report.id]} onChange={event => setDrafts(previous => ({ ...previous, [report.id]: event.target.value }))} required /></label>
+          {errors[report.id] && <p role="alert" className="text-destructive">{errors[report.id]}</p>}
+          <Button type="submit" size="sm" disabled={pending[report.id] || !(drafts[report.id] ?? "").trim()}>{pending[report.id] ? "Saving…" : "Resolve report"}</Button>
+        </form>
+      ) : undefined} />}
     </div>
   );
 }

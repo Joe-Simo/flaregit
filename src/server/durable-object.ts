@@ -179,7 +179,6 @@ export interface Ledger {
   previewOrigin(repository: string, appOrigin?: string): Promise<PreviewOriginRegistration | null>;
   registerPreviewOrigin(repository: string, origin: string, operator: string, appOrigin: string): Promise<PreviewOriginRegistration>;
   retirePreviewOrigin(repository: string, operator: string, appOrigin: string): Promise<PreviewOriginRegistration | null>;
-
   nativeComputeFailure(key: string): Promise<boolean>;
   setNativeComputeFailure(key: string, failed: boolean): Promise<void>;
   nativeComputeStatus(key: string): Promise<{ active: boolean; sandboxName: string; token: string; deadline: number } | null>;
@@ -227,6 +226,7 @@ export interface Ledger {
   checkpointAgentRun(runId: string, taskId: string, eventId: string, commit: string): Promise<boolean>;
   failAgentRun(runId: string, taskId: string): Promise<boolean>;
   publicGrant(): Promise<PublicGrantMetadata | null>;
+  publicContributionsFor(userId: string): Promise<{ grant: PublicGrantMetadata; contributions: Array<{ commit: string; acceptedAt: string }> } | null>;
   directoryState(): Promise<DirectoryState>;
   configureDirectory(input: unknown, actor: string): Promise<DirectoryState>;
   registerDirectory(input: DirectoryRegistration): Promise<void>;
@@ -706,6 +706,19 @@ export class RepositoryController extends DurableObject<Env> {
     if (row?.visibility !== "public" || !row.confirmed_by) return null;
     const state = this.load();
     return { visibility: "public", confirmedByOwner: true, acceptedCommit: state.acceptedState.currentCommit, name: state.projectName, canonicalRepoName: state.canonicalRepoName, version: row.version };
+  }
+  async publicContributionsFor(userId: string): Promise<{ grant: PublicGrantMetadata; contributions: Array<{ commit: string; acceptedAt: string }> } | null> {
+    if (!userId) return null;
+    const grant = await this.publicGrant();
+    if (!grant || !this.ctx.storage.sql.exec<{ role: string }>("SELECT role FROM members WHERE user_id=?", userId).toArray()[0]) return null;
+    this.gitTables();
+    const state = this.load();
+    const taskIds = new Set(this.ctx.storage.sql.exec<{ task_id: string }>("SELECT task_id FROM git_task_writers WHERE user_id=?", userId).toArray()
+      .filter((row) => state.tasks[row.task_id]?.contributor.type === "human").map((row) => row.task_id));
+    const contributions = state.acceptedState.history.slice(-100)
+      .filter((record) => /^[a-f0-9]{40}$/.test(record.commit) && record.participatingTasks.some((taskId) => taskIds.has(taskId)))
+      .map((record) => ({ commit: record.commit, acceptedAt: record.acceptedAt }));
+    return { grant, contributions };
   }
   async setRepositoryVisibility(visibility: "public" | "private", confirmed: boolean, by: string): Promise<void> {
     if (this.repositoryDeleting()) throw new Error("Repository deletion is in progress");
@@ -1360,11 +1373,21 @@ export class RepositoryController extends DurableObject<Env> {
     const args: string[] = [];
     if (filter.status) { where.push("status = ?"); args.push(filter.status); }
     if (filter.reporter) { where.push("reporter = ?"); args.push(filter.reporter); }
-    return this.ctx.storage.sql.exec(`SELECT * FROM reports ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY at DESC LIMIT 200`, ...args).toArray() as unknown as ReportRow[];
+    const direction = filter.status === "open" && !filter.reporter ? "ASC" : "DESC";
+    return this.ctx.storage.sql.exec(`SELECT * FROM reports ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY at ${direction}, id ${direction} LIMIT 200`, ...args).toArray() as unknown as ReportRow[];
   }
   async resolveReport(id: string, resolution: string, by: string): Promise<ReportRow | null> {
-    this.ctx.storage.sql.exec("UPDATE reports SET status = 'resolved', resolution = ?, resolved_by = ?, resolved_at = ? WHERE id = ?", resolution, by, new Date().toISOString(), id);
-    return (this.ctx.storage.sql.exec("SELECT * FROM reports WHERE id = ?", id).toArray()[0] as unknown as ReportRow) ?? null;
+    if (!resolution.trim() || !by) throw new Error("Report resolution and operator identity required");
+    return this.ctx.storage.transactionSync(() => {
+      const current = this.ctx.storage.sql.exec("SELECT * FROM reports WHERE id = ?", id).toArray()[0] as unknown as ReportRow | undefined;
+      if (!current) return null;
+      if (current.status === "resolved") {
+        if (current.resolution === resolution && current.resolved_by === by) return current;
+        throw new Error("Report was already resolved");
+      }
+      this.ctx.storage.sql.exec("UPDATE reports SET status = 'resolved', resolution = ?, resolved_by = ?, resolved_at = ? WHERE id = ? AND status = 'open'", resolution, by, new Date().toISOString(), id);
+      return this.ctx.storage.sql.exec("SELECT * FROM reports WHERE id = ?", id).toArray()[0] as unknown as ReportRow;
+    });
   }
   async reportBacklog(): Promise<{ open: number; oldestOpenHours: number | null }> {
     const row = this.ctx.storage.sql.exec<{ n: number; oldest: string | null }>("SELECT COUNT(*) AS n, MIN(at) AS oldest FROM reports WHERE status = 'open'").toArray()[0];
