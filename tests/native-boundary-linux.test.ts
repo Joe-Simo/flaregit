@@ -22,6 +22,8 @@ if (process.env.FLAREGIT_BOUNDARY_PROOF_REQUIRED === "1" && !native) throw new E
   let daemonPid: number | undefined;
   try {
     expect(privileged.pid).toBeDefined();
+    await new Promise<void>((resolve, reject) => { privileged.once("spawn", resolve); privileged.once("error", reject); });
+    expect(fs.readFileSync(`/proc/${privileged.pid}/environ`, "utf8")).toContain(canary);
     boundary = createExecutionBoundary(work, [snapshot, home], canonical);
     expect(boundary.isolated).toBe(true);
     const env = executionEnv(home);
