@@ -1538,8 +1538,21 @@ export default {
             const run = await project.getWorkflowRun(id);
             if (!run) return text("Workflow not found in this repository", 404);
             if (method === "POST") assertWorkflowControlPermission(run, userId, isOwner);
-            const result = await controlWorkflow(env, project, id, wf[2] === "pause" ? "pause" : wf[2] === "resume" ? "resume" : "status");
+            let context;
+            try { context = await project.repositoryReadContext(userId); }
+            catch { throw new WorkflowControlError("Workflow access changed; refresh before continuing", 403); }
+            const credentialHash = auth.viaToken ? await gitParentTokenHash(request) : undefined;
+            const authorize = async () => {
+              const current = await authenticate(request, env);
+              if (current instanceof Response || current.id !== userId || (current.viaToken === true) !== (auth.viaToken === true)
+                || (current.viaToken && ((current.tokenRepo && current.tokenRepo !== projectId) || (method === "POST" && current.tokenScope === "read"))))
+                throw new WorkflowControlError("Workflow authentication changed; refresh before continuing", 403);
+              if (!await project.assertWorkflowControlAuthority(context, userId, run, method === "POST", current.viaToken === true, credentialHash, current.expiresAt))
+                throw new WorkflowControlError("Workflow authority or repository scope changed; refresh before continuing", 403);
+            };
+            const result = await controlWorkflow(env, project, id, wf[2] === "pause" ? "pause" : wf[2] === "resume" ? "resume" : "status", authorize, async (owned, action) => { await project.logActivity(userId, `workflow.${action}_requested`, `Requested ${action} of ${owned.kind} run ${owned.instanceId}; provider outcome is not yet confirmed`); });
             if (method === "POST") await project.logActivity(userId, `workflow.${wf[2]}`, `${result.kind} run ${id}: ${result.status}`);
+            await authorize();
             return json(result);
           } catch (error) {
             if (error instanceof WorkflowControlError) return text(error.message, error.statusCode);

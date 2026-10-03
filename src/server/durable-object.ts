@@ -1,3 +1,4 @@
+import type {OwnedWorkflow} from "./workflow-control.js";
 import {IntegrationNativeRuntimeLedger,type IntegrationNativeRuntimeScope} from "./integration-native-runtime.js";
 import { LegacyCandidateReruns, LegacyRerunError, assertLegacyRerunEligible, type LegacyCandidateRerun, type LegacyRerunSnapshot } from "./legacy-candidate-rerun.js";
 import {PublicationReadbacks,inspectPublicationReadback,type PublicationReadbackReport,type PublicationReadbackResult} from "./publication-readback.js";
@@ -437,6 +438,7 @@ export interface Ledger {
   workflowCounts(sinceMs: number): Promise<WorkflowCount[]>;
   listRepositoryWorkflows(): Promise<Array<{ instanceId: string; kind: "agent" | "integration" | "scenario" }>>;
   registerWorkflow(instanceId: string, kind: "agent" | "integration" | "scenario", taskId?: string, actorId?: string, nativeRuntimeProtocolVersion?:1): Promise<void>;
+  assertWorkflowControlAuthority(context:RepositoryReadContext,userId:string,run:OwnedWorkflow,mutation:boolean,viaToken:boolean,credentialHash?:string,sessionExpiresAt?:number):Promise<boolean>;
   getWorkflowRun(instanceId: string): Promise<{ instanceId: string; kind: "agent" | "integration" | "scenario"; actorId: string | null } | null>;
   admitIntegrationDispatch(eventId: string, taskIds: string[]): Promise<{ terminal: boolean; actorId: string | null }>;
   recordIntegrationDispatchOutcome(eventId: string, status: WorkflowOutcome): Promise<void>;
@@ -2245,6 +2247,22 @@ export class RepositoryController extends DurableObject<Env> {
       if (old.outcome === "awaiting_review" && status === "started") return;
       this.ctx.storage.sql.exec("UPDATE integration_dispatch_receipts SET outcome=?,terminal=? WHERE event_id=?",status,terminal?1:0,eventId);
     });
+  }
+  async assertWorkflowControlAuthority(context:RepositoryReadContext,userId:string,run:OwnedWorkflow,mutation:boolean,viaToken:boolean,credentialHash?:string,sessionExpiresAt?:number):Promise<boolean>{
+    try{
+      if(viaToken&&!credentialHash)return false;
+      if(!await this.assertRepositoryReadContext(context,userId,null,credentialHash))return false;
+      let fullAuthority=!viaToken;
+      if(viaToken&&mutation){const account=accountOf(this.env,await accountKeyFor(userId));if(!await account.apiTokenHashCanRead(credentialHash!,userId,context.projectId,true))return false;fullAuthority=await account.apiTokenHashCanAdminister(credentialHash!,userId,context.projectId);}
+      this.assertReadLocal(context,userId,null);
+      const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",userId).toArray()[0]?.role;
+      const row=this.ctx.storage.sql.exec<{instance_id:string;kind:string;actor_id:string|null}>("SELECT instance_id,kind,actor_id FROM project_workflows WHERE instance_id=?",run.instanceId).toArray()[0];
+      const fallback=!row?Object.values(this.load().candidates).find(candidate=>candidate.workflowInstanceId===run.instanceId):undefined;
+      const current=row?{instanceId:row.instance_id,kind:row.kind,actorId:row.actor_id}:fallback?{instanceId:run.instanceId,kind:"integration",actorId:null}:null;
+      if(!role||!current||current.instanceId!==run.instanceId||current.kind!==run.kind||current.actorId!==run.actorId)return false;
+      if(!viaToken&&(!Number.isFinite(sessionExpiresAt)||Date.now()>=sessionExpiresAt!))return false;
+      return !mutation||(role==="owner"&&fullAuthority)||(run.kind==="agent"&&run.actorId===userId);
+    }catch{return false;}
   }
   async getWorkflowRun(instanceId: string): Promise<{ instanceId: string; kind: "agent" | "integration" | "scenario"; actorId: string | null } | null> {
     const registered = this.ctx.storage.sql.exec<{ instanceId: string; kind: "agent" | "integration" | "scenario"; actorId: string | null }>("SELECT instance_id AS instanceId, kind, actor_id AS actorId FROM project_workflows WHERE instance_id = ?", instanceId).toArray()[0];
