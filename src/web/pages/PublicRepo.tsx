@@ -1,3 +1,4 @@
+import { CloudflareBadgeFooter } from "../components/CloudflareBadge";
 import React, { useCallback, useEffect, useState } from "react";
 import { GitBranch, Folder, FileText, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -54,9 +55,9 @@ export function PublicRepo({ projectId, params = new URLSearchParams(), onSignIn
     const ref = match.aHash === hash ? from : to;
     return (await readPublic<{ file: BlobResult }>(projectId, "file", new URLSearchParams({ commit: ref, path: match.path }))).file;
   }, [changes, from, to, projectId]);
-  return <div className="min-h-screen bg-background text-foreground font-sans">
+  return <div className="min-h-screen flex flex-col bg-background text-foreground font-sans">
     <header className="h-14 border-b border-border px-5 sm:px-8 flex items-center justify-between gap-3"><a href="/" className="flex items-center gap-2 font-semibold"><GitBranch className="h-5 w-5 text-primary" aria-hidden="true" />FlareGit</a><div className="flex items-center gap-3"><ThemeSelector compact />{onSignIn ? <Button size="sm" variant="ghost" onClick={onSignIn}>Sign in to contribute</Button> : <a href={`/#/p/${encodeURIComponent(projectId)}`} className="text-sm underline rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Sign in to contribute</a>}</div></header>
-    <main className="max-w-6xl mx-auto px-5 sm:px-8 py-8 min-w-0">
+    <main className="w-full flex-1 max-w-6xl mx-auto px-5 sm:px-8 py-8 min-w-0">
       <div className="flex flex-wrap items-baseline justify-between gap-3 mb-6"><h1 className="text-xl font-medium break-words">{meta?.name ?? "Public repository"}</h1>{meta && <span className="text-xs text-muted-foreground">Public · accepted <code>{meta.acceptedCommit.slice(0, 12)}</code></span>}</div>
       {meta && <nav aria-label="Public repository sections" className="flex gap-1 border-b border-border mb-5"><Button variant="ghost" aria-current={view === "code" ? "page" : undefined} onClick={() => go({ view: "code", ...(selectedCommit ? { commit: selectedCommit } : {}) })}>Source</Button><Button variant="ghost" aria-current={view === "history" ? "page" : undefined} onClick={() => go({ view: "history" })}>History</Button><Button variant="ghost" aria-current={view === "community" ? "page" : undefined} onClick={() => go({ view: "community" })}>Community</Button></nav>}
       {meta && view === "code" && selectedCommit && <div className="mb-5 flex flex-wrap items-center justify-between gap-3 border-b border-border pb-4"><p className="text-sm">Selected revision <code className="text-xs break-all" title={selectedCommit}>{selectedCommit.slice(0, 12)}</code></p>{selectedCommit !== meta.acceptedCommit && <Button size="sm" variant="outline" onClick={() => go({ view: "code" })}>Browse latest accepted revision</Button>}</div>}
@@ -69,5 +70,6 @@ export function PublicRepo({ projectId, params = new URLSearchParams(), onSignIn
       {view === "history" && commits && <><ul className="divide-y divide-border">{commits.map((item) => <li key={item.hash} className="py-4 flex flex-wrap items-start justify-between gap-3"><div className="min-w-0 flex-1"><h2 className="text-sm font-medium break-words">{item.message.split("\n")[0]}</h2><p className="mt-1 text-xs text-muted-foreground break-words">{item.author.name} · {timeAgo(item.committedAt)} · <code>{item.hash.slice(0, 12)}</code></p></div><div className="flex gap-2"><Button size="sm" variant="ghost" onClick={() => go({ view: "code", commit: item.hash })}>Browse</Button>{item.parents[0] && <Button size="sm" variant="outline" onClick={() => go({ view: "diff", from: item.parents[0]!, to: item.hash })}>Diff</Button>}</div></li>)}</ul><div className="mt-5 flex gap-2"><Button size="sm" variant="outline" disabled={offset === 0} onClick={() => go({ view: "history", offset: String(Math.max(0, offset - 30)) })}>Newer commits</Button><Button size="sm" variant="outline" disabled={commits.length < 30} onClick={() => go({ view: "history", offset: String(offset + 30) })}>Older commits</Button></div></>}
       {view === "diff" && changes && <><p className="text-xs text-muted-foreground mb-3">Comparing <code>{from.slice(0, 12)}</code> to <code>{to.slice(0, 12)}</code></p>{changes.length ? <DiffViewer key={`${from}:${to}`} files={changes} loadBlob={loadBlob} /> : <p className="text-sm text-muted-foreground">No changed files.</p>}</>}
     </main>
+    <footer className="border-t border-border"><div className="mx-auto max-w-6xl flex flex-wrap items-center gap-5 px-5 sm:px-8 py-6 text-xs text-muted-foreground"><a href="/status">Status</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><CloudflareBadgeFooter /></div></footer>
   </div>;
 }
