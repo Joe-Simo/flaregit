@@ -65,6 +65,7 @@
     { "name": "flaregit-scenario-workflow", "binding": "SCENARIO_WORKFLOW", "class_name": "FlareGitScenarioWorkflow" },
     { "name": "flaregit-agent-workflow", "binding": "AGENT_WORKFLOW", "class_name": "FlareGitAgentWorkflow" },
     { "name": "flaregit-import-history-workflow", "binding": "IMPORT_HISTORY_WORKFLOW", "class_name": "FlareGitImportHistoryWorkflow" },
+    { "name": "flaregit-rebase-resume-workflow", "binding": "REBASE_RESUME_WORKFLOW", "class_name": "FlareGitRebaseResumeWorkflow" },
     { "name": "flaregit-private-recovery-workflow", "binding": "PRIVATE_RECOVERY_WORKFLOW", "class_name": "FlareGitPrivateRecoveryWorkflow" }
   ],
   "routes": [

@@ -1,6 +1,8 @@
 import {PublicationReadbacks,inspectPublicationReadback,type PublicationReadbackReport,type PublicationReadbackResult} from "./publication-readback.js";
 import {openRepositoryRead,RepositoryReadError} from "./repository-read-budget.js";
-import {RebaseRecoveryLedger,RebaseRecoveryError,verifyRebaseRecovery,type RebaseRecoverySnapshot,type RebaseRecoveryReport,type RebaseRecoveryReceipt} from "./rebase-recovery.js";
+import {SavedRebaseResumeCredentials,type SavedRebaseResumeCredentialPurpose} from "./saved-rebase-resume-credentials.js";
+import {RebaseResumeAttempts,assertRebaseResumeSessionDelegation,type RebaseResumeAttempt} from "./rebase-resume-attempts.js";
+import {RebaseRecoveryLedger,RebaseRecoveryError,verifyRebaseRecovery,type RebaseRecoverySnapshot,type RebaseRecoveryReport,type RebaseRecoveryReceipt,type RebaseRecoveryProof} from "./rebase-recovery.js";
 import {RetainedCredentialIncidents} from "./retained-credential-incidents.js";
 import {RetainedInputs,retainedInputSchema,type RetainedInput,type RetainedInputReceipt,type RebaseApplication} from "./retained-inputs.js";
 import {ImportHistoryInspection,type HistorySide,type HistoryInspectionActor,type HistoryChunk,type HistoryInspectionSnapshot,type HistoryInspectionBatch} from "./import-history-inspection.js";
@@ -49,7 +51,8 @@ import { AgentRunLedger, type AgentRunInput, type AgentRunRecord, type AgentRunC
 import { actorName, RepositoryPublicCommunity, type PublicCommunityActor, type PublicCommunityPolicy, type PublicPost, type ContributionRequest } from "./public-community.js";
 export interface RepositoryReadContext { projectId:string; incarnation:string|null; canonicalRepoName:string; repoName:string; ownerId:string; accountKey:string; publicationVersion?:number; acceptedCommit?:string; taskBase?:string; taskCommit?:string; taskBranch?:string; candidateId?:string; candidateCommit?:string; candidateBase?:string; candidateInputCommit?:string; candidateInputBase?:string;retainedInputReceiptId?:string }
 export type OwnerRebaseRecoveryResult={ok:true;receipt:RebaseRecoveryReceipt}|{ok:false;status:409|503|429;error:string;report?:RebaseRecoveryReport};
-export type OwnerRebaseApplication=RebaseRecoveryReport;
+export type OwnerRebaseResumeResult={ok:true;attempt:RebaseResumeAttempt}|{ok:false;status:409|503|429;error:string;report?:RebaseRecoveryReport};
+export type OwnerRebaseApplication=RebaseRecoveryReport & {resumeAvailable:boolean;resume?:{id:string;generation:number;dispatch:RebaseResumeAttempt["dispatch"];nativeState:RebaseResumeAttempt["nativeState"];terminal?:RebaseResumeAttempt["terminal"];pauseReason?:string}};
 export type PublicGrantMetadata = PublicRepositoryGrant & { name: string; version: number; canonicalRepoName: string };
 import type {
   CandidateGeneration,
@@ -455,6 +458,21 @@ export interface Ledger {
   retainedCredentialSummary(inputId:string,purpose:"workspace"|"canonical"):Promise<ReturnType<RetainedCredentialIncidents["summary"]>>;
   lookupRetainedInput(taskId:string,candidateId:string,commit:string,base?:string,userId?:string):Promise<RetainedInputReceipt|null>;
   assertRetainedInput(input:RetainedInput):Promise<boolean>;
+  beginRebaseResume(id:string,actor:HumanDecisionActor,expectedVersion:number,idempotencyKey:string,credentialHash?:string,sessionExpiresAt?:number):Promise<OwnerRebaseResumeResult>;
+  pauseRebaseResume(id:string,generation:number,workflowId:string,reason:string):Promise<void>;
+  beginRebaseResumeCredential(id:string,generation:number,purpose:SavedRebaseResumeCredentialPurpose,expiresAt:number,scope:"read"|"write"):Promise<boolean>;
+  recordRebaseResumeCredential(id:string,generation:number,purpose:SavedRebaseResumeCredentialPurpose,repoName:string,token:string,expiresAt:number):Promise<void>;
+  revokeRebaseResumeCredential(id:string,generation:number,purpose:SavedRebaseResumeCredentialPurpose):Promise<boolean>;
+  markRebaseResumeCredentialRevoked(id:string,purpose:SavedRebaseResumeCredentialPurpose,token:string):Promise<void>;
+  stopRebaseResumeForDeletion():Promise<boolean>;
+  ownerRebaseResumeStatus(applicationId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<RebaseResumeAttempt|null>;
+  rebaseResumeCurrent(id:string):Promise<RebaseResumeAttempt|null>;
+  assertRebaseResume(id:string,generation:number,workflowId:string):Promise<{application:RebaseApplication;snapshot:RebaseRecoverySnapshot;actor:HumanDecisionActor;accountKey:string;nativeRunId:string;workflowId:string;receipt?:RebaseRecoveryReceipt}>;
+  markRebaseResumeDispatch(id:string,generation:number,state:RebaseResumeAttempt["dispatch"]):Promise<RebaseResumeAttempt>;
+  rebaseResumeNativeIntent(id:string,generation:number,workflowId:string):Promise<RebaseResumeAttempt>;
+  rebaseResumeNativeStopped(id:string,generation:number,nativeRunId:string):Promise<RebaseResumeAttempt>;
+  observeRebaseResume(id:string,generation:number,actor?:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<RebaseResumeAttempt>;
+  finishRebaseResume(id:string,generation:number,workflowId:string,proof:RebaseRecoveryProof):Promise<RebaseRecoveryReceipt>;
   reconcileRebaseApplication(id:string,actor:HumanDecisionActor,expectedVersion:number,idempotencyKey:string,credentialHash?:string,sessionExpiresAt?:number):Promise<OwnerRebaseRecoveryResult>;
   ownerRebaseApplications(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<{applications:OwnerRebaseApplication[];truncated:boolean}>;
   prepareRebaseApplication(input:RetainedInput,commit:string,base:string,parentAccepted:boolean):Promise<RebaseApplication>;
@@ -1690,7 +1708,7 @@ export class RepositoryController extends DurableObject<Env> {
     if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='rebase_applications'").toArray().length)return {applications:[],truncated:false};
     const state=this.load(),incarnation=this.readRepositoryIncarnation();const rows=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM rebase_applications ORDER BY rowid DESC LIMIT 51").toArray();
     const ledger=new RebaseRecoveryLedger(this.ctx.storage);
-    const applications=rows.slice(0,50).map(row=>JSON.parse(row.doc) as RebaseApplication).filter(value=>value.input.projectId===state.projectId&&value.input.incarnation===incarnation&&value.input.canonicalRepoName===state.canonicalRepoName).map(value=>ledger.observe(value,this.ownerRebaseSnapshot(value)));
+    const applications=rows.slice(0,50).map(row=>JSON.parse(row.doc) as RebaseApplication).filter(value=>value.input.projectId===state.projectId&&value.input.incarnation===incarnation&&value.input.canonicalRepoName===state.canonicalRepoName).map(value=>{const report=ledger.observe(value,this.ownerRebaseSnapshot(value)),attempt=new RebaseResumeAttempts(this.ctx.storage).latest(value.input.id);return {...report,resumeAvailable:Boolean(this.env.REBASE_RESUME_WORKFLOW)&&(report.canReconcile||report.status==="remote_old_resume_required"),...(attempt?{resume:{id:attempt.id,generation:attempt.generation,dispatch:attempt.dispatch,nativeState:attempt.nativeState,terminal:attempt.terminal,pauseReason:attempt.pauseReason}}:{})};});
     assert();return {applications,truncated:rows.length>50};
   }
   async reconcileRebaseApplication(id:string,actor:HumanDecisionActor,expectedVersion:number,idempotencyKey:string,credentialHash?:string,sessionExpiresAt?:number):Promise<OwnerRebaseRecoveryResult>{try{return {ok:true,receipt:await this.reconcileOwnerRebase(id,actor,expectedVersion,idempotencyKey,credentialHash,sessionExpiresAt)};}catch(error){return error instanceof RebaseRecoveryError?{ok:false,status:error.status,error:error.message,...(error.report?{report:error.report}:{})}:{ok:false,status:409,error:"Recovery was not confirmed. Reload saved state before retrying this request."};}}
@@ -1710,6 +1728,107 @@ export class RepositoryController extends DurableObject<Env> {
       const task=this.load().tasks[application.input.taskId]!;applications.remoteVerified(id,application.commit);
       applications.applyApplication(id,()=>{task.currentCommit=plan.commit;task.baseCommit=plan.base;if(plan.dependsOn===undefined)delete task.dependsOn;else task.dependsOn=plan.dependsOn;task.updatedAt=new Date().toISOString();this.save();});
     },()=>{assert();if(JSON.stringify(this.ownerRebaseSnapshot(application))!==snapshotKey)throw new RebaseRecoveryError("Recovery scope changed",409);});}catch(error){this.state=null;throw error;}
+  }
+  private async authorizeSavedResume(id:string,generation:number,workflowId:string){
+    const attempt=new RebaseResumeAttempts(this.ctx.storage).get(id);
+    if(!attempt||attempt.generation!==generation||attempt.workflowId!==workflowId||attempt.terminal)throw new RebaseRecoveryError("Saved recovery attempt is unavailable",409);
+    const incarnation=this.readRepositoryIncarnation(),currentAuthority=await this.authorizeHumanDecision(attempt.actor,attempt.credentialHash,true);
+    const assert=()=>{currentAuthority();if(this.readRepositoryIncarnation()!==incarnation)throw new RebaseRecoveryError("Saved recovery repository scope changed",409);assertRebaseResumeSessionDelegation(attempt);};assert();
+    const application=new RetainedInputs(this.ctx.storage).application(attempt.applicationId);
+    if(!application||JSON.stringify(application.input)!==JSON.stringify(attempt.application.input)||application.commit!==attempt.application.commit||application.base!==attempt.application.base)throw new RebaseRecoveryError("Saved rebase identity changed",409);
+    const currentScope=this.ownerRebaseSnapshot(application);if(currentScope.projectId!==attempt.scope.projectId||currentScope.incarnation!==attempt.scope.incarnation||currentScope.canonicalRepoName!==attempt.scope.canonicalRepoName)throw new RebaseRecoveryError("Saved recovery scope changed",409);
+    const receipt=new RebaseRecoveryLedger(this.ctx.storage).replay(attempt.requestId,attempt.applicationId,attempt.actor,attempt.expectedVersion);
+    const validate=()=>{assert();const latest=new RebaseResumeAttempts(this.ctx.storage).latest(attempt.applicationId),live=new RetainedInputs(this.ctx.storage).application(attempt.applicationId),current=this.ownerRebaseSnapshot(application);if(latest?.id!==id||latest.generation!==generation||latest.terminal||!live||JSON.stringify(live.input)!==JSON.stringify(attempt.application.input)||live.commit!==attempt.application.commit||live.base!==attempt.application.base||current.projectId!==attempt.scope.projectId||current.incarnation!==attempt.scope.incarnation||current.canonicalRepoName!==attempt.scope.canonicalRepoName)throw new RebaseRecoveryError("Saved recovery scope or generation changed",409);if(receipt)return;if(JSON.stringify(current)!==JSON.stringify(attempt.snapshot))throw new RebaseRecoveryError("Contribution changed during saved recovery",409);};validate();
+    return {attempt,application,validate,receipt};
+  }
+  async beginRebaseResume(id:string,actor:HumanDecisionActor,expectedVersion:number,idempotencyKey:string,credentialHash?:string,sessionExpiresAt?:number):Promise<OwnerRebaseResumeResult>{
+    try{
+      const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();
+      const application=new RetainedInputs(this.ctx.storage).application(id);if(!application)throw new RebaseRecoveryError("Saved rebase not found",409);
+      if(application.input.canonicalRepoName===application.input.workspaceRepoName)throw new RebaseRecoveryError("Saved workspace is not isolated from accepted history",409);
+      const snapshot=this.ownerRebaseSnapshot(application),ledger=new RebaseRecoveryLedger(this.ctx.storage),attempts=new RebaseResumeAttempts(this.ctx.storage);
+      // Scope validation precedes replay, including recreated repository incarnations.
+      const report=ledger.observe(application,snapshot);
+      const replay=attempts.replay(id,idempotencyKey,actor,expectedVersion);if(replay)return {ok:true,attempt:replay};
+      ledger.preflight(idempotencyKey,id,actor,expectedVersion);
+      if(report.version!==expectedVersion||!report.canReconcile||application.status==="applied")throw new RebaseRecoveryError(report.detail,409,report);
+      return this.ctx.storage.transactionSync(()=>{assert();if(JSON.stringify(this.ownerRebaseSnapshot(application))!==JSON.stringify(snapshot))throw new RebaseRecoveryError("Contribution changed before resume",409);return {ok:true as const,attempt:attempts.begin({application,snapshot,actor,expectedVersion,requestId:idempotencyKey,credentialHash,sessionExpiresAt})};});
+    }catch(error){return error instanceof RebaseRecoveryError?{ok:false,status:error.status,error:error.message}:{ok:false,status:409,error:"Saved resume requires current owner authority"};}
+  }
+  async pauseRebaseResume(id:string,generation:number,workflowId:string,reason:string):Promise<void>{
+    const attempts=new RebaseResumeAttempts(this.ctx.storage),attempt=attempts.get(id);if(!attempt||attempt.generation!==generation||attempt.workflowId!==workflowId)throw new RebaseRecoveryError("Saved recovery identity changed",409);
+    // Controlled vocabulary prevents provider secrets or command output entering saved context.
+    const allowed=["authority_changed","git_state_changed","funding_refused","transport_unconfirmed","cleanup_unconfirmed","execution_failed"];
+    if(!allowed.includes(reason))throw new RebaseRecoveryError("Invalid recovery pause reason",409);
+    attempts.update(id,generation,value=>{value.pauseReason=reason;});
+  }
+  async beginRebaseResumeCredential(id:string,generation:number,purpose:SavedRebaseResumeCredentialPurpose,expiresAt:number,scope:"read"|"write"):Promise<boolean>{
+    const attempt=new RebaseResumeAttempts(this.ctx.storage).get(id);if(!attempt)throw new RebaseRecoveryError("Saved resume missing",409);
+    const {application,validate}=await this.authorizeSavedResume(id,generation,attempt.workflowId);
+    if(scope!==(purpose==="canonical"?"read":"write"))throw new RebaseRecoveryError("Credential scope does not match saved recovery",409);
+    const accountKey=await accountKeyFor(attempt.actor.userId);validate();await this.ensureRecoveryAlarm();validate();
+    return new SavedRebaseResumeCredentials(this.ctx.storage).begin({attemptId:id,applicationId:attempt.applicationId,projectId:attempt.scope.projectId,incarnation:attempt.scope.incarnation!,accountKey,canonicalRepoName:application.input.canonicalRepoName,workspaceRepoName:application.input.workspaceRepoName,actorId:attempt.actor.userId},purpose,expiresAt,validate);
+  }
+  async recordRebaseResumeCredential(id:string,generation:number,purpose:SavedRebaseResumeCredentialPurpose,repoName:string,token:string,expiresAt:number):Promise<void>{const attempt=new RebaseResumeAttempts(this.ctx.storage).get(id);if(!attempt||attempt.generation!==generation)throw new RebaseRecoveryError("Credential recovery identity changed",409);await new SavedRebaseResumeCredentials(this.ctx.storage).record(id,purpose,repoName,token,expiresAt);await this.ensureRecoveryAlarm();}
+  async markRebaseResumeCredentialRevoked(id:string,purpose:SavedRebaseResumeCredentialPurpose,token:string):Promise<void>{await new SavedRebaseResumeCredentials(this.ctx.storage).markRevoked(id,purpose,token);}
+  async revokeRebaseResumeCredential(id:string,generation:number,purpose:SavedRebaseResumeCredentialPurpose):Promise<boolean>{
+    const attempt=new RebaseResumeAttempts(this.ctx.storage).get(id);if(!attempt||attempt.generation!==generation)throw new RebaseRecoveryError("Credential cleanup identity changed",409);
+    const incidents=new SavedRebaseResumeCredentials(this.ctx.storage),summary=incidents.summary(id,purpose);if(!summary||summary.status==="revoked")return true;
+    const pending=incidents.credentialForRevocation(id,purpose);if(!pending)return false;
+    const admission=await globalOf(this.env).reserveCoreGitOperation(`resume-cleanup-${crypto.randomUUID()}`,pending.accountKey,this.currentGitBudget()).catch(()=>null);if(!admission?.allowed||!incidents.markAttempt(id,purpose))return false;
+    try{using repo=await this.env.ARTIFACTS.get(pending.repoName);if(!await repo.revokeToken(pending.token))return false;await incidents.markRevoked(id,purpose,pending.token);return true;}catch{return false;}
+  }
+  private async retryRebaseResumeCredentials(){const incidents=new SavedRebaseResumeCredentials(this.ctx.storage);for(const incident of incidents.pendingBatch()){if(!incidents.markAutomaticSweep(incident.attemptId,incident.purpose))continue;const attempt=new RebaseResumeAttempts(this.ctx.storage).get(incident.attemptId);if(attempt)await this.revokeRebaseResumeCredential(incident.attemptId,attempt.generation,incident.purpose);}const wake=incidents.nextWake();if(wake!==null)await this.ensureRecoveryAlarm(Math.max(1,wake-Date.now()));}
+  async stopRebaseResumeForDeletion():Promise<boolean>{
+    if(!this.repositoryDeleting())throw new RebaseRecoveryError("Recovery cleanup requires repository deletion fence",409);
+    const attempts=new RebaseResumeAttempts(this.ctx.storage),rows=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM rebase_resume_attempts a WHERE rowid=(SELECT MAX(rowid) FROM rebase_resume_attempts b WHERE b.application_id=a.application_id) AND (json_extract(doc,'$.nativeState')!='stopped' OR json_extract(doc,'$.terminal') IS NULL OR json_extract(doc,'$.dispatch')='unknown') ORDER BY rowid LIMIT 21").toArray();
+    for(const row of rows.slice(0,20)){const attempt=JSON.parse(row.doc) as RebaseResumeAttempt;if(attempts.latest(attempt.applicationId)?.id!==attempt.id)continue;
+      try{
+        if(attempt.dispatch!=="saved"&&!attempt.terminal){
+          if(!this.env.REBASE_RESUME_WORKFLOW)return false;
+          const handle=await this.env.REBASE_RESUME_WORKFLOW.get(attempt.workflowId);let status=await handle.status();
+          if(!["complete","errored","terminated"].includes(status.status)){await handle.terminate();status=await handle.status();if(!["complete","errored","terminated"].includes(status.status))return false;}
+          attempts.dispatch(attempt.id,attempt.generation,"observed");attempts.terminal(attempt.id,attempt.generation,status.status==="complete"?"completed":"failed");
+        }else if(attempt.dispatch==="saved"){if(attempt.nativeState!=="unallocated"&&attempt.nativeState!=="stopped")return false;attempts.terminal(attempt.id,attempt.generation,"failed");}
+        await this.rebaseResumeNativeStopped(attempt.id,attempt.generation,attempt.nativeRunId);
+      }catch{return false;}
+    }
+    if(rows.length>20)return false;
+    const incidents=new SavedRebaseResumeCredentials(this.ctx.storage);for(const pending of incidents.pendingBatch()){const attempt=attempts.get(pending.attemptId);if(!attempt||!await this.revokeRebaseResumeCredential(attempt.id,attempt.generation,pending.purpose))return false;}
+    return !incidents.hasPending();
+  }
+  async ownerRebaseResumeStatus(applicationId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){
+    const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();const app=new RetainedInputs(this.ctx.storage).application(applicationId);if(!app)throw new RebaseRecoveryError("Saved rebase not found",409);new RebaseRecoveryLedger(this.ctx.storage).observe(app,this.ownerRebaseSnapshot(app));const attempt=new RebaseResumeAttempts(this.ctx.storage).latest(applicationId);if(!attempt)return null;
+    const scope={projectId:app.input.projectId,incarnation:app.input.incarnation,canonicalRepoName:app.input.canonicalRepoName};
+    const validate=()=>{assert();const live=new RetainedInputs(this.ctx.storage).application(applicationId),current=this.load(),latest=new RebaseResumeAttempts(this.ctx.storage).latest(applicationId);if(!live||JSON.stringify(live.input)!==JSON.stringify(app.input)||live.commit!==app.commit||live.base!==app.base||current.projectId!==scope.projectId||current.canonicalRepoName!==scope.canonicalRepoName||this.readRepositoryIncarnation()!==scope.incarnation||latest?.id!==attempt.id||latest.generation!==attempt.generation)throw new RebaseRecoveryError("Saved recovery status scope changed",409);};
+    let result:RebaseResumeAttempt|null;try{result=await this.observeRebaseResume(attempt.id,attempt.generation,actor,credentialHash,sessionExpiresAt);}catch{validate();result=new RebaseResumeAttempts(this.ctx.storage).get(attempt.id);}validate();return result;
+  }
+  async rebaseResumeCurrent(id:string){return new RebaseResumeAttempts(this.ctx.storage).get(id);}
+  async assertRebaseResume(id:string,generation:number,workflowId:string){const {attempt,application,validate,receipt}=await this.authorizeSavedResume(id,generation,workflowId);const accountKey=await accountKeyFor(attempt.actor.userId);validate();return {application,snapshot:attempt.snapshot,actor:attempt.actor,accountKey,nativeRunId:attempt.nativeRunId,workflowId:attempt.workflowId,...(receipt?{receipt}:{})};}
+  async markRebaseResumeDispatch(id:string,generation:number,state:RebaseResumeAttempt["dispatch"]){const attempt=new RebaseResumeAttempts(this.ctx.storage).get(id);if(!attempt)throw new RebaseRecoveryError("Saved resume missing",409);const {validate}=await this.authorizeSavedResume(id,generation,attempt.workflowId);validate();return new RebaseResumeAttempts(this.ctx.storage).dispatch(id,generation,state);}
+  async rebaseResumeNativeIntent(id:string,generation:number,workflowId:string){const {validate}=await this.authorizeSavedResume(id,generation,workflowId);validate();return new RebaseResumeAttempts(this.ctx.storage).nativeIntent(id,generation);}
+  async rebaseResumeNativeStopped(id:string,generation:number,nativeRunId:string){
+    const attempts=new RebaseResumeAttempts(this.ctx.storage),attempt=attempts.get(id);if(!attempt||attempt.generation!==generation||attempt.nativeRunId!==nativeRunId)throw new RebaseRecoveryError("Native recovery identity changed",409);
+    if(attempt.nativeState==="possible"){const sandbox=this.env.INTEGRATOR.getByName(nativeRunId);await sandbox.destroy();if((await sandbox.lifetimeStatus())?.state!=="stopped")throw new RebaseRecoveryError("Native recovery stop is unconfirmed",503);}
+    return attempts.nativeStopped(id,generation,nativeRunId);
+  }
+  async observeRebaseResume(id:string,generation:number,actor?:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){
+    const attempts=new RebaseResumeAttempts(this.ctx.storage),attempt=attempts.get(id);if(!attempt||attempt.generation!==generation)throw new RebaseRecoveryError("Saved recovery generation changed",409);
+    const authority=await this.authorizeRebaseRecovery(actor??attempt.actor,actor?credentialHash:attempt.credentialHash,actor?sessionExpiresAt:attempt.sessionExpiresAt);authority();const current=this.load();if(current.projectId!==attempt.scope.projectId||current.canonicalRepoName!==attempt.scope.canonicalRepoName||this.readRepositoryIncarnation()!==attempt.scope.incarnation)throw new RebaseRecoveryError("Saved recovery scope changed",409);
+    if(!this.env.REBASE_RESUME_WORKFLOW)throw new RebaseRecoveryError("Saved recovery execution is unavailable",503);
+    const instance=await this.env.REBASE_RESUME_WORKFLOW.get(attempt.workflowId),status=await instance.status();
+    authority();const fresh=this.load(),latest=attempts.latest(attempt.applicationId);if(fresh.projectId!==attempt.scope.projectId||fresh.canonicalRepoName!==attempt.scope.canonicalRepoName||this.readRepositoryIncarnation()!==attempt.scope.incarnation||latest?.id!==id||latest.generation!==generation)throw new RebaseRecoveryError("Saved recovery observation scope changed",409);attempts.dispatch(id,generation,"observed");
+    if(status.status==="complete"||status.status==="errored"||status.status==="terminated"){attempts.terminal(id,generation,status.status==="complete"?"completed":"failed");await this.rebaseResumeNativeStopped(id,generation,attempt.nativeRunId).catch(()=>undefined);return attempts.get(id)!;}
+    return attempts.get(id)!;
+  }
+  async finishRebaseResume(id:string,generation:number,workflowId:string,proof:RebaseRecoveryProof):Promise<RebaseRecoveryReceipt>{
+    const {attempt,application,validate,receipt}=await this.authorizeSavedResume(id,generation,workflowId);if(receipt)return receipt;
+    // Caller proof is never sufficient: independently read all pinned objects and the branch.
+    const accountKey=await accountKeyFor(attempt.actor.userId);
+    const verified=await verifyRebaseRecovery(this.env.ARTIFACTS,application,{authorize:async()=>{await this.authorizeSavedResume(id,generation,workflowId);validate();},reserveGroup:operationId=>globalOf(this.env).reserveCoreGitOperation(operationId,accountKey,this.currentGitBudget())});
+    if(JSON.stringify(verified)!==JSON.stringify(proof))throw new RebaseRecoveryError("Saved Git proof changed before recovery",409);
+    validate();const applications=new RetainedInputs(this.ctx.storage),ledger=new RebaseRecoveryLedger(this.ctx.storage);
+    try{return ledger.reconcile({application,snapshot:attempt.snapshot,proof:verified,actor:attempt.actor,expectedVersion:attempt.expectedVersion,idempotencyKey:attempt.requestId},plan=>{validate();const task=this.load().tasks[application.input.taskId]!;applications.remoteVerified(application.input.id,application.commit);applications.applyApplication(application.input.id,()=>{task.currentCommit=plan.commit;task.baseCommit=plan.base;if(plan.dependsOn===undefined)delete task.dependsOn;else task.dependsOn=plan.dependsOn;task.updatedAt=new Date().toISOString();this.save();});},validate);}catch(error){this.state=null;throw error;}
   }
   async prepareRebaseApplication(input:RetainedInput,commit:string,base:string,parentAccepted:boolean):Promise<RebaseApplication>{await this.authorizeRetainedInput(input);return this.ctx.storage.transactionSync(()=>{this.assertRetainedLocal(input);return new RetainedInputs(this.ctx.storage).prepareApplication(input,commit,base,parentAccepted);});}
   async recordRebaseRemoteOutcome(id:string,observedCommit:string):Promise<RebaseApplication>{const value=new RetainedInputs(this.ctx.storage).application(id);if(!value)throw new Error("Saved rebase application unavailable");await this.authorizeRetainedInput(value.input,false);return this.ctx.storage.transactionSync(()=>{this.assertRetainedLocal(value.input,false);return new RetainedInputs(this.ctx.storage).remoteVerified(id,observedCommit);});}
@@ -1774,6 +1893,7 @@ export class RepositoryController extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     await this.reconcileLegacyPublicationReadbacks();
     await this.retryRetainedCredentialIncidents();
+    await this.retryRebaseResumeCredentials();
     await this.retryPreviewCredentialIncidents();
     await this.reconcileDirectoryRegistration();
     await this.reconcileContributorRegistrations();
@@ -2424,6 +2544,8 @@ export class RepositoryController extends DurableObject<Env> {
   /** Delete everything this project stores (account deletion / repository deletion). */
   async destroy(): Promise<void> {
     this.repositoryDeleting();
+    new RebaseResumeAttempts(this.ctx.storage);
+    if(this.ctx.storage.sql.exec("SELECT 1 FROM rebase_resume_attempts a WHERE rowid=(SELECT MAX(rowid) FROM rebase_resume_attempts b WHERE b.application_id=a.application_id) AND (json_extract(doc,'$.nativeState')!='stopped' OR json_extract(doc,'$.terminal') IS NULL OR json_extract(doc,'$.dispatch')='unknown') LIMIT 1").toArray().length||new SavedRebaseResumeCredentials(this.ctx.storage).hasPending())throw new Error("Saved recovery cleanup is unconfirmed; durable attempts and credentials were preserved");
     const tables = this.ctx.storage.sql.exec<{name:string}>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name!='repository_deletion'").toArray();
     this.ctx.storage.transactionSync(() => {
       for (const table of tables) this.ctx.storage.sql.exec(`DELETE FROM "${table.name.replaceAll('"','""')}"`);

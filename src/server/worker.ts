@@ -1,3 +1,4 @@
+export {FlareGitRebaseResumeWorkflow} from "./rebase-resume-workflow.js";
 import { openRepositoryRead, RepositoryReadError } from "./repository-read-budget.js";
 import {taskCreationInputSchema} from "./task-creation.js";
 import {storageReconciliationReport,type StorageReconciliationSnapshot} from "./storage-reconciliation-report.js";
@@ -1367,8 +1368,35 @@ export default {
           const profile=await account.getProfile();const currentAuth=await authenticate(request,env);if(currentAuth instanceof Response)return currentAuth;
           if(currentAuth.id!==userId||(currentAuth.viaToken===true)!==(auth.viaToken===true)||(currentAuth.viaToken&&(currentAuth.tokenScope!=="full"||(currentAuth.tokenRepo&&currentAuth.tokenRepo!==projectId))))return text("Owner authentication changed",403);
           const credentialHash=currentAuth.viaToken?await gitParentTokenHash(request):undefined;
-          try{const result=await project.reconcileRebaseApplication(rebaseRecoveryRoute[1]!,{userId,displayName:clean(profile.displayName,120)||"Repository owner",viaToken:currentAuth.viaToken===true},b.expectedVersion!,b.idempotencyKey,credentialHash,currentAuth.expiresAt);if(!result.ok)return Response.json({error:result.error,...(result.report?{report:result.report}:{})},{status:result.status,headers:{"Cache-Control":"no-store"}});const receipt=result.receipt;return Response.json({...receipt,actor:{displayName:receipt.actor.displayName,viaToken:receipt.actor.viaToken}},{headers:{"Cache-Control":"no-store"}});}
+          try{const result=await project.reconcileRebaseApplication(rebaseRecoveryRoute[1]!,{userId,displayName:clean(profile.displayName,120)||"Repository owner",viaToken:currentAuth.viaToken===true},b.expectedVersion!,b.idempotencyKey,credentialHash,currentAuth.expiresAt);if(!result.ok)return Response.json({error:result.error,...(result.report?{report:{...result.report,resumeAvailable:Boolean(env.REBASE_RESUME_WORKFLOW)&&result.report.status==="remote_old_resume_required"}}:{})},{status:result.status,headers:{"Cache-Control":"no-store"}});const receipt=result.receipt;return Response.json({...receipt,actor:{displayName:receipt.actor.displayName,viaToken:receipt.actor.viaToken}},{headers:{"Cache-Control":"no-store"}});}
           catch{return text("Recovery was not confirmed. Reload saved state before retrying this request.",503);}
+        }
+
+        const rebaseResumeRoute=/^\/rebase-applications\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\/resume$/.exec(sub);
+        if(rebaseResumeRoute&&method==="GET"){
+          if(!isOwner||(auth.viaToken&&auth.tokenScope!=="full"))return text("Only the current owner can inspect saved recovery execution",403);
+          const profile=await account.getProfile(),currentAuth=await authenticate(request,env);if(currentAuth instanceof Response)return currentAuth;
+          if(currentAuth.id!==userId||(currentAuth.viaToken===true)!==(auth.viaToken===true)||(currentAuth.viaToken&&(currentAuth.tokenScope!=="full"||(currentAuth.tokenRepo&&currentAuth.tokenRepo!==projectId))))return text("Owner authentication changed",403);
+          const credentialHash=currentAuth.viaToken?await gitParentTokenHash(request):undefined;
+          try{const attempt=await project.ownerRebaseResumeStatus(rebaseResumeRoute[1]!,{userId,displayName:clean(profile.displayName,120)||"Repository owner",viaToken:currentAuth.viaToken===true},credentialHash,currentAuth.expiresAt);return Response.json({attempt:attempt?{id:attempt.id,applicationId:attempt.applicationId,generation:attempt.generation,dispatch:attempt.dispatch,nativeState:attempt.nativeState,terminal:attempt.terminal,pauseReason:attempt.pauseReason}:null},{headers:{"Cache-Control":"no-store"}});}catch{return text("Saved recovery status requires current owner authority",403);}
+        }
+        if(rebaseResumeRoute&&method==="POST"){
+          if(!isOwner||(auth.viaToken&&auth.tokenScope!=="full"))return text("Only the current owner with a session or full-access token can resume saved rebases",403);
+          const b=await body<{expectedVersion?:number;idempotencyKey?:string}>();
+          if(!b||Object.keys(b).some(key=>key!=="expectedVersion"&&key!=="idempotencyKey")||!Number.isSafeInteger(b.expectedVersion)||b.expectedVersion!<0||typeof b.idempotencyKey!=="string"||!/^([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/.test(b.idempotencyKey))return text("Saved recovery version and request identity are required",400);
+          if(!env.REBASE_RESUME_WORKFLOW)return text("Saved recovery execution is unavailable",503);
+          const profile=await account.getProfile(),currentAuth=await authenticate(request,env);if(currentAuth instanceof Response)return currentAuth;
+          if(currentAuth.id!==userId||(currentAuth.viaToken===true)!==(auth.viaToken===true)||(currentAuth.viaToken&&(currentAuth.tokenScope!=="full"||(currentAuth.tokenRepo&&currentAuth.tokenRepo!==projectId))))return text("Owner authentication changed",403);
+          const credentialHash=currentAuth.viaToken?await gitParentTokenHash(request):undefined;
+          const result=await project.beginRebaseResume(rebaseResumeRoute[1]!,{userId,displayName:clean(profile.displayName,120)||"Repository owner",viaToken:currentAuth.viaToken===true},b.expectedVersion!,b.idempotencyKey,credentialHash,currentAuth.expiresAt);
+          if(!result.ok)return Response.json({error:result.error},{status:result.status,headers:{"Cache-Control":"no-store"}});
+          let attempt=result.attempt;
+          if(!attempt.terminal&&(attempt.dispatch==="saved"||(attempt.dispatch==="unknown"&&Date.now()-Date.parse(attempt.createdAt)<24*60*60_000))){
+            attempt=await project.markRebaseResumeDispatch(attempt.id,attempt.generation,"unknown");
+            try{await env.REBASE_RESUME_WORKFLOW.createBatch([{id:attempt.workflowId,params:{projectId,attemptId:attempt.id,generation:attempt.generation},retention:{successRetention:"3 days",errorRetention:"3 days"}}]);}catch{/* An uncertain dispatch preserves the same immutable Workflow identity. */}
+          }
+          try{attempt=await project.observeRebaseResume(attempt.id,attempt.generation,{userId,displayName:clean(profile.displayName,120)||"Repository owner",viaToken:currentAuth.viaToken===true},credentialHash,currentAuth.expiresAt);}catch{/* Return the saved uncertainty; never invent a replacement generation. */}
+          return Response.json({id:attempt.id,applicationId:attempt.applicationId,generation:attempt.generation,dispatch:attempt.dispatch,nativeState:attempt.nativeState,terminal:attempt.terminal,pauseReason:attempt.pauseReason},{status:202,headers:{"Cache-Control":"no-store"}});
         }
 
         // ----- human review of a verified candidate -----
@@ -1899,6 +1927,7 @@ async function stopImportHistoryAttempts(env: Env, ledger: Ledger): Promise<bool
 }
 
 async function stopRepositoryWorkflows(env: Env, ledger: Ledger): Promise<boolean> {
+  if(!await ledger.stopRebaseResumeForDeletion())return false;
   if (!await stopImportHistoryAttempts(env, ledger)) return false;
   for (const run of await ledger.listRepositoryWorkflows()) {
     const binding = run.kind === "agent" ? env.AGENT_WORKFLOW : run.kind === "scenario" ? env.SCENARIO_WORKFLOW : env.INTEGRATION_WORKFLOW;

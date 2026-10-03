@@ -1,3 +1,5 @@
+import {PrivateRecoveryOperations} from "../../src/server/private-recovery";
+import {RetainedInputs} from "../../src/server/retained-inputs";
 import { recoveryScopeId } from "../../src/server/private-recovery.js";
 import { accountKeyFor } from "../../src/server/projects.js";
 import { RepositoryController } from "../../src/server/durable-object.js";
@@ -10,7 +12,15 @@ import type { FlareGitProjectState } from "../../src/core/types.js";
 
 /** Test-only fixture injection; all acceptance/abort transitions execute production methods. */
 export class PublicationFixture extends RepositoryController {
-  seed(state: FlareGitProjectState, holder: string) {
+  async seed(state: FlareGitProjectState, holder: string) {
+    const incarnation=new PrivateRecoveryOperations(this.ctx.storage).incarnation();
+    // Synthetic remote read-back proofs only; production authority and publication methods remain intact.
+    for(const candidate of Object.values(state.candidates)){
+      if(candidate.preservationProtocolVersion!==1)continue;
+      if(!candidate.workflowInstanceId)throw Error("Synthetic preserved scope needs workflow identity");
+      if(!candidate.frozenContributorProofs)throw Error("Synthetic preserved scope needs frozen proofs");
+      for(const taskId of candidate.participatingTaskIds){const task=state.tasks[taskId],commit=candidate.participatingCommits[taskId];if(!task||!commit||!/^[a-f0-9]{40}$/.test(commit))continue;const base=candidate.frozenContributorProofs.find(proof=>proof.id===taskId)?.baseCommit??task.baseCommit??candidate.expectedAcceptedBase??"a".repeat(40);if(!/^[a-f0-9]{40}$/.test(base))continue;if(!task.workspace)throw Error("Synthetic preserved input needs workspace identity");const owner=candidate.review?.actor?.userId??"test-reviewer";new RetainedInputs(this.ctx.storage).record({id:crypto.randomUUID(),version:1,projectId:state.projectId,incarnation,taskId,commit,base,canonicalRepoName:state.canonicalRepoName,workspaceRepoName:task.workspace.repoName,branch:task.workspace.branch,protectedRef:`refs/flaregit/inputs/${incarnation}/${taskId}/${commit}`,protectedBaseRef:`refs/flaregit/inputs/${incarnation}/${taskId}/${base}`,workflowId:candidate.workflowInstanceId,candidateId:candidate.id,actorId:task.contributor.id,ownerId:owner,accountKey:await accountKeyFor(owner)},{commit,base});}
+    }
     this.ctx.storage.sql.exec("INSERT INTO project (id, doc) VALUES (1, ?)", JSON.stringify(state));
     for (const candidate of Object.values(state.candidates)) if (candidate.review?.actor) this.ctx.storage.sql.exec("INSERT OR IGNORE INTO members(user_id,role,added_at,label) VALUES (?,'owner','synthetic-review-time',?)",candidate.review.actor.userId,candidate.review.actor.displayName);
     this.ctx.storage.sql.exec("INSERT INTO lease (id, holder, expires_at) VALUES (1, ?, ?)", holder, Date.now() + 60_000);
@@ -62,7 +72,7 @@ export default {
       if (url.pathname === "/checkpoint") await stub.ingestCheckpoint({ eventId: "checkpoint-event", taskId: "task", commit: "checkpoint-tip", ready: true });
       if (url.pathname === "/subscribe") await stub.addWebhook("https://example.com/hook", await request.json() as string[]);
       if (url.pathname === "/expire") await stub.expireLease();
-      if (url.pathname === "/claim") await stub.claimLanding({ holder: "claim-holder", taskIds: (url.searchParams.get("tasks") ?? "task").split(",") });
+      if (url.pathname === "/claim") await stub.claimLanding({ holder: "claim-holder",preservationProtocolVersion:1, taskIds: (url.searchParams.get("tasks") ?? "task").split(",") });
       const communityActors:Record<string,PublicCommunityActor>={owner:{userId:"community-owner",accountKey:"owner-key",displayName:"Maintainer"},author:{userId:"community-author",accountKey:"author-key",displayName:"Public author"},other:{userId:"community-other",accountKey:"other-key",displayName:"Other author"}};
       const actor=communityActors[url.searchParams.get("actor")??"author"]!;
       if(url.pathname==="/community-configure"){const value=await request.json() as {policy:PublicCommunityPolicy;confirmed:boolean};return Response.json(await stub.configurePublicCommunity(value.policy,value.confirmed,actor));}
@@ -117,7 +127,7 @@ export default {
       if (url.pathname === "/visibility-status") return Response.json(await stub.visibilitySnapshot());
       if (url.pathname === "/connection") return Response.json(await stub.fixtureConnection());
       if (url.pathname === "/external-policy") await stub.fixturePolicy(await request.json() as ExternalCheckPolicy);
-      if (url.pathname === "/await-review") await stub.awaitReview("candidate", url.searchParams.get("commit") ?? "landed", "old-holder");
+      if (url.pathname === "/await-review") await stub.awaitReview("candidate", url.searchParams.get("commit") ?? "b".repeat(40), "old-holder");
       if (url.pathname === "/checks") return Response.json(await stub.externalChecks("candidate"));
       if (url.pathname === "/external") await stub.injectExternal(await request.json() as ExternalCheckState);
       if (url.pathname === "/review") { await stub.addMember("test-reviewer", "owner"); return Response.json(await stub.recordReview("candidate", { approved: true, actor: { userId: "test-reviewer", displayName: "test-reviewer", viaToken: false } }, url.searchParams.get("expected") ?? "b".repeat(40))); }

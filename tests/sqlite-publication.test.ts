@@ -4,11 +4,11 @@ import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 
 function state(newer = false) {
   return {
-    projectId: "test", projectName: "Test", canonicalRepoName: "repo", policyVersion: 1, verificationPolicy: {}, decisions: {}, evidence: {},
-    acceptedState: { currentCommit: newer ? "newer" : "base", buildDigest: "original", activeRequirements: [] as Array<{ id: string; status: string }>, history: [] },
-    tasks: { task: { id: "task", goal: "Checkpoint goal", contributor: { id: "person", name: "Person", type: "human" }, checkpoints: [] as Array<{ id: string }>, status: newer ? "integrating" : "verifying", currentCommit: "task-tip", activeCandidateId: newer ? "new-candidate" : "candidate", requirements: [{ id: "unverified", status: "approved" }], issue: undefined } },
-    candidates: { candidate: { id: "candidate", status: "verified", workflowInstanceId: "old-holder", participatingTaskIds: ["task"], participatingCommits: { task: "task-tip" }, evidenceId: "evidence", frozenPolicyVersion: 1, frozenRequirements: [{ id: "verified", status: "approved" }] } },
-    journal: [{ id: "journal", candidateId: "candidate", state: "PREPARED", expectedHead: "base", newHead: "landed", outputDigest: "build", candidateTree: "tree" }],
+    projectId: "p123456789abc", projectName: "Test", canonicalRepoName: "repo", policyVersion: 1, verificationPolicy: {}, decisions: {}, evidence: {},
+    acceptedState: { currentCommit: newer ? "newer" : "a".repeat(40), buildDigest: "original", activeRequirements: [] as Array<{ id: string; status: string }>, history: [] },
+    tasks: { task: { id: "task", goal: "Checkpoint goal", contributor: { id: "person", name: "Person", type: "human" }, checkpoints: [] as Array<{ id: string }>, status: newer ? "integrating" : "verifying", currentCommit: "e".repeat(40),baseCommit:"a".repeat(40),workspace:{repoName:"synthetic-workspace",remote:"https://fixture.invalid",branch:"task/task"},activeCandidateId: newer ? "new-candidate" : "candidate", requirements: [{ id: "unverified", status: "approved" }], issue: undefined } },
+    candidates: { candidate: { id: "candidate",preservationProtocolVersion:1,frozenContributorProofs:[{id:"task",commit:"e".repeat(40),baseCommit:"a".repeat(40),ref:"refs/flaregit/tasks/task",allowedScope:[]}], status: "verified", workflowInstanceId: "old-holder", participatingTaskIds: ["task"], participatingCommits: { task: "e".repeat(40) }, evidenceId: "evidence", frozenPolicyVersion: 1, frozenRequirements: [{ id: "verified", status: "approved" }] } },
+    journal: [{ id: "journal", candidateId: "candidate", state: "PREPARED", expectedHead: "a".repeat(40), newHead: "b".repeat(40), outputDigest: "build", candidateTree: "c".repeat(40) }],
   };
 }
 
@@ -191,8 +191,8 @@ test("local workerd SQLite executes production publication rollback and recovery
     expect((await request("/recovery-prepare?name=import-baseline",prepareImport)).status).toBe(500);
     const publishable = {
       ...state(),
-      evidence: { evidence: { id: "evidence", candidateCommit: "landed", candidateTree: "tree", status: "passed", verifierIdentity: "flaregit-ticket-booking-protected-verifier-v2", expectedAcceptedBase: "base", requirementsVersion: 1, builtOutputDigest: "build" } },
-      candidates: { candidate: { ...state().candidates.candidate, candidateCommit: "landed", expectedAcceptedBase: "base", frozenVerificationPolicy: {}, review: { approved: true, commit: "landed", by: "reviewer", at: "2026-10-03T00:00:00.000Z", actor: { userId: "test-reviewer", displayName: "reviewer", viaToken: false } } } },
+      evidence: { evidence: { id: "evidence", candidateCommit: "b".repeat(40), candidateTree: "c".repeat(40), status: "passed", verifierIdentity: "flaregit-ticket-booking-protected-verifier-v2", expectedAcceptedBase: "a".repeat(40), requirementsVersion: 1, builtOutputDigest: "build" } },
+      candidates: { candidate: { ...state().candidates.candidate, candidateCommit: "b".repeat(40), expectedAcceptedBase: "a".repeat(40), frozenVerificationPolicy: {}, review: { approved: true, commit: "b".repeat(40), by: "reviewer", at: "2026-10-03T00:00:00.000Z", actor: { userId: "test-reviewer", displayName: "reviewer", viaToken: false } } } },
     };
     const reviewedCommit = "b".repeat(40);
     await request("/seed?name=exact-review", { state: { ...publishable, journal: [], candidates: { candidate: { ...publishable.candidates.candidate, candidateCommit: reviewedCommit, status: "awaiting_review", review: undefined } } }, holder: "old-holder" });
@@ -351,12 +351,12 @@ test("local workerd SQLite executes production publication rollback and recovery
     const nativeCandidate = {
       ...publishable,
       evidence: { evidence: { ...publishable.evidence.evidence, verifierIdentity: "flaregit-native-integrity-v1" } },
-      candidates: { candidate: { ...publishable.candidates.candidate, frozenVerificationPolicy: { kind: "command", test: "bun test" }, frozenExternalChecksPolicy: policy, frozenContributorProofs: [{ id: "task", commit: "task-tip", baseCommit: "base", ref: "refs/flaregit/tasks/task", allowedScope: ["src/"] }] } },
+      candidates: { candidate: { ...publishable.candidates.candidate, frozenVerificationPolicy: { kind: "command", test: "bun test" }, frozenExternalChecksPolicy: policy, frozenContributorProofs: [{ id: "task", commit: "e".repeat(40), baseCommit: "a".repeat(40), ref: "refs/flaregit/tasks/task", allowedScope: ["src/"] }] } },
     };
-    const externalPassed = { frozen: { repositoryId: "test", candidateId: "candidate", commit: "landed", tree: "tree", policy }, runs: { run: { id: "run", checkId: "required-check", sequence: 1, status: "passed" } }, selectedRuns: { "required-check": "run" }, receipts: {} };
+    const externalPassed = { frozen: { repositoryId: "p123456789abc", candidateId: "candidate", commit: "b".repeat(40), tree: "c".repeat(40), policy }, runs: { run: { id: "run", checkId: "required-check", sequence: 1, status: "passed" } }, selectedRuns: { "required-check": "run" }, receipts: {} };
     await request("/seed?name=native-alone", { state: nativeCandidate, holder: "old-holder" });
     expect((await (await request("/prepare?name=native-alone")).json() as { ok: boolean }).ok).toBe(false);
-    for (const [label, external] of [["commit", { ...externalPassed, frozen: { ...externalPassed.frozen, commit: "wrong" } }], ["tree", { ...externalPassed, frozen: { ...externalPassed.frozen, tree: "wrong" } }], ["policy", { ...externalPassed, frozen: { ...externalPassed.frozen, policy: { ...policy, version: 3 } } }]] as const) {
+    for (const [label, external] of [["commit", { ...externalPassed, frozen: { ...externalPassed.frozen, commit: "wrong" } }], ["c".repeat(40), { ...externalPassed, frozen: { ...externalPassed.frozen, tree: "wrong" } }], ["policy", { ...externalPassed, frozen: { ...externalPassed.frozen, policy: { ...policy, version: 3 } } }]] as const) {
       await request(`/seed?name=wrong-${label}`, { state: nativeCandidate, holder: "old-holder" });
       await request(`/external?name=wrong-${label}`, external);
       expect((await (await request(`/prepare?name=wrong-${label}`)).json() as { ok: boolean }).ok).toBe(false);
@@ -379,7 +379,7 @@ test("local workerd SQLite executes production publication rollback and recovery
     await request(`/await-review?name=frozen-policy&commit=${commit}`);
     const afterReplay = await (await request("/checks?name=frozen-policy")).json() as typeof beforeReplay;
     expect(afterReplay).toEqual(beforeReplay);
-    const mismatched = { frozen: { repositoryId: "test", candidateId: "candidate", commit: "different-commit", tree: "tree", policy: { version: 1, mode: "augment", checks: [] } }, runs: {}, selectedRuns: {}, receipts: {} };
+    const mismatched = { frozen: { repositoryId: "p123456789abc", candidateId: "candidate", commit: "different-commit", tree: "c".repeat(40), policy: { version: 1, mode: "augment", checks: [] } }, runs: {}, selectedRuns: {}, receipts: {} };
     await request("/seed?name=mismatched-review", { state: { ...publishable, candidates: { candidate: { ...publishable.candidates.candidate, status: "awaiting_review", review: undefined } } }, holder: "old-holder" });
     await request("/external?name=mismatched-review", mismatched);
     expect((await (await request("/review?name=mismatched-review")).json() as { ok: boolean }).ok).toBe(false);
@@ -427,7 +427,7 @@ test("local workerd SQLite executes production publication rollback and recovery
     const checkpointRollback = await (await request("/snapshot?name=checkpoint")).json() as typeof accepted & { events: unknown[] };
     expect(checkpointRollback.events).toHaveLength(0);
     expect(checkpointRollback.deliveries).toHaveLength(0);
-    expect(checkpointRollback.state.tasks.task.currentCommit).toBe("task-tip");
+    expect(checkpointRollback.state.tasks.task.currentCommit).toBe("e".repeat(40));
     await request("/fail?name=checkpoint&enabled=false");
     const checkpointSaved = await (await request("/checkpoint?name=checkpoint")).json() as typeof checkpointRollback;
     expect(checkpointSaved.events).toHaveLength(1);
