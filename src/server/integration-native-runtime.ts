@@ -7,13 +7,24 @@ export class IntegrationNativeRuntimeError extends Error {}
 /** Funded, authorized callers record intent before VM allocation. Coverage is
  * declared only at fresh workflow entry; historical absence is never backfilled. */
 export class IntegrationNativeRuntimeLedger {
- constructor(private readonly storage:DurableObjectStorage) {
+ constructor(private readonly storage:DurableObjectStorage, initialize=true) {
+  if(!initialize)return;
   storage.sql.exec("CREATE TABLE IF NOT EXISTS integration_native_coverage(workflow_id TEXT PRIMARY KEY,scope TEXT NOT NULL,sealed INTEGER NOT NULL)");
   storage.sql.exec("CREATE TABLE IF NOT EXISTS integration_native_commands(command_id TEXT PRIMARY KEY,workflow_id TEXT NOT NULL,native_id TEXT NOT NULL,outcome TEXT)");
   storage.sql.exec("CREATE INDEX IF NOT EXISTS integration_native_commands_workflow ON integration_native_commands(workflow_id,outcome)");
   storage.sql.exec("CREATE INDEX IF NOT EXISTS integration_native_coverage_pending ON integration_native_coverage(sealed,workflow_id)");
   storage.sql.exec("CREATE TABLE IF NOT EXISTS integration_native_allocations(native_id TEXT PRIMARY KEY,workflow_id TEXT NOT NULL,stage TEXT NOT NULL,stopped INTEGER NOT NULL)");
   storage.sql.exec("CREATE INDEX IF NOT EXISTS integration_native_allocations_pending ON integration_native_allocations(workflow_id,stopped)");
+ }
+ static inspect(storage:DurableObjectStorage,identity:Pick<IntegrationNativeRuntimeScope,"workflowId"|"candidateId"|"projectId"|"incarnation">){return new IntegrationNativeRuntimeLedger(storage,false).inspect(identity);}
+ inspect(identity:Pick<IntegrationNativeRuntimeScope,"workflowId"|"candidateId"|"projectId"|"incarnation">) {
+  const tables=this.storage.sql.exec<{name:string}>("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('integration_native_coverage','integration_native_allocations','integration_native_commands')").toArray();
+  if(tables.length!==3)return {coverage:false,sealed:null,status:"recovery_required" as const,allocations:null,commands:null};
+  const row=this.storage.sql.exec<{scope:string;sealed:number}>("SELECT scope,sealed FROM integration_native_coverage WHERE workflow_id=?",identity.workflowId).toArray()[0];
+  if(!row)return {coverage:false,sealed:null,status:"recovery_required" as const,allocations:null,commands:null};
+  const scope=schema.parse(JSON.parse(row.scope));for(const key of ["workflowId","candidateId","projectId","incarnation"] as const)if(scope[key]!==identity[key])throw new IntegrationNativeRuntimeError("Saved native coverage identity differs");
+  const allocations=this.allocations(scope),commands=this.storage.sql.exec<{total:number;pending:number;completed:number;refused:number}>("SELECT COUNT(*) AS total,COALESCE(SUM(outcome IS NULL),0) AS pending,COALESCE(SUM(outcome='completed'),0) AS completed,COALESCE(SUM(outcome='refused'),0) AS refused FROM integration_native_commands WHERE workflow_id=?",identity.workflowId).toArray()[0]!;
+  return {coverage:true,sealed:row.sealed===1,status:this.recovery(scope),allocations,commands};
  }
  private encoded(scope:IntegrationNativeRuntimeScope) { return JSON.stringify(schema.parse(scope)); }
  private coverage(scope:IntegrationNativeRuntimeScope) {
@@ -98,3 +109,5 @@ export class IntegrationNativeRuntimeLedger {
   return !coverage.sealed || active>0 || this.allocations(scope).some(row=>!row.stopped)?"held":"stopped";
  }
 }
+
+export type IntegrationNativeInspection = ReturnType<IntegrationNativeRuntimeLedger["inspect"]>;

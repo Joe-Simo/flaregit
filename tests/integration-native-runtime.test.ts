@@ -6,7 +6,7 @@ function fixture() {
  const storage={sql:{exec(query:string,...bindings:Array<string|number>) { const rows=db.query(query).all(...bindings);return {toArray:()=>rows}; }},transactionSync<T>(fn:()=>T) {return db.transaction(fn)();}};
  const ledger=new IntegrationNativeRuntimeLedger(storage as unknown as DurableObjectStorage);
  const scope={workflowId:"workflow",candidateId:"candidate",projectId:"project",incarnation:crypto.randomUUID(),actorId:"actor",accountKey:"account"};
- return {db,ledger,scope};
+ return {db,ledger,scope,storage};
 }
 test("absent legacy coverage never proves zero native executions; seal fences late allocation",()=> {
  const {db,ledger,scope}=fixture();try {
@@ -57,3 +57,7 @@ test("cleanup scope inventory reports partial enumeration explicitly",()=> {
  expect(()=>ledger.pendingScopes(21)).toThrow();for(let i=0;i<3;i++) ledger.seal({...scope,workflowId:`workflow-${i}`});expect(ledger.hasUnconfirmed()).toBe(false);
  }finally{db.close();}
 });
+
+test("owner inspection is read-only, bounded and excludes secret scope",()=>{const {db,ledger,scope}=fixture();try{const identity={workflowId:scope.workflowId,candidateId:scope.candidateId,projectId:scope.projectId,incarnation:scope.incarnation};expect(ledger.inspect(identity).status).toBe("recovery_required");expect(ledger.inspect(identity).allocations).toBeNull();expect(ledger.inspect(identity).commands).toBeNull();expect(db.query("SELECT COUNT(*) AS count FROM integration_native_coverage").get()).toEqual({count:0});ledger.declareCoverage(scope);const native=crypto.randomUUID(),command=crypto.randomUUID();ledger.reserve(scope,native,"check");ledger.admitCommand(scope,native,command);const before=JSON.stringify(db.query("SELECT * FROM integration_native_coverage").all());const report=ledger.inspect(identity);expect(report.status).toBe("held");expect(report.commands).toEqual({total:1,pending:1,completed:0,refused:0});expect(report.allocations).toHaveLength(1);expect(JSON.stringify(report)).not.toContain('accountKey');expect(JSON.stringify(report)).not.toContain('actorId');expect(JSON.stringify(db.query("SELECT * FROM integration_native_coverage").all())).toBe(before);expect(()=>ledger.inspect({...identity,incarnation:crypto.randomUUID()})).toThrow("identity differs");}finally{db.close();}});
+
+test("read-only inspection does not create schema for historical repositories",()=>{const {db,scope,storage}=fixture();try{db.exec("DROP TABLE integration_native_commands;DROP TABLE integration_native_allocations;DROP TABLE integration_native_coverage");const before=db.query("SELECT name,type FROM sqlite_master ORDER BY name").all();const report=IntegrationNativeRuntimeLedger.inspect(storage as unknown as DurableObjectStorage,scope);expect(report.status).toBe("recovery_required");expect(report.allocations).toBeNull();expect(report.commands).toBeNull();expect(db.query("SELECT name,type FROM sqlite_master ORDER BY name").all()).toEqual(before);}finally{db.close();}});

@@ -1361,14 +1361,17 @@ export default {
           return json({ queued: eventId }, 202);
         }
 
+        const runtimeInspectionRoute=/^\/candidates\/([a-z0-9_-]{1,128})\/runtime$/.exec(sub);
+        if(runtimeInspectionRoute&&method!=="GET")return text("Read-only runtime inspection",405);
         const legacyAbandonRoute=/^\/candidates\/([a-z0-9_-]{1,128})\/rerun\/abandon$/.exec(sub);
         const legacyRerunRoute=/^\/candidates\/([a-z0-9_-]{1,128})\/rerun$/.exec(sub);
-        if((legacyRerunRoute||legacyAbandonRoute)&&(method==="GET"||method==="POST")){
+        if((legacyRerunRoute||legacyAbandonRoute||runtimeInspectionRoute)&&(method==="GET"||method==="POST")){
           if(!isOwner||(auth.viaToken&&auth.tokenScope!=="full"))return text("Only the current owner can request a fresh review of saved legacy inputs",403);
           const profile=await account.getProfile(),currentAuth=await authenticate(request,env);if(currentAuth instanceof Response)return currentAuth;
           if(currentAuth.id!==userId||(currentAuth.viaToken===true)!==(auth.viaToken===true)||(currentAuth.viaToken&&(currentAuth.tokenScope!=="full"||(currentAuth.tokenRepo&&currentAuth.tokenRepo!==projectId))))return text("Owner authentication changed",403);
-          const actor={userId,displayName:clean(profile.displayName,120)||"Repository owner",viaToken:currentAuth.viaToken===true},credentialHash=currentAuth.viaToken?await gitParentTokenHash(request):undefined,candidateId=(legacyRerunRoute??legacyAbandonRoute)![1]!;
+          const actor={userId,displayName:clean(profile.displayName,120)||"Repository owner",viaToken:currentAuth.viaToken===true},credentialHash=currentAuth.viaToken?await gitParentTokenHash(request):undefined,candidateId=(legacyRerunRoute??legacyAbandonRoute??runtimeInspectionRoute)![1]!;
           try{
+            if(runtimeInspectionRoute){if(currentAuth.viaToken)return text("Signed-in owner required for runtime inspection",403);const report=await project.candidateRuntimeInspection(candidateId,actor,credentialHash,currentAuth.expiresAt),finalAuth=await authenticate(request,env);if(finalAuth instanceof Response)return finalAuth;if(finalAuth.id!==userId||finalAuth.viaToken)return text("Owner authentication changed",403);await project.assertCandidateRuntimeInspection(candidateId,report.workflowId,report.incarnation,report.protocol,actor,finalAuth.expiresAt);return Response.json({...report,source:"recorded-ledger",providerVerified:false},{headers:{"Cache-Control":"no-store"}}); }
             if(method==="GET"){
               const available=await project.legacyCandidateRuntimeAvailable(candidateId),report=await project.legacyCandidateRerunReport(candidateId,actor,credentialHash,currentAuth.expiresAt);
               return Response.json(!available&&report.eligible?{...report,eligible:false,detail:"The old native runtime identities were not recorded. Operator recovery is required before rerun; no workspace is guessed stopped."}:report,{headers:{"Cache-Control":"no-store"}});

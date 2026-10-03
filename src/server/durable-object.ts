@@ -1,5 +1,5 @@
 import type {OwnedWorkflow} from "./workflow-control.js";
-import {IntegrationNativeRuntimeLedger,type IntegrationNativeRuntimeScope} from "./integration-native-runtime.js";
+import {IntegrationNativeRuntimeLedger,type IntegrationNativeRuntimeScope,type IntegrationNativeInspection} from "./integration-native-runtime.js";
 import { LegacyCandidateReruns, LegacyRerunError, assertLegacyRerunEligible, type LegacyCandidateRerun, type LegacyRerunSnapshot } from "./legacy-candidate-rerun.js";
 import {PublicationReadbacks,inspectPublicationReadback,type PublicationReadbackReport,type PublicationReadbackResult} from "./publication-readback.js";
 import {openRepositoryRead,RepositoryReadError} from "./repository-read-budget.js";
@@ -501,6 +501,8 @@ export interface Ledger {
   declareIntegrationNativeRuntime(workflowId:string,candidateId:string):Promise<void>;
   reserveIntegrationNativeRuntime(workflowId:string,candidateId:string,nativeId:string,stage:string):Promise<void>;
   confirmIntegrationNativeRuntimeStopped(workflowId:string,candidateId:string,nativeId:string):Promise<void>;
+  assertCandidateRuntimeInspection(candidateId:string,workflowId:string|null,incarnation:string,protocol:1|null,actor:HumanDecisionActor,sessionExpiresAt?:number):Promise<void>;
+  candidateRuntimeInspection(candidateId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<IntegrationNativeInspection & {candidateId:string;workflowId:string|null;incarnation:string;protocol:1|null;checkedAt:number}>;
   legacyCandidateRuntimeAvailable(candidateId:string):Promise<boolean>;
   legacyCandidateRerunReport(candidateId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<{candidateId:string;expectedCommit:string|null;inputs:Record<string,{commit:string;base:string}>;eligible:boolean;detail:string;operation?:{id:string;phase:LegacyCandidateRerun["phase"];dispatch:LegacyCandidateRerun["dispatch"];abandoned?:LegacyCandidateRerun["abandoned"];successorCandidateId?:string;successorWorkflowId:string;successorDecisionId?:string;continuationWorkflowId?:string}}> ;
   prepareLegacyCandidateRerun(candidateId:string,expectedCommit:string|null,requestId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number,expectedInputs?:Record<string,{commit:string;base:string}>):Promise<LegacyCandidateRerun>;
@@ -1765,6 +1767,16 @@ export class RepositoryController extends DurableObject<Env> {
   async integrationNativeCommandAllowed(scope:IntegrationNativeRuntimeScope,nativeId:string,commandId:string):Promise<boolean>{try{this.assertIntegrationNativeLocal(scope);if(await accountOf(this.env,scope.accountKey).accountLifecycle()!=="active")return false;this.assertIntegrationNativeLocal(scope);return new IntegrationNativeRuntimeLedger(this.ctx.storage).commandAllowed(scope,nativeId,commandId);}catch{return false;}}
   async finishIntegrationNativeCommand(scope:IntegrationNativeRuntimeScope,nativeId:string,commandId:string,outcome:"completed"|"refused"):Promise<void>{new IntegrationNativeRuntimeLedger(this.ctx.storage).finishCommand(scope,nativeId,commandId,{outcome});}
   async confirmIntegrationNativeRuntimeStopped(workflowId:string,candidateId:string,nativeId:string):Promise<void>{const scope=await this.integrationRuntimeScope(workflowId,candidateId);const lifetime=await this.env.INTEGRATOR.getByName(`native-${nativeId}`).lifetimeStatus();if(lifetime?.state!=="stopped")throw new LegacyRerunError("Native shutdown is unconfirmed.");new IntegrationNativeRuntimeLedger(this.ctx.storage).confirmStopped(scope,nativeId,{nativeRunId:nativeId,state:"stopped"});}
+  async assertCandidateRuntimeInspection(candidateId:string,workflowId:string|null,incarnation:string,protocol:1|null,actor:HumanDecisionActor,sessionExpiresAt?:number){
+    if(actor.viaToken)throw new LegacyRerunError("Signed-in owner required for runtime inspection.");const assert=await this.authorizeRebaseRecovery(actor,undefined,sessionExpiresAt);assert();const candidate=this.load().candidates[candidateId];const run=workflowId?this.ctx.storage.sql.exec<{native_protocol:number|null}>("SELECT native_protocol FROM project_workflows WHERE instance_id=? AND kind='integration'",workflowId).toArray()[0]:undefined;if((run?.native_protocol===1?1:null)!==protocol||this.readRepositoryIncarnation()!==incarnation||!candidate||(candidate.workflowInstanceId??null)!==workflowId)throw new LegacyRerunError("Candidate runtime identity changed.");
+  }
+  async candidateRuntimeInspection(candidateId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){
+    if(actor.viaToken)throw new LegacyRerunError("Signed-in owner required for runtime inspection.");
+    const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();const state=this.load(),candidate=state.candidates[candidateId],incarnation=this.readRepositoryIncarnation();if(!candidate||!incarnation)throw new LegacyRerunError("Saved candidate is unavailable.");
+    const workflowId=candidate.workflowInstanceId??null,run=workflowId?this.ctx.storage.sql.exec<{native_protocol:number|null}>("SELECT native_protocol FROM project_workflows WHERE instance_id=? AND kind='integration'",workflowId).toArray()[0]:undefined;
+    if(workflowId&&(!run||run.native_protocol!==1)) {assert();return {candidateId,workflowId,incarnation,protocol:null,checkedAt:Date.now(),coverage:false,sealed:null,status:"recovery_required" as const,allocations:null,commands:null};}
+    const report=IntegrationNativeRuntimeLedger.inspect(this.ctx.storage,{workflowId:workflowId??"",candidateId,projectId:state.projectId,incarnation});assert();return {...report,candidateId,workflowId,incarnation,protocol:run?.native_protocol===1?1 as const:null,checkedAt:Date.now()};
+  }
   async legacyCandidateRuntimeAvailable(candidateId:string):Promise<boolean>{try{const candidate=this.load().candidates[candidateId];if(!candidate?.workflowInstanceId)return false;const scope=await this.integrationRuntimeScope(candidate.workflowInstanceId,candidateId);return new IntegrationNativeRuntimeLedger(this.ctx.storage).recovery(scope)!=="recovery_required";}catch{return false;}}
   private legacyRerunSnapshot(candidateId:string):LegacyRerunSnapshot {
     const state=this.load(),candidate=state.candidates[candidateId],incarnation=this.readRepositoryIncarnation();
