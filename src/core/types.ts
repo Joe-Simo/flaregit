@@ -101,6 +101,8 @@ export interface RepairAttempt {
 }
 
 export interface CandidateGeneration {
+  /** New orchestration preserves original Git inputs before publication. Absent on legacy runs. */
+  preservationProtocolVersion?: 1;
   id: string;
   attemptNumber: number;
   participatingTaskIds: string[];

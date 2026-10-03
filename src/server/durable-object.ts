@@ -490,7 +490,7 @@ export interface Ledger {
   revokeGitCapabilities(userId: string): Promise<void>;
   resolveDecision(decisionId: string, selectedOptionId: string, actor: HumanDecisionActor, credentialHash?: string): Promise<{ taskIds: string[] }>;
   getState(): Promise<FlareGitProjectState>;
-  claimLanding(req: { holder: string; taskIds: string[] }): Promise<ClaimResult>;
+  claimLanding(req: { holder: string; taskIds: string[]; preservationProtocolVersion?: 1 }): Promise<ClaimResult>;
   recordVerification(candidateId: string, commit: string, evidence: VerificationEvidence): Promise<void>;
   recordComposition(candidateId: string, attempts: RepairAttempt[]): Promise<void>;
   awaitReview(candidateId: string, commit: string, workflowInstanceId: string): Promise<void>;
@@ -2612,7 +2612,8 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   /** Acquire the single landing lease and freeze a candidate against the current accepted head. */
-  async claimLanding(req: { holder: string; taskIds: string[] }): Promise<ClaimResult> {
+  async claimLanding(req: { holder: string; taskIds: string[]; preservationProtocolVersion?: 1 }): Promise<ClaimResult> {
+    if(req.preservationProtocolVersion!==1)return {reason:"This integration run needs the contribution preservation upgrade. Start a new integration; saved work and reviews remain available."};
     await this.ensureRecoveryAlarm();
     const s = this.load();
     const now = Date.now();
@@ -2665,6 +2666,7 @@ export class RepositoryController extends DurableObject<Env> {
       this.ctx.storage.transactionSync(() => {
         if (Object.hasOwn(s.candidates, candidate.id)) throw new Error("Candidate identity already exists; retry the integration claim");
         candidate.workflowInstanceId = req.holder;
+        candidate.preservationProtocolVersion = 1;
         candidate.frozenExternalChecksPolicy = structuredClone(this.connections().policy());
         candidate.frozenContributorProofs = tasks.map((task) => ({ id: task.id, commit: task.currentCommit, baseCommit: task.baseCommit, ref: `refs/flaregit/tasks/${task.id}`, allowedScope: [...(task.allowedScope ?? settingsFor(s.verificationPolicy).allowedScope)] }));
         s.candidates[candidate.id] = candidate;
@@ -2698,6 +2700,23 @@ export class RepositoryController extends DurableObject<Env> {
     this.save();
   }
 
+  /** Applies only to NEW publication, never reconciliation of a confirmed Git update. */
+  private candidatePreservationFailure(candidate: CandidateGeneration): string | null {
+    const upgrade="This candidate needs the contribution preservation upgrade. Start a new integration from the saved changes; this review and candidate remain available.";
+    if(candidate.preservationProtocolVersion!==1)return upgrade;
+    const state=this.load(),incarnation=this.readRepositoryIncarnation();
+    if(!incarnation||!candidate.workflowInstanceId||candidate.participatingTaskIds.length<1||candidate.participatingTaskIds.length>8||new Set(candidate.participatingTaskIds).size!==candidate.participatingTaskIds.length)return "Frozen contribution preservation scope is unavailable";
+    const ledger=new RetainedInputs(this.ctx.storage);
+    for(const taskId of candidate.participatingTaskIds){
+      const commit=candidate.participatingCommits[taskId];
+      const proof=candidate.frozenContributorProofs?.find(item=>item.id===taskId&&item.commit===commit);
+      if(!commit||!proof)return "Frozen contribution preservation proof is unavailable";
+      const receipt=ledger.lookup(taskId,candidate.id,commit,proof.baseCommit);
+      if(!receipt||receipt.followup||receipt.projectId!==state.projectId||receipt.incarnation!==incarnation||receipt.canonicalRepoName!==state.canonicalRepoName||receipt.workflowId!==candidate.workflowInstanceId||receipt.protectedRef!==`refs/flaregit/inputs/${incarnation}/${taskId}/${commit}`||receipt.protectedBaseRef!==`refs/flaregit/inputs/${incarnation}/${taskId}/${proof.baseCommit}`)return "Original contribution and base were not confirmed in protected Git refs. Publication is waiting for preservation.";
+    }
+    return null;
+  }
+
   /** Ledger step 1: validate every invariant, then journal PREPARED. The workflow then pushes with a lease. */
   async preparePublish(candidateId: string): Promise<PrepareResult> {
     const recorded = this.load().candidates[candidateId]?.review;
@@ -2709,6 +2728,8 @@ export class RepositoryController extends DurableObject<Env> {
     const c = s.candidates[candidateId];
     const ev = c?.evidenceId ? s.evidence[c.evidenceId] : undefined;
     if (!c || !ev || !c.candidateCommit) return { ok: false, error: "No verified candidate" };
+    const preservationFailure=this.candidatePreservationFailure(c);
+    if(preservationFailure)return {ok:false,error:preservationFailure};
     // Nothing becomes accepted history without a human approving this exact commit.
     if (!c.review?.approved || c.review.commit !== c.candidateCommit || c.review.actor?.userId !== recorded.actor.userId) return { ok: false, error: "No current owner approval for this candidate commit" };
     if (ev.status !== "passed" || ev.candidateCommit !== c.candidateCommit) return { ok: false, error: "Evidence does not match candidate" };
@@ -2754,6 +2775,7 @@ export class RepositoryController extends DurableObject<Env> {
     try { assertCurrent = await this.authorizeHumanDecision(recorded.actor); assertCurrent(); }
     catch { return false; }
     const state = this.load(), candidate = state.candidates[candidateId];
+    if(!candidate||this.candidatePreservationFailure(candidate))return false;
     const evidence = candidate?.evidenceId ? state.evidence[candidate.evidenceId] : undefined;
     const journal = state.journal.find(item => item.candidateId === candidateId && item.state === "PREPARED" && item.newHead === commit);
     const authority = journal?.publicationAuthority;
@@ -2860,6 +2882,7 @@ export class RepositoryController extends DurableObject<Env> {
     const c = s.candidates[candidateId];
     if (!c || !c.candidateCommit || !c.workflowInstanceId) return { ok: false, error: "This candidate is not waiting for review" };
     if (!/^[a-f0-9]{40}$/.test(expectedCommit ?? "") || expectedCommit !== c.candidateCommit) return { ok: false, error: "The candidate changed from the commit you reviewed. Refresh and inspect its diff before deciding." };
+    if(review.approved){const preservationFailure=this.candidatePreservationFailure(c);if(preservationFailure)return {ok:false,error:preservationFailure};}
     // Idempotent: the same decision can be re-sent if notifying the integration run failed the first time.
     if (c.review && c.review.commit === c.candidateCommit && (c.status === "verified" || c.status === "failed") && !s.journal.some((j) => j.candidateId === c.id)) {
       return c.review.approved === review.approved && (c.review.note ?? "") === (review.note ?? "") ? { ok: true, instanceId: c.workflowInstanceId, review: c.review } : { ok: false, error: `Already ${c.review.approved ? "approved" : "rejected"} by ${c.review.by}` };

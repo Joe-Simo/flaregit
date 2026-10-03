@@ -66,7 +66,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     // Workflow sleeps), never a silently dropped request. Other refusals are final and reported.
     let claim: ClaimResult = { reason: "not attempted" };
     for (let turn = 0; turn < 72; turn++) {
-      claim = (await step.do(`claim-landing-${turn}`, async () => (await stub.claimLanding({ holder, taskIds: event.payload.taskIds })) as never)) as ClaimResult;
+      claim = (await step.do(`claim-landing-${turn}`, async () => (await stub.claimLanding({ holder, taskIds: event.payload.taskIds, preservationProtocolVersion: 1 })) as never)) as ClaimResult;
       if (claim.candidate || claim.decision || claim.reason !== "Another landing holds the lease") break;
       await step.sleep(`queued-${turn}`, "30 seconds");
     }
