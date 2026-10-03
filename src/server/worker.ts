@@ -1344,6 +1344,21 @@ export default {
           try{return Response.json(await project.ownerRebaseApplications({userId,displayName:clean(profile.displayName,120)||"Repository owner",viaToken:currentAuth.viaToken===true},credentialHash,currentAuth.expiresAt),{headers:{"Cache-Control":"no-store"}});}catch{return text("Saved rebase inspection requires current owner authority",403);}
         }
 
+        if(sub==="/publication-recovery"&&method==="GET"){
+          if(!isOwner||(auth.viaToken&&auth.tokenScope!=="full"))return text("Only the current owner can inspect publication recovery",403);
+          const profile=await account.getProfile(),currentAuth=await authenticate(request,env);if(currentAuth instanceof Response)return currentAuth;
+          if(currentAuth.id!==userId||(currentAuth.viaToken===true)!==(auth.viaToken===true)||(currentAuth.viaToken&&(currentAuth.tokenScope!=="full"||(currentAuth.tokenRepo&&currentAuth.tokenRepo!==projectId))))return text("Owner authentication changed",403);
+          try{return Response.json(await project.ownerPublicationReadbacks({userId,displayName:clean(profile.displayName,120)||"Repository owner",viaToken:currentAuth.viaToken===true},currentAuth.viaToken?await gitParentTokenHash(request):undefined,currentAuth.expiresAt),{headers:{"Cache-Control":"no-store"}});}catch{return text("Publication recovery requires current owner authority",403);}
+        }
+        const publicationRecoveryRoute=/^\/publication-recovery\/(jrnl_[a-f0-9-]{36})\/check$/.exec(sub);
+        if(publicationRecoveryRoute&&method==="POST"){
+          if(!isOwner||(auth.viaToken&&auth.tokenScope!=="full"))return text("Only the current owner can check publication recovery",403);
+          const b=await body<{requestId?:string}>();if(!b||Object.keys(b).some(key=>key!=="requestId")||typeof b.requestId!=="string"||!/^([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/.test(b.requestId))return text("A stable publication check identity is required",400);
+          const profile=await account.getProfile(),currentAuth=await authenticate(request,env);if(currentAuth instanceof Response)return currentAuth;
+          if(currentAuth.id!==userId||(currentAuth.viaToken===true)!==(auth.viaToken===true)||(currentAuth.viaToken&&(currentAuth.tokenScope!=="full"||(currentAuth.tokenRepo&&currentAuth.tokenRepo!==projectId))))return text("Owner authentication changed",403);
+          try{return Response.json(await project.checkOwnerPublicationReadback(publicationRecoveryRoute[1]!,b.requestId,{userId,displayName:clean(profile.displayName,120)||"Repository owner",viaToken:currentAuth.viaToken===true},currentAuth.viaToken?await gitParentTokenHash(request):undefined,currentAuth.expiresAt),{headers:{"Cache-Control":"no-store"}});}catch{return text("Publication readback was not confirmed; its saved journal remains pending",409);}
+        }
+
         const rebaseRecoveryRoute=/^\/rebase-applications\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\/reconcile$/.exec(sub);
         if(rebaseRecoveryRoute&&method==="POST"){
           if(!isOwner||(auth.viaToken&&auth.tokenScope!=="full"))return text("Only the current owner with a session or full-access token can recover saved rebases",403);
