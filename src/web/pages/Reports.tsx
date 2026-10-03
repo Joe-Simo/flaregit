@@ -137,7 +137,7 @@ export function OperatorPage() {
     <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8 space-y-4">
       <h1 className="text-xl font-bold">Report queue</h1>
       <Tabs value={status} onValueChange={value => { if (value !== status && (value === "open" || value === "resolved")) { sequence.current++; setLoading(true); setStatus(value); } }}>
-        <TabsList><TabsTrigger value="open">Open</TabsTrigger><TabsTrigger value="resolved">Resolved</TabsTrigger></TabsList>
+        <TabsList aria-label="Report status"><TabsTrigger value="open">Open</TabsTrigger><TabsTrigger value="resolved">Resolved</TabsTrigger></TabsList>
       </Tabs>
       {loadError && <div className="flex flex-wrap items-center gap-2"><p role="alert" className="text-sm text-destructive">{loadError}</p><Button variant="outline" size="sm" disabled={loading} onClick={() => setRefresh(previous => previous + 1)}>Retry</Button></div>}
       {loading && <p role="status" className="text-sm text-muted-foreground">Loading reports…</p>}
