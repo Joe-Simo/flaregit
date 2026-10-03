@@ -14,6 +14,7 @@ export type ManagedAdmission = { allowed: true; reservation: ManagedReservation;
 export class ManagedSpendLedger {
   constructor(private readonly storage: DurableObjectStorage) {
     storage.sql.exec("CREATE TABLE IF NOT EXISTS managed_spend(run_id TEXT PRIMARY KEY, account_key TEXT NOT NULL, month TEXT NOT NULL, charged INTEGER NOT NULL, doc TEXT NOT NULL)");
+    storage.sql.exec("CREATE INDEX IF NOT EXISTS managed_spend_month ON managed_spend(month)");
   }
   get(runId: string): ManagedReservation | null {
     identifier.parse(runId);
@@ -82,6 +83,29 @@ export class ManagedSpendLedger {
         this.storage.sql.exec("UPDATE managed_spend SET charged=0,doc=? WHERE run_id=?", JSON.stringify(run), run!.runId);
       }
     });
+  }
+  /** Stable membership snapshot; counters are current when each page is read.
+   * Run/account/context identities stay inside the actor and never enter export. */
+  async attributionPage(input: { month: string; cursor?: string }) {
+    const month = z.string().regex(/^\d{4}-(?:0[1-9]|1[0-2])$/).parse(input.month);
+    const cursorSchema = z.object({ version: z.literal(1), month: z.literal(month), after: micros, through: micros }).strict();
+    let cursor: z.infer<typeof cursorSchema>;
+    if (input.cursor !== undefined) {
+      if (input.cursor.length > 512) throw new Error("Invalid reservation cursor");
+      try { cursor = cursorSchema.parse(JSON.parse(atob(input.cursor))); } catch { throw new Error("Invalid reservation cursor"); }
+      if (cursor.after > cursor.through) throw new Error("Invalid reservation cursor");
+    } else {
+      const row = this.storage.sql.exec<{last:number}>("SELECT COALESCE(MAX(rowid),0) AS last FROM managed_spend WHERE month=?", month).toArray()[0];
+      cursor = { version:1,month,after:0,through:micros.parse(row?.last ?? 0) };
+    }
+    const rows = this.storage.sql.exec<{sequence:number;doc:string}>("SELECT rowid AS sequence,doc FROM managed_spend WHERE month=? AND rowid>? AND rowid<=? ORDER BY rowid LIMIT 26",month,cursor.after,cursor.through).toArray();
+    const digest = async (value:string) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(value))),byte=>byte.toString(16).padStart(2,"0")).join("");
+    const entries = await Promise.all(rows.slice(0,25).map(async row => {
+      const run = JSON.parse(row.doc) as ManagedReservation;
+      return { attemptDigest:await digest(run.runId),month:run.month,reservationUsdMicros:run.usdMicros,admittedCalls:run.calls,admittedContainerSeconds:run.containerSeconds,dispatchAttempted:run.dispatchAttempted===true,accountingState:run.state,measuredUsage:null,invoiceCost:null,recordedReconciliationUsdMicros:run.state==="reconciled"?run.actualUsdMicros:null,reconciliationEvidenceDigest:run.evidenceId?await digest(run.evidenceId):null,workflowAttribution:"unattributed" as const };
+    }));
+    const nextCursor=rows.length>25?btoa(JSON.stringify({...cursor,after:rows[24]!.sequence})):null;
+    return {month,entries,nextCursor,membership:"bounded_snapshot" as const,values:"current_at_page_read" as const,measurement:"admitted_capacity_is_not_measured_usage" as const,invoice:"unverified" as const};
   }
   used(month: string, accountKey?: string): number {
     const row = accountKey ? this.storage.sql.exec<{ total: number }>("SELECT COALESCE(SUM(charged),0) AS total FROM managed_spend WHERE month=? AND account_key=?", month, accountKey).toArray()[0] : this.storage.sql.exec<{ total: number }>("SELECT COALESCE(SUM(charged),0) AS total FROM managed_spend WHERE month=?", month).toArray()[0];

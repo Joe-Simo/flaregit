@@ -570,6 +570,18 @@ export default {
       const operators = (env.OPERATOR_ACCOUNTS ?? "").split(",").map((x) => x.trim()).filter(Boolean);
       if (path.startsWith("/operator/")) {
         if (auth.viaToken || !operators.includes(accountKey)) return text("Not found", 404);
+        if (path === "/operator/reservation-attribution" && method === "GET") {
+          const keys=[...url.searchParams.keys()];
+          if(keys.some(key=>!["month","cursor"].includes(key)||url.searchParams.getAll(key).length!==1)||!/^\d{4}-(?:0[1-9]|1[0-2])$/.test(url.searchParams.get("month")??"")||(url.searchParams.get("cursor")?.length??0)>512)return text("Invalid reservation page",400);
+          if(url.searchParams.has("cursor")){
+            try{const value:unknown=JSON.parse(atob(url.searchParams.get("cursor")!));if(typeof value!=="object"||value===null||Array.isArray(value))throw Error();const cursor=value as Record<string,unknown>;if(Object.keys(cursor).sort().join(",")!=="after,month,through,version"||cursor.version!==1||cursor.month!==url.searchParams.get("month")||typeof cursor.after!=="number"||typeof cursor.through!=="number"||!Number.isSafeInteger(cursor.after)||!Number.isSafeInteger(cursor.through)||cursor.after<0||cursor.through<cursor.after)throw Error();}catch{return text("Invalid reservation cursor",400);}
+          }
+          let page;
+          try{page=await globalOf(env).managedReservationAttribution({month:url.searchParams.get("month")!,...(url.searchParams.has("cursor")?{cursor:url.searchParams.get("cursor")!}:{})});}catch{return text("Reservation page unavailable; retry",503);}
+          const current=await authenticate(request,env);
+          if(current instanceof Response||current.id!==userId||current.viaToken||!operators.includes(await accountKeyFor(current.id))||await account.accountLifecycle()!=="active")return text("Not found",404);
+          return Response.json(page,{headers:{"Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
+        }
         const publicationRoute = /^\/operator\/reports\/(rpt_[a-z0-9-]+)\/publication$/.exec(path);
         if (publicationRoute) {
           const report = await globalOf(env).getReport(publicationRoute[1]!);

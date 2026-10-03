@@ -310,6 +310,7 @@ export interface Ledger {
   markManagedDispatchAttempted(runIds: string[], accountKey: string): Promise<void>;
   cancelUnstartedManagedSpend(runIds: string[], accountKey: string): Promise<void>;
   managedSpendReserved(month: string, accountKey?: string): Promise<number>;
+  managedReservationAttribution(input: {month:string;cursor?:string}): ReturnType<ManagedSpendLedger["attributionPage"]>;
   reserveManagedSpendBatch(inputs: ManagedEnvelope[], budget: ManagedBudget): Promise<ManagedAdmission[]>;
   reserveManagedSpend(input: ManagedEnvelope, budget: ManagedBudget): Promise<ManagedAdmission>;
   consumeManagedSpend(runId: string, inputBytes: number, outputTokens: number, containerSeconds: number): Promise<ManagedReservation>;
@@ -2798,6 +2799,7 @@ export class RepositoryController extends DurableObject<Env> {
   async cancelUnstartedManagedSpend(runIds: string[], accountKey: string): Promise<void> {
     new ManagedSpendLedger(this.ctx.storage).cancelUnstarted(runIds, accountKey);
   }
+  async managedReservationAttribution(input: {month:string;cursor?:string}) { return new ManagedSpendLedger(this.ctx.storage).attributionPage(input); }
   async managedSpendReserved(month: string, accountKey?: string): Promise<number> {
     if (!/^\d{4}-\d{2}$/.test(month) || (accountKey !== undefined && !/^[A-Za-z0-9_-]{1,200}$/.test(accountKey))) throw new Error("Invalid spending scope");
     return new ManagedSpendLedger(this.ctx.storage).used(month, accountKey);
