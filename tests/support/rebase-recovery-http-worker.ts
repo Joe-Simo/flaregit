@@ -8,9 +8,10 @@ import type { Env } from '../../src/server/env';
 import type { FlareGitProjectState } from '../../src/core/types';
 const projectId = 'p123456789abc', id = '12345678-1234-4234-8234-123456789abc', old = 'a'.repeat(40), base = 'b'.repeat(40), result = 'c'.repeat(40), target = 'd'.repeat(40);
 let mode = 'normal', calls: string[] = [];
+// Test-only logical clock barrier: advance only after fake SDK lookup is entered.
+let expireFixtureSessionClock: (() => void) | null = null;
 export class RebaseRecoveryHttpFixture extends RepositoryController {
-    constructor(ctx: DurableObjectState, env: Env) { super(ctx, { ...env, ARTIFACTS: { get: async (name: string) => { calls.push(`get:${name}`); if (mode === 'expiry-await')
-                await new Promise(resolve => setTimeout(resolve, 75)); if (mode === 'unavailable')
+    constructor(ctx: DurableObjectState, env: Env) { super(ctx, { ...env, ARTIFACTS: { get: async (name: string) => { calls.push(`get:${name}`); if (mode === 'expiry-await') { expireFixtureSessionClock?.(); await Promise.resolve(); } if (mode === 'unavailable')
                 throw Error('Synthetic metadata outage'); return { log: async ({ ref }: {
                     ref: string;
                 }) => { calls.push(`log:${name}:${ref}`); if (mode === 'withdraw') {
@@ -89,7 +90,18 @@ export default { async fetch(request: Request, env: FixtureEnv, ctx: ExecutionCo
                 calls = [];
                 const actor = { userId: 'owner', displayName: 'Synthetic owner', viaToken: false };
                 const list = await repo.ownerRebaseApplications(actor, undefined, Date.now() + 1000);
-                return Response.json(await repo.reconcileRebaseApplication(id, actor, list.applications[0]!.version, crypto.randomUUID(), undefined, Date.now() + 50));
+                const realNow = Date.now;
+                const logicalStart = realNow();
+                let expiredAtLookup = false;
+                Date.now = () => logicalStart + (expiredAtLookup ? 201 : 0);
+                expireFixtureSessionClock = () => { expiredAtLookup = true; };
+                try {
+                    return Response.json(await repo.reconcileRebaseApplication(id, actor, list.applications[0]!.version, crypto.randomUUID(), undefined, logicalStart + 200));
+                } finally {
+                    Date.now = realNow;
+                    expireFixtureSessionClock = null;
+                    mode = 'normal';
+                }
             }
             if (url.pathname === '/fixture/expired') {
                 return Response.json(await repo.reconcileRebaseApplication(id, { userId: 'owner', displayName: 'Synthetic owner', viaToken: false }, 0, crypto.randomUUID(), undefined, Date.now() - 1));
