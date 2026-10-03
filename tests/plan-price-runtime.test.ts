@@ -1,7 +1,9 @@
+import { workerdChild } from "./support/workerd-child";
 import { expect, test } from "bun:test";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 
 test("default price-reader fetch reaches intercepted Polar fixture in actual workerd", async () => {
+  if (await workerdChild("tests/plan-price-runtime.test.ts")) return;
   const built = await Bun.build({ entrypoints: ["tests/support/plan-price-worker.ts"], target: "browser", external: ["cloudflare:workers"] });
   if (!built.success) throw new Error(built.logs.join("\n"));
   const id = "00000000-0000-4000-8000-000000000001";

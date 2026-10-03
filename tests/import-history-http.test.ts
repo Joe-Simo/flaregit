@@ -1,10 +1,11 @@
+import { workerdChild } from "./support/workerd-child";
 import {expect,test} from "bun:test";
 import {Miniflare,convertV4MiniflareOptions} from "miniflare";
 import {generateKeyPair,exportJWK,SignJWT} from "jose";
-async function nativeCase(name:string):Promise<boolean>{const file='tests/import-history-http.test.ts';if(process.env.FLAREGIT_WORKERD_TEST_FILE===file)return false;const child=Bun.spawn([process.execPath,'test',file,'-t',name],{env:{...process.env,FLAREGIT_WORKERD_TEST_FILE:file},stdout:'pipe',stderr:'pipe'});const [out,error,code]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);if(code!==0)throw Error(`Native HTTP fixture failed:\n${out}\n${error}`);expect(code).toBe(0);return true;}
+
 
 test("native import inspection HTTP retains dispatch identity and SQL recovery",async()=>{
- if(await nativeCase('native import inspection HTTP retains dispatch identity and SQL recovery'))return;
+ if(await workerdChild('tests/import-history-http.test.ts', 'native import inspection HTTP retains dispatch identity and SQL recovery'))return;
  const pair=await generateKeyPair("RS256"),jwk={...await exportJWK(pair.publicKey),kid:"task-replay",alg:"RS256",use:"sig"};
  const issuer=Bun.serve({hostname:"127.0.0.1",port:0,fetch:()=>Response.json({keys:[jwk]})});
  const file=`/tmp/flaregit-task-replay-${crypto.randomUUID()}.js`;
@@ -37,7 +38,7 @@ test("native import inspection HTTP retains dispatch identity and SQL recovery",
 },30000);
 
 test("native inspection lifecycle cleanup uses latest attempt and holds unknown shutdown",async()=>{
- if(await nativeCase('native inspection lifecycle cleanup uses latest attempt and holds unknown shutdown'))return;
+ if(await workerdChild('tests/import-history-http.test.ts', 'native inspection lifecycle cleanup uses latest attempt and holds unknown shutdown'))return;
  const pair=await generateKeyPair("RS256"),jwk={...await exportJWK(pair.publicKey),kid:"task-replay",alg:"RS256",use:"sig"};
  const issuer=Bun.serve({hostname:"127.0.0.1",port:0,fetch:()=>Response.json({keys:[jwk]})});
  const file=`/tmp/flaregit-task-replay-${crypto.randomUUID()}.js`;
@@ -55,7 +56,7 @@ test("native inspection lifecycle cleanup uses latest attempt and holds unknown 
 },30000);
 
 test("saved unallocated cleanup avoids Workflow and VM allocation",async()=>{
- if(await nativeCase('saved unallocated cleanup avoids Workflow and VM allocation'))return;
+ if(await workerdChild('tests/import-history-http.test.ts', 'saved unallocated cleanup avoids Workflow and VM allocation'))return;
  const pair=await generateKeyPair("RS256"),jwk={...await exportJWK(pair.publicKey),kid:"task-replay",alg:"RS256",use:"sig"};
  const issuer=Bun.serve({hostname:"127.0.0.1",port:0,fetch:()=>Response.json({keys:[jwk]})});
  const file=`/tmp/flaregit-task-replay-${crypto.randomUUID()}.js`;
@@ -74,7 +75,7 @@ test("saved unallocated cleanup avoids Workflow and VM allocation",async()=>{
 },30000);
 
 test("account cleanup preserves unknown latest attempt",async()=>{
- if(await nativeCase('account cleanup preserves unknown latest attempt'))return;
+ if(await workerdChild('tests/import-history-http.test.ts', 'account cleanup preserves unknown latest attempt'))return;
  const pair=await generateKeyPair("RS256"),jwk={...await exportJWK(pair.publicKey),kid:"task-replay",alg:"RS256",use:"sig"};
  const issuer=Bun.serve({hostname:"127.0.0.1",port:0,fetch:()=>Response.json({keys:[jwk]})});
  const file=`/tmp/flaregit-task-replay-${crypto.randomUUID()}.js`;
@@ -93,7 +94,7 @@ test("account cleanup preserves unknown latest attempt",async()=>{
 },30000);
 
 test("unconfirmed native stop retains repository storage",async()=>{
- if(await nativeCase('unconfirmed native stop retains repository storage'))return;
+ if(await workerdChild('tests/import-history-http.test.ts', 'unconfirmed native stop retains repository storage'))return;
  const pair=await generateKeyPair("RS256"),jwk={...await exportJWK(pair.publicKey),kid:"task-replay",alg:"RS256",use:"sig"};
  const issuer=Bun.serve({hostname:"127.0.0.1",port:0,fetch:()=>Response.json({keys:[jwk]})});
  const file=`/tmp/flaregit-task-replay-${crypto.randomUUID()}.js`;
@@ -112,7 +113,7 @@ test("unconfirmed native stop retains repository storage",async()=>{
 },30000);
 
 test("protocol2 claim before begin remains deletable without allocating inspection",async()=>{
- if(await nativeCase('protocol2 claim before begin remains deletable without allocating inspection'))return;
+ if(await workerdChild('tests/import-history-http.test.ts', 'protocol2 claim before begin remains deletable without allocating inspection'))return;
  const pair=await generateKeyPair("RS256"),jwk={...await exportJWK(pair.publicKey),kid:"task-replay",alg:"RS256",use:"sig"};
  const issuer=Bun.serve({hostname:"127.0.0.1",port:0,fetch:()=>Response.json({keys:[jwk]})});
  const file=`/tmp/flaregit-task-replay-${crypto.randomUUID()}.js`;
@@ -129,7 +130,7 @@ test("protocol2 claim before begin remains deletable without allocating inspecti
 },30000);
 
 test("owner status recovers exact stopped native attempt before resuming",async()=>{
- if(await nativeCase('owner status recovers exact stopped native attempt before resuming'))return;
+ if(await workerdChild('tests/import-history-http.test.ts', 'owner status recovers exact stopped native attempt before resuming'))return;
  const pair=await generateKeyPair("RS256"),jwk={...await exportJWK(pair.publicKey),kid:"task-replay",alg:"RS256",use:"sig"};
  const issuer=Bun.serve({hostname:"127.0.0.1",port:0,fetch:()=>Response.json({keys:[jwk]})});
  const file=`/tmp/flaregit-task-replay-${crypto.randomUUID()}.js`;
