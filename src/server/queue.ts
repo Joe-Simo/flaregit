@@ -32,7 +32,7 @@ export async function handleQueueBatch(batch: MessageBatch<QueueMessage>, env: E
         if(current.terminal){msg.ack();continue;}
         if(current.actorId!==actorId)throw new Error("Integration dispatch authority changed");
         // Billing authority comes from the stored authenticated request, never queue payload data.
-        const params: IntegrationParams = { projectId: body.projectId, taskIds: body.taskIds, accountKey };
+        const params: IntegrationParams = { projectId: body.projectId, taskIds: body.taskIds, accountKey,nativeRuntimeProtocolVersion:1 };
         // Documented batch creation skips retained duplicate IDs. Errors still
         // retry; a lost acknowledgment never becomes an inferred successful start.
         const created=await env.INTEGRATION_WORKFLOW.createBatch([{ id: body.eventId, params }]);

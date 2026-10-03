@@ -52,10 +52,10 @@ export class FlareGitScenarioWorkflow extends WorkflowEntrypoint<Env, ScenarioPa
 
     const instance = await step.do("start-integration", async () => {
       const parent = await ledger.getWorkflowRun(event.instanceId);
-      await ledger.registerWorkflow(`int-${projectId}-${runId}-${act}`, "integration", undefined, parent?.kind === "scenario" ? parent.actorId ?? undefined : undefined);
+      await ledger.registerWorkflow(`int-${projectId}-${runId}-${act}`, "integration", undefined, parent?.kind === "scenario" ? parent.actorId ?? undefined : undefined,1);
       const wf = await this.env.INTEGRATION_WORKFLOW.create({
         id: `int-${projectId}-${runId}-${act}`,
-        params: { projectId, accountKey: event.payload.accountKey, taskIds: [tasks[0]!.id, tasks[1]!.id] },
+        params: { projectId, accountKey: event.payload.accountKey, taskIds: [tasks[0]!.id, tasks[1]!.id],nativeRuntimeProtocolVersion:1 },
       });
       return { id: wf.id };
     });

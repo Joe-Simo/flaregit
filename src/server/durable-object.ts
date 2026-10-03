@@ -1,3 +1,5 @@
+import {IntegrationNativeRuntimeLedger,type IntegrationNativeRuntimeScope} from "./integration-native-runtime.js";
+import { LegacyCandidateReruns, LegacyRerunError, assertLegacyRerunEligible, type LegacyCandidateRerun, type LegacyRerunSnapshot } from "./legacy-candidate-rerun.js";
 import {PublicationReadbacks,inspectPublicationReadback,type PublicationReadbackReport,type PublicationReadbackResult} from "./publication-readback.js";
 import {openRepositoryRead,RepositoryReadError} from "./repository-read-budget.js";
 import {SavedRebaseResumeCredentials,type SavedRebaseResumeCredentialPurpose} from "./saved-rebase-resume-credentials.js";
@@ -433,7 +435,7 @@ export interface Ledger {
   recordWorkflowOutcome(kind: WorkflowKind, instanceId: string, status: WorkflowOutcome): Promise<void>;
   workflowCounts(sinceMs: number): Promise<WorkflowCount[]>;
   listRepositoryWorkflows(): Promise<Array<{ instanceId: string; kind: "agent" | "integration" | "scenario" }>>;
-  registerWorkflow(instanceId: string, kind: "agent" | "integration" | "scenario", taskId?: string, actorId?: string): Promise<void>;
+  registerWorkflow(instanceId: string, kind: "agent" | "integration" | "scenario", taskId?: string, actorId?: string, nativeRuntimeProtocolVersion?:1): Promise<void>;
   getWorkflowRun(instanceId: string): Promise<{ instanceId: string; kind: "agent" | "integration" | "scenario"; actorId: string | null } | null>;
   admitIntegrationDispatch(eventId: string, taskIds: string[]): Promise<{ terminal: boolean; actorId: string | null }>;
   recordIntegrationDispatchOutcome(eventId: string, status: WorkflowOutcome): Promise<void>;
@@ -489,6 +491,23 @@ export interface Ledger {
   observeRebaseResume(id:string,generation:number,actor?:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<RebaseResumeAttempt>;
   finishRebaseResume(id:string,generation:number,workflowId:string,proof:RebaseRecoveryProof):Promise<RebaseRecoveryReceipt>;
   reconcileRebaseApplication(id:string,actor:HumanDecisionActor,expectedVersion:number,idempotencyKey:string,credentialHash?:string,sessionExpiresAt?:number):Promise<OwnerRebaseRecoveryResult>;
+  admitIntegrationNativeCommand(workflowId:string,candidateId:string,nativeId:string,commandId:string):Promise<IntegrationNativeRuntimeScope>;
+  integrationNativeCommandAllowed(scope:IntegrationNativeRuntimeScope,nativeId:string,commandId:string):Promise<boolean>;
+  finishIntegrationNativeCommand(scope:IntegrationNativeRuntimeScope,nativeId:string,commandId:string,outcome:"completed"|"refused"):Promise<void>;
+  stopIntegrationNativeForDeletion():Promise<boolean>;
+  declareIntegrationNativeRuntime(workflowId:string,candidateId:string):Promise<void>;
+  reserveIntegrationNativeRuntime(workflowId:string,candidateId:string,nativeId:string,stage:string):Promise<void>;
+  confirmIntegrationNativeRuntimeStopped(workflowId:string,candidateId:string,nativeId:string):Promise<void>;
+  legacyCandidateRuntimeAvailable(candidateId:string):Promise<boolean>;
+  legacyCandidateRerunReport(candidateId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<{candidateId:string;expectedCommit:string|null;inputs:Record<string,{commit:string;base:string}>;eligible:boolean;detail:string;operation?:{id:string;phase:LegacyCandidateRerun["phase"];dispatch:LegacyCandidateRerun["dispatch"];abandoned?:LegacyCandidateRerun["abandoned"];successorCandidateId?:string;successorWorkflowId:string;successorDecisionId?:string;continuationWorkflowId?:string}}> ;
+  prepareLegacyCandidateRerun(candidateId:string,expectedCommit:string|null,requestId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number,expectedInputs?:Record<string,{commit:string;base:string}>):Promise<LegacyCandidateRerun>;
+  getLegacyCandidateRerun(id:string):Promise<LegacyCandidateRerun|null>;
+  abandonLegacyCandidateRerun(id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<LegacyCandidateRerun>;
+  markLegacyCandidateRerunDispatch(id:string,dispatch:"unknown"|"observed"):Promise<LegacyCandidateRerun>;
+  assertLegacyCandidateRerun(id:string,actor?:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number,holder?:string):Promise<LegacyCandidateRerun>;
+  stopLegacyCandidateRerun(id:string,allowChangedInputs?:boolean,actor?:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<LegacyCandidateRerun>;
+  commitLegacyCandidateRerunReassignment(id:string):Promise<LegacyCandidateRerun>;
+  attachLegacyCandidateRerunSuccessor(id:string,candidateId:string):Promise<LegacyCandidateRerun>;
   ownerRebaseApplications(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<{applications:OwnerRebaseApplication[];truncated:boolean}>;
   prepareRebaseApplication(input:RetainedInput,commit:string,base:string,parentAccepted:boolean):Promise<RebaseApplication>;
   recordRebaseRemoteOutcome(id:string,observedCommit:string):Promise<RebaseApplication>;
@@ -525,7 +544,7 @@ export interface Ledger {
   artifactStorageSnapshot():Promise<ReturnType<ArtifactStorageAdmission["snapshot"]>>;
 
   revokeGitCapabilities(userId: string): Promise<void>;
-  resolveDecision(decisionId: string, selectedOptionId: string, actor: HumanDecisionActor, credentialHash?: string): Promise<{ taskIds: string[] }>;
+  resolveDecision(decisionId: string, selectedOptionId: string, actor: HumanDecisionActor, credentialHash?: string, sessionExpiresAt?:number): Promise<{ taskIds: string[];legacyRerunId?:string;continuationWorkflowId?:string }>;
   getState(): Promise<FlareGitProjectState>;
   claimLanding(req: { holder: string; taskIds: string[]; preservationProtocolVersion?: 1 }): Promise<ClaimResult>;
   recordVerification(candidateId: string, commit: string, evidence: VerificationEvidence): Promise<void>;
@@ -1415,6 +1434,7 @@ export class RepositoryController extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS runs (day TEXT PRIMARY KEY, n INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS lease (id INTEGER PRIMARY KEY CHECK (id = 1), holder TEXT NOT NULL, expires_at INTEGER NOT NULL);
     `);
+    try{this.ctx.storage.sql.exec("ALTER TABLE project_workflows ADD COLUMN native_protocol INTEGER");}catch{/* Existing column. */}
     // Databases created before ordered delivery lack these columns.
     for (const col of ["seq INTEGER NOT NULL DEFAULT 0", "queue_ms INTEGER"]) {
       try { this.ctx.storage.sql.exec(`ALTER TABLE deliveries ADD COLUMN ${col}`); } catch { /* already present */ }
@@ -1720,6 +1740,101 @@ export class RepositoryController extends DurableObject<Env> {
   private async authorizeRebaseRecovery(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<()=>void>{
     const incarnation=this.readRepositoryIncarnation();const current=await this.authorizeHumanDecision(actor,credentialHash,true);
     const assert=()=>{current();if(this.readRepositoryIncarnation()!==incarnation||(!actor.viaToken&&(!Number.isFinite(sessionExpiresAt)||Date.now()>=sessionExpiresAt!)))throw new Error("Owner recovery authority changed");};assert();return assert;
+  }
+  private async integrationRuntimeScope(workflowId:string,candidateId:string):Promise<IntegrationNativeRuntimeScope>{
+    const run=await this.getWorkflowRun(workflowId),state=this.load(),candidate=state.candidates[candidateId],incarnation=this.readRepositoryIncarnation();
+    if(!run?.actorId||run.kind!=="integration"||!candidate||candidate.workflowInstanceId!==workflowId||!incarnation)throw new LegacyRerunError("Native workflow identity needs recovery.");
+    const accountKey=await accountKeyFor(run.actorId);
+    const current=this.load();if(this.readRepositoryIncarnation()!==incarnation||current.projectId!==state.projectId||current.candidates[candidateId]?.workflowInstanceId!==workflowId)throw new LegacyRerunError("Native workflow scope changed.");
+    return{workflowId,candidateId,projectId:state.projectId,incarnation,actorId:run.actorId,accountKey};
+  }
+  private assertIntegrationNativeLocal(scope:IntegrationNativeRuntimeScope):void{const state=this.load();if(this.repositoryDeleting()||state.projectId!==scope.projectId||this.readRepositoryIncarnation()!==scope.incarnation||state.candidates[scope.candidateId]?.workflowInstanceId!==scope.workflowId||!this.ctx.storage.sql.exec("SELECT role FROM members WHERE user_id=?",scope.actorId).toArray().length)throw new LegacyRerunError("Native runtime scope or authority changed.");}
+  private integrationNativeMissingCoverage():{instance_id:string;native_protocol:number|null}[]{return this.ctx.storage.sql.exec<{instance_id:string;native_protocol:number|null}>("SELECT p.instance_id,p.native_protocol FROM project_workflows p LEFT JOIN integration_native_coverage c ON c.workflow_id=p.instance_id WHERE p.kind='integration' AND c.workflow_id IS NULL LIMIT 21").toArray();}
+  async stopIntegrationNativeForDeletion():Promise<boolean>{
+    if(!this.repositoryDeleting())throw new Error("Deletion fence required");const runtime=new IntegrationNativeRuntimeLedger(this.ctx.storage),missing=this.integrationNativeMissingCoverage();if(missing.length>20)return false;
+    for(const run of missing){if(run.native_protocol!==1||Object.values(this.load(true).candidates).some(candidate=>candidate.workflowInstanceId===run.instance_id))return false;try{const handle=await this.env.INTEGRATION_WORKFLOW.get(run.instance_id);let status=(await handle.status()).status;if(!["complete","errored","terminated"].includes(status)){await handle.terminate();status=(await handle.status()).status;}if(!["complete","errored","terminated"].includes(status))return false;}catch{return false;}}
+    const page=runtime.pendingScopes();for(const scope of page.scopes){if(scope.projectId!==this.load(true).projectId||scope.incarnation!==this.readRepositoryIncarnation())return false;runtime.seal(scope);try{const handle=await this.env.INTEGRATION_WORKFLOW.get(scope.workflowId);let status=(await handle.status()).status;if(!["complete","errored","terminated"].includes(status)){await handle.terminate();status=(await handle.status()).status;}if(!["complete","errored","terminated"].includes(status))return false;for(const allocation of runtime.allocations(scope)){const sandbox=this.env.INTEGRATOR.getByName(`native-${allocation.nativeRunId}`);await sandbox.destroy();if((await sandbox.lifetimeStatus())?.state!=="stopped")return false;runtime.confirmStopped(scope,allocation.nativeRunId,{nativeRunId:allocation.nativeRunId,state:"stopped"});}if(runtime.recovery(scope)!=="stopped")return false;}catch{return false;}}
+    return !page.truncated&&!runtime.hasUnconfirmed();
+  }
+  async declareIntegrationNativeRuntime(workflowId:string,candidateId:string):Promise<void>{const scope=await this.integrationRuntimeScope(workflowId,candidateId);this.assertIntegrationNativeLocal(scope);if(this.load().candidates[candidateId]?.preservationProtocolVersion!==1||await accountOf(this.env,scope.accountKey).accountLifecycle()!=="active")throw new LegacyRerunError("Native runtime authority changed.");this.assertIntegrationNativeLocal(scope);new IntegrationNativeRuntimeLedger(this.ctx.storage).declareCoverage(scope);}
+  async reserveIntegrationNativeRuntime(workflowId:string,candidateId:string,nativeId:string,stage:string):Promise<void>{const scope=await this.integrationRuntimeScope(workflowId,candidateId);this.assertIntegrationNativeLocal(scope);if(await accountOf(this.env,scope.accountKey).accountLifecycle()!=="active")throw new LegacyRerunError("Native runtime authority changed.");this.assertIntegrationNativeLocal(scope);new IntegrationNativeRuntimeLedger(this.ctx.storage).reserve(scope,nativeId,stage);}
+  async admitIntegrationNativeCommand(workflowId:string,candidateId:string,nativeId:string,commandId:string):Promise<IntegrationNativeRuntimeScope>{const scope=await this.integrationRuntimeScope(workflowId,candidateId);this.assertIntegrationNativeLocal(scope);if(await accountOf(this.env,scope.accountKey).accountLifecycle()!=="active")throw new LegacyRerunError("Native command authority changed.");this.assertIntegrationNativeLocal(scope);new IntegrationNativeRuntimeLedger(this.ctx.storage).admitCommand(scope,nativeId,commandId);return scope;}
+  async integrationNativeCommandAllowed(scope:IntegrationNativeRuntimeScope,nativeId:string,commandId:string):Promise<boolean>{try{this.assertIntegrationNativeLocal(scope);if(await accountOf(this.env,scope.accountKey).accountLifecycle()!=="active")return false;this.assertIntegrationNativeLocal(scope);return new IntegrationNativeRuntimeLedger(this.ctx.storage).commandAllowed(scope,nativeId,commandId);}catch{return false;}}
+  async finishIntegrationNativeCommand(scope:IntegrationNativeRuntimeScope,nativeId:string,commandId:string,outcome:"completed"|"refused"):Promise<void>{new IntegrationNativeRuntimeLedger(this.ctx.storage).finishCommand(scope,nativeId,commandId,{outcome});}
+  async confirmIntegrationNativeRuntimeStopped(workflowId:string,candidateId:string,nativeId:string):Promise<void>{const scope=await this.integrationRuntimeScope(workflowId,candidateId);const lifetime=await this.env.INTEGRATOR.getByName(`native-${nativeId}`).lifetimeStatus();if(lifetime?.state!=="stopped")throw new LegacyRerunError("Native shutdown is unconfirmed.");new IntegrationNativeRuntimeLedger(this.ctx.storage).confirmStopped(scope,nativeId,{nativeRunId:nativeId,state:"stopped"});}
+  async legacyCandidateRuntimeAvailable(candidateId:string):Promise<boolean>{try{const candidate=this.load().candidates[candidateId];if(!candidate?.workflowInstanceId)return false;const scope=await this.integrationRuntimeScope(candidate.workflowInstanceId,candidateId);return new IntegrationNativeRuntimeLedger(this.ctx.storage).recovery(scope)!=="recovery_required";}catch{return false;}}
+  private legacyRerunSnapshot(candidateId:string):LegacyRerunSnapshot {
+    const state=this.load(),candidate=state.candidates[candidateId],incarnation=this.readRepositoryIncarnation();
+    if(!candidate||!incarnation)throw new LegacyRerunError("Saved candidate is unavailable.");
+    const tasks=candidate.participatingTaskIds.map(id=>{const task=state.tasks[id];if(!task)throw new LegacyRerunError("Saved contribution is unavailable.");return {id:task.id,currentCommit:task.currentCommit,baseCommit:task.baseCommit,workspace:{repoName:task.workspace.repoName,branch:task.workspace.branch},dependsOn:task.dependsOn,status:task.status,activeCandidateId:task.activeCandidateId,agentRunId:task.agentRunId};});
+    return {projectId:state.projectId,incarnation,canonicalRepoName:state.canonicalRepoName,candidate:structuredClone(candidate),tasks,busy:tasks.some(task=>{if(!task.agentRunId)return false;const run=this.agentRuns().get(task.agentRunId);return !run||["claimed","proposed","pushed"].includes(run.phase);}),publicationBlocked:state.journal.some(entry=>entry.candidateId===candidateId&&(entry.state==="PREPARED"||entry.state==="ACCEPTED"))||state.acceptedState.history.some(entry=>entry.candidateId===candidateId)};
+  }
+  async legacyCandidateRerunReport(candidateId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){
+    const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();const snapshot=this.legacyRerunSnapshot(candidateId),expectedCommit=snapshot.candidate.candidateCommit??null,inputs:Record<string,{commit:string;base:string}>={};
+    for(const proof of snapshot.candidate.frozenContributorProofs??[])if(snapshot.candidate.participatingCommits[proof.id]===proof.commit)inputs[proof.id]={commit:proof.commit,base:proof.baseCommit};
+    const saved=new LegacyCandidateReruns(this.ctx.storage).forCandidate(candidateId);let eligible=true,detail="Run a fresh candidate from these exact saved contributions. This candidate and its review remain preserved.";
+    try{if(saved?.phase==="abandoned"){assertLegacyRerunEligible(snapshot,expectedCommit);detail="The previous rerun was abandoned before dispatch. Its audit and preserved candidate remain available.";}else if(saved){this.assertLegacyRerunScope(saved);if(saved.phase==="awaiting_decision"){eligible=false;detail="Resolve the linked product decision to continue from these preserved inputs.";}if(saved.phase==="attached"){eligible=false;detail="The fresh candidate is linked below. Its progress and review remain separate from this preserved candidate.";}}else assertLegacyRerunEligible(snapshot,expectedCommit);}catch(error){eligible=false;detail=error instanceof LegacyRerunError?error.message:"Frozen contribution context is unavailable.";}
+    return {candidateId,expectedCommit,inputs,eligible,detail,...(saved?{operation:{id:saved.id,phase:saved.phase,dispatch:saved.dispatch,abandoned:saved.abandoned,successorCandidateId:saved.successorCandidateId,successorWorkflowId:saved.successorWorkflowId,successorDecisionId:saved.successorDecisionId,continuationWorkflowId:saved.continuationWorkflowId}}:{})};
+  }
+  async prepareLegacyCandidateRerun(candidateId:string,expectedCommit:string|null,requestId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number,expectedInputs?:Record<string,{commit:string;base:string}>):Promise<LegacyCandidateRerun>{
+    const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();
+    return this.ctx.storage.transactionSync(()=>{assert();const snapshot=this.legacyRerunSnapshot(candidateId);if(!expectedInputs)throw new LegacyRerunError("Exact frozen contribution inputs are required.");const attempt=new LegacyCandidateReruns(this.ctx.storage).prepare({id:requestId,expectedCommit,actor,snapshot,credentialHash,sessionExpiresAt,expectedInputs});this.assertLegacyRerunScope(attempt);attempt.credentialHash=credentialHash;attempt.sessionExpiresAt=sessionExpiresAt;new LegacyCandidateReruns(this.ctx.storage).save(attempt);return attempt;});
+  }
+  async getLegacyCandidateRerun(id:string):Promise<LegacyCandidateRerun|null>{return new LegacyCandidateReruns(this.ctx.storage).get(id);}
+  async markLegacyCandidateRerunDispatch(id:string,dispatch:"unknown"|"observed"):Promise<LegacyCandidateRerun>{const attempt=await this.assertLegacyCandidateRerun(id),assert=await this.authorizeHumanDecision(attempt.actor,attempt.credentialHash,true);assert();this.assertLegacyRerunScope(attempt);return new LegacyCandidateReruns(this.ctx.storage).markDispatch(id,dispatch);}
+  async abandonLegacyCandidateRerun(id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<LegacyCandidateRerun>{
+    let assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();const ledger=new LegacyCandidateReruns(this.ctx.storage);let attempt=ledger.get(id);if(!attempt)throw new LegacyRerunError("Saved rerun is unavailable.");
+    const scopeOnly=()=>{assert();const state=this.load(),candidate=state.candidates[attempt!.predecessorCandidateId];if(state.projectId!==attempt!.snapshot.projectId||state.canonicalRepoName!==attempt!.snapshot.canonicalRepoName||this.readRepositoryIncarnation()!==attempt!.snapshot.incarnation||!candidate||JSON.stringify(candidate)!==JSON.stringify(attempt!.snapshot.candidate)||state.journal.some(entry=>entry.candidateId===candidate.id&&(entry.state==="PREPARED"||entry.state==="ACCEPTED"))||state.acceptedState.history.some(entry=>entry.candidateId===candidate.id))throw new LegacyRerunError("The preserved candidate or publication state changed.");};scopeOnly();
+    if(attempt.phase==="abandoned")return attempt;
+    if(attempt.dispatch!=="not_started"||attempt.successorCandidateId)throw new LegacyRerunError("A dispatched or uncertain rerun cannot be abandoned.");
+    attempt=await this.stopLegacyCandidateRerun(id,true,actor,credentialHash,sessionExpiresAt);assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);scopeOnly();
+    try{return this.ctx.storage.transactionSync(()=>{scopeOnly();const current=ledger.get(id);if(!current||current.dispatch!=="not_started"||!current.vmStopped||!current.terminalState)throw new LegacyRerunError("Stopped predispatch execution must be confirmed before abandonment.");const state=this.load();for(const previous of current.snapshot.tasks){const task=state.tasks[previous.id];if(task&&task.activeCandidateId===current.predecessorCandidateId&&["integrating","verifying"].includes(task.status)&&task.currentCommit===previous.currentCommit&&task.baseCommit===previous.baseCommit&&task.workspace.repoName===previous.workspace.repoName&&task.workspace.branch===previous.workspace.branch&&task.dependsOn===previous.dependsOn&&task.agentRunId===previous.agentRunId){task.status="checkpointed";task.updatedAt=new Date().toISOString();}}const result=ledger.abandon(id,actor);this.save();return result;});}catch(error){this.state=null;throw error;}
+  }
+
+  async assertLegacyCandidateRerun(id:string,actor?:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number,holder?:string):Promise<LegacyCandidateRerun>{
+    const attempt=new LegacyCandidateReruns(this.ctx.storage).get(id);if(!attempt)throw new LegacyRerunError("Saved rerun is unavailable.");
+    if(actor&&(actor.userId!==attempt.actor.userId||actor.viaToken!==attempt.actor.viaToken))throw new LegacyRerunError("This request belongs to another rerun actor.");
+    let backgroundActor=attempt.actor,backgroundHash=attempt.credentialHash;
+    if(holder&&holder===attempt.continuationWorkflowId&&attempt.continuationActor){const registered=await this.getWorkflowRun(holder);if(registered?.kind!=="integration"||registered.actorId!==attempt.continuationActor.userId)throw new LegacyRerunError("Decision continuation identity changed.");backgroundActor=attempt.continuationActor;backgroundHash=attempt.continuationCredentialHash;}
+    else if(holder&&holder!==attempt.successorWorkflowId)throw new LegacyRerunError("Saved rerun workflow identity changed.");
+    const assert=actor?await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt):await this.authorizeHumanDecision(backgroundActor,backgroundHash,true);assert();this.assertLegacyRerunScope(attempt);return attempt;
+  }
+  private assertLegacyRerunScope(attempt:LegacyCandidateRerun):void{
+    const current=this.legacyRerunSnapshot(attempt.predecessorCandidateId);
+    if(attempt.phase==="abandoned")throw new LegacyRerunError("This rerun was explicitly abandoned before dispatch.");
+    if(attempt.phase==="prepared"||attempt.phase==="stopped"){
+      assertLegacyRerunEligible(current,attempt.expectedCommit);
+      if(JSON.stringify(current)!==JSON.stringify(attempt.snapshot))throw new LegacyRerunError("The frozen rerun context changed.");
+    }else{
+      if(current.projectId!==attempt.snapshot.projectId||current.incarnation!==attempt.snapshot.incarnation||current.canonicalRepoName!==attempt.snapshot.canonicalRepoName||current.publicationBlocked||JSON.stringify(current.candidate)!==JSON.stringify(attempt.snapshot.candidate))throw new LegacyRerunError("The predecessor or repository changed.");
+      if(attempt.phase==="attached"){
+        const successor=attempt.successorCandidateId?this.load().candidates[attempt.successorCandidateId]:undefined;
+        if(!successor||successor.workflowInstanceId!==(attempt.continuationWorkflowId??attempt.successorWorkflowId)||successor.predecessorCandidateId!==attempt.predecessorCandidateId||successor.legacyRerunId!==attempt.id||successor.preservationProtocolVersion!==1||JSON.stringify(successor.participatingTaskIds)!==JSON.stringify(attempt.taskIds)||attempt.snapshot.tasks.some(task=>successor.participatingCommits[task.id]!==task.currentCommit||!successor.frozenContributorProofs?.some(proof=>proof.id===task.id&&proof.commit===task.currentCommit&&proof.baseCommit===task.baseCommit)))throw new LegacyRerunError("Saved successor linkage changed.");
+        return;
+      }
+      if(attempt.phase==="awaiting_decision"){const decision=attempt.successorDecisionId?this.load().decisions[attempt.successorDecisionId]:undefined;if(!decision||decision.legacyRerunId!==attempt.id||decision.status!=="pending")throw new LegacyRerunError("Saved product decision ownership changed.");}
+      for(const previous of attempt.snapshot.tasks){const task=current.tasks.find(value=>value.id===previous.id);if(!task||task.currentCommit!==previous.currentCommit||task.baseCommit!==previous.baseCommit||task.workspace.repoName!==previous.workspace.repoName||task.workspace.branch!==previous.workspace.branch||task.dependsOn!==previous.dependsOn||task.agentRunId!==previous.agentRunId||task.activeCandidateId!==(attempt.successorCandidateId??previous.activeCandidateId)||task.status!==(attempt.phase==="awaiting_decision"?"needs_decision":"ready"))throw new LegacyRerunError("Reassigned contribution changed.");}
+    }
+  }
+  async stopLegacyCandidateRerun(id:string,allowChangedInputs=false,actor?:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<LegacyCandidateRerun>{
+    const attempt=allowChangedInputs?new LegacyCandidateReruns(this.ctx.storage).get(id):await this.assertLegacyCandidateRerun(id);if(!attempt)throw new LegacyRerunError("Saved rerun unavailable.");
+    const current=actor?await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt):await this.authorizeHumanDecision(attempt.actor,attempt.credentialHash,true);
+    const assertStop=()=>{current();const snapshot=this.legacyRerunSnapshot(attempt.predecessorCandidateId);if(snapshot.projectId!==attempt.snapshot.projectId||snapshot.incarnation!==attempt.snapshot.incarnation||snapshot.canonicalRepoName!==attempt.snapshot.canonicalRepoName||snapshot.publicationBlocked||JSON.stringify(snapshot.candidate)!==JSON.stringify(attempt.snapshot.candidate))throw new LegacyRerunError("Old execution scope changed.");if(!allowChangedInputs)this.assertLegacyRerunScope(attempt);};assertStop();if(attempt.phase!=="prepared")return attempt;
+    const workflowId=attempt.snapshot.candidate.workflowInstanceId!,scope=await this.integrationRuntimeScope(workflowId,attempt.predecessorCandidateId),runtime=new IntegrationNativeRuntimeLedger(this.ctx.storage);
+    if(runtime.recovery(scope)==="recovery_required")throw new LegacyRerunError("The old native runtime identities were not recorded. Operator recovery is required; no execution is guessed stopped.");
+    runtime.seal(scope);const handle=await this.env.INTEGRATION_WORKFLOW.get(workflowId);let status=(await handle.status()).status;
+    if(!["complete","errored","terminated"].includes(status)){await handle.terminate();status=(await handle.status()).status;}
+    if(status!=="complete"&&status!=="errored"&&status!=="terminated")throw new LegacyRerunError("Old workflow shutdown is unconfirmed.");
+    for(const allocation of runtime.allocations(scope)){const sandbox=this.env.INTEGRATOR.getByName(`native-${allocation.nativeRunId}`);await sandbox.destroy();if((await sandbox.lifetimeStatus())?.state!=="stopped")throw new LegacyRerunError("Old native shutdown is unconfirmed.");runtime.confirmStopped(scope,allocation.nativeRunId,{nativeRunId:allocation.nativeRunId,state:"stopped"});}
+    assertStop();return this.ctx.storage.transactionSync(()=>{assertStop();if(runtime.recovery(scope)!=="stopped")throw new LegacyRerunError("Old execution remains unconfirmed.");attempt.phase="stopped";attempt.terminalState=status;attempt.vmStopped=true;new LegacyCandidateReruns(this.ctx.storage).save(attempt);return attempt;});
+  }
+  async commitLegacyCandidateRerunReassignment(id:string):Promise<LegacyCandidateRerun>{
+    const attempt=await this.assertLegacyCandidateRerun(id),assert=await this.authorizeHumanDecision(attempt.actor,attempt.credentialHash,true);
+    try{return this.ctx.storage.transactionSync(()=>{assert();this.assertLegacyRerunScope(attempt);if(attempt.phase==="reassigned"||attempt.phase==="attached")return attempt;if(attempt.phase!=="stopped"||!attempt.vmStopped||!attempt.terminalState)throw new LegacyRerunError("Saved rerun must confirm execution stopped before reassignment.");const state=this.load();for(const taskId of attempt.taskIds)state.tasks[taskId]!.status="ready";const lease=this.ctx.storage.sql.exec<{holder:string}>("SELECT holder FROM lease WHERE id=1").toArray()[0];if(lease&&lease.holder===attempt.snapshot.candidate.workflowInstanceId)this.ctx.storage.sql.exec("DELETE FROM lease WHERE id=1 AND holder=?",lease.holder);attempt.phase="reassigned";new LegacyCandidateReruns(this.ctx.storage).save(attempt);this.save();return attempt;});}catch(error){this.state=null;throw error;}
+  }
+  async attachLegacyCandidateRerunSuccessor(id:string,candidateId:string):Promise<LegacyCandidateRerun>{
+    const attempt=new LegacyCandidateReruns(this.ctx.storage).get(id);if(!attempt)throw new LegacyRerunError("Saved rerun is unavailable.");const assert=await this.authorizeHumanDecision(attempt.actor,attempt.credentialHash,true);assert();
+    return this.ctx.storage.transactionSync(()=>{assert();const candidate=this.load().candidates[candidateId];if(attempt.successorCandidateId===candidateId){this.assertLegacyRerunScope(attempt);return attempt;}if(attempt.phase!=="reassigned"||!candidate||candidate.workflowInstanceId!==(attempt.continuationWorkflowId??attempt.successorWorkflowId)||candidate.predecessorCandidateId!==attempt.predecessorCandidateId||candidate.legacyRerunId!==id)throw new LegacyRerunError("Successor claim does not match this saved rerun.");attempt.successorCandidateId=candidateId;attempt.phase="attached";this.assertLegacyRerunScope(attempt);new LegacyCandidateReruns(this.ctx.storage).save(attempt);return attempt;});
   }
   private ownerRebaseSnapshot(application:RebaseApplication):RebaseRecoverySnapshot {
     const state=this.load(),task=state.tasks[application.input.taskId];if(!task)throw new RebaseRecoveryError("Contribution is unavailable",409);
@@ -2068,13 +2183,13 @@ export class RepositoryController extends DurableObject<Env> {
     for (const task of Object.values(state.tasks)) if (task.agentWorkflowInstanceId) byId.set(task.agentWorkflowInstanceId, { instanceId: task.agentWorkflowInstanceId, kind: "agent" });
     return [...byId.values()];
   }
-  async registerWorkflow(instanceId: string, kind: "agent" | "integration" | "scenario", taskId?: string, actorId?: string): Promise<void> {
+  async registerWorkflow(instanceId: string, kind: "agent" | "integration" | "scenario", taskId?: string, actorId?: string, nativeRuntimeProtocolVersion?:1): Promise<void> {
     if (!/^[a-zA-Z0-9_-]{1,128}$/.test(instanceId) || !["agent", "integration", "scenario"].includes(kind)) throw new Error("Invalid workflow registration");
     const state = this.load();
     if (taskId && (kind !== "agent" || !state.tasks[taskId])) throw new Error("Unknown agent change");
     const old = await this.getWorkflowRun(instanceId);
     if (old && old.kind !== kind) throw new Error("Workflow kind differs from its saved registration");
-    this.ctx.storage.sql.exec("INSERT OR IGNORE INTO project_workflows (instance_id, kind, actor_id) VALUES (?, ?, ?)", instanceId, kind, actorId ?? null);
+    this.ctx.storage.sql.exec("INSERT OR IGNORE INTO project_workflows (instance_id, kind, actor_id,native_protocol) VALUES (?, ?, ?,?)", instanceId, kind, actorId ?? null,kind==="integration"&&nativeRuntimeProtocolVersion===1?1:null);
     if (taskId) {
       state.tasks[taskId]!.agentWorkflowInstanceId = instanceId;
       this.save();
@@ -2598,6 +2713,7 @@ export class RepositoryController extends DurableObject<Env> {
     this.repositoryDeleting();
     new RebaseResumeAttempts(this.ctx.storage);
     if(this.ctx.storage.sql.exec("SELECT 1 FROM rebase_resume_attempts a WHERE rowid=(SELECT MAX(rowid) FROM rebase_resume_attempts b WHERE b.application_id=a.application_id) AND (json_extract(doc,'$.nativeState')!='stopped' OR json_extract(doc,'$.terminal') IS NULL OR json_extract(doc,'$.dispatch')='unknown') LIMIT 1").toArray().length||new SavedRebaseResumeCredentials(this.ctx.storage).hasPending())throw new Error("Saved recovery cleanup is unconfirmed; durable attempts and credentials were preserved");
+    const integrationNative=new IntegrationNativeRuntimeLedger(this.ctx.storage);if(integrationNative.hasUnconfirmed()||this.integrationNativeMissingCoverage().some(run=>run.native_protocol!==1||Object.values(this.load(true).candidates).some(candidate=>candidate.workflowInstanceId===run.instance_id)))throw new Error("Integration native shutdown remains unconfirmed; metadata was preserved");
     const tables = this.ctx.storage.sql.exec<{name:string}>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name!='repository_deletion'").toArray();
     this.ctx.storage.transactionSync(() => {
       for (const table of tables) this.ctx.storage.sql.exec(`DELETE FROM "${table.name.replaceAll('"','""')}"`);
@@ -2802,6 +2918,9 @@ export class RepositoryController extends DurableObject<Env> {
     if (lease && lease.expires_at > now && lease.holder !== req.holder) return { reason: "Another landing holds the lease" };
     if (req.taskIds.length < 1 || req.taskIds.length > 8 || new Set(req.taskIds).size !== req.taskIds.length) return { reason: "Integrate one to eight different changes" };
 
+    const reruns=new LegacyCandidateReruns(this.ctx.storage),rerun=reruns.forWorkflow(req.holder);
+    if(reruns.reservedForTasks(req.taskIds).some(value=>(value.continuationWorkflowId??value.successorWorkflowId)!==req.holder))return {reason:"These contributions belong to a saved owner rerun"};
+    if(rerun){await this.assertLegacyCandidateRerun(rerun.id,undefined,undefined,undefined,req.holder);if(req.holder!==(rerun.continuationWorkflowId??rerun.successorWorkflowId))return {reason:"This saved rerun continues on its decision workflow"};if(JSON.stringify(req.taskIds)!==JSON.stringify(rerun.taskIds))return {reason:"Saved rerun task set changed"};if(rerun.phase==="awaiting_decision"&&rerun.successorDecisionId){const decision=s.decisions[rerun.successorDecisionId];if(!decision||decision.legacyRerunId!==rerun.id)return {reason:"Saved product decision changed"};return {decision};}if(JSON.stringify(req.taskIds)!==JSON.stringify(rerun.taskIds))return {reason:"Saved rerun scope changed"};if(rerun.phase==="attached"&&rerun.successorCandidateId)return {candidate:s.candidates[rerun.successorCandidateId]!};if(rerun.phase!=="reassigned")return {reason:"Saved rerun scope changed"};}
     const found = req.taskIds.map((id) => s.tasks[id]);
     if (found.some((t) => !t)) return { reason: "Unknown task" };
     const tasks = found as Task[];
@@ -2824,8 +2943,8 @@ export class RepositoryController extends DurableObject<Env> {
             let deliveries: string[] = [];
             try {
                 this.ctx.storage.transactionSync(() => {
+                    if(rerun){this.assertLegacyRerunScope(rerun);decision.legacyRerunId=rerun.id;for(const task of tasks)task.status="needs_decision";reruns.awaitDecision(rerun.id,decision.id);}else a.status = b.status = "needs_decision";
                     s.decisions[decision.id] = decision;
-                    a.status = b.status = "needs_decision";
                     deliveries = this.stageEvent("decision.needed", { decision: decision.id, question: decision.question });
                     this.save();
                     });
@@ -2846,6 +2965,7 @@ export class RepositoryController extends DurableObject<Env> {
     try {
       this.ctx.storage.transactionSync(() => {
         if (Object.hasOwn(s.candidates, candidate.id)) throw new Error("Candidate identity already exists; retry the integration claim");
+        if(rerun){this.assertLegacyRerunScope(rerun);candidate.predecessorCandidateId=rerun.predecessorCandidateId;candidate.legacyRerunId=rerun.id;rerun.successorCandidateId=candidate.id;rerun.phase="attached";reruns.save(rerun);}
         candidate.workflowInstanceId = req.holder;
         candidate.preservationProtocolVersion = 1;
         candidate.frozenExternalChecksPolicy = structuredClone(this.connections().policy());
@@ -2862,7 +2982,11 @@ export class RepositoryController extends DurableObject<Env> {
     return { candidate };
   }
 
+  private legacyCandidateRerunFrozen(candidateId:string):boolean{return new LegacyCandidateReruns(this.ctx.storage).hasCandidate(candidateId);}
+  private assertCandidateNotRerunFrozen(candidateId:string):void{if(this.legacyCandidateRerunFrozen(candidateId))throw new LegacyRerunError("This predecessor is preserved by an explicit owner rerun. Continue on its linked fresh candidate.");}
+
   async recordComposition(candidateId: string, attempts: RepairAttempt[]): Promise<void> {
+    this.assertCandidateNotRerunFrozen(candidateId);
     const candidate = this.load().candidates[candidateId];
     if (!candidate) throw new Error("Unknown candidate");
     candidate.repairAttempts = attempts;
@@ -2871,6 +2995,7 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   async recordVerification(candidateId: string, commit: string, evidence: VerificationEvidence): Promise<void> {
+    this.assertCandidateNotRerunFrozen(candidateId);
     const s = this.load();
     const c = s.candidates[candidateId];
     if (!c) throw new Error("Unknown candidate");
@@ -2952,6 +3077,7 @@ export class RepositoryController extends DurableObject<Env> {
 
   /** Ledger step 1: validate every invariant, then journal PREPARED. The workflow then pushes with a lease. */
   async preparePublish(candidateId: string): Promise<PrepareResult> {
+    if(this.legacyCandidateRerunFrozen(candidateId))return {ok:false,error:"This preserved predecessor has a saved owner rerun. Review the linked fresh candidate before publication."};
     if(this.legacyPreparedPublication(candidateId)){await this.ensureRecoveryAlarm();return {ok:false,recoveryRequired:true,error:"A previously prepared publication needs Git readback before recovery. Its journal, review and saved changes remain pending."};}
     const recorded = this.load().candidates[candidateId]?.review;
     if (!recorded?.actor) return { ok: false, error: "The previous approval has no verified owner identity. Run a new candidate and review it before publishing." };
@@ -2962,6 +3088,7 @@ export class RepositoryController extends DurableObject<Env> {
     const c = s.candidates[candidateId];
     const ev = c?.evidenceId ? s.evidence[c.evidenceId] : undefined;
     if (!c || !ev || !c.candidateCommit) return { ok: false, error: "No verified candidate" };
+    if(this.legacyCandidateRerunFrozen(candidateId))return {ok:false,error:"This predecessor is preserved by an owner rerun."};
     const preservationFailure=this.candidatePreservationFailure(c);
     if(preservationFailure)return {ok:false,error:preservationFailure};
     // Nothing becomes accepted history without a human approving this exact commit.
@@ -2996,20 +3123,21 @@ export class RepositoryController extends DurableObject<Env> {
       timestamp: new Date().toISOString(),
     };
     try {
-      this.ctx.storage.transactionSync(() => { assertCurrent(); s.journal.push(journal); this.save(); });
+      this.ctx.storage.transactionSync(() => { assertCurrent(); this.assertCandidateNotRerunFrozen(candidateId); s.journal.push(journal); this.save(); });
     } catch (cause) { this.state = null; throw cause; }
     return { ok: true, journal };
   }
 
   /** Fresh authorization for a new Git dispatch; confirmed ref updates reconcile independently. */
   async authorizeCandidatePublication(candidateId: string, commit: string): Promise<boolean> {
+    if(this.legacyCandidateRerunFrozen(candidateId))return false;
     const recorded = this.load().candidates[candidateId]?.review;
     if (!recorded?.approved || recorded.commit !== commit || !recorded.actor) return false;
     let assertCurrent: () => void;
     try { assertCurrent = await this.authorizeHumanDecision(recorded.actor); assertCurrent(); }
     catch { return false; }
     const state = this.load(), candidate = state.candidates[candidateId];
-    if(!candidate||this.candidatePreservationFailure(candidate))return false;
+    if(!candidate||this.legacyCandidateRerunFrozen(candidateId)||this.candidatePreservationFailure(candidate))return false;
     const evidence = candidate?.evidenceId ? state.evidence[candidate.evidenceId] : undefined;
     const journal = state.journal.find(item => item.candidateId === candidateId && item.state === "PREPARED" && item.newHead === commit);
     const authority = journal?.publicationAuthority;
@@ -3076,6 +3204,7 @@ export class RepositoryController extends DurableObject<Env> {
 
   /** Verified and waiting: a person must accept (or reject) this exact commit before it can land. */
   async awaitReview(candidateId: string, commit: string, workflowInstanceId: string): Promise<void> {
+    this.assertCandidateNotRerunFrozen(candidateId);
     const s = this.load();
     const c = s.candidates[candidateId];
     if (!c || c.candidateCommit !== commit) return;
@@ -3115,6 +3244,7 @@ export class RepositoryController extends DurableObject<Env> {
     assertCurrent();
     const s = this.load();
     const c = s.candidates[candidateId];
+    if(this.legacyCandidateRerunFrozen(candidateId))return {ok:false,error:"This preserved predecessor has a saved owner rerun. Review its linked fresh candidate."};
     if (!c || !c.candidateCommit || !c.workflowInstanceId) return { ok: false, error: "This candidate is not waiting for review" };
     if (!/^[a-f0-9]{40}$/.test(expectedCommit ?? "") || expectedCommit !== c.candidateCommit) return { ok: false, error: "The candidate changed from the commit you reviewed. Refresh and inspect its diff before deciding." };
     if(review.approved){const preservationFailure=this.candidatePreservationFailure(c);if(preservationFailure)return {ok:false,error:preservationFailure};}
@@ -3130,6 +3260,7 @@ export class RepositoryController extends DurableObject<Env> {
     try {
       this.ctx.storage.transactionSync(() => {
         assertCurrent();
+        this.assertCandidateNotRerunFrozen(candidateId);
         c.review = { ...review, actor: { ...review.actor }, by: review.actor.displayName, at: new Date().toISOString(), commit: c.candidateCommit! };
         c.status = review.approved ? "verified" : "failed";
         c.updatedAt = new Date().toISOString();
@@ -3142,6 +3273,8 @@ export class RepositoryController extends DurableObject<Env> {
 
   async abortPublish(candidateId: string, journalId: string | undefined, reason: string, outcome: "failed" | "stale"): Promise<void> {
     await this.ensureRecoveryAlarm();
+    // Cancellation cleanup must not turn the preserved predecessor or its tasks into a fabricated failure.
+    if(this.legacyCandidateRerunFrozen(candidateId))return;
     const s = this.load();
     const c = s.candidates[candidateId];
     if (!c) return;
@@ -3170,28 +3303,42 @@ export class RepositoryController extends DurableObject<Env> {
     await this.logActivity("FlareGit", outcome === "stale" ? "integration.stale" : "integration.blocked", outcome === "stale" ? "Base moved; will recompose" : `Blocked: ${reason}`.slice(0, 280));
   }
 
-  async resolveDecision(decisionId: string, selectedOptionId: string, actor: HumanDecisionActor, credentialHash?: string): Promise<{ taskIds: string[] }> {
-    const assertCurrent = await this.authorizeHumanDecision(actor, credentialHash, true);
+  async resolveDecision(decisionId: string, selectedOptionId: string, actor: HumanDecisionActor, credentialHash?: string, sessionExpiresAt?:number): Promise<{ taskIds: string[];legacyRerunId?:string;continuationWorkflowId?:string }> {
+    let assertCurrent = await this.authorizeHumanDecision(actor, credentialHash, true);
     assertCurrent();
     const s = this.load();
     const d = s.decisions[decisionId];
     if (!d) throw new Error("Unknown decision");
+    const reruns=new LegacyCandidateReruns(this.ctx.storage),rerun=d.legacyRerunId?reruns.get(d.legacyRerunId):null;
+    if(d.legacyRerunId&&(!rerun||(rerun.successorDecisionId!==decisionId&&(d.status!=="resolved"||!rerun.decisionIds?.includes(decisionId)))))throw new LegacyRerunError("Saved rerun decision scope changed.");
+    if(rerun)this.assertLegacyRerunScope(rerun);
+    const continuationWorkflowId=rerun?`decision-${s.projectId}-${decisionId}`:undefined;
+    if(rerun&&(s.projectId!==rerun.snapshot.projectId||this.readRepositoryIncarnation()!==rerun.snapshot.incarnation||s.canonicalRepoName!==rerun.snapshot.canonicalRepoName||JSON.stringify(s.candidates[rerun.predecessorCandidateId])!==JSON.stringify(rerun.snapshot.candidate)))throw new LegacyRerunError("Historical decision scope changed.");
     if (d.status === "resolved") {
       if (d.selectedOptionId !== selectedOptionId) throw new Error("This decision was already resolved with a different option");
-      return { taskIds: [...(d.resolvedTaskIds ?? [])] };
+      return { taskIds: [...(d.resolvedTaskIds ?? [])],...(rerun?{legacyRerunId:rerun.id,continuationWorkflowId}: {}) };
     }
     if (d.status !== "pending") throw new Error("This decision is not awaiting a choice");
+    if(rerun){
+      const scopeKey=JSON.stringify({projectId:s.projectId,incarnation:this.readRepositoryIncarnation(),canonicalRepoName:s.canonicalRepoName});
+      const authorize=async()=>{assertCurrent=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assertCurrent();if(JSON.stringify({projectId:this.load().projectId,incarnation:this.readRepositoryIncarnation(),canonicalRepoName:this.load().canonicalRepoName})!==scopeKey)throw new LegacyRerunError("Decision repository scope changed.");this.assertLegacyRerunScope(rerun);};
+      await authorize();const accountKey=await accountKeyFor(actor.userId);await authorize();
+      for(const task of rerun.snapshot.tasks){using repository=await openRepositoryRead(this.env,{repoName:task.workspace.repoName,authorize,reserveGroup:operationId=>globalOf(this.env).reserveCoreGitOperation(operationId,accountKey,this.currentGitBudget()),limits:{maxProviderCalls:8,deadlineMs:10000}});const head=(await repository.log({ref:`refs/heads/${task.workspace.branch}`,limit:1}))[0]?.hash;if(head!==task.currentCommit)throw new LegacyRerunError("A contribution branch advanced. No product choice or continuation was applied.");}
+      await authorize();
+    }
+
     const [idA, idB] = d.conflictingRequirementIds;
     if (selectedOptionId !== idA && selectedOptionId !== idB) throw new Error("Unknown option");
     const taskIds: string[] = [];
     try {
       this.ctx.storage.transactionSync(() => {
         assertCurrent();
+        if(rerun){this.assertLegacyRerunScope(rerun);if(rerun.phase!=="awaiting_decision")throw new LegacyRerunError("This decision no longer owns the rerun inputs.");}
         d.selectedOptionId = selectedOptionId;
         d.status = "resolved";
         d.resolvedAt = new Date().toISOString();
         d.resolvedBy = { ...actor };
-        for (const t of Object.values(s.tasks)) {
+        for (const t of rerun?rerun.taskIds.map(id=>s.tasks[id]!):Object.values(s.tasks)) {
           for (const r of t.requirements) {
             if (r.id === (selectedOptionId === idA ? idB : idA)) r.status = "superseded";
             if (r.id === selectedOptionId && r.policyPatch) {
@@ -3205,9 +3352,10 @@ export class RepositoryController extends DurableObject<Env> {
           }
         }
         d.resolvedTaskIds = [...taskIds];
+        if(rerun){if(JSON.stringify(taskIds)!==JSON.stringify(rerun.taskIds))throw new LegacyRerunError("The decision task set changed; recovery is required.");reruns.continueDecision(rerun.id,decisionId,continuationWorkflowId!,actor,credentialHash);}
         this.save();
       });
     } catch (cause) { this.state = null; throw cause; }
-    return { taskIds };
+    return { taskIds,...(rerun?{legacyRerunId:rerun.id,continuationWorkflowId}: {}) };
   }
 }

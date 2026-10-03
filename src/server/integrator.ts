@@ -1,3 +1,5 @@
+import type {IntegrationNativeRuntimeScope} from "./integration-native-runtime.js";
+import {projectOf} from "./projects.js";
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env.js";
 import {ContainerLifetime,MANAGED_CONTAINER_LIFETIME_MS,AGENT_CONTAINER_LIFETIME_MS} from "./container-lifetime.js";
@@ -61,6 +63,23 @@ export class IntegratorSandbox extends DurableObject<Env> {
     const out = await proc.output();
     return { success: out.exitCode === 0, stdout: DEC.decode(out.stdout), stderr: DEC.decode(out.stderr), exitCode: out.exitCode };
   }
+
+  private async runIntegrationCommand<T>(scope:IntegrationNativeRuntimeScope,nativeId:string,commandId:string,payload:unknown,action:()=>Promise<T>):Promise<T>{
+    const project=projectOf(this.env,scope.projectId);
+    if(this.ctx.id.toString()!==this.env.INTEGRATOR.idFromName(`native-${nativeId}`).toString())throw new Error("Native command destination changed");
+    const encoded=JSON.stringify({scope,nativeId,payload}),digest=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(encoded)))).map(value=>value.toString(16).padStart(2,"0")).join("");
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS integration_command_dispatch(command_id TEXT PRIMARY KEY,payload_hash TEXT NOT NULL,state TEXT NOT NULL)");
+    this.ctx.storage.transactionSync(()=>{const old=this.ctx.storage.sql.exec<{payload_hash:string}>("SELECT payload_hash FROM integration_command_dispatch WHERE command_id=?",commandId).toArray()[0];if(old)throw new Error(old.payload_hash===digest?"Native command already dispatched; its outcome is retained":"Native command identity belongs to another payload");this.ctx.storage.sql.exec("INSERT INTO integration_command_dispatch VALUES(?,?,'started')",commandId,digest);});
+    let allowed=false;try{allowed=await project.integrationNativeCommandAllowed(scope,nativeId,commandId);}catch{/* No native dispatch occurred. */}
+    if(!allowed){await project.finishIntegrationNativeCommand(scope,nativeId,commandId,"refused");this.ctx.storage.sql.exec("UPDATE integration_command_dispatch SET state='refused' WHERE command_id=?",commandId);throw new Error("Sealed or revoked native command refused");}
+    // Completion is stored here, before replying to a possibly interrupted caller.
+    // Unknown execution failures retain the admitted permit and block handoff.
+    const result=await action();await project.finishIntegrationNativeCommand(scope,nativeId,commandId,"completed");this.ctx.storage.sql.exec("UPDATE integration_command_dispatch SET state='completed' WHERE command_id=?",commandId);return result;
+  }
+  async integrationExec(scope:IntegrationNativeRuntimeScope,nativeId:string,commandId:string,argv:string[],opts?:{env?:Record<string,string>;timeoutMs?:number}){return this.runIntegrationCommand(scope,nativeId,commandId,{kind:"exec",argv,opts:opts?{timeoutMs:opts.timeoutMs,env:opts.env?Object.fromEntries(Object.entries(opts.env).sort(([a],[b])=>a.localeCompare(b))):undefined}:undefined},()=>this.exec(argv,opts));}
+  async integrationReadFile(scope:IntegrationNativeRuntimeScope,nativeId:string,commandId:string,path:string){return this.runIntegrationCommand(scope,nativeId,commandId,{kind:"readFile",path},()=>this.readFile(path));}
+  async integrationReadFileBytes(scope:IntegrationNativeRuntimeScope,nativeId:string,commandId:string,path:string){return this.runIntegrationCommand(scope,nativeId,commandId,{kind:"readFileBytes",path},()=>this.readFileBytes(path));}
+  async integrationWriteFile(scope:IntegrationNativeRuntimeScope,nativeId:string,commandId:string,path:string,content:string){return this.runIntegrationCommand(scope,nativeId,commandId,{kind:"writeFile",path,content},()=>this.writeFile(path,content));}
 
   async readFile(path: string): Promise<string> {
     const r = await this.exec(["cat", path]);

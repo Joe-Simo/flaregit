@@ -101,6 +101,9 @@ export interface RepairAttempt {
 }
 
 export interface CandidateGeneration {
+  /** Explicit fresh-review successor of a preserved legacy candidate. */
+  predecessorCandidateId?: string;
+  legacyRerunId?: string;
   /** New orchestration preserves original Git inputs before publication. Absent on legacy runs. */
   preservationProtocolVersion?: 1;
   id: string;
@@ -194,6 +197,8 @@ export interface DecisionOption {
 export interface HumanDecisionActor { userId: string; displayName: string; viaToken: boolean }
 
 export interface ProductDecision {
+  /** Durable legacy rerun lineage; resolution always creates a fresh candidate. */
+  legacyRerunId?: string;
   id: string;
   question: string;
   explanation: string;

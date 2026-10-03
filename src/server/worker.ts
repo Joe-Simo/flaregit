@@ -1,3 +1,4 @@
+import {LegacyRerunError} from "./legacy-candidate-rerun.js";
 export {FlareGitRebaseResumeWorkflow} from "./rebase-resume-workflow.js";
 import { openRepositoryRead, RepositoryReadError } from "./repository-read-budget.js";
 import {taskCreationInputSchema} from "./task-creation.js";
@@ -1343,9 +1344,49 @@ export default {
           const denied = await admitRun(env, account, planLimits(env)[plan]);
           if (denied) return denied;
           const eventId = `integ-${projectId}-${crypto.randomUUID()}`;
-          await project.registerWorkflow(eventId, "integration", undefined, userId);
+          await project.registerWorkflow(eventId, "integration", undefined, userId,1);
           await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds: b.taskIds as string[], eventId } satisfies QueueMessage);
           return json({ queued: eventId }, 202);
+        }
+
+        const legacyAbandonRoute=/^\/candidates\/([a-z0-9_-]{1,128})\/rerun\/abandon$/.exec(sub);
+        const legacyRerunRoute=/^\/candidates\/([a-z0-9_-]{1,128})\/rerun$/.exec(sub);
+        if((legacyRerunRoute||legacyAbandonRoute)&&(method==="GET"||method==="POST")){
+          if(!isOwner||(auth.viaToken&&auth.tokenScope!=="full"))return text("Only the current owner can request a fresh review of saved legacy inputs",403);
+          const profile=await account.getProfile(),currentAuth=await authenticate(request,env);if(currentAuth instanceof Response)return currentAuth;
+          if(currentAuth.id!==userId||(currentAuth.viaToken===true)!==(auth.viaToken===true)||(currentAuth.viaToken&&(currentAuth.tokenScope!=="full"||(currentAuth.tokenRepo&&currentAuth.tokenRepo!==projectId))))return text("Owner authentication changed",403);
+          const actor={userId,displayName:clean(profile.displayName,120)||"Repository owner",viaToken:currentAuth.viaToken===true},credentialHash=currentAuth.viaToken?await gitParentTokenHash(request):undefined,candidateId=(legacyRerunRoute??legacyAbandonRoute)![1]!;
+          try{
+            if(method==="GET"){
+              const available=await project.legacyCandidateRuntimeAvailable(candidateId),report=await project.legacyCandidateRerunReport(candidateId,actor,credentialHash,currentAuth.expiresAt);
+              return Response.json(!available&&report.eligible?{...report,eligible:false,detail:"The old native runtime identities were not recorded. Operator recovery is required before rerun; no workspace is guessed stopped."}:report,{headers:{"Cache-Control":"no-store"}});
+            }
+            if(legacyAbandonRoute){const b=await body<{requestId?:string;confirm?:string}>();if(!b||Object.keys(b).some(key=>key!=="requestId"&&key!=="confirm")||typeof b.requestId!=="string"||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(b.requestId)||b.confirm!=="abandon pending rerun")return text("Confirm the saved undispatched rerun identity",400);const known=await project.getLegacyCandidateRerun(b.requestId);if(!known||known.predecessorCandidateId!==candidateId)return text("Saved rerun unavailable",404);const abandoned=await project.abandonLegacyCandidateRerun(b.requestId,actor,credentialHash,currentAuth.expiresAt);return Response.json({id:abandoned.id,phase:abandoned.phase,dispatch:abandoned.dispatch},{headers:{"Cache-Control":"no-store"}});}
+            const b=await body<{expectedCommit?:string|null;expectedInputs?:Record<string,{commit:string;base:string}>;requestId?:string}>();
+            if(!b||Object.keys(b).some(key=>!["expectedCommit","expectedInputs","requestId"].includes(key))||(b.expectedCommit!==null&&(typeof b.expectedCommit!=="string"||!/^[a-f0-9]{40}$/.test(b.expectedCommit)))||typeof b.requestId!=="string"||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(b.requestId)||!b.expectedInputs||Array.isArray(b.expectedInputs)||Object.keys(b.expectedInputs).length<1||Object.keys(b.expectedInputs).length>8||Object.entries(b.expectedInputs).some(([id,value])=>!TASK_ID.test(id)||!value||Object.keys(value).some(key=>key!=="commit"&&key!=="base")||!/^[a-f0-9]{40}$/.test(value.commit)||!/^[a-f0-9]{40}$/.test(value.base)))return text("The exact candidate, frozen inputs, and reusable request identity are required",400);
+            let attempt=await project.prepareLegacyCandidateRerun(candidateId,b.expectedCommit,b.requestId,actor,credentialHash,currentAuth.expiresAt,b.expectedInputs);
+            const authorize=async()=>{await project.assertLegacyCandidateRerun(attempt.id,actor,credentialHash,currentAuth.expiresAt);};
+            if(attempt.phase==="abandoned")return text("This rerun was explicitly abandoned. Use a new request after checking current contribution inputs.",409);
+            if(attempt.phase!=="attached"&&attempt.phase!=="awaiting_decision"&&!attempt.continuationWorkflowId){
+              const accountKey=await accountKeyFor(userId);await authorize();
+              const verifyHeads=async()=>{for(const task of attempt.snapshot.tasks){
+                using repository=await openRepositoryRead(env,{repoName:task.workspace.repoName,authorize,reserveGroup:operationId=>globalOf(env).reserveCoreGitOperation(operationId,accountKey,{accountUsdMicros:null,globalUsdMicros:null})});
+                const head=(await repository.log({ref:`refs/heads/${task.workspace.branch}`,limit:1}))[0]?.hash;
+                if(head!==task.currentCommit)throw new LegacyRerunError("A contributor branch advanced. Its newer work was preserved; rerun was not dispatched.");
+              }
+              };await verifyHeads();
+              await authorize();attempt=await project.stopLegacyCandidateRerun(attempt.id);await authorize();await verifyHeads();
+              const {plan}=await account.getBilling();const denied=await admitRun(env,account,planLimits(env)[plan],attempt.successorWorkflowId);if(denied)return denied;await authorize();
+              attempt=await project.commitLegacyCandidateRerunReassignment(attempt.id);await authorize();
+              await project.registerWorkflow(attempt.successorWorkflowId,"integration",undefined,userId,1);await authorize();
+              if(attempt.dispatch==="unknown"&&Date.now()-Date.parse(attempt.createdAt)>=24*60*60_000)return Response.json({error:"Saved dispatch is too old to safely redeliver. Its outcome requires reconciliation."},{status:409});
+              if(attempt.dispatch!=="observed")attempt=await project.markLegacyCandidateRerunDispatch(attempt.id,"unknown");
+              try{await env.INTEGRATION_WORKFLOW.createBatch([{id:attempt.successorWorkflowId,params:{projectId,taskIds:attempt.taskIds,accountKey,nativeRuntimeProtocolVersion:1},retention:{successRetention:"3 days",errorRetention:"3 days"}}]);attempt=await project.markLegacyCandidateRerunDispatch(attempt.id,"observed");}
+              catch{try{await(await env.INTEGRATION_WORKFLOW.get(attempt.successorWorkflowId)).status();attempt=await project.markLegacyCandidateRerunDispatch(attempt.id,"observed");}catch{return Response.json({id:attempt.id,phase:attempt.phase,successorWorkflowId:attempt.successorWorkflowId,dispatch:"unknown"},{status:202,headers:{"Cache-Control":"no-store"}});}}
+            }
+            attempt=await project.assertLegacyCandidateRerun(attempt.id,actor,credentialHash,currentAuth.expiresAt);
+            return Response.json({id:attempt.id,phase:attempt.phase,successorWorkflowId:attempt.continuationWorkflowId??attempt.successorWorkflowId,successorCandidateId:attempt.successorCandidateId,successorDecisionId:attempt.successorDecisionId,dispatch:attempt.dispatch},{status:202,headers:{"Cache-Control":"no-store"}});
+          }catch(error){if(error instanceof RepositoryReadError)return Response.json({error:error.message},{status:error.status,headers:{"Cache-Control":"no-store"}});return Response.json({error:error instanceof LegacyRerunError?error.message:"Rerun was not confirmed. Saved context is preserved; retry the same request after inspecting recovery."},{status:error instanceof LegacyRerunError?error.status:409,headers:{"Cache-Control":"no-store"}});}
         }
 
         if(sub==="/rebase-applications"&&method==="GET"){
@@ -1447,12 +1488,12 @@ export default {
           const credentialHash = currentAuth.viaToken ? await gitParentTokenHash(request) : undefined;
           const actor = { userId, displayName: clean(profile.displayName, 120) || "Repository owner", viaToken: auth.viaToken === true };
           let result;
-          try { result = await project.resolveDecision(b.decisionId, b.selectedOptionId, actor, credentialHash); }
+          try { result = await project.resolveDecision(b.decisionId, b.selectedOptionId, actor, credentialHash,currentAuth.expiresAt); }
           catch (cause) { return text(cause instanceof Error ? cause.message : "Decision was not saved", 409); }
           const { taskIds } = result;
           if (taskIds.length > 0) {
-            const eventId = `decision-${projectId}-${b.decisionId}`;
-            await project.registerWorkflow(eventId, "integration", undefined, userId);
+            const eventId = result.continuationWorkflowId??`decision-${projectId}-${b.decisionId}`;
+            await project.registerWorkflow(eventId, "integration", undefined, userId,1);
             await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds, eventId } satisfies QueueMessage);
           }
           return json({ resolved: true });
@@ -1938,6 +1979,7 @@ async function stopImportHistoryAttempts(env: Env, ledger: Ledger): Promise<bool
 }
 
 async function stopRepositoryWorkflows(env: Env, ledger: Ledger): Promise<boolean> {
+  if(!await ledger.stopIntegrationNativeForDeletion())return false;
   if(!await ledger.stopRebaseResumeForDeletion())return false;
   if (!await stopImportHistoryAttempts(env, ledger)) return false;
   for (const run of await ledger.listRepositoryWorkflows()) {

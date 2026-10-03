@@ -6,7 +6,7 @@ import { CandidateJournal } from "../components/CandidateJournal";
 import { LivePreview } from "../components/LivePreview";
 import { DecisionModal } from "../components/DecisionModal";
 import { EvidenceDrawer } from "../components/EvidenceDrawer";
-import { CandidateReview } from "../components/CandidateReview";
+import { CandidateReview, LegacyCandidateRerun } from "../components/CandidateReview";
 import { apiJson } from "../api";
 import { RebaseRecovery } from "../components/RebaseRecovery";
 import { Badge } from "@/components/ui/badge";
@@ -124,6 +124,7 @@ export function IntegrationTab({
                 <li key={c.id} className="text-sm min-w-0">
                   <div className="break-words">{describe(c)}</div>
                   <Badge variant="warning">{IN_PROGRESS[c.status] ?? c.status}</Badge>
+                  <LegacyCandidateRerun projectId={projectId} candidate={c} isOwner={isOwner} onDone={reload} />
                 </li>
               ))}
             </ul>
@@ -153,6 +154,7 @@ export function IntegrationTab({
                 <li key={c.id} className="text-sm min-w-0">
                   <div className="break-words">{describe(c)}</div>
                   <div className="text-xs"><Badge variant={c.status === "stale" ? "outline" : "destructive"}>{c.status === "stale" ? "Outdated" : "Failed"}</Badge> <span className="text-muted-foreground break-words">{c.failureBlocker ?? (c.status === "stale" ? "The accepted version moved on before this finished." : "No reason was recorded.")}</span></div>
+                  <LegacyCandidateRerun projectId={projectId} candidate={c} isOwner={isOwner} onDone={reload} />
                 </li>
               ))}
             </ul>

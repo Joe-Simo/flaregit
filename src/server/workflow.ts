@@ -24,6 +24,7 @@ import { globalOf, reserveManagedAgent, assertManagedInitiator } from "./project
 import type { WorkflowOutcome } from "./durable-object.js";
 
 export interface IntegrationParams {
+  nativeRuntimeProtocolVersion?:1;
   projectId: string;
   accountKey?: string;
   /** One to eight changes, merged in this order. */
@@ -75,6 +76,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       return { status: claim.decision ? "needs_decision" as const : "not_started" as const, reason: claim.reason, decision: claim.decision };
     }
     const candidate = claim.candidate;
+    if(event.payload.nativeRuntimeProtocolVersion===1){await step.do("declare-native-runtime-coverage",()=>stub.declareIntegrationNativeRuntime(event.instanceId,candidate.id));this.nativeRuntimeCandidateId=candidate.id;}
 
     const integrated = await step.do(
       "compose-repair-verify",
@@ -234,21 +236,24 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
   private projectId = "";
 
   /** Every allocation is isolated; interrupted work is recovered from retained Git refs. */
+  private nativeRuntimeCandidateId?:string;
   private computeAccountKey?: string;
   private computeWorkflowId?: string;
   private async sandbox(id: string) {
     const repository=ledgerOf(this.env,this.projectId);
     await assertManagedInitiator(this.env,repository,this.computeWorkflowId,this.computeAccountKey);
-    const allocationId=`native-${crypto.randomUUID()}`;
+    const nativeId=crypto.randomUUID(),allocationId=`native-${nativeId}`;
     await admitNativeCompute(this.env,this.computeAccountKey!,allocationId);
+    if(this.nativeRuntimeCandidateId)await repository.reserveIntegrationNativeRuntime(this.computeWorkflowId!,this.nativeRuntimeCandidateId,nativeId,id);
     const sb = this.env.INTEGRATOR.getByName(allocationId);
+    const command=async()=>{const commandId=crypto.randomUUID(),scope=await repository.admitIntegrationNativeCommand(this.computeWorkflowId!,this.nativeRuntimeCandidateId!,nativeId,commandId);return {commandId,scope};};
     return {
-      exec: (cmd: string, env?: Record<string, string>) => sb.exec(["sh", "-c", cmd], { env }),
-      readFile: async (p: string) => ({ content: await sb.readFile(p) }),
-      readFileBytes: (p: string) => sb.readFileBytes(p),
-      writeFile: (p: string, c: string) => sb.writeFile(p, c),
+      exec: async(cmd:string,env?:Record<string,string>)=>{if(!this.nativeRuntimeCandidateId)return sb.exec(["sh","-c",cmd],{env});const permit=await command();return sb.integrationExec(permit.scope,nativeId,permit.commandId,["sh","-c",cmd],{env});},
+      readFile: async(p:string)=>{if(!this.nativeRuntimeCandidateId)return {content:await sb.readFile(p)};const permit=await command();return {content:await sb.integrationReadFile(permit.scope,nativeId,permit.commandId,p)};},
+      readFileBytes: async(p:string)=>{if(!this.nativeRuntimeCandidateId)return sb.readFileBytes(p);const permit=await command();return sb.integrationReadFileBytes(permit.scope,nativeId,permit.commandId,p);},
+      writeFile: async(p:string,c:string)=>{if(!this.nativeRuntimeCandidateId)return sb.writeFile(p,c);const permit=await command();return sb.integrationWriteFile(permit.scope,nativeId,permit.commandId,p,c);},
       destroy: async () => {
-        try { await sb.destroy(); }
+        try { await sb.destroy();if(this.nativeRuntimeCandidateId)await repository.confirmIntegrationNativeRuntimeStopped(this.computeWorkflowId!,this.nativeRuntimeCandidateId,nativeId); }
         catch {
           console.warn("Container cleanup failed");
           await ledgerOf(this.env, this.projectId).logActivity("FlareGit", "container.cleanup_failed", `Container ${id} did not confirm shutdown; durable Git refs are preserved`).catch(() => console.warn("Container cleanup evidence unavailable"));

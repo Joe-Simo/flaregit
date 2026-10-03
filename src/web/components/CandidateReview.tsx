@@ -8,11 +8,13 @@ import { VERIFIER_IDENTITIES } from "@/core/verification-identities";
 import { externalCheckGate, type ExternalCheckState } from "@/core/external-checks";
 import { blocksExternalAcceptance } from "../review-gate";
 import { navigate } from "../router";
+import { abandonLegacyRerun, legacyRerunDraft, requestLegacyRerun, type LegacyRerunDraft, type LegacyRerunReport } from "../legacy-candidate-rerun";
 import type { CandidateGeneration, Task, VerificationEvidence } from "@/core/types";
 
 /** Requirements and input commits are frozen; legacy task descriptions are current context only. */
 export function CandidatePurpose({ projectId, candidate, tasks }: { projectId: string; candidate: CandidateGeneration; tasks?: Record<string, Task> }) {
   return <section aria-label="Contribution purpose" className="space-y-3 text-sm">
+    {candidate.predecessorCandidateId && <a className="text-primary underline-offset-4 hover:underline" href={`#/p/${projectId}/review?candidate=${encodeURIComponent(candidate.predecessorCandidateId)}`}>Original review</a>}
     {candidate.frozenRequirements.length > 0 && <div><h3 className="font-semibold">Requirements for this candidate</h3><ul className="mt-2 space-y-1 list-disc pl-5">{candidate.frozenRequirements.map((requirement) => <li key={requirement.id} className="break-words">{requirement.description}</li>)}</ul></div>}
     <div><h3 className="font-semibold">Contributions</h3><p className="mt-1 text-xs text-muted-foreground">Input commits belong to this candidate. Descriptions, contributors, and issue/dependency links reflect the current contributions.</p>
       <ul className="mt-2 divide-y divide-border">{candidate.participatingTaskIds.map((id) => {
@@ -32,6 +34,7 @@ export function CandidatePurpose({ projectId, candidate, tasks }: { projectId: s
  * Accept or Reject. Nothing becomes repository history without this decision on this exact commit.
  */
 export function CandidateReview({ projectId, candidate, evidence, tasks, onDone, showOpen = true, externalChecks, providerNames, onRetryExternalCheck, isOwner = false, reviewReady = true }: { projectId: string; candidate: CandidateGeneration; evidence?: VerificationEvidence; tasks?: Record<string, Task>; onDone: () => void; showOpen?: boolean; externalChecks?: ExternalCheckState; providerNames?: Record<string, string>; onRetryExternalCheck?: (checkId: string) => Promise<void>; isOwner?: boolean; reviewReady?: boolean }) {
+  const [rerunReserved, setRerunReserved] = useState(false);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +45,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
   const scope = `${projectId}:${candidate.id}:${candidate.candidateCommit ?? ""}`;
   const checkScope = `${scope}:${isOwner ? "owner" : "member"}`;
   const decisionGeneration = useRef(0);
-  useEffect(() => { decisionGeneration.current++; setBusy(null); setError(null); return () => { decisionGeneration.current++; }; }, [scope, isOwner]);
+  useEffect(() => { decisionGeneration.current++; setBusy(null); setError(null); setRerunReserved(false); return () => { decisionGeneration.current++; }; }, [scope, isOwner]);
   const [loadedChecks, setLoadedChecks] = useState<{ scope: string; checks: ExternalCheckState | null; reports: ExternalCheckDetail[] } | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
   const [names, setNames] = useState<Record<string, string>>({});
@@ -83,7 +86,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
   const identityMismatch = checks && (checks.frozen.repositoryId !== projectId || checks.frozen.candidateId !== candidate.id || checks.frozen.commit !== candidate.candidateCommit || (candidate.frozenExternalChecksPolicy && (checks.frozen.policy.version !== candidate.frozenExternalChecksPolicy.version || checks.frozen.policy.mode !== candidate.frozenExternalChecksPolicy.mode)) || (evidence && (checks.frozen.commit !== evidence.candidateCommit || checks.frozen.tree !== evidence.candidateTree)));
   const declaredRequiredChecks = candidate.frozenExternalChecksPolicy?.checks.some((check) => check.required) ?? false;
   const checkGate = checks ? externalCheckGate(checks) : declaredRequiredChecks ? "pending" : "passed";
-  const acceptanceBlocked = !reviewReady || !candidate.candidateCommit || blocksExternalAcceptance({ required: declaredRequiredChecks, known: checksKnown, readFailed: checkError !== null, identityMismatch: Boolean(identityMismatch), gate: checkGate, retryingRequired });
+  const acceptanceBlocked = rerunReserved || candidate.preservationProtocolVersion !== 1 || !reviewReady || !candidate.candidateCommit || blocksExternalAcceptance({ required: declaredRequiredChecks, known: checksKnown, readFailed: checkError !== null, identityMismatch: Boolean(identityMismatch), gate: checkGate, retryingRequired });
   const retryCheck = isOwner ? async (checkId: string) => {
     const sequence = ++requestSequence.current;
     retryInFlight.current = true; setRetryingCheck(true); setRetryingRequired(checks?.frozen.policy.checks.find((check) => check.id === checkId)?.required ?? declaredRequiredChecks);
@@ -102,7 +105,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
   </>;
 
   const decide = async (approved: boolean) => {
-    if (!isOwner || busy !== null || !candidate.candidateCommit || (approved && acceptanceBlocked)) return;
+    if (!isOwner || rerunReserved || busy !== null || !candidate.candidateCommit || (approved && acceptanceBlocked)) return;
     const generation = decisionGeneration.current;
     setBusy(approved ? "approve" : "reject");
     setError(null);
@@ -122,6 +125,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
         <p><span className="font-semibold">Approved by {candidate.review.by}</span> {candidate.review.note ? `(${candidate.review.note})` : ""}: publishing <code>{candidate.candidateCommit?.slice(0, 7)}</code>.</p>
         <p className="text-muted-foreground">If this does not move to Accepted within a minute, the run may not have received the decision. Resending is safe.</p>
         {connectedRows}
+        <LegacyCandidateRerun projectId={projectId} candidate={candidate} isOwner={isOwner} onDone={onDone} onReserved={setRerunReserved} />
         {identityMismatch && <p role="alert" className="text-destructive">Connected check evidence belongs to a different candidate or tree. Reload before accepting.</p>}
         {error && <p role="alert" className="text-destructive">{error}</p>}
         <Button size="sm" variant="outline" disabled={!isOwner || busy !== null || acceptanceBlocked} onClick={() => decide(true)}>{busy ? "Resending…" : "Resend approval"}</Button>
@@ -151,6 +155,8 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
         </details>)}
       </div>}
       {connectedRows}
+      <LegacyCandidateRerun projectId={projectId} candidate={candidate} isOwner={isOwner} onDone={onDone} onReserved={setRerunReserved} />
+      {candidate.preservationProtocolVersion !== 1 && <p role="status" className="text-xs text-muted-foreground">This older candidate cannot be accepted. Its review remains available; create a protected successor when eligible.</p>}
       {!reviewReady && <p role="status" className="text-xs text-muted-foreground">Diff files are loading or unavailable. Acceptance from this review is paused; comments and rejection remain available.</p>}
       {checksKnown && !checkError && (identityMismatch || checkGate !== "passed") && <p role="status" className="text-xs text-amber-800 dark:text-amber-200">{identityMismatch ? "Connected check evidence does not match this candidate. Reload before accepting." : checkGate === "failed" ? "A required connected check failed or was cancelled. Acceptance is blocked." : "Waiting for required connected checks before acceptance."}</p>}
       <textarea className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm" rows={2} maxLength={500} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Review note (optional; required context if you reject)" aria-label="Review note" />
@@ -158,8 +164,79 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
       <div className="flex flex-wrap gap-2">
         {showOpen && <Button size="sm" variant="outline" onClick={() => navigate(`/p/${projectId}/review?candidate=${candidate.id}`)}><Eye className="h-3.5 w-3.5 mr-1.5" /> Read the diff</Button>}
         <Button size="sm" variant="orange" disabled={!isOwner || busy !== null || acceptanceBlocked} onClick={() => decide(true)}><Check className="h-3.5 w-3.5 mr-1.5" /> {busy === "approve" ? "Accepting…" : "Accept into history"}</Button>
-        <Button size="sm" variant="outline" disabled={!isOwner || busy !== null || !candidate.candidateCommit} onClick={() => decide(false)}><X className="h-3.5 w-3.5 mr-1.5" /> {busy === "reject" ? "Rejecting…" : "Reject"}</Button>
+        <Button size="sm" variant="outline" disabled={!isOwner || rerunReserved || busy !== null || !candidate.candidateCommit} onClick={() => decide(false)}><X className="h-3.5 w-3.5 mr-1.5" /> {busy === "reject" ? "Rejecting…" : "Reject"}</Button>
       </div>
     </section>
   );
+}
+
+/** A successor keeps the original review intact and requires its own approval. */
+export function LegacyCandidateRerun({ projectId, candidate, isOwner, onDone, onReserved }: { projectId: string; candidate: CandidateGeneration; isOwner: boolean; onDone: () => void; onReserved?: (reserved: boolean) => void }) {
+  const scope = `${projectId}:${candidate.id}:${candidate.candidateCommit ?? ""}:${isOwner}`;
+  const [loaded, setLoaded] = useState<{ scope: string; report: LegacyRerunReport } | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [revision, setRevision] = useState(0);
+  const [abandonConfirmed, setAbandonConfirmed] = useState(false);
+  const draft = useRef<LegacyRerunDraft | null>(null);
+  const generation = useRef(0);
+  useEffect(() => {
+    const current = ++generation.current;
+    const controller = new AbortController();
+    setLoaded(null); setFailure(null); setBusy(false); setAbandonConfirmed(false);
+    if (isOwner && candidate.status !== "accepted" && (candidate.preservationProtocolVersion !== 1 || ["composing", "repairing", "verifying", "failed", "stale"].includes(candidate.status))) void apiJson<LegacyRerunReport>(`/p/${projectId}/candidates/${candidate.id}/rerun`, { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]) }).then(report => {
+      if (current !== generation.current) return;
+      if (report.candidateId !== candidate.id || report.expectedCommit !== (candidate.candidateCommit ?? null)) throw new Error("Candidate changed. Refresh before requesting a rerun.");
+      draft.current = legacyRerunDraft(draft.current, projectId, report);
+      setLoaded({ scope, report }); onReserved?.(Boolean(report.operation));
+    }).catch(cause => { if (current === generation.current && !controller.signal.aborted) setFailure(cause instanceof Error ? cause.message : "Rerun availability is unknown."); });
+    return () => { generation.current++; controller.abort(); };
+  }, [scope, revision, projectId, candidate.id, candidate.candidateCommit, candidate.preservationProtocolVersion, candidate.status, isOwner]);
+  if (!isOwner || candidate.status === "accepted" || (candidate.preservationProtocolVersion === 1 && !["composing", "repairing", "verifying", "failed", "stale"].includes(candidate.status) && !loaded?.report.operation)) return null;
+  const report = loaded?.scope === scope ? loaded.report : null;
+  const rerun = async () => {
+    if (busy || !report || !draft.current || (!report.eligible && (!report.operation || report.operation.phase === "abandoned")) || (report.operation?.phase === "attached" || report.operation?.phase === "awaiting_decision")) return;
+    const current = generation.current;
+    setBusy(true); setFailure(null);
+    try {
+      const operation = await requestLegacyRerun(projectId, candidate.id, draft.current);
+      if (current !== generation.current) return;
+      setLoaded({ scope, report: { ...report, operation } }); onReserved?.(true);
+      onDone(); setRevision(value => value + 1);
+    } catch (cause) {
+      if (current === generation.current) setFailure(`${cause instanceof Error ? cause.message : "Request was not confirmed."} Refresh status or retry the same saved request.`);
+    } finally { if (current === generation.current) setBusy(false); }
+  };
+  const canAbandon = report?.operation?.dispatch === "not_started" && report.operation.phase !== "attached" && report.operation.phase !== "abandoned" && report.operation.phase !== "awaiting_decision";
+  const abandon = async () => {
+    if (busy || !canAbandon || !abandonConfirmed || !report?.operation) return;
+    const current = generation.current;
+    setBusy(true); setFailure(null);
+    try {
+      const result = await abandonLegacyRerun(projectId, candidate.id, report.operation.id);
+      if (current !== generation.current) return;
+      if (result.id !== report.operation.id || result.phase !== "abandoned") throw new Error("Abandonment was not confirmed.");
+      draft.current = null;
+      onDone(); setRevision(value => value + 1);
+    } catch (cause) {
+      if (current === generation.current) setFailure(`${cause instanceof Error ? cause.message : "Abandonment was not confirmed."} Refresh status before continuing.`);
+    } finally { if (current === generation.current) setBusy(false); }
+  };
+  return <section aria-label="Rebuild candidate" className="space-y-2 border-t border-border pt-3 text-sm">
+    <h3 className="font-medium">Rebuild candidate</h3>
+    <p className="text-xs text-muted-foreground">Keep this candidate’s reviews and conversation. A successor protects the recorded inputs, runs fresh checks, and needs a new approval.</p>
+    <p role="status" className="text-xs text-muted-foreground">{report?.detail ?? "Checking saved inputs and rerun availability…"}</p>
+    {report && <div className="text-xs text-muted-foreground space-y-1"><p>{report.expectedCommit ? <>Original candidate <code>{report.expectedCommit.slice(0, 7)}</code></> : "No candidate commit was recorded. Rebuilding uses only the frozen contribution inputs below."}</p><ul>{Object.entries(report.inputs).map(([id, input]) => <li key={id} className="break-words">{id}: <code title={input.base}>{input.base.slice(0, 7)}</code> → <code title={input.commit}>{input.commit.slice(0, 7)}</code></li>)}</ul></div>}
+    {report?.operation && <p className="text-xs text-muted-foreground">{report.operation.phase === "awaiting_decision" ? "A product decision needs your explicit choice before the successor can continue." : report.operation.phase === "abandoned" ? "Saved rerun abandoned. Contributions need normal Ready checks before another attempt." : report.operation.phase === "prepared" ? "Request saved. Replacement is held until the original run and workspace are confirmed stopped." : report.operation.phase === "attached" ? "Successor candidate created." : "Saved rerun is continuing; new approval is still required."}</p>}
+    {failure && <p role="alert" className="text-xs text-destructive">{failure}</p>}
+    <div className="flex flex-wrap gap-2">
+      {report?.operation?.phase === "awaiting_decision" ? <Button size="sm" variant="outline" onClick={() => navigate(`/p/${projectId}/integration`)}>Resolve product decision</Button> : report?.operation?.successorCandidateId ? <Button size="sm" variant="outline" onClick={() => navigate(`/p/${projectId}/review?candidate=${report.operation!.successorCandidateId}`)}>Review successor</Button> : <Button size="sm" variant="outline" disabled={busy || !report || (!report.eligible && (!report.operation || report.operation.phase === "abandoned")) || report.operation?.phase === "attached"} onClick={() => void rerun()}>{busy ? "Requesting…" : report?.operation && report.operation.phase !== "abandoned" ? "Continue saved rerun" : "Create successor candidate"}</Button>}
+      <Button size="sm" variant="ghost" disabled={busy} onClick={() => setRevision(value => value + 1)}>Refresh status</Button>
+    </div>
+    {canAbandon && <div className="space-y-2">
+      <label className="flex items-start gap-2 text-xs text-muted-foreground"><input type="checkbox" checked={abandonConfirmed} disabled={busy} onChange={event => setAbandonConfirmed(event.target.checked)} className="mt-0.5" /> <span>Stop the old run and release this saved rerun. Its review and context remain. Unchanged contributions return to checkpointed and require normal Ready checks; newer work stays intact.</span></label>
+      <Button size="sm" variant="outline" disabled={busy || !abandonConfirmed} onClick={() => void abandon()}>Abandon saved rerun</Button>
+    </div>}
+    {report?.operation && (report.operation.dispatch === "unknown" || report.operation.dispatch === "observed") && <p className="text-xs text-muted-foreground">Replacement dispatch may have started. Abandonment is unavailable until its state is safely reconciled.</p>}
+  </section>;
 }
