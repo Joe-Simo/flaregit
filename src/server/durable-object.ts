@@ -1,4 +1,7 @@
 import { HealthProbeBudget, type HealthProbeAdmission } from "./health-probe-budget.js";
+import { z } from "zod";
+import { PublicGitPublicationLedger, type PublicGitPublication } from "./public-git-publication.js";
+import type { PublicGitConsentScope } from "./public-git-consent.js";
 import { PublicationModeration, type PublicationModerationState, type PublicationModerationDecision, type PublicationModerationKind } from "./publication-moderation.js";
 import { isSafeSha } from "../core/sanitize.js";
 import {PrivateRecoveryOperations,PrivateRecoveryStorage,type PrivateRecoveryOperation,type PrivateRecoveryReceipt,type PrivateRecoveryTarget,recoveryScopeId} from "./private-recovery.js";
@@ -185,6 +188,8 @@ export interface Ledger {
   reserveHealthProbe(): Promise<HealthProbeAdmission>;
   reservePrivateRecoveryStorage(id:string,accountKey:string):Promise<void>;
   releasePrivateRecoveryStorage(id: string, accountKey: string): Promise<void>;
+  publicGitSharingState(ownerId: string): Promise<{ publication: PublicGitPublication | null; target: PublicGitConsentScope | null }>;
+  decidePublicGitSharing(ownerId: string, value: unknown): Promise<PublicGitPublication | null>;
   privateRecoveryCleanupList(): Promise<PrivateRecoveryOperation[]>;
   privateRecoveryBeginDeletion(id: string, ownerId: string): Promise<PrivateRecoveryOperation>;
   privateRecoveryFinishDeletion(id: string): Promise<void>;
@@ -596,6 +601,34 @@ export class RepositoryController extends DurableObject<Env> {
     const history = state.acceptedState.history;
     if (!Array.isArray(history) || (history.length && history.at(-1)?.commit !== state.acceptedState.currentCommit)) return null;
     return { journalId: "baseline", commit: state.acceptedState.currentCommit, tree: null, acceptedAt: state.acceptedState.acceptedAt };
+  }
+
+  private publicGitSharingTarget(ownerId: string): PublicGitConsentScope | null {
+    if (this.repositoryDeleting() || this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",ownerId).toArray()[0]?.role !== "owner") return null;
+    this.visibilityTable();
+    const visibility = this.ctx.storage.sql.exec<{visibility:string;version:number;confirmed_by:string}>("SELECT visibility,version,confirmed_by FROM repository_visibility WHERE id=1").toArray()[0];
+    const state = this.load();
+    if (visibility?.visibility !== "public" || !visibility.confirmed_by || new PublicationModeration(this.ctx.storage).state("repository",state.projectId).suppressed) return null;
+    const operations = new PrivateRecoveryOperations(this.ctx.storage);
+    const op = operations.all().find(item => item.ownerId === ownerId && item.commit === state.acceptedState.currentCommit && item.status === "ready" && !!item.receipt && this.privateRecoveryScopeCurrent(item));
+    if (!op?.receipt || !op.tree || op.receipt.projectId !== state.projectId || op.receipt.incarnation !== operations.incarnation() || op.receipt.commit !== op.commit || op.receipt.tree !== op.tree || op.receipt.journalId !== op.journalId || op.receipt.objectScope !== "exact-accepted-reachable-closure") return null;
+    return {incarnation:operations.incarnation(),commit:op.commit,tree:op.tree,publicationVersion:visibility.version};
+  }
+  async publicGitSharingState(ownerId: string): Promise<{publication:PublicGitPublication|null;target:PublicGitConsentScope|null}> {
+    if (await this.roleOf(ownerId) !== "owner") throw new Error("Only the owner can inspect Git sharing consent");
+    return {publication:new PublicGitPublicationLedger(this.ctx.storage).state(),target:this.publicGitSharingTarget(ownerId)};
+  }
+  async decidePublicGitSharing(ownerId: string, value: unknown): Promise<PublicGitPublication|null> {
+    const parsed = z.object({enabled:z.boolean(),consent:z.unknown().optional(),mutation:z.unknown()}).strict().parse(value);
+    return this.ctx.storage.transactionSync(() => {
+      if (this.repositoryDeleting() || this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",ownerId).toArray()[0]?.role !== "owner") throw new Error("Owner Git sharing authorization changed");
+      const ledger = new PublicGitPublicationLedger(this.ctx.storage);
+      const current = this.publicGitSharingTarget(ownerId);
+      if (parsed.enabled && !current) throw new Error("Prepare the current accepted private recovery snapshot before confirming Git sharing");
+      const scope = current ?? ledger.state();
+      if (!scope) return null;
+      return ledger.decide({enabled:parsed.enabled,consent:parsed.consent,mutation:parsed.mutation},current ?? scope,ownerId);
+    });
   }
 
   async privateRecoveryTargets():Promise<PrivateRecoveryTarget[]>{

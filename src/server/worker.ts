@@ -705,6 +705,14 @@ export default {
         const isOwner = role === "owner" && canAdminister;
 
 
+        if (sub === "/git-sharing" && (method === "GET" || method === "PUT")) {
+          if (auth.viaToken || role !== "owner") return text("A signed-in repository owner must decide Git sharing",403);
+          if (await account.accountLifecycle() !== "active") return text("Account is unavailable",409);
+          try {
+            return json(method === "GET" ? await project.publicGitSharingState(userId) : await project.decidePublicGitSharing(userId,await body<unknown>()));
+          } catch { return text("Git sharing decision was not confirmed. Reload or retry the identical request.",409); }
+        }
+
         if(sub==="/recovery"&&method==="GET"){
           const targets=await project.privateRecoveryTargets();
           return Response.json({snapshots:(await project.privateRecoveryList()).map(op=>({id:op.id,commit:op.commit,tree:op.tree,status:op.status,createdAt:op.createdAt,error:op.error,size:op.receipt?.size,cacheState:op.cacheState,...(op.cacheState === "deleting" ? {cleanupAdvice:privateRecoveryCleanupAdvice(op)} : {}),canRetry:isOwner&&op.ownerId===userId&&!op.cacheState})),target:targets.at(-1)??null,targets},{headers:{"Cache-Control":"no-store"}});
