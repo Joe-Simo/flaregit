@@ -77,6 +77,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
 
     // Human control over history: the verified candidate waits until a person accepts this exact commit.
     await step.do("await-review", async () => stub.awaitReview(candidate.id, integrated.commit, event.instanceId));
+    await step.do("outcome-awaiting-review", async () => globalOf(this.env).recordWorkflowOutcome("integration", event.instanceId, "awaiting_review"));
     let review: { approved: boolean; by: string; note?: string };
     try {
       review = (await step.waitForEvent<{ approved: boolean; by: string; note?: string }>("human-review", { type: "review", timeout: "7 days" })).payload;

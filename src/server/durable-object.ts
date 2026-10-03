@@ -81,7 +81,7 @@ export interface ComponentStatus {
   degradedMinutes24h: number;
 }
 export type WorkflowKind = "agent" | "integration";
-export type WorkflowOutcome = "started" | "completed" | "skipped" | "accepted" | "needs_decision" | "not_started" | "blocked" | "stale" | "rejected" | "failed";
+export type WorkflowOutcome = "started" | "awaiting_review" | "completed" | "skipped" | "accepted" | "needs_decision" | "not_started" | "blocked" | "stale" | "rejected" | "failed";
 export interface WorkflowCount { kind: WorkflowKind; status: WorkflowOutcome; count: number }
 
 export const WEBHOOK_EVENTS = ["change.ready", "change.accepted", "change.blocked", "decision.needed", "deployment.requested"] as const;
@@ -1225,9 +1225,9 @@ export class RepositoryController extends DurableObject<Env> {
   }
   /** One lifecycle row per workflow instance; replayed starts cannot erase terminal evidence. */
   async recordWorkflowOutcome(kind: WorkflowKind, instanceId: string, status: WorkflowOutcome): Promise<void> {
-    if (!["agent", "integration"].includes(kind) || !instanceId || instanceId.length > 256 || !["started", "completed", "skipped", "accepted", "needs_decision", "not_started", "blocked", "stale", "rejected", "failed"].includes(status)) throw new Error("Invalid workflow outcome");
+    if (!["agent", "integration"].includes(kind) || !instanceId || instanceId.length > 256 || !["started", "awaiting_review", "completed", "skipped", "accepted", "needs_decision", "not_started", "blocked", "stale", "rejected", "failed"].includes(status)) throw new Error("Invalid workflow outcome");
     const now = Date.now();
-    this.ctx.storage.sql.exec("INSERT INTO workflow_runs (kind, instance_id, status, started_at, finished_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(kind, instance_id) DO UPDATE SET status = excluded.status, finished_at = excluded.finished_at WHERE workflow_runs.status = 'started'", kind, instanceId, status, now, status === "started" ? null : now);
+    this.ctx.storage.sql.exec("INSERT INTO workflow_runs (kind, instance_id, status, started_at, finished_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(kind, instance_id) DO UPDATE SET status = excluded.status, finished_at = excluded.finished_at WHERE workflow_runs.finished_at IS NULL AND (excluded.status != 'started' OR workflow_runs.status = 'started')", kind, instanceId, status, now, status === "started" || status === "awaiting_review" ? null : now);
     // Keep outstanding starts: an interrupted run remains visible rather than aging into success.
     this.ctx.storage.sql.exec("DELETE FROM workflow_runs WHERE finished_at < ?", now - 7 * 86_400_000);
   }
