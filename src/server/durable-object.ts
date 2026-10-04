@@ -2104,11 +2104,19 @@ export class RepositoryController extends DurableObject<Env> {
     return queued;
   }
   async redeliver(id: string): Promise<boolean> {
-    const d = this.ctx.storage.sql.exec<{ id: string }>("SELECT id FROM deliveries WHERE id = ?", id).toArray()[0];
+    const d = this.ctx.storage.sql.exec<{ id: string; generation:number }>("SELECT id,generation FROM deliveries WHERE id = ?", id).toArray()[0];
     if (!d) return false;
+    const generation=d.generation+1;
     this.ctx.storage.sql.exec("UPDATE deliveries SET status = 'pending', attempts = 0, generation = generation + 1, last_error = NULL, dispatch_state = 'unknown', dispatch_error = NULL, updated_at = ? WHERE id = ?", new Date().toISOString(), id);
     await this.ensureRecoveryAlarm();
-    if(!await this.enqueueWebhookDelivery(id))throw new Error("Replay was saved, but queue dispatch is unavailable. The same delivery ID remains recoverable and will be retried.");
+    if(!await this.enqueueWebhookDelivery(id)){
+      const current=this.ctx.storage.sql.exec<{generation:number;status:string;dispatch_state:string}>("SELECT generation,status,dispatch_state FROM deliveries WHERE id=?",id).toArray()[0];
+      // An existing duplicate message can complete this fresh generation while
+      // scheduling awaits. That receiver result is not an enqueue failure.
+      if(current?.generation===generation&&current.dispatch_state==="consumed"&&["success","failed"].includes(current.status))return true;
+      if(current&&current.generation!==generation)throw new Error("A newer replay replaced this request. Reload the delivery log for its current outcome.");
+      throw new Error("Replay was saved, but queue dispatch is unavailable. The same delivery ID remains recoverable and will be retried.");
+    }
     return true;
   }
   private stageEvent(type: (typeof WEBHOOK_EVENTS)[number], data: Record<string, unknown>, identity?:{id:string;createdAt:string}): string[] {

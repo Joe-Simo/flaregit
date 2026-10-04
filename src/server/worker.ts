@@ -1869,7 +1869,7 @@ export default {
         const redeliverRoute = /^\/deliveries\/(dlv_[a-z0-9-]+)\/redeliver$/.exec(sub);
         if (redeliverRoute && method === "POST") {
           if (!isOwner) return text("Only the owner can redeliver", 403);
-          return (await project.redeliver(redeliverRoute[1]!)) ? json({ queued: redeliverRoute[1] }) : text("Unknown delivery", 404);
+          return (await project.redeliver(redeliverRoute[1]!)) ? json({ recorded: redeliverRoute[1] }) : text("Unknown delivery", 404);
         }
 
         // ----- settings -----
