@@ -1359,6 +1359,18 @@ export default {
           }, 201);
         }
 
+        const gitRecoveryRoute=/^\/tasks\/([a-z0-9-]+)\/git-recovery$/.exec(sub);
+        if(gitRecoveryRoute){
+          if(!isOwner||(auth.viaToken&&auth.tokenScope!=="full"))return text("Only the repository owner can inspect Git transfer recovery",403);
+          if(method!=="GET")return text("Git recovery inspection is read-only",405);
+          const query=[...url.searchParams.keys()];if(query.some(key=>!['limit','cursor'].includes(key))||new Set(query).size!==query.length)return text("Invalid Git recovery query",400);
+          const rawLimit=url.searchParams.get("limit"),cursor=url.searchParams.get("cursor");if(rawLimit!==null&&(!/^[1-9][0-9]?$/.test(rawLimit)||Number(rawLimit)>20)||cursor!==null&&(!/^[1-9][0-9]{0,15}$/.test(cursor)||!Number.isSafeInteger(Number(cursor))))return text("Invalid Git recovery page",400);
+          const taskId=gitRecoveryRoute[1]!;if(!state.tasks[taskId])return text("Unknown change",404);
+          const currentOwner=async()=>{const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||(current.viaToken&&(current.tokenScope!=="full"||(current.tokenRepo&&current.tokenRepo!==projectId))))return text("Git recovery owner authentication changed",403);return current;};
+          const current=await currentOwner();if(current instanceof Response)return current;const actor={userId,displayName:"Repository owner",viaToken:current.viaToken===true},credentialHash=current.viaToken?await gitParentTokenHash(request):undefined,options={...(rawLimit!==null?{limit:Number(rawLimit)}:{}),...(cursor!==null?{cursor}:{})};
+          try{await project.ownerGitGatewayRecovery(taskId,actor,credentialHash,current.expiresAt,options);const fresh=await currentOwner();if(fresh instanceof Response)return fresh;const report=await project.ownerGitGatewayRecovery(taskId,actor,credentialHash,fresh.expiresAt,options);return repositoryReadJson(report);}catch{return repositoryReadJson({error:"Git transfer recovery could not be confirmed. Saved transfer and credential holds remain preserved."},409);}
+        }
+
         const tokenRoute = /^\/tasks\/([a-z0-9-]+)\/token$/.exec(sub);
         const agentRecordRoute = /^\/tasks\/([a-z0-9-]+)\/agent-run$/.exec(sub);
         if (agentRecordRoute && method === "GET") {
