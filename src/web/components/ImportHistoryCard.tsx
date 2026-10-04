@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogClose } from "@/components/ui/dialog";
+import { importSuccessorIntent, type ImportSuccessorIntent } from "../import-successor-intent";
 import { apiJson } from "../api";
 import type { ImportHistoryResult } from "@/server/import-history";
 import type { MigrationReceipt } from "@/server/migration-receipt";
@@ -11,6 +12,7 @@ interface Inspection {
   instanceId: string; head: string; status: string; reason?: string | null;
   progress?: { source: { revision?: number; count: number; pending: number }; destination: { revision?: number; count: number; pending: number } };
   attemptGeneration?: number | null; workflowStatus?: string | null; canResume?: boolean;
+  scopeChanged?: boolean; canStartSuccessor?: boolean; predecessorId?: string | null; successorId?: string | null;
   authority?: "durable-sql" | "legacy-r2" | "unavailable";
   receipt?: { head: string; inspectedAt: string; result: ImportHistoryResult | MigrationReceipt } | null; detail?: string;
 }
@@ -26,11 +28,14 @@ const pauseReasons: Record<string,string> = {
 };
 const operationPattern = /^import-history-[a-f0-9-]{36}$/;
 const storageKey = (projectId: string) => `flaregit.import-history.${projectId}`;
+const successorKey = (projectId: string) => `${storageKey(projectId)}.successor`;
+const readSuccessor = (projectId: string) => { try { const value=localStorage.getItem(successorKey(projectId)); return value ? importSuccessorIntent(JSON.parse(value)) : null; } catch { return null; } };
 const readSaved = (projectId: string) => { try { const value = localStorage.getItem(storageKey(projectId)); return value && operationPattern.test(value) ? value : null; } catch { return null; } };
 
 /** Owner-only receipts are independent of imported browsing readiness. */
 export function ImportHistoryCard({ projectId }: { projectId: string }) {
   const [instanceId, setInstanceId] = useState<string | null>(() => readSaved(projectId));
+  const [successorIntent, setSuccessorIntent] = useState<ImportSuccessorIntent | null>(() => readSuccessor(projectId));
   const [inspection, setInspection] = useState<Inspection | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -43,15 +48,16 @@ export function ImportHistoryCard({ projectId }: { projectId: string }) {
     const request = ++epoch.current;
     setBusy(true); setError(null);
     try {
-      const result = await apiJson<Inspection>(`/p/${projectId}/import-history/${id}`);
+      const result = await apiJson<Inspection>(`/p/${projectId}/import-history/${id}`,{signal:AbortSignal.timeout(15_000)});
       if (request !== epoch.current || identity.current !== projectId) return;
       if (result.instanceId !== id) throw new Error("Inspection identity does not match the saved operation");
-      setInspection(result);
+      setInstanceId(id); setInspection(result);
     } catch (failure) { if (request === epoch.current && identity.current === projectId) setError(failure instanceof Error ? failure.message : "Inspection status is unavailable"); }
     finally { if (request === epoch.current && identity.current === projectId) setBusy(false); }
   }, [projectId]);
   useEffect(() => {
     const saved = readSaved(projectId);
+    setSuccessorIntent(readSuccessor(projectId));
     setInstanceId(saved); setInspection(null); setError(null); setNotice(null); setBusy(false);
     if (saved) void load(saved);
     return () => { epoch.current++; };
@@ -74,6 +80,26 @@ export function ImportHistoryCard({ projectId }: { projectId: string }) {
       if (request === epoch.current && identity.current === projectId) setError(`${failure instanceof Error ? failure.message : "Inspection request failed"}. The request outcome is not confirmed; repository browsing remains available.`);
     } finally { requestLock.current=false;if (request === epoch.current && identity.current === projectId) setBusy(false); }
   };
+  const startSuccessor = async () => {
+    if(requestLock.current)return;
+    const intent=successorIntent ?? (inspection?.scopeChanged && inspection.canStartSuccessor ? importSuccessorIntent({predecessorId:inspection.instanceId,expectedGeneration:inspection.attemptGeneration}) : null);
+    if(!intent)return;
+    // Persist the exact predecessor intent before dispatch so a lost reply never creates a new request.
+    try { localStorage.setItem(successorKey(projectId),JSON.stringify(intent)); }
+    catch { setError("This browser could not save the recovery identity. No corrected inspection was requested."); return; }
+    setSuccessorIntent(intent); requestLock.current=true;
+    const request=++epoch.current; setBusy(true); setError(null); setNotice(null);
+    try {
+      const next=await apiJson<Inspection>(`/p/${projectId}/import-history`,{method:"POST",json:intent,signal:AbortSignal.timeout(30_000)});
+      if(request!==epoch.current || identity.current!==projectId)return;
+      if(!operationPattern.test(next.instanceId) || next.instanceId===intent.predecessorId || next.predecessorId!==intent.predecessorId)throw Error("Corrected inspection identity was not confirmed. Check the preserved inspection before retrying.");
+      localStorage.setItem(storageKey(projectId),next.instanceId);
+      localStorage.removeItem(successorKey(projectId));
+      setSuccessorIntent(null); setInstanceId(next.instanceId); setInspection(next);
+      setNotice("Corrected branch inspection saved. Its predecessor and recorded progress remain available.");
+    } catch(failure) { if(request===epoch.current && identity.current===projectId)setError(`${failure instanceof Error ? failure.message : "Corrected inspection could not be confirmed"}. Retry uses this same preserved predecessor and generation.`); }
+    finally {requestLock.current=false;if(request===epoch.current && identity.current===projectId)setBusy(false);}
+  };
   const result = inspection?.receipt?.result;
   const receipt = result ? "receipt" in result ? result.receipt : "refs" in result ? result : null : null;
   const mismatchExamples=receipt ? [{label:"Different refs",values:receipt.differentRefs},{label:"Missing commits",values:receipt.missingCommits},{label:"Different commits",values:receipt.differentCommits}] : [];
@@ -85,6 +111,10 @@ export function ImportHistoryCard({ projectId }: { projectId: string }) {
     {inspection?.progress && <dl className="grid grid-cols-2 gap-4"><div><dt className="text-xs text-muted-foreground">Source commits saved</dt><dd className="mt-1 font-medium tabular-nums">{inspection.progress.source.count.toLocaleString()}</dd></div><div><dt className="text-xs text-muted-foreground">Imported commits saved</dt><dd className="mt-1 font-medium tabular-nums">{inspection.progress.destination.count.toLocaleString()}</dd></div></dl>}
     {ancestryRemains && <p className="text-xs text-muted-foreground">More ancestry remains. The comparison is incomplete.</p>}
     {inspection?.reason && <p className="text-xs leading-5 text-muted-foreground">{pauseReasons[inspection.reason] ?? "Inspection is paused. Saved progress is retained; refresh to check its status."}</p>}
+    {inspection?.scopeChanged && <p className="text-xs leading-5 text-muted-foreground">The selected branch changed. This inspection retains its original head and saved progress. A corrected inspection uses the current branch and preserves this record.</p>}
+    {inspection?.predecessorId && inspection.predecessorId !== inspection.instanceId && <p className="text-xs break-all">Continues from <button type="button" className="underline underline-offset-4" disabled={busy} onClick={()=>void load(inspection.predecessorId!)}>{inspection.predecessorId}</button></p>}
+    {inspection?.successorId && <Button size="sm" variant="outline" disabled={busy} onClick={()=>void load(inspection.successorId!)}>Open corrected inspection</Button>}
+    {(successorIntent || (inspection?.scopeChanged && inspection.canStartSuccessor)) && <Button size="sm" variant="outline" disabled={busy} onClick={()=>void startSuccessor()}>{successorIntent ? "Recover corrected inspection" : "Inspect corrected branch"}</Button>}
     {error && <p role="alert" className="text-sm text-destructive">{error}{inspection && " Showing the last loaded inspection."}</p>}
     {notice && <p role="status" className="text-xs text-muted-foreground">{notice}</p>}
     <div className="flex flex-wrap gap-2">{!instanceId && <Button size="sm" disabled={busy} onClick={() => void requestInspection()}>{busy ? "Requesting…" : error ? "Recover saved inspection" : "Inspect imported history"}</Button>}{instanceId && <><Button size="sm" variant="outline" disabled={busy} onClick={() => void load(instanceId)}>{busy ? "Checking…" : "Refresh status"}</Button>{canResume && <Button size="sm" variant="outline" disabled={busy} onClick={() => void requestInspection(instanceId)}>Resume saved inspection</Button>}</>}<Button size="sm" variant="ghost" onClick={()=>setDetailsOpen(true)}>Inspection details</Button></div>

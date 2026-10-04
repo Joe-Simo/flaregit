@@ -22,9 +22,10 @@ export class AccountDeletionFixture extends RepositoryController {
         if(id!=="import-history-deletion-fixture"||!flags.workflowAvailable)throw new Error("Synthetic workflow lookup unavailable");
         return{status:async()=>({status:flags.shutdownConfirmed&&await this.ctx.storage.get("terminateCalls")?"terminated":"running"}),terminate:async()=>{await this.ctx.storage.put("terminateCalls",Number(await this.ctx.storage.get("terminateCalls")??0)+1);}};
       }},
+      INTEGRATOR:{getByName:()=>{throw new Error("Deletion must not allocate native inspection");}},
       ARTIFACTS:{get:async(name:string)=>{
         if(name!=="pending-import-fixture")throw new Error("Unexpected fixture repository");
-        return{info:async()=>({defaultBranch:"main",remote:"https://artifacts.example.com/fixture"}),log:async()=>flags.importReady?[{hash:"a".repeat(40)}]:[],[Symbol.dispose]() {}};
+        return{info:async()=>{if(!flags.importReady)throw Object.assign(new Error("Synthetic import allocation pending"),{code:"IMPORT_IN_PROGRESS"});return{defaultBranch:"main",remote:"https://artifacts.example.com/fixture"};},log:async()=>{throw new Error("Deletion must not use SDK Git authority");},createToken:async()=>{throw new Error("Deletion must not issue Git credentials");},[Symbol.dispose]() {}};
       },delete:async(name:string)=>{const calls=await this.ctx.storage.get<string[]>("deleteCalls")??[];calls.push(name);await this.ctx.storage.put("deleteCalls",calls);return flags.deleteConfirmed===true;}}
     } as unknown as Env;
     return worker.fetch(request,providerEnv,this.ctx as unknown as ExecutionContext);

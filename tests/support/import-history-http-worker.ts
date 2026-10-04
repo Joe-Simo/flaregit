@@ -13,9 +13,18 @@ export class HistoryNativeFixture extends DurableObject {
  async snapshot(){return {destroyCalls:Number(await this.ctx.storage.get('destroyCalls')??0)};}
 }
 export class HistoryHttpFixture extends RepositoryController {
+ constructor(ctx:DurableObjectState,env:Env){
+  const workflow={get:async(id:string)=>({status:async()=>{calls.push(`status:${id}`);if(providerStatus==='unavailable')throw Error('Synthetic missing handle');return {status:providerStatus};}})};
+  super(ctx,{...env,IMPORT_HISTORY_WORKFLOW:workflow} as unknown as Env);
+ }
+
+ async driftBranch(){const state=await super.getState();state.defaultBranch='release';this.ctx.storage.sql.exec('UPDATE project SET doc=? WHERE id=1',JSON.stringify(state));}
+ driftJob(){this.ctx.storage.sql.exec("UPDATE import_jobs SET doc=json_set(doc,'$.importedBranch','release') WHERE id=?",projectId);}
+
  async moveAcceptedHead(){await this.ctx.storage.put('syntheticAcceptedHead','b'.repeat(40));}
  override async getState(){const state=await super.getState();const moved=await this.ctx.storage.get<string>('syntheticAcceptedHead');return moved?{...state,acceptedState:{...state.acceptedState,currentCommit:moved}}:state;}
  async cleanupAttempt(id:string,mode:string){const key=await accountKeyFor('owner');await this.beginHistoryInspection(id,key,head);const ledger=new ImportHistoryAttempts(this.ctx.storage);const first=ledger.start(id,0);if(mode==='saved')return first;ledger.observed(id,1,'terminated');ledger.nativeStopped(id,1,first.nativeRunId);const latest=ledger.start(id,1);ledger.dispatchUnknown(id,2);if(mode==='native-unknown')ledger.nativeAllocationIntent(id,2);return latest;}
+ nativePossible(id:string){const ledger=new ImportHistoryAttempts(this.ctx.storage),attempt=ledger.get(id)!;return ledger.nativeAllocationIntent(id,attempt.generation);}
  async pauseNative(id:string){const attempt=new ImportHistoryAttempts(this.ctx.storage).get(id)!;await this.pauseHistoryInspection(id,'native_execution_unavailable',{generation:attempt.generation,workflowId:attempt.workflowId});return attempt;}
  resetOperations(){this.ctx.storage.sql.exec("DELETE FROM import_history_operations");}
  resetInspections(){this.ctx.storage.sql.exec("DELETE FROM history_inspections;DELETE FROM history_attempts");}
@@ -28,10 +37,12 @@ export class HistoryHttpFixture extends RepositoryController {
 type FixtureEnv=Omit<Env,'REPOSITORY_CONTROLLER'|'INTEGRATOR'>&{REPOSITORY_CONTROLLER:DurableObjectNamespace<HistoryHttpFixture>;FIXTURE_ISSUER:string;INTEGRATOR:DurableObjectNamespace<HistoryNativeFixture>};
 export default {async fetch(request:Request,env:FixtureEnv,ctx:ExecutionContext){const url=new URL(request.url),key=await accountKeyFor('owner'),repo=env.REPOSITORY_CONTROLLER.getByName(`project:${projectId}`),account=env.REPOSITORY_CONTROLLER.getByName(`account:${key}`);
  if(url.pathname==='/fixture/seed'){await repo.initialize({projectId,projectName:'Synthetic import HTTP',canonicalRepoName,head,verificationPolicy:{},ownerId:'owner'});await repo.addMember('member','member');await account.setProfile({handle:'owner',displayName:'Synthetic owner',bio:'',joinedAt:'2026-10-03'});await account.seedJob();const token=`fgt_${key}_`+'x'.repeat(32);const created=await account.createApiToken('owner','fixture',token,{scope:'full'});return Response.json({token,tokenId:created.id});}
+ if(url.pathname==='/fixture/drift'){await repo.driftBranch();await account.driftJob();return new Response('ok');}
  if(url.pathname==='/fixture/reset'){await account.resetOperations();await repo.resetInspections();calls.length=0;return new Response('ok');}
  if(url.pathname==='/fixture/claim'){const id=`import-history-${crypto.randomUUID()}`;return Response.json(await account.claimImportHistoryOperation({projectId,head,canonicalRepoName,ownerId:'owner',instanceId:id,...(url.searchParams.has('legacy')?{}:{protocolVersion:2 as const})}));}
  if(url.pathname==='/fixture/cleanup-attempt'){return Response.json(await repo.cleanupAttempt(url.searchParams.get('id')!,url.searchParams.get('mode')!));}
  if(url.pathname==='/fixture/inspection')return Response.json(await repo.getHistoryInspection(url.searchParams.get('id')!));
+ if(url.pathname==='/fixture/native-possible')return Response.json(await repo.nativePossible(url.searchParams.get('id')!));
  if(url.pathname==='/fixture/pause-native')return Response.json(await repo.pauseNative(url.searchParams.get('id')!));
  if(url.pathname==='/fixture/native-stopped'){await env.INTEGRATOR.getByName(url.searchParams.get('id')!).knownStopped();return new Response('ok');}
  if(url.pathname==='/fixture/native-state')return Response.json(await env.INTEGRATOR.getByName(url.searchParams.get('id')!).snapshot());

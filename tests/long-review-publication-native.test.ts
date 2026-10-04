@@ -1,0 +1,56 @@
+import type {ManagedSpendLedger} from "../src/server/managed-spend-ledger";
+import { nativeFunding } from "./support/native-funding.js";
+import { accountKeyFor } from "../src/server/projects.js";
+import { expect, mock, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Env } from "../src/server/env.js";
+import type { CandidateGeneration } from "../src/core/types.js";
+import type { Ledger } from "../src/server/durable-object.js";
+
+import {Database} from "bun:sqlite";
+import {RetainedInputs,retainedInputSchema,type RetainedInput} from "../src/server/retained-inputs";
+import {RetainedCredentialIncidents} from "../src/server/retained-credential-incidents";
+import {CoreGitOperationLedger} from "../src/server/core-git-budget";
+const fixtureRemote="https://"+"a".repeat(32)+".artifacts.cloudflare.net/repo";
+/** Synthetic authority fixture; receipt and funding modules use real SQLite. Git refs use local bare repositories. */
+function retainedFixture(base:string,commit:string,candidateId:string){
+ const db=new Database(':memory:');const storage={sql:{exec(query:string,...bindings:Array<string|number>){const rows=db.query(query).all(...bindings);return{toArray:()=>rows,one:()=>rows[0]};}},transactionSync<T>(callback:()=>T){return db.transaction(callback)();}} as unknown as DurableObjectStorage;
+ const pins=new RetainedInputs(storage),credentials=new RetainedCredentialIncidents(storage),funding=new CoreGitOperationLedger(storage);const issued=new Map<string,RetainedInput>();
+ return {savedPins:()=>db.query<{doc:string},[]>("SELECT doc FROM retained_inputs").all().map(row=>JSON.parse(row.doc) as RetainedInput),pendingCredentials:()=>db.query<{n:number},[]>("SELECT COUNT(*) AS n FROM retained_credential_incidents WHERE status<>'revoked'").get()!.n,reserveCoreGitOperation:async(id:string,key:string)=>funding.reserve(id,key,{accountUsdMicros:10000000,globalUsdMicros:10000000}),
+ prepareRetainedInput:async(taskId:string,workflowId:string,selectedCandidate:string,id:string)=>{if(taskId!=='one'||workflowId!=='registered-parent'||selectedCandidate!==candidateId)throw Error('Synthetic authority scope mismatch');const incarnation='11111111-1111-4111-8111-111111111111';const input=retainedInputSchema.parse({id,version:1,projectId:'p123456789abc',incarnation,taskId,commit,base,canonicalRepoName:'repo',workspaceRepoName:'repo',branch:'task/one',protectedRef:`refs/flaregit/inputs/${incarnation}/${taskId}/${commit}`,protectedBaseRef:`refs/flaregit/inputs/${incarnation}/${taskId}/${base}`,workflowId,candidateId,actorId:'fixture-human',ownerId:'fixture-human',accountKey:await accountKeyFor('fixture-human')});issued.set(id,input);return input;},
+ assertRetainedInput:async(input:RetainedInput)=>JSON.stringify(issued.get(input.id))===JSON.stringify(retainedInputSchema.parse(input)),
+ beginRetainedCredential:async(...args:Parameters<RetainedCredentialIncidents['begin']>)=>credentials.begin(...args),recordRetainedCredential:async(...args:Parameters<RetainedCredentialIncidents['record']>)=>credentials.record(...args),
+ revokeRetainedCredential:async(id:string,purpose:'workspace'|'canonical')=>{const receipt=credentials.credentialForRevocation(id,purpose);if(!receipt)return false;credentials.markAttempt(id,purpose);await credentials.markRevoked(id,purpose,receipt.token);return true;},
+ markRetainedCredentialRevoked:async(...args:Parameters<RetainedCredentialIncidents['markRevoked']>)=>credentials.markRevoked(...args),recordRetainedInput:async(...args:Parameters<RetainedInputs['record']>)=>pins.record(...args),
+ accountLifecycle:async()=>"active",getWorkflowRun:async()=>({actorId:'fixture-human'}),roleOf:async()=>"owner",logActivity:async()=>{},getBilling:async()=>({plan:'free'})};
+}
+function lifecycleFunding(retention:ReturnType<typeof retainedFixture>){const funding=nativeFunding();return {...funding,CORE_GIT_ACCOUNT_MONTHLY_USD_MICROS:'10000000',CORE_GIT_GLOBAL_MONTHLY_USD_MICROS:'10000000',REPOSITORY_CONTROLLER:{idFromName:(name:string)=>name,get:(name:string)=>name==='global'?{...funding.REPOSITORY_CONTROLLER.get(funding.REPOSITORY_CONTROLLER.idFromName('global')),reserveCoreGitOperation:retention.reserveCoreGitOperation}:retention}};}
+
+mock.module("cloudflare:workers", () => ({
+  WorkflowEntrypoint: class { constructor(_ctx: unknown, public env: Env) {} },
+  DurableObject: class {},
+}));
+const { FlareGitIntegrationWorkflow } = await import("../src/server/workflow.js");
+
+
+import {ContainerLifetime} from "../src/server/container-lifetime";
+import {IntegrationNativeRuntimeLedger} from "../src/server/integration-native-runtime";
+// Synthetic authorization and provider boundary; real production lifetime, ledger, funding and publication methods with local native Git.
+test("native fresh publication survives a review delay after composition lifetime expires",async()=>{
+ const root=await mkdtemp(join(tmpdir(),"flaregit-long-review-")),canonical=join(root,"canonical.git"),seed=join(root,"seed"),publicationDir=join(root,"publication"),oldDir=join(root,"composition");
+ const db=new Database(":memory:"),storage={sql:{exec(query:string,...bindings:Array<string|number>){const rows=db.query(query).all(...bindings);return{toArray:()=>rows,one:()=>rows[0]};}},transactionSync<T>(fn:()=>T){return db.transaction(fn)();},setAlarm:async()=>{},deleteAlarm:async()=>{}} as unknown as DurableObjectStorage;
+ const runtime=new IntegrationNativeRuntimeLedger(storage),oldNative=crypto.randomUUID(),accountKey=await accountKeyFor("fixture-human"),scope={projectId:"p123456789abc",incarnation:"11111111-1111-4111-8111-111111111111",workflowId:"registered-parent",candidateId:"test",actorId:"fixture-human",accountKey};
+ const git=async(args:string[])=>{const child=Bun.spawn(["git",...args],{stdout:"pipe",stderr:"pipe",env:{...process.env,GIT_AUTHOR_NAME:"Synthetic",GIT_AUTHOR_EMAIL:"fixture@localhost",GIT_COMMITTER_NAME:"Synthetic",GIT_COMMITTER_EMAIL:"fixture@localhost"}});const [stdout,stderr,code]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);if(code)throw Error(stderr);return stdout.trim();};
+ try{await git(["init","--bare","--initial-branch=main",canonical]);await git(["clone",canonical,seed]);await Bun.write(join(seed,"feature.txt"),"base");await git(["-C",seed,"add","."]);await git(["-C",seed,"commit","-m","Base"]);const base=await git(["-C",seed,"rev-parse","HEAD"]);await git(["-C",seed,"push","origin","main"]);await Bun.write(join(seed,"feature.txt"),"Reviewed immutable feature");await git(["-C",seed,"commit","-am","Candidate"]);const commit=await git(["-C",seed,"rev-parse","HEAD"]);await git(["-C",seed,"push","origin",`${commit}:refs/flaregit/candidates/test`]);await Bun.write(join(oldDir,"ephemeral.txt"),"Disposable composition state");
+ runtime.declareCoverage(scope);runtime.reserve(scope,oldNative,"composition");let clock=Date.now(),running=false;const lifetime=new ContainerLifetime(storage,()=>({get running(){return running;},destroy:async()=>{running=false;await rm(oldDir,{recursive:true,force:true});},inspect:async()=>running?{}:null}),20*60000,()=>clock);await lifetime.beforeWork();running=true;clock+=2*60*60000;await lifetime.alarm();expect(lifetime.status()?.state).toBe("stopped");runtime.confirmStopped(scope,oldNative,{nativeRunId:oldNative,state:"stopped"});expect(await Bun.file(join(oldDir,"ephemeral.txt")).exists()).toBe(false);
+ const retention=retainedFixture(base,commit,"test"),allocated:string[]=[],commands:string[]=[],funded:string[]=[],funding=lifecycleFunding(retention);
+ const ledger={...retention,reserveIntegrationNativeRuntime:async(_workflow:string,_candidate:string,id:string,stage:string)=>runtime.reserve(scope,id,stage),admitIntegrationNativeCommand:async(_workflow:string,_candidate:string,id:string,command:string)=>{runtime.admitCommand(scope,id,command);return scope;},confirmIntegrationNativeRuntimeStopped:async(_workflow:string,_candidate:string,id:string)=>runtime.confirmStopped(scope,id,{nativeRunId:id,state:"stopped"}),authorizeCandidatePublication:async()=>true} as unknown as Ledger;
+ const global=funding.REPOSITORY_CONTROLLER.get("global") as unknown as {reserveManagedSpend:(...args:Parameters<ManagedSpendLedger["reserve"]>)=>Promise<ReturnType<ManagedSpendLedger["reserve"]>>};
+ const reserve=global.reserveManagedSpend;const fundedGlobal={...global,reserveManagedSpend:async(...args:Parameters<typeof reserve>)=>{const result=await reserve(...args);if(result.allowed)funded.push(args[0].runId);return result;}};
+ const env={...funding,REPOSITORY_CONTROLLER:{idFromName:(name:string)=>name,get:(name:string)=>name==="global"?fundedGlobal:ledger},ARTIFACTS:{get:async()=>({info:async()=>({remote:fixtureRemote}),createToken:async(scope:string)=>({plaintext:"synthetic-read-write",scope,expiresAt:new Date(Date.now()+900000).toISOString()}),revokeToken:async()=>true,[Symbol.dispose]() {}})},INTEGRATOR:{getByName:(name:string)=>{allocated.push(name);return{integrationExec:async(_scope:unknown,id:string,commandId:string,argv:string[])=>{const command=argv[2]!.replaceAll(fixtureRemote,canonical).replaceAll("/workspace/publish",publicationDir);commands.push(command);const child=Bun.spawn(["sh","-c",command],{stdout:"pipe",stderr:"pipe"});const [stdout,stderr,exitCode]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);runtime.finishCommand(scope,id,commandId,{outcome:"completed"});return{success:exitCode===0,stdout,stderr,exitCode};},destroy:async()=>rm(publicationDir,{recursive:true,force:true})};}}} as unknown as Env;
+ const workflow=new FlareGitIntegrationWorkflow({} as ExecutionContext,env);Object.assign(workflow,{projectId:scope.projectId,computeAccountKey:accountKey,computeWorkflowId:scope.workflowId,nativeRuntimeCandidateId:"test"});const callable=workflow as unknown as{casPush(candidate:CandidateGeneration,commit:string,stub:Ledger,branch:string):Promise<{ok:boolean}>};
+ const result=await callable.casPush({id:"test",participatingTaskIds:["one"],expectedAcceptedBase:base} as CandidateGeneration,commit,ledger,"main");expect(result.ok).toBe(true);expect(allocated).toHaveLength(1);expect(funded).toContain(allocated[0]!);expect(allocated[0]).not.toBe(`native-${oldNative}`);expect(allocated[0]).toMatch(/^native-[a-f0-9-]{36}$/);expect(runtime.allocations(scope)).toHaveLength(2);expect(runtime.allocations(scope).every(row=>row.stopped)).toBe(true);expect(commands.some(command=>command.includes("fetch")&&command.includes("refs/flaregit/candidates/test"))).toBe(true);expect(await git(["--git-dir",canonical,"rev-parse","main"])).toBe(commit);expect(await git(["--git-dir",canonical,"rev-parse","refs/flaregit/candidates/test"])).toBe(commit);expect(await Bun.file(join(publicationDir,".git","HEAD")).exists()).toBe(false);expect(retention.pendingCredentials()).toBe(0);
+ }finally{db.close();await rm(root,{recursive:true,force:true});}
+});

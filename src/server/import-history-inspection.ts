@@ -7,7 +7,7 @@ export const HISTORY_MAX_GRAPH_BYTES=8*1024*1024;
 export interface HistoryInspectionActor {generation:number;workflowId:string}
 export type HistorySide="source"|"destination";
 export interface HistoryInspectionScope {operationId:string;projectId:string;incarnation:string;ownerId:string;accountKey:string;canonicalRepoName:string;source:string;branch:string;head:string}
-export interface HistoryInspectionSnapshot {currentAttempt?:import("./import-history-attempts.js").ImportHistoryAttempt|null;scope:HistoryInspectionScope;status:"running"|"paused"|"verified"|"mismatch";reason:string|null;source:{revision:number;count:number;pending:number};destination:{revision:number;count:number;pending:number};result:MigrationReceipt|null}
+export interface HistoryInspectionSnapshot {scopeChanged?:boolean;canStartSuccessor?:boolean;successorId?:string|null;currentAttempt?:import("./import-history-attempts.js").ImportHistoryAttempt|null;scope:HistoryInspectionScope;status:"running"|"paused"|"verified"|"mismatch";reason:string|null;source:{revision:number;count:number;pending:number};destination:{revision:number;count:number;pending:number};result:MigrationReceipt|null}
 export interface HistoryInspectionBatch {batchId:string;revision:number;requested:string[];complete:boolean;knownHashes:string[];knownHashesTruncated:boolean}
 export interface HistoryChunk {batchId:string;revision:number;requested:string[];commits:Array<{hash:string;tree:string;parents:string[]}>;unavailable?:string[]}
 const sha=z.string().regex(/^[a-f0-9]{40}$/),identifier=z.string().min(1).max(200).regex(/^[A-Za-z0-9_-]+$/);

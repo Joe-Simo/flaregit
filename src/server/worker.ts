@@ -1,3 +1,5 @@
+import {importedAllocationReady} from "./import-allocation-readiness.js";
+import {inspectSavedImport} from "./import-read-lifecycle.js";
 import {gitCloneCommand,taskGitCommands} from "./git-command-metadata.js";
 import { artifactStorageSlots } from "./storage-allocation.js";
 import {observeRerunInputs} from "./rerun-input-observations.js";
@@ -59,7 +61,7 @@ import type { Env, QueueMessage } from "./env.js";
 import type { Task } from "../core/types.js";
 import { assertAgentWrites, redactSecrets } from "../agents/prompt.js";
 import { assertWorkflowControlPermission, controlWorkflow, WorkflowControlError } from "./workflow-control.js";
-import { inspectImport, startImport, type ImportJob, type ImportReadiness } from "./import-job.js";
+import { startImport, type ImportJob, type ImportReadiness } from "./import-job.js";
 import { retainDeploymentTarget } from "./retain-deployment.js";
 import { deploymentRequestParametersSchema } from "./deployments.js";
 import { readPublicPlanPrice } from "./plan-price.js";
@@ -517,8 +519,9 @@ export default {
         for (const job of imports) {
           if (await account.accountArtifactDeleted(job.canonicalRepoName)) continue;
           if (job.status !== "ready") {
-            const readiness = await inspectImport(env.ARTIFACTS, job.canonicalRepoName);
-            if (readiness.status !== "ready") return json({ deleted: false, status: "deleting", reason: "Saved import may still allocate repository storage; cleanup is unconfirmed. Retry deletion." }, 202);
+            // A sealed account needs allocation completion, not new Git/native
+            // authority. Branch readiness remains mandatory for browsing setup.
+            if (!await importedAllocationReady(env.ARTIFACTS,job.canonicalRepoName)) return json({ deleted: false, status: "deleting", reason: "Saved import may still allocate repository storage; cleanup is unconfirmed. Retry deletion." }, 202);
           }
           if (!await removeArtifact(job.canonicalRepoName)) return json({ deleted: false, status: "deleting", reason: "Imported repository storage cleanup is unconfirmed; retry deletion" }, 202);
         }
@@ -718,7 +721,7 @@ export default {
       if (resumeImport && method === "POST") {
         const job = await account.getImportJob(resumeImport[1]!);
         if (!job || job.ownerId !== userId) return text("Import not found", 404);
-        const result = await finishImport(env, account, job, job.status === "failed" ? { status: "failed", detail: job.detail } : await inspectImport(env.ARTIFACTS, job.canonicalRepoName));
+        const result = await finishImport(env, account, job, job.status === "failed" ? { status: "failed", detail: job.detail } : await inspectSavedImport(env,job,auth.viaToken?await gitParentTokenHash(request):undefined,auth.expiresAt));
         return json(result, result.status === "ready" ? 201 : result.status === "failed" ? 409 : 202);
       }
 
@@ -737,7 +740,7 @@ export default {
           if (b.branch !== undefined && (typeof b.branch !== "string" || (b.branch !== "" && !isSafeRef(b.branch)))) return text("Enter a valid Git branch name", 400);
           try { for (const command of [b.install, b.build, b.test]) validateRepositoryCommand(command); }
           catch (error) { return text(error instanceof Error ? error.message : "Invalid repository command", 400); }
-          const created = await importRepository(env, account, { projectId, name, userId, url: source.toString(), branch: b.branch ?? "", install: clean(b.install, 300), build: clean(b.build, 300), test: clean(b.test, 300) });
+          const created = await importRepository(env, account, { projectId, name, userId, url: source.toString(), branch: b.branch ?? "", credentialHash:auth.viaToken?await gitParentTokenHash(request):undefined,sessionExpiresAt:auth.expiresAt, install: clean(b.install, 300), build: clean(b.build, 300), test: clean(b.test, 300) });
           return json(created, created.status === "ready" ? 201 : created.status === "failed" ? 409 : 202);
         }
         const created = await createDemoRepository(env, projectId, name, userId);
@@ -866,10 +869,25 @@ export default {
           const job=await account.getImportJob(projectId);
           if(!job||job.ownerId!==userId||job.status!=="ready"||job.canonicalRepoName!==state.canonicalRepoName)return text("Ready owned import required",409);
           if(!job.importedHead||!job.importedBranch)return json({status:"unavailable",canResume:false,detail:"This legacy import has no recorded import-time head; current branch history is not a substitute."},409);
-          const input=method==="POST"&&request.body?await body<{instanceId?:string;expectedGeneration?:number}>():{};
-          if(Object.keys(input).some(key=>key!=="instanceId"&&key!=="expectedGeneration")||(input.instanceId!==undefined&&!/^import-history-[a-f0-9-]{36}$/.test(input.instanceId))||(input.expectedGeneration!==undefined&&(!Number.isSafeInteger(input.expectedGeneration)||input.expectedGeneration<0)))return text("Invalid inspection resume request",400);
+          const input=method==="POST"&&request.body?await body<{instanceId?:string;predecessorId?:string;expectedGeneration?:number}>():{};
+          if(Object.keys(input).some(key=>key!=="instanceId"&&key!=="predecessorId"&&key!=="expectedGeneration")||(input.instanceId!==undefined&&!/^import-history-[a-f0-9-]{36}$/.test(input.instanceId))||(input.predecessorId!==undefined&&(!/^import-history-[a-f0-9-]{36}$/.test(input.predecessorId)||input.instanceId!==undefined||input.expectedGeneration===undefined))||(input.expectedGeneration!==undefined&&(!Number.isSafeInteger(input.expectedGeneration)||input.expectedGeneration<0)))return text("Invalid inspection resume request",400);
           const proposed=`import-history-${crypto.randomUUID()}`;
-          const operation=method==="GET"?await account.getImportHistoryOperation(historyOperationRoute![1]!):input.instanceId?await account.getImportHistoryOperation(input.instanceId):await account.claimImportHistoryOperation({protocolVersion:2,projectId,head:job.importedHead,canonicalRepoName:state.canonicalRepoName,ownerId:userId,instanceId:proposed});
+          let operation=method==="GET"?await account.getImportHistoryOperation(historyOperationRoute![1]!):input.instanceId?await account.getImportHistoryOperation(input.instanceId):input.predecessorId?null:await account.claimImportHistoryOperation({protocolVersion:2,projectId,head:job.importedHead,canonicalRepoName:state.canonicalRepoName,ownerId:userId,instanceId:proposed});
+          if(method==="POST"&&input.predecessorId){
+            try{
+            const predecessor=await account.getImportHistoryOperation(input.predecessorId);
+            if(!predecessor||predecessor.ownerId!==userId||predecessor.projectId!==projectId||predecessor.canonicalRepoName!==state.canonicalRepoName||predecessor.head!==job.importedHead)return text("Saved predecessor inspection not found",404);
+            const old=await project.getHistoryInspection(predecessor.instanceId),oldAttempt=old?.currentAttempt;
+            if(!oldAttempt||oldAttempt.generation!==input.expectedGeneration)return text("Predecessor attempt changed; refresh before requesting a successor",409);
+            let terminal:string;try{terminal=(await(await env.IMPORT_HISTORY_WORKFLOW.get(oldAttempt.workflowId)).status()).status;}catch{return text("Predecessor workflow termination is unconfirmed; no successor was dispatched",409);}
+            if(!["complete","errored","terminated"].includes(terminal))return text("Predecessor workflow must be terminal before starting a successor",409);
+            if(!await authorizeHistoryOwner())return text("Import inspection owner access changed",403);
+            await project.observeHistoryInspectionAttempt(predecessor.instanceId,oldAttempt.generation,terminal);
+            await project.historyInspectionNativeStopped(predecessor.instanceId,oldAttempt.generation,oldAttempt.nativeRunId);
+            if(!await authorizeHistoryOwner())return text("Import inspection owner access changed",403);
+            operation=await account.claimImportHistorySuccessor({predecessorId:predecessor.instanceId,expectedGeneration:oldAttempt.generation,instanceId:proposed},{userId,displayName:"Repository owner",viaToken:auth.viaToken===true},auth.viaToken?await gitParentTokenHash(request):undefined,auth.expiresAt);
+            }catch{return text("Successor inspection was not confirmed. The predecessor and imported history remain preserved; retry the identical request after refreshing status",409);}
+          }
           if(!operation||operation.ownerId!==userId||operation.projectId!==projectId||operation.canonicalRepoName!==state.canonicalRepoName||operation.head!==job.importedHead)return text("Saved inspection not found",404);
           let inspection=await project.getHistoryInspection(operation.instanceId);
           if(!inspection&&operation.protocolVersion===2)inspection=await project.beginHistoryInspection(operation.instanceId,accountKey,operation.head);
@@ -886,11 +904,15 @@ export default {
             inspection=(await project.getHistoryInspection(operation.instanceId))!;attempt=inspection.currentAttempt;
           }
           if(operation.protocolVersion===2&&attempt?.terminal&&attempt.nativeState==="possible"&&(method==="GET"||input.expectedGeneration===attempt.generation)){try{await project.historyInspectionNativeStopped(operation.instanceId,attempt.generation,attempt.nativeRunId);inspection=(await project.getHistoryInspection(operation.instanceId))!;attempt=inspection.currentAttempt;}catch{/* Unknown stop keeps recovery disabled. */}}
+          if(inspection.scopeChanged){
+            if(!await authorizeHistoryOwner())return text("Import inspection owner access changed",403);
+            return Response.json({instanceId:operation.instanceId,predecessorId:operation.instanceId,head:operation.head,status:inspection.status,reason:"inspection_scope_changed",scopeChanged:true,attemptGeneration:attempt?.generation??null,workflowStatus:workflowStatus??attempt?.terminal??null,canResume:false,canStartSuccessor:inspection.canStartSuccessor,successorId:inspection.successorId,authority:"durable-sql",receipt:inspection.result?{head:operation.head,inspectedAt:inspection.result.destinationCapturedAt,result:inspection.result}:null},{status:method==="POST"?409:200,headers:{"Cache-Control":"no-store"}});
+          }
           const canResume=inspection.status==="paused"&&Boolean(attempt?.terminal)&&attempt?.nativeState!=="possible"&&!['unsupported_source','inspection_capacity','source_shallow','history_metadata_capacity'].includes(inspection.reason??"");
           if(method==="POST"&&inspection.status!=="verified"&&inspection.status!=="mismatch"){
             if(!attempt){if(operation.protocolVersion!==2)return json({instanceId:operation.instanceId,head:operation.head,status:inspection.status,reason:"attempt_identity_unavailable",canResume:false,detail:"Saved attempt identity is unavailable; no replacement was started."},202);attempt=await project.startHistoryInspectionAttempt(operation.instanceId,0);}
             else if(canResume&&input.expectedGeneration===attempt.generation){attempt=await project.startHistoryInspectionAttempt(operation.instanceId,attempt.generation);inspection=(await project.getHistoryInspection(operation.instanceId))!;}
-            else if(input.expectedGeneration!==undefined&&input.expectedGeneration!==attempt.generation&&input.expectedGeneration+1!==attempt.generation)return text("Inspection attempt changed; refresh before resuming",409);
+            else if(!input.predecessorId&&input.expectedGeneration!==undefined&&input.expectedGeneration!==attempt.generation&&input.expectedGeneration+1!==attempt.generation)return text("Inspection attempt changed; refresh before resuming",409);
             const withinDeliveryWindow=Date.now()<=Date.parse(attempt.deliveryUntil);
             if(attempt.dispatch==="saved"||(attempt.dispatch==="unknown"&&!attempt.terminal&&withinDeliveryWindow)){
               const {plan}=await account.getBilling();const denied=await admitRun(env,account,planLimits(env)[plan],attempt.workflowId);if(denied)return denied;
@@ -902,7 +924,7 @@ export default {
           }
           if(!await authorizeHistoryOwner())return text("Import inspection owner access changed",403);
           const resumable=inspection.status==="paused"&&Boolean(attempt?.terminal)&&attempt?.nativeState!=="possible"&&!['unsupported_source','inspection_capacity','source_shallow','history_metadata_capacity'].includes(inspection.reason??"");
-          return Response.json({instanceId:operation.instanceId,head:operation.head,status:inspection.status,reason:inspection.reason,progress:{source:inspection.source,destination:inspection.destination},attemptGeneration:attempt?.generation??null,workflowStatus:workflowStatus??(attempt?.terminal??null),canResume:resumable,authority:"durable-sql",receipt:inspection.result?{head:operation.head,inspectedAt:inspection.result.destinationCapturedAt,result:inspection.result}:null},{status:method==="POST"?202:200,headers:{"Cache-Control":"no-store"}});
+          return Response.json({instanceId:operation.instanceId,predecessorId:operation.predecessorId??null,head:operation.head,status:inspection.status,reason:inspection.reason,progress:{source:inspection.source,destination:inspection.destination},attemptGeneration:attempt?.generation??null,workflowStatus:workflowStatus??(attempt?.terminal??null),canResume:resumable,authority:"durable-sql",receipt:inspection.result?{head:operation.head,inspectedAt:inspection.result.destinationCapturedAt,result:inspection.result}:null},{status:method==="POST"?202:200,headers:{"Cache-Control":"no-store"}});
         }
 
         if (sub === "/directory" && method === "GET") {
@@ -1183,7 +1205,7 @@ export default {
         if (sub === "/clone" && method === "POST") {
           const remote = gitRemote(url.origin,projectId,null);
           const {token}=await project.mintGitCapability(userId,null,false,await gitParentTokenHash(request));
-          return json({ remote, token, expiresInSeconds: 3600, command: gitCloneCommand(remote) });
+          return json({ remote, token, expiresInSeconds: 3600, command: gitCloneCommand(remote,undefined,{branch:/^[a-f0-9]{40}$/.test(state.acceptedState.currentCommit)&&!/^0{40}$/.test(state.acceptedState.currentCommit)?state.defaultBranch??"main":undefined}) });
         }
 
         // ----- changes (tasks) -----
@@ -1212,7 +1234,7 @@ export default {
           if (b.dependsOn && (!parent || parent.status === "cancelled")) return text("dependsOn must name an existing, uncancelled change", 400);
           const source = await env.ARTIFACTS.get(parent ? parent.workspace.repoName : state.canonicalRepoName);
           const repoName = taskRepoName(projectId, b.taskId);
-          const fork = await allocateArtifact(env,{name:repoName,projectId,userId,kind:"workspace"},()=>source.fork(repoName,{description:goal}));
+          const fork = await allocateArtifact(env,{name:repoName,projectId,userId,kind:"workspace"},()=>source.fork(repoName,{description:goal,defaultBranchOnly:false}));
           const remote=gitRemote(url.origin,projectId,b.taskId);
           const now = new Date().toISOString();
           const task: Task = {
@@ -1965,13 +1987,18 @@ async function createDemoRepository(env: Env, projectId: string, name: string, u
 async function finishImport(env: Env, account: Ledger, job: ImportJob, readiness: ImportReadiness) {
   if (readiness.status === "ready") {
     try {
+      if(job.importedHead&&job.importedBranch!==readiness.defaultBranch){
+        if(readiness.head!==job.importedHead)throw new Error("Import head differs; branch metadata was preserved");
+        await account.repairImportBranch(job,readiness.defaultBranch);
+        job=(await account.getImportJob(job.id))!;
+      }
       // Persist the first observed import snapshot before controller/account setup.
       // A retry cannot substitute a later accepted branch head after interruption.
       if (!job.importedHead && job.status !== "ready") {
         job = { ...job, importedHead: readiness.head, importedBranch: readiness.defaultBranch };
         await account.saveImportJob(job);
       }
-      await projectOf(env, job.id).initialize({ projectId: job.id, projectName: job.name, canonicalRepoName: job.canonicalRepoName, head: job.importedHead ?? readiness.head, verificationPolicy: job.verificationPolicy as unknown as Record<string, unknown>, kind: "import", defaultBranch: job.importedBranch ?? readiness.defaultBranch, ownerId: job.ownerId, source: job.source });
+      await projectOf(env, job.id).initialize({ projectId: job.id, projectName: job.name, canonicalRepoName: job.canonicalRepoName, head: job.importedHead ?? readiness.head, tree:readiness.tree, verificationPolicy: job.verificationPolicy as unknown as Record<string, unknown>, kind: "import", defaultBranch: job.importedBranch ?? readiness.defaultBranch, ownerId: job.ownerId, source: job.source });
       await account.addProject({ id: job.id, name: job.name, role: "owner", kind: "import" });
       await account.saveImportJob({ ...job, importedHead: job.importedHead ?? readiness.head, importedBranch: job.importedBranch ?? readiness.defaultBranch, status: "ready", updatedAt: new Date().toISOString(), detail: "Repository is available. No shallow depth was requested; completeness of imported history is not verified." });
       return { id: job.id, status: "ready" as const, head: readiness.head, kind: "import", remote: readiness.remote };
@@ -1988,7 +2015,7 @@ async function finishImport(env: Env, account: Ledger, job: ImportJob, readiness
 async function importRepository(
   env: Env,
   account: Ledger,
-  o: { projectId: string; name: string; userId: string; url: string; branch: string; install: string; build: string; test: string }
+  o: { projectId: string; name: string; userId: string; url: string; branch: string; credentialHash?:string;sessionExpiresAt?:number; install: string; build: string; test: string }
 ) {
   const source = validateImportSource(o.url);
   if (!o.test) throw new Error("A test command is required: it is the protected check every change must pass.");
@@ -2001,7 +2028,7 @@ async function importRepository(
   // Persist ownership and recovery identity BEFORE contacting the provider.
   await account.saveImportJob(job);
   const readiness=await allocateArtifact(env,{name:job.canonicalRepoName,projectId:job.id,userId:job.ownerId,kind:"import"},()=>startImport(env.ARTIFACTS,job));
-  return finishImport(env,account,job,readiness);
+  return finishImport(env,account,job,readiness.status==="failed"?readiness:await inspectSavedImport(env,job,o.credentialHash,o.sessionExpiresAt));
 }
 
 async function stopImportHistoryAttempts(env: Env, ledger: Ledger): Promise<boolean> {

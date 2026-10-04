@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { apiFetch, apiJson } from "../api";
+import { creationRejectedBeforeAllocation, repositoryRequestSignal } from "../repo-request";
 import { navigate, timeAgo } from "../router";
 
 const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
@@ -15,6 +16,8 @@ interface ImportJob {
 interface CreationResponse { id: string; status?: "ready" | "pending" | "failed"; kind?: "demo" | "import"; import?: ImportJob }
 
 export function NewRepo() {
+  const lifetime = useRef(new AbortController()), readSequence = useRef(0), mutationLock = useRef(false);
+  const [unconfirmed, setUnconfirmed] = useState(false);
   const [mode, setMode] = useState("import");
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
@@ -29,34 +32,42 @@ export function NewRepo() {
   const [activeImport, setActiveImport] = useState<ImportJob | null>(null);
   const [checkingId, setCheckingId] = useState<string | null>(null);
   const loadImports = useCallback(async () => {
-    try { const response = await apiJson<{ imports: ImportJob[] }>("/imports"); setImports(response.imports); setActiveImport((previous) => previous ? response.imports.find((job) => job.id === previous.id) ?? previous : previous); setImportsError(null); }
-    catch (cause) { setImportsError(cause instanceof Error ? cause.message : "Could not load saved imports"); }
+    const current = ++readSequence.current;
+    try { const response = await apiJson<{ imports: ImportJob[] }>("/imports", { signal: repositoryRequestSignal(lifetime.current.signal) }); if(lifetime.current.signal.aborted || current !== readSequence.current)return; setImports(response.imports); setActiveImport((previous) => previous ? response.imports.find((job) => job.id === previous.id) ?? previous : previous); setImportsError(null); }
+    catch (cause) { if(lifetime.current.signal.aborted || current !== readSequence.current)return; setImportsError(cause instanceof Error ? cause.message : "Could not load saved imports"); }
   }, []);
-  useEffect(() => { void loadImports(); }, [loadImports]);
-  const remember = (job: ImportJob) => { setActiveImport(job); setImports((previous) => [job, ...(previous ?? []).filter((item) => item.id !== job.id)]); };
+  useEffect(() => { lifetime.current = new AbortController(); void loadImports(); return () => { lifetime.current.abort(); readSequence.current++; }; }, [loadImports]);
+  const remember = (job: ImportJob) => { readSequence.current++; setActiveImport(job); setImports((previous) => [job, ...(previous ?? []).filter((item) => item.id !== job.id)]); };
   const restore = (job: ImportJob) => {
     setMode("import"); setName(job.name); setUrl(job.source); setBranch(job.branch); setInstall(job.verificationPolicy.install ?? ""); setBuild(job.verificationPolicy.build ?? ""); setTest(job.verificationPolicy.test ?? ""); setError(null); setActiveImport(job);
   };
   const resume = async (job: ImportJob) => {
+    if(mutationLock.current)return; mutationLock.current=true;
     setBusy(true); setCheckingId(job.id); setError(null);
     try {
-      const result = await apiJson<CreationResponse>(`/imports/${job.id}/resume`, { method: "POST" });
+      const result = await apiJson<CreationResponse>(`/imports/${job.id}/resume`, { method: "POST", signal: repositoryRequestSignal(lifetime.current.signal, true) });
+      if(lifetime.current.signal.aborted)return;
       if (result.status === "ready") { navigate(`/p/${result.id}`); return; }
       if (result.status === "pending" && result.import) { restore(result.import); remember(result.import); }
       else throw new Error("Import readiness was not confirmed. Check saved imports before starting another import.");
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not check this saved import"); }
-    finally { setBusy(false); setCheckingId(null); }
+    } catch (cause) { if(lifetime.current.signal.aborted)return; setError(cause instanceof Error ? cause.message : "Could not check this saved import"); }
+    finally { mutationLock.current=false; if(!lifetime.current.signal.aborted){setBusy(false); setCheckingId(null);} }
   };
 
-  const disabled = busy || activeImport !== null || (mode === "import" && (!url || !test || !name));
+  const disabled = busy || unconfirmed || activeImport !== null || (mode === "import" && (!url || !test || !name));
 
   const submit = async () => {
+    if(mutationLock.current || unconfirmed)return; mutationLock.current=true;
+    let rejectedBeforeAllocation = false;
     setBusy(true);
     setError(null);
     try {
       const body = mode === "import" ? { kind: "import", name, url, branch, install, build, test } : { kind: "demo", name: name || "Ticket checkout" };
-      const response = await apiFetch("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const response = await apiFetch("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: repositoryRequestSignal(lifetime.current.signal, true) });
+      rejectedBeforeAllocation = creationRejectedBeforeAllocation(response.status);
       const raw = await response.text();
+      if(lifetime.current.signal.aborted)return;
+      if(rejectedBeforeAllocation)throw new Error(raw || "Creation was rejected before allocation. Correct the inputs or sign in again before retrying.");
       let created: CreationResponse;
       try { created = JSON.parse(raw) as CreationResponse; } catch { throw new Error(raw || "Could not read the creation result"); }
       if (created.status === "failed" && created.import) { remember(created.import); setError(created.import.detail || "The provider refused this import."); setBusy(false); return; }
@@ -66,10 +77,12 @@ export function NewRepo() {
       else throw new Error("Repository readiness was not confirmed. Check saved imports before retrying creation.");
       setBusy(false);
     } catch (e) {
-      setError(`${e instanceof Error ? e.message : "Could not create the repository"}${mode === "import" ? " Check saved imports before submitting this import again." : ""}`);
+      if(lifetime.current.signal.aborted)return;
+      setUnconfirmed(!rejectedBeforeAllocation);
+      setError(`${e instanceof Error ? e.message : "Could not create the repository"}${!rejectedBeforeAllocation && mode === "import" ? " Check saved imports before submitting this import again." : ""}`);
       setBusy(false);
       void loadImports();
-    }
+    } finally { mutationLock.current=false; }
   };
 
   return (
@@ -81,6 +94,7 @@ export function NewRepo() {
         <p className="text-xs text-muted-foreground">{activeImport.status === "failed" ? "The saved source and protected checks remain below. Correcting the source creates a new import; this refused request is retained." : "The source and protected checks below are saved. Checking status inspects this existing import and does not request another provider import."}</p>
         <div className="flex flex-wrap gap-2">{activeImport.status !== "failed" && <Button size="sm" variant="outline" disabled={busy} onClick={() => activeImport.status === "ready" ? navigate(`/p/${activeImport.id}`) : void resume(activeImport)}>{checkingId === activeImport.id ? "Checking…" : activeImport.status === "ready" ? "Open repository" : "Check import status"}</Button>}{activeImport.status === "failed" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setActiveImport(null); setError(null); }}>Correct source and create a new import</Button>}<Button size="sm" variant="ghost" disabled={busy} onClick={() => { setActiveImport(null); setName(""); setUrl(""); setBranch(""); setError(null); }}>Start another repository</Button></div>
       </section>}
+      {unconfirmed && <p role="status" className="mb-4 text-sm text-muted-foreground">Creation could not be confirmed. Your inputs are preserved. Check saved imports below or return to repositories to find the saved result before creating another repository.</p>}
       <Card>
         <CardHeader className="pb-2">
           <Tabs value={mode} onValueChange={(value) => { if (!busy && !activeImport) setMode(value); }}>

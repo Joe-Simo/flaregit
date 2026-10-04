@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import { apiJson } from "../api";
 import { timeAgo } from "../router";
 
@@ -130,7 +131,7 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
           <p id={anchorId} className="text-xs text-muted-foreground break-all">Commenting on <code>{anchor.path}:{anchor.line}</code> at <code title={anchor.commit}>{anchor.commit.slice(0, 7)}</code> <button type="button" className="underline" onClick={onAnchorUsed}>clear</button></p>
         )}
         <label htmlFor={draftId} className="sr-only">Comment</label>
-        <textarea ref={draftInput} id={draftId} aria-describedby={anchor ? anchorId : undefined} className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm" rows={3} maxLength={10000} value={draft} disabled={saving}
+        <Textarea ref={draftInput} id={draftId} aria-describedby={anchor ? anchorId : undefined} rows={3} maxLength={10000} value={draft} disabled={saving}
           onChange={(e) => { setDraft(e.target.value); setSaved(false); }}
           onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void send(); } }}
           placeholder="Write a comment (⌘/Ctrl+Enter to send)" />

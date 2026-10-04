@@ -1,3 +1,4 @@
+import {confirmCompositionBranch} from "./composition-branch";
 import { retainGitInput, retainedGitInputRef } from "./retained-git-input.js";
 import type { RetainedInput } from "./retained-inputs.js";
 import { validateRecoveryRemote } from "./private-recovery-bundle.js";
@@ -6,7 +7,6 @@ import {rebaseAcceptedFollowup,mirrorAcceptedFollowup} from "./accepted-followup
 import { assertPreviewStorageAdmission, PreviewStorageAdmissionError } from "./preview-storage.js";
 import { inspectPreviewStorageManifest, publishPreviewStorageManifest } from "./preview-storage-upload.js";
 import { admitNativeCompute } from "./native-compute.js";
-import { isSafeRef } from "../core/sanitize.js";
 import { buildPrefix } from "./preview-access.js";
 import { publicationInHistory } from "./publication.js";
 import { pushMirror } from "./mirror.js";
@@ -370,10 +370,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     await this.fundedRetainedCommand(inputs[0]!, stub);
     let r = await run(`rm -rf ${WORK} && git clone --quiet ${q(activeCanonical.remote)} ${WORK}`, gitAuthEnv(activeCanonical.token));
     if (!r.success) return { ok: false, error: "Could not clone canonical repository" };
-    // The clone's HEAD names the remote's real default branch (Artifacts metadata can differ for imported repos).
-    const branch = (await run(`git -C ${WORK} symbolic-ref --short HEAD`)).stdout.trim() || state.defaultBranch || "main";
-    // The default branch name comes from the (possibly imported) repository: whitelist it before it reaches any command.
-    if (!isSafeRef(branch)) throw new Error("Default branch name contains characters FlareGit does not accept");
+    const branch=await confirmCompositionBranch({branch:state.defaultBranch,expectedBase:candidate.expectedAcceptedBase,remote:activeCanonical.remote,token:activeCanonical.token,directory:WORK,exec:run,beforeCommand:async phase=>{if(phase==="before")await this.fundedRetainedCommand(inputs[0]!,stub);else await this.retainedAuthority(inputs[0]!,stub);}});
     await run(`git -C ${WORK} config user.name FlareGit && git -C ${WORK} config user.email integrator@flaregit.com && git -C ${WORK} checkout --quiet --detach ${q(candidate.expectedAcceptedBase)}`);
 
     for (const input of inputs) {
