@@ -1119,9 +1119,10 @@ export class RepositoryController extends DurableObject<Env> {
     return this.community().requestContribution(actor, input);
   }
   async publicContributionRequests(actor: PublicCommunityActor): Promise<ContributionRequest[]> {
-    this.requirePublicRepository();
     const ownerId = await this.roleOf(actor.userId) === "owner" ? actor.userId : "";
-    this.requirePublicRepository();
+    // Making a repository private must not erase its owner's access-request history.
+    // Contributor reads and every access decision still require public visibility.
+    if (!ownerId) this.requirePublicRepository();
     return this.community().requestsFor(actor, ownerId).map((request)=>this.contributionRegistration(request));
   }
   private registrationTable(): void {this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS member_registrations(request_id TEXT PRIMARY KEY,user_id TEXT NOT NULL,account_key TEXT NOT NULL,status TEXT NOT NULL)");}
