@@ -33,11 +33,13 @@ mock.module("cloudflare:workers", () => ({
 }));
 const { FlareGitIntegrationWorkflow } = await import("../src/server/workflow.js");
 
+// Four sequential publication/recovery attempts spawn real local Git processes.
+// Keep a bounded integration deadline without inheriting runner Git hooks/config.
 test("publication releases its ephemeral checkout while preserving the reviewed immutable Git ref", async () => {
   const root = await mkdtemp(join(tmpdir(), "workflow-lifecycle-"));
   const canonical = join(root, "canonical.git"), seed = join(root, "seed"), workspace = join(root, "publish");
   const git = async (args: string[]) => {
-    const child = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@localhost", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@localhost" } });
+    const child = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_CONFIG_NOSYSTEM:"1",GIT_CONFIG_GLOBAL:"/dev/null",GIT_TERMINAL_PROMPT:"0", GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@localhost", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@localhost" } });
     const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
     if (exitCode) throw new Error(stderr);
     return stdout.trim();
@@ -62,7 +64,7 @@ test("publication releases its ephemeral checkout while preserving the reviewed 
         exec: async (argv: string[]) => {
           const command = argv[2]!.replaceAll(fixtureRemote,canonical).replaceAll("/workspace/publish", workspace);
           if(command.includes("merge-base --is-ancestor"))publicationReadbackObserved=true;
-          const child = Bun.spawn(["sh", "-c", command], { stdout: "pipe", stderr: "pipe" });
+          const child = Bun.spawn(["sh", "-c", command], { stdout: "pipe", stderr: "pipe",env:{...process.env,GIT_CONFIG_NOSYSTEM:"1",GIT_CONFIG_GLOBAL:"/dev/null",GIT_TERMINAL_PROMPT:"0"} });
           const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
           return { success: exitCode === 0, stdout, stderr, exitCode };
         },
@@ -96,7 +98,7 @@ test("publication releases its ephemeral checkout while preserving the reviewed 
     expect(await git(["--git-dir", canonical, "rev-parse", "refs/flaregit/candidates/test"])).toBe(commit);
     expect(await git(["--git-dir", canonical, "rev-parse", "main"])).toBe(commit);
   } finally { await rm(root, { recursive: true, force: true }); }
-});
+}, 20000);
 
 test("operation error survives failed shutdown and cleanup failure becomes durable activity", async () => {
   const activities: string[] = [];
