@@ -1,3 +1,4 @@
+import {runMirrorExecution} from "./mirror-runner";
 import {createEmptyRepository} from "./empty-repository";
 import {createReadmeRepository} from "./readme-repository";
 import {repositoryCreationRequestSchema} from "./repository-creation-request";
@@ -48,7 +49,7 @@ import { FlareGitImportHistoryWorkflow, importHistoryReceiptKey } from "./import
 import { handleQueueBatch } from "./queue.js";
 import { authenticate } from "./access.js";
 import { handleGitGateway } from "./git-gateway-handler.js";
-import { admitGitOperation } from "./core-git-budget.js";
+import { admitGitOperation,configuredGitCap } from "./core-git-budget.js";
 import { gitAuthEnv, q } from "./shell.js";
 import { ensureBuild } from "./build.js";
 import { buildPrefix, generationBuildPrefix, signPreviewGeneration, signPreview, validPreviewRegistration } from "./preview-access.js";
@@ -59,7 +60,7 @@ import { billingFromEvent, createCheckout, planLimits, reportUsage, verifyPolarW
 import { TICKET_BOOKING_POLICY } from "../fixtures/ticket-booking/policy.js";
 import { DEFAULT_PROTECTED_PATHS, isCommandPolicy,isGitIntegrityPolicy, settingsFor, type CommandPolicy } from "../core/command-policy.js";
 import { currentStatus, runProbes, statusIncidents, statusPage, workflowHealth } from "./status.js";
-import { isPlausibleGithubToken, pushMirror, validateMirrorTarget } from "./mirror.js";
+import { isPlausibleGithubToken, validateMirrorTarget } from "./mirror.js";
 import { lookupTxt, normalizeDomain, txtHost, txtValue } from "./dns.js";
 import { isSafeRef } from "../core/sanitize.js";
 import { diffTrees, listCommits, listDirectory, readBlobByHash, readFileText, resolveCommit } from "./browse.js";
@@ -827,14 +828,16 @@ export default {
       }
 
       if (path === "/join" && method === "POST") {
-        const b = await body<{ projectId?: string; token?: string; name?: string }>();
-        if (!b.projectId || !PROJECT_ID.test(b.projectId) || !b.token) return text("Invalid invite", 400);
-        const project = projectOf(env, b.projectId);
-        const ok = await project.acceptInvite(b.token, userId, clean(b.name, 60) || `member-${userId.slice(-6)}`);
-        if (!ok) return text("This invite is invalid, expired or already used.", 410);
-        const state = await project.getState();
-        await account.addProject({ id: b.projectId, name: state.projectName, role: "member", kind: state.kind ?? "demo" });
-        return json({ id: b.projectId });
+        if(auth.viaToken)return text("Join invitations from a signed-in human session",403);
+        const parsed=z.object({projectId:z.string().regex(PROJECT_ID),token:z.string().regex(/^[a-f0-9]{48}$/),requestId:z.uuid()}).strict().safeParse(await body<unknown>());
+        if(!parsed.success)return text("Confirm the exact invitation and join request",400);
+        const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.viaToken||current.id!==userId)return text("Joining session changed",403);
+        const profile=await account.getProfile(),project=projectOf(env,parsed.data.projectId);
+        try{const joined=await project.joinRepositoryInvitation(parsed.data.token,parsed.data.requestId,userId,clean(profile.displayName,60)||"Collaborator",{viaToken:false,sessionExpiresAt:current.expiresAt});
+          const fresh=await authenticate(request,env);if(fresh instanceof Response||fresh.viaToken||fresh.id!==userId)return text("Join acknowledgement unavailable; retry the original request",409);
+          if(!joined.joined||!await project.roleOf(userId))return text("Current membership could not be confirmed",409);
+          return repositoryReadJson({id:parsed.data.projectId,requestId:parsed.data.requestId,...joined});
+        }catch{return text("Invitation join was not confirmed. Retry the original request; removed membership cannot be restored by an old link.",409);}
       }
 
       // ---------- project level: /p/:id/... ----------
@@ -2063,11 +2066,33 @@ export default {
           return json({ humans, agents });
         }
         if (sub === "/members" && method === "GET") return json(await project.listMembers());
-        if (sub === "/invites" && method === "POST") {
-          if (!isOwner) return text("Only the owner can invite", 403);
-          const token = await project.createInvite(userId);
-          return json({ url: `${url.origin}/#/join/${projectId}/${token}`, expiresInDays: 7 });
+        const invitationDecision=/^\/invites\/([a-f0-9-]{36}|legacy_[0-9]+)\/(revoke|ratify)$/.exec(sub);
+        if(sub==="/invites"||invitationDecision){
+          if(!isOwner||auth.viaToken)return text("A signed-in repository owner must manage invitations",403);
+          if((sub==="/invites"?!["GET","POST"].includes(method):method!=="POST"))return text("Method not allowed",405);
+          const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||current.viaToken)return text("Invitation owner session changed",403);
+          const profile=await account.getProfile(),actor={userId,displayName:clean(profile.displayName,120)||"Repository owner",viaToken:false};
+          try{
+            if(sub==="/invites"&&method==="GET"){
+              if([...url.searchParams.keys()].some(key=>key!=="cursor")||url.searchParams.getAll("cursor").length>1||url.searchParams.has("cursor")&&!/^[0-9]{1,16}$/.test(url.searchParams.get("cursor")!))return text("Invalid invitation cursor",400);
+              return repositoryReadJson(await project.listRepositoryInvitations(actor,undefined,current.expiresAt,{limit:20,...(url.searchParams.has("cursor")?{cursor:url.searchParams.get("cursor")!}:{})}));
+            }
+            if([...url.searchParams.keys()].length)return text("Invalid invitation query",400);
+            if(sub==="/invites"){
+              const parsed=z.object({requestId:z.uuid(),expiresInSeconds:z.literal(604800)}).strict().safeParse(await body<unknown>());if(!parsed.success)return text("Confirm the original invitation request and expiry",400);
+              const saved=await project.createRepositoryInvitation(parsed.data.requestId,actor,undefined,current.expiresAt);
+              return repositoryReadJson({invitation:saved.invitation,requestId:parsed.data.requestId,url:`${url.origin}/#/join/${projectId}/${saved.token}`});
+            }
+            if(invitationDecision![2]==="ratify"){
+              const parsed=z.object({requestId:z.uuid(),expectedExpiresAt:z.number().int().nonnegative().safe(),expectedOriginalIssuerId:z.string().min(1).max(256),confirmCurrentRepository:z.literal(true)}).strict().safeParse(await body<unknown>());if(!parsed.success)return text("Confirm the original issuer, expiry and current repository",400);
+              const invitation=await project.ratifyLegacyInvitation(invitationDecision![1]!,parsed.data.requestId,actor,{expiresAt:parsed.data.expectedExpiresAt,issuerId:parsed.data.expectedOriginalIssuerId},undefined,current.expiresAt);
+              return repositoryReadJson(invitation);
+            }
+            const parsed=z.object({requestId:z.uuid(),expectedStatus:z.enum(["available","legacy_unverified"]),confirm:z.literal(true)}).strict().safeParse(await body<unknown>());if(!parsed.success)return text("Confirm the exact invitation revocation",400);
+            return repositoryReadJson(await project.revokeRepositoryInvitation(invitationDecision![1]!,parsed.data.requestId,actor,undefined,current.expiresAt,parsed.data.expectedStatus));
+          }catch(error){if(error instanceof RequestBodyError)throw error;return text("Invitation action was not confirmed. Original grants and membership remain preserved; retry the same request.",409);}
         }
+
         const memberRoute = /^\/members\/([\w-]+)$/.exec(sub);
         if (memberRoute && method === "DELETE") {
           if (!isOwner && memberRoute[1] !== userId) return text("Only the owner can remove members", 403);
@@ -2133,35 +2158,25 @@ export default {
           await project.deleteMirror();
           return json({ removed: true });
         }
+        const mirrorOperationRoute=/^\/mirror\/operations(?:\/([a-f0-9-]{36}))?$/.exec(sub);
+        if(mirrorOperationRoute&&method==="GET"){
+          if(!isOwner)return text("Only the owner can inspect mirror operations",403);
+          const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId)return text("Mirror owner changed",403);
+          const actor={userId,displayName:"Repository owner",viaToken:current.viaToken===true},hash=current.viaToken?await gitParentTokenHash(request):undefined;
+          const fields=[...url.searchParams.keys()],id=mirrorOperationRoute[1],rawLimit=url.searchParams.get("limit"),cursor=url.searchParams.get("cursor");if(fields.some(key=>!["limit","cursor"].includes(key))||new Set(fields).size!==fields.length||id&&fields.length||rawLimit!==null&&(!/^[1-9][0-9]?$/.test(rawLimit)||Number(rawLimit)>20)||cursor!==null&&!/^[1-9][0-9]{0,15}$/.test(cursor))return text("Invalid mirror operation inspection",400);
+          try{const result=id?{operation:await project.mirrorOperationStatus(id,actor,hash,current.expiresAt)}:await project.mirrorOperationStatuses(actor,hash,current.expiresAt,{...(rawLimit!==null?{limit:Number(rawLimit)}:{}),...(cursor?{cursor}:{})});const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;if(fresh.id!==userId||await project.roleOf(userId)!=="owner")return text("Mirror inspection access changed",403);return repositoryReadJson(result);}catch{return text("Mirror operation inspection requires current owner access",403);}
+        }
         if (sub === "/mirror/run" && method === "POST") {
-          if (!isOwner) return text("Only the owner can retry mirroring", 403);
-          const cfg = await project.mirrorSecret();
-          if (!cfg) return text("Mirroring is not enabled", 409);
-          const repo = await env.ARTIFACTS.get(state.canonicalRepoName);
-          const remote = String((await repo.info()).remote);
-          const canonicalToken = (await repo.createToken("read", 900)).plaintext;
-          const nativeRunId=`native-${crypto.randomUUID()}`;
-          await admitNativeCompute(env,accountKey,nativeRunId,"native-optional");
-          const sb = env.INTEGRATOR.getByName(nativeRunId);
-          const exec = (cmd: string, e?: Record<string, string>) => sb.exec(["sh", "-c", cmd], { env: e });
-          const cleanup = async () => {
-            try { await sb.destroy(); }
-            catch { await project.logActivity("FlareGit", "container.cleanup_failed", "Mirror retry container did not confirm shutdown; accepted history is preserved").catch(() => console.warn("Container cleanup evidence unavailable")); }
-          };
-          let branch: string;
-          try { branch = (await exec(`git ls-remote --symref ${q(remote)} HEAD`, gitAuthEnv(canonicalToken))).stdout.match(/ref: refs\/heads\/(\S+)\s+HEAD/)?.[1] ?? state.defaultBranch ?? "main"; } catch (error) {
-            await cleanup();
-            throw error;
-          }
-          const commit = state.acceptedState.currentCommit;
-          if(commit===null){await cleanup();return text("No accepted commit is available to mirror",409);}
-          ctx.waitUntil(
-            pushMirror({ exec }, { canonicalRemote: remote, canonicalToken, target: cfg.target, githubToken: cfg.token, branch, commit })
-              .then((r) => project.recordMirrorRun(commit, r.status, r.detail))
-              .catch(() => project.recordMirrorRun(commit, "error", "Mirror run failed to start"))
-              .finally(cleanup)
-          );
-          return json({ queued: true }, 202);
+          if(!isOwner)return text("Only the owner can run mirroring",403);
+          const input=await body<{requestId?:unknown;operationId?:unknown;expectedTarget?:unknown}>(),uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+          if(Object.keys(input).some(key=>!["requestId","operationId","expectedTarget"].includes(key))||Boolean(input.requestId)===Boolean(input.operationId)||input.requestId!==undefined&&(typeof input.requestId!=="string"||!uuid.test(input.requestId))||input.operationId!==undefined&&(typeof input.operationId!=="string"||!uuid.test(input.operationId)||input.expectedTarget!==undefined))return text("A stable mirror request or recorded operation UUID is required",400);
+          let current=auth,actor={userId,displayName:"Repository owner",viaToken:auth.viaToken===true},hash=auth.viaToken?await gitParentTokenHash(request):undefined;
+          const fresh=async()=>{const value=await authenticate(request,env);if(value instanceof Response||value.id!==userId||await project.roleOf(userId)!=="owner")throw Error("Mirror owner authentication changed");current=value;actor={userId,displayName:"Repository owner",viaToken:value.viaToken===true};hash=value.viaToken?await gitParentTokenHash(request):undefined;};
+          try{await fresh();let saved;if(typeof input.operationId==="string")saved=await project.mirrorExecutionRecord(input.operationId,actor,hash,current.expiresAt);else{if(typeof input.expectedTarget!=="string"||validateMirrorTarget(input.expectedTarget)!==input.expectedTarget)return text("The exact selected GitHub target is required",400);if(typeof input.requestId!=="string")return text("A stable mirror request UUID is required",400);saved=await project.prepareMirrorExecutionRequest(input.requestId,actor,hash,current.expiresAt,input.expectedTarget);if(saved.scope.target!==input.expectedTarget)return text("Mirror target changed before the request; no export was started",409);}
+            const id=saved.scope.id,authorize=async(mode:"dispatch"|"reconcile")=>{await fresh();await project.authorizeMirrorExecution(id,actor,hash,current.expiresAt,mode);},fund=async()=>{const result=await globalOf(env).reserveCoreGitOperation(`mirror-sdk-${crypto.randomUUID()}`,accountKey,{accountUsdMicros:configuredGitCap(env.CORE_GIT_ACCOUNT_MONTHLY_USD_MICROS),globalUsdMicros:configuredGitCap(env.CORE_GIT_GLOBAL_MONTHLY_USD_MICROS)});if(!result.allowed)throw Error("Mirror read or cleanup funding unavailable");};
+            const result=await runMirrorExecution(env,saved.scope,{authorize,fund,recordCredential:(token,expiry,scope)=>project.recordMirrorExecutionCredential(id,token,expiry,scope),admit:async()=>{await fresh();await project.admitMirrorExecution(id,actor,hash,current.expiresAt);},access:async(mode)=>{await fresh();return project.mirrorExecutionAccess(id,actor,hash,current.expiresAt,mode);},assertReadAccess:async(digest)=>{await fresh();await project.assertMirrorReadAccess(id,digest,actor,hash,current.expiresAt);},journal:{get:async()=>{await fresh();return project.mirrorExecutionRecord(id,actor,hash,current.expiresAt);},beginIssue:async()=>{await fresh();return project.beginMirrorExecutionIssue(id,actor,hash,current.expiresAt);},recordCredential:(token,expiry,scope)=>project.recordMirrorExecutionCredential(id,token,expiry,scope),beginNative:async()=>{await fresh();return project.beginMirrorExecutionNative(id,actor,hash,current.expiresAt);},beginPush:async()=>{await fresh();return project.beginMirrorExecutionPush(id,actor,hash,current.expiresAt);},observed:async(value)=>{await fresh();return project.observeMirrorExecution(id,value,actor,hash,current.expiresAt);},credentialRevoked:token=>project.confirmMirrorExecutionCredentialRevoked(id,token),nativeStopped:()=>project.confirmMirrorExecutionStopped(id)}});
+            await fresh();const operation=await project.mirrorOperationStatus(id,actor,hash,current.expiresAt);await fresh();return repositoryReadJson({status:result.status,operation},result.status==="complete"?200:202);
+          }catch{return text("Mirror execution remains unconfirmed; inspect its saved operation before retrying the same request",409);}
         }
 
         if (sub === "/webhooks" && method === "GET") {

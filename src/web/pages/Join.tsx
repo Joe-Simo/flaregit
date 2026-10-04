@@ -1,41 +1,9 @@
-import React, { useCallback, useEffect, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { apiJson } from "../api";
-import { navigate } from "../router";
-
-export function Join({ projectId, token }: { projectId: string; token: string }) {
-  const [error, setError] = useState<string | null>(null);
-  const [joining, setJoining] = useState(true);
-
-  const join = useCallback(async () => {
-    setJoining(true);
-    setError(null);
-    try {
-      const r = await apiJson<{ id: string }>("/join", { method: "POST", json: { projectId, token } });
-      navigate(`/p/${r.id}`);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not join the repository");
-      setJoining(false);
-    }
-  }, [projectId, token]);
-  useEffect(() => {
-    void join();
-  }, [join]);
-
-  return (
-    <div className="min-h-[50vh] flex flex-col items-center justify-center gap-3 text-sm px-4 text-center">
-      <h1 className="text-lg font-semibold">Join repository</h1>
-      {error ? (
-        <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive max-w-md break-words space-y-2">
-          <p>{error}</p>
-          <div className="flex flex-wrap justify-center gap-2">
-            <Button size="sm" variant="outline" disabled={joining} onClick={() => void join()}>Try again</Button>
-            <Button size="sm" variant="ghost" onClick={() => navigate("/")}>Go to your repositories</Button>
-          </div>
-        </div>
-      ) : (
-        <p role="status" className="text-muted-foreground">Joining repository…</p>
-      )}
-    </div>
-  );
+import {useEffect,useRef,useState} from 'react';
+import {z} from 'zod';import {Button} from '@/components/ui/button';import {apiJson,apiSessionIdentity} from '../api';import {invitationRequestId} from '../invitations';import {navigate} from '../router';
+const receiptSchema=z.object({id:z.string(),requestId:z.uuid(),joined:z.literal(true),invitationId:z.string(),role:z.enum(['owner','member']),projection:z.enum(['pending','confirmed']),legacyRecovery:z.literal(true).optional()}).strict();
+export function Join({projectId,token}:{projectId:string;token:string}){
+ const [error,setError]=useState(''),[busy,setBusy]=useState(false),[pending,setPending]=useState(false),[receipt,setReceipt]=useState<z.infer<typeof receiptSchema>|null>(null);const epoch=useRef(0),lock=useRef(false),controller=useRef(new AbortController());const session=apiSessionIdentity();
+ useEffect(()=>{epoch.current++;controller.current.abort();controller.current=new AbortController();lock.current=false;setBusy(false);setError('');setReceipt(null);setPending(false);if(!session)return;const current=epoch.current;void crypto.subtle.digest('SHA-256',new TextEncoder().encode(token)).then(hash=>{if(current!==epoch.current)return;const fingerprint=[...new Uint8Array(hash)].map(value=>value.toString(16).padStart(2,'0')).join('');setPending(!!localStorage.getItem('flaregit-invitation-intent:'+session+':'+projectId+':join:'+fingerprint));}).catch(()=>{if(current===epoch.current)setError('Saved join recovery could not be read. Check browser storage before continuing.');});return()=>{epoch.current++;controller.current.abort();};},[projectId,token,session]);
+ async function join(){if(lock.current||!session)return;lock.current=true;setBusy(true);setError('');const current=epoch.current;try{const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(token)),fingerprint=[...new Uint8Array(hash)].map(value=>value.toString(16).padStart(2,'0')).join(''),requestId=current===epoch.current?invitationRequestId(localStorage,session+':'+projectId,'join:'+fingerprint):null;if(!requestId)return;setPending(true);const saved=receiptSchema.parse(await apiJson<unknown>('/join',{method:'POST',json:{projectId,token,requestId},signal:AbortSignal.any([controller.current.signal,AbortSignal.timeout(30000)])}));if(current!==epoch.current)return;if(saved.id!==projectId||saved.requestId!==requestId)throw Error('Join receipt scope differs');setReceipt(saved);if(saved.projection==='confirmed')navigate('/p/'+saved.id);}catch{if(current===epoch.current)setError('Joining was not confirmed. Recover the same request; an old link cannot restore removed membership.');}finally{if(current===epoch.current){lock.current=false;setBusy(false);}}}
+ return <div className="min-h-[50vh] flex flex-col items-center justify-center gap-4 text-sm px-4 text-center"><h1 className="text-lg font-semibold">Join repository</h1>{error&&<p role="alert" className="text-destructive max-w-md">{error}</p>}{receipt?.projection==='pending'?<><p role="status" className="max-w-md">Repository access is confirmed as {receipt.role}. Your repository list is still being updated.</p><Button onClick={()=>navigate('/p/'+receipt.id)}>Open repository</Button><Button variant="outline" disabled={busy} onClick={()=>void join()}>Recover repository list</Button></>:<><p className="max-w-md text-muted-foreground">Join this repository as a collaborator. The invitation can be used by one signed-in person.</p><Button disabled={busy||!session} onClick={()=>void join()}>{busy?'Confirming repository access…':pending?'Recover join request':'Join repository'}</Button></>}<Button variant="ghost" disabled={busy} onClick={()=>navigate('/')}>Go to your repositories</Button></div>;
 }

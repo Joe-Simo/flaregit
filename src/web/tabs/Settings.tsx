@@ -1,8 +1,9 @@
+import {InviteManagement} from "../components/InviteManagement";
 import {GitCredentialRevocation} from "../components/GitCredentialRevocation";
 import { StorageReconciliation } from "../components/StorageReconciliation";
 import {PrivateGitRecovery} from "../components/PrivateGitRecovery";
 import React, { lazy, Suspense, useCallback, useEffect, useState } from "react";
-import { Copy, Trash2 } from "lucide-react";
+import { Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,7 +30,7 @@ const errText = (e: unknown, fallback: string) => (e instanceof Error ? e.messag
 
 interface Meta { id: string; role: "owner" | "member"; kind: string; name: string; source: string | null; verification: Record<string, unknown>; protectedPaths: string[]; visibility?: "private" | "public"; moderation?: { suppressed: boolean; reason: string; reportId: string; version: number } }
 interface Member { user_id: string; role: string; label: string | null; added_at: string }
-type Busy = null | "save" | "invite" | "delete" | `remove:${string}`;
+type Busy = null | "save" | "delete" | `remove:${string}`;
 
 export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }) {
   const isOwner = meta.role === "owner";
@@ -42,8 +43,6 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
   const [paths, setPaths] = useState(meta.protectedPaths.join("\n"));
   const [members, setMembers] = useState<Member[] | null>(null);
   const [membersError, setMembersError] = useState<string | null>(null);
-  const [invite, setInvite] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmName, setConfirmName] = useState("");
@@ -146,27 +145,11 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
               ))}
             </div>
           )}
-          {isOwner && (
-            <>
-              <Button variant="outline" disabled={busy !== null} onClick={() => guard("invite", async () => { const r = await apiJson<{ url: string }>(`/p/${meta.id}/invites`, { method: "POST" }); setInvite(r.url); setCopied(false); })}>
-                {busy === "invite" ? "Creating…" : "Create invite link"}
-              </Button>
-              {invite && (
-                <div className="flex gap-2 items-center">
-                  <label className="sr-only" htmlFor="invite-link">Invite link</label>
-                  <input id="invite-link" readOnly className={field} value={invite} onFocus={(e) => e.currentTarget.select()} />
-                  <Button variant="outline" size="icon" aria-label="Copy invite link" onClick={() => {
-                    navigator.clipboard.writeText(invite).then(() => setCopied(true), () => setError("Could not copy to the clipboard. Select the link and copy it manually."));
-                  }}><Copy className="h-4 w-4" /></Button>
-                </div>
-              )}
-              {copied && <p role="status" className="text-xs text-emerald-300">Invite link copied.</p>}
-              {invite && <p className="text-xs text-muted-foreground">Single use, valid for 7 days. Whoever signs in with it becomes a collaborator.</p>}
-            </>
-          )}
+
         </CardContent>
       </Card>
 
+      {isOwner && <InviteManagement key={`invitations:${meta.id}`} projectId={meta.id} isOwner/>}
       {isOwner && meta.moderation?.suppressed && <Card><CardHeader className="pb-2"><CardTitle className="text-sm">Public repository unavailable</CardTitle></CardHeader><CardContent className="space-y-2 text-sm"><p className="whitespace-pre-wrap break-words">{meta.moderation.reason}</p><p className="text-xs text-muted-foreground break-all">Report {meta.moderation.reportId}</p><p className="text-xs text-muted-foreground">Private Git, reviews, and collaborator access remain available.</p><a className="inline-block underline underline-offset-4" href={`/#/report?signin=1&target=${encodeURIComponent(`/#/public/${meta.id}`)}`}>Appeal this decision</a></CardContent></Card>}
       {isOwner && <VisibilityCard key={`visibility:${meta.id}`} projectId={meta.id} visibility={meta.visibility ?? "private"} publicationBlocked={meta.moderation?.suppressed} reload={reload} />}
       {isOwner && <PublicCommunityCard key={`community:${meta.id}`} projectId={meta.id} isPublic={meta.visibility === "public"} publicationBlocked={meta.moderation?.suppressed} />}

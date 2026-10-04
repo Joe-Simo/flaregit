@@ -4,6 +4,7 @@ import { tagCreationSchema, type TagCreationIdentity, type TagGitObservation,tag
 export interface TagCreationOperation extends TagCreationIdentity {
   phase: "prepared" | "unknown" | "confirmed" | "refused";
   native?:TagNativeOwnership&{stopped:boolean};
+  priorNatives?:Array<TagNativeOwnership&{stopped:true;resumeId:string}>;
   createdAt: number;
   reason?: "existing_ref" | "different_ref" | "owner_abandoned_prepared";
   observation?: TagGitObservation;
@@ -55,14 +56,15 @@ export class TagCreationOperations {
   }
   claimNative(identity:TagCreationIdentity,input:TagNativeOwnership,validate:()=>void):boolean {
     const ownership=tagNativeOwnershipSchema.parse(input);let claimed=false;
-    this.update(identity,validate,operation=>{if(operation.phase!=="prepared")throw Error("Tag native operation is unavailable");if(operation.native){if(operation.native.attemptId!==ownership.attemptId||operation.native.nativeId!==ownership.nativeId)throw Error("Tag native ownership differs");return;}operation.native={...ownership,stopped:false};claimed=true;});return claimed;
+    this.update(identity,validate,operation=>{if(operation.phase!=="prepared")throw Error("Tag native operation is unavailable");if(operation.native){if(operation.native.attemptId!==ownership.attemptId||operation.native.nativeId!==ownership.nativeId||operation.native.nativeName!==ownership.nativeName)throw Error("Tag native ownership differs");return;}operation.native={...ownership,stopped:false};claimed=true;});return claimed;
   }
+  resumeNative(identity:TagCreationIdentity,resumeId:string,input:TagNativeOwnership,validate:()=>void):boolean {z.uuid().parse(resumeId);const ownership=tagNativeOwnershipSchema.parse(input);let claimed=false;this.update(identity,validate,operation=>{if(operation.phase!=="prepared"||!operation.native?.stopped)throw Error("Only positively stopped undispatched tag work can resume");if(operation.priorNatives?.some(native=>native.resumeId===resumeId))return;if(operation.native.nativeId===ownership.nativeId||operation.native.attemptId===ownership.attemptId)throw Error("A fresh native tag resume identity is required");if((operation.priorNatives?.length??0)>=10)throw Error("Tag native resume capacity reached");operation.priorNatives=[...(operation.priorNatives??[]),{...operation.native,stopped:true,resumeId}];operation.native={...ownership,stopped:false};claimed=true;});return claimed;}
   confirmNativeStopped(identity:TagCreationIdentity,input:TagNativeOwnership,proof:{name:string;sealed:true;stopped:true}):void {
-    const ownership=tagNativeOwnershipSchema.parse(input);this.update(identity,()=>{},operation=>{if(!operation.native||operation.native.attemptId!==ownership.attemptId||operation.native.nativeId!==ownership.nativeId||proof.name!==`tag-${ownership.nativeId}`||proof.sealed!==true||proof.stopped!==true)throw Error("Tag native closure proof differs");operation.native.stopped=true;});
+    const ownership=tagNativeOwnershipSchema.parse(input);this.update(identity,()=>{},operation=>{if(!operation.native||operation.native.attemptId!==ownership.attemptId||operation.native.nativeId!==ownership.nativeId||operation.native.nativeName!==ownership.nativeName||proof.name!==(ownership.nativeName??`tag-${ownership.nativeId}`)||proof.sealed!==true||proof.stopped!==true)throw Error("Tag native closure proof differs");operation.native.stopped=true;});
   }
   markDispatch(identity: TagCreationIdentity, input:TagNativeOwnership, validate: () => void):boolean {
     const ownership=tagNativeOwnershipSchema.parse(input);let dispatched=false;
-    this.update(identity,validate,operation=>{if(!operation.native||operation.native.attemptId!==ownership.attemptId||operation.native.nativeId!==ownership.nativeId)throw Error("Exact tag native ownership required");if(operation.phase==="unknown"||operation.native.stopped)return;if(operation.phase!=="prepared")throw Error("Tag operation is terminal");operation.phase="unknown";dispatched=true;});return dispatched;
+    this.update(identity,validate,operation=>{if(!operation.native||operation.native.attemptId!==ownership.attemptId||operation.native.nativeId!==ownership.nativeId||operation.native.nativeName!==ownership.nativeName)throw Error("Exact tag native ownership required");if(operation.phase==="unknown"||operation.native.stopped)return;if(operation.phase!=="prepared")throw Error("Tag operation is terminal");operation.phase="unknown";dispatched=true;});return dispatched;
   }
   observe(identity: TagCreationIdentity, input: TagGitObservation | null, validate: () => void): TagCreationOperation {
     const observation = input === null ? null : observationSchema.parse(input);

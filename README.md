@@ -1,5 +1,8 @@
 # FlareGit
 
+Delivery status, remaining work, and acceptance gates are tracked in the
+[completion roadmap](docs/ROADMAP.md).
+
 A Git collaboration platform on Cloudflare Workers and Artifacts for humans and AI agents working at the same time. Each change lives in its own Artifacts fork and is pushed with ordinary `git`. FlareGit composes ready changes onto the accepted head, repairs what it safely can, verifies the exact candidate commit, waits for a human to accept that commit, and lands only that commit with a compare-and-swap ref update.
 
 The current collaboration and interface improvements are on [`codex/docs-community-and-delivery`](https://github.com/Joe-Simo/flaregit/tree/codex/docs-community-and-delivery), under review in [PR #2](https://github.com/Joe-Simo/flaregit/pull/2). To reproduce this branch before the PR is merged:

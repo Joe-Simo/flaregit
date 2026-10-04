@@ -7,11 +7,11 @@ import type { BranchGitExecutor } from "./branch-git";
 const sha = z.string().regex(/^[a-f0-9]{40}$/).refine(value => !/^0{40}$/.test(value));
 export const tagCreationSchema = z.object({
   operationId: z.uuid(), projectId: z.string().min(1).max(128), incarnation: z.uuid(), canonicalRepoName: z.string().min(1).max(200), actorId: z.string().min(1).max(256), accountKey: z.string().min(1).max(200),
-  tag: z.string().refine(value => isSafeRef(value) && !value.startsWith("refs/") && value !== "HEAD"),
+  tag: z.string().max(200).refine(value => isSafeRef(value) && !value.startsWith("refs/") && value !== "HEAD"),
   sourceCommit: sha, sourceTree: sha, acceptedCommit: sha,
 }).strict().refine(value => value.sourceCommit === value.acceptedCommit, "Exact accepted commit required");
 export type TagCreationIdentity = z.infer<typeof tagCreationSchema>;
-export const tagNativeOwnershipSchema=z.object({attemptId:z.uuid(),nativeId:z.uuid()}).strict();
+export const tagNativeOwnershipSchema=z.object({attemptId:z.uuid(),nativeId:z.uuid(),nativeName:z.string().optional()}).strict().refine(value=>value.nativeName===undefined||value.nativeName===`native-${value.nativeId}`||value.nativeName===`tag-${value.nativeId}`,"Exact tag native name required");
 export type TagNativeOwnership=z.infer<typeof tagNativeOwnershipSchema>;
 export interface TagGitObservation { object: string; commit?: string; tree?: string; type?: "commit" | "tag" }
 export type TagGitResult = { status: "confirmed" | "existing" | "different" | "unknown"; observation?: TagGitObservation };
@@ -72,4 +72,13 @@ export async function createNativeTag(executor: BranchGitExecutor, options: { id
   if (!observed) return { status: "unknown" };
   const observation = await inspect(observed);
   return { status: observation.object === identity.sourceCommit && observation.commit === identity.sourceCommit && observation.tree === identity.sourceTree && observation.type === "commit" ? "confirmed" : "different", observation };
+}
+
+export async function inspectNativeTags(executor:BranchGitExecutor,remote:string,token:string,directory:string){
+ validateRecoveryRemote(remote);if(!directory.startsWith('/')||directory==='/'||/[\x00-\x1f\x7f]/.test(directory))throw Error('Owned tag inventory workspace required');
+ const run=async(command:string)=>{await executor.beforeCommand('before');const result=await executor.exec(command,gitAuthEnv(token));await executor.beforeCommand('after');if(!result.success)throw Error('Native tag inventory unavailable');return result.stdout.trim();};
+ const advertised=await run(`git ls-remote --refs ${q(remote)} ${q('refs/tags/*')}`);if(new TextEncoder().encode(advertised).byteLength>128000)throw Error('Tag inventory advertisement exceeds supported bound');const lines=advertised.split('\n').filter(Boolean);if(lines.length>500)throw Error('Tag inventory exceeds supported ref bound');const seen=new Set<string>();const refs=lines.map(line=>{const[object,ref,extra]=line.split('\t');if(!object||!ref||extra!==undefined||!sha.safeParse(object).success||!ref.startsWith('refs/tags/')||!isSafeRef(ref)||seen.has(ref))throw Error('Tag advertisement identity is invalid');seen.add(ref);return{object,ref};});
+ await run(`git init --quiet --bare ${q(directory)}`);const tags:Array<{name:string;ref:string;object:string;objectType:'commit'|'tag'|'tree'|'blob';peeledCommit:string|null}>=[];
+ for(const ref of refs.slice(0,20)){await run(`git -C ${q(directory)} fetch --quiet --no-tags ${q(remote)} ${q(ref.object)}`);const type=await run(`git -C ${q(directory)} cat-file -t ${q(ref.object)}`);if(!['commit','tag','tree','blob'].includes(type))throw Error('Tag object type unavailable');await executor.beforeCommand('before');const peeled=await executor.exec(`git -C ${q(directory)} rev-parse --verify ${q(`${ref.object}^{commit}`)}`,gitAuthEnv(token));await executor.beforeCommand('after');const commit=peeled.success?peeled.stdout.trim():null;if(commit!==null&&!sha.safeParse(commit).success)throw Error('Tag peeled commit differs');tags.push({name:ref.ref.slice(10),ref:ref.ref,object:ref.object,objectType:type as 'commit'|'tag'|'tree'|'blob',peeledCommit:commit});}
+ return{tags,truncated:refs.length>20,totalAdvertised:refs.length};
 }

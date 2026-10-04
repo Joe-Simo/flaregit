@@ -1,3 +1,4 @@
+import {runWorkflowMirrorFollowup} from "./workflow-mirror";
 import type { NativeComputeKind } from "./managed-spend-ledger.js";
 import {retainCandidateGitPin} from "./candidate-git-pin";
 import {confirmCompositionBranch} from "./composition-branch";
@@ -5,13 +6,12 @@ import { retainGitInput, retainUnbornGitInput, retainedGitInputRef } from "./ret
 import type { RetainedInput } from "./retained-inputs.js";
 import { validateRecoveryRemote } from "./private-recovery-bundle.js";
 import { admitGitOperation } from "./core-git-budget.js";
-import {rebaseAcceptedFollowup,mirrorAcceptedFollowup} from "./accepted-followups.js";
+import {rebaseAcceptedFollowup} from "./accepted-followups.js";
 import { assertPreviewStorageAdmission, PreviewStorageAdmissionError } from "./preview-storage.js";
 import { inspectPreviewStorageManifest, publishPreviewStorageManifest } from "./preview-storage-upload.js";
 import { admitNativeCompute } from "./native-compute.js";
 import { buildPrefix } from "./preview-access.js";
 import { publicationInHistory } from "./publication.js";
-import { pushMirror } from "./mirror.js";
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { WorkersAIClient, DEFAULT_CODE_MODEL } from "../ai/workers-ai.js";
 import { buildRepairPrompt, parseRepairResponse, MAX_REPAIR_ROUNDS } from "../core/pipeline/repair.js";
@@ -182,27 +182,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       return{status:"not_requested" as const,reason:"target_mapping_required" as const,targetRef:candidate.acceptedTarget!.ref};
     }):undefined;
     // Mirror delivery is optional and has an existing owner-controlled retry route.
-    const mirrorFollowup=await step.do("mirror-to-github", {retries:{limit:1,delay:"5 seconds"}}, async () => {
-      if(candidate.acceptedTarget){
-        let configuration:Awaited<ReturnType<Stub["getMirror"]>>;
-        try{configuration=await stub.getMirror();}catch{return{status:"deferred" as const,reason:"target_mapping_unconfirmed" as const,targetRef:candidate.acceptedTarget.ref};}
-        if(!configuration?.target||!configuration.enabled)return{skipped:true as const};
-        await stub.logActivity("FlareGit","mirror.target_mapping_required",`Accepted commit ${integrated.commit} on ${candidate.acceptedTarget.ref} is durable. GitHub delivery was deferred until the owner configures an explicit target mapping.`).catch(()=>console.warn("Target mirror boundary activity delivery was not confirmed"));
-        return{status:"deferred" as const,reason:"target_mapping_required" as const,targetRef:candidate.acceptedTarget.ref};
-      }
-      return mirrorAcceptedFollowup(stub,integrated.commit,async()=>{
-      let mirror:Awaited<ReturnType<FlareGitIntegrationWorkflow["sandbox"]>>|undefined;
-      try {
-        const cfg=await stub.mirrorSecret();
-        if(!cfg)return{skipped:true as const};
-        mirror=await this.sandbox(`mirror-${candidate.id}`,"native-optional");
-        const input=await stub.prepareRetainedInput(candidate.participatingTaskIds[0]!,event.instanceId,candidate.id,crypto.randomUUID(),true);
-        const canonical=await this.retainedRemote(stub,input,"canonical","read");
-        try { await this.fundedRetainedCommand(input,stub);return await pushMirror({exec:mirror.exec},{target:cfg.target,githubToken:cfg.token,canonicalRemote:canonical.remote,canonicalToken:canonical.token,branch:integrated.branch,commit:integrated.commit}); }
-        finally { await canonical.close(); }
-      } finally {if(mirror)await mirror.destroy();}
-      });
-    });
+    const mirrorFollowup=await step.do("mirror-to-github", {retries:{limit:1,delay:"5 seconds"}}, ()=>runWorkflowMirrorFollowup(this.env,stub,event.instanceId,prepared.journal!.id,candidate.acceptedTarget?.ref,integrated.commit));
     return { status: "accepted" as const, commit: integrated.commit, evidenceId: integrated.evidenceId,...(candidate.acceptedTarget?{targetRef:candidate.acceptedTarget.ref,followups:{mirror:mirrorFollowup,deployment:targetDeploymentFollowup}}:{}) };
   }
 
