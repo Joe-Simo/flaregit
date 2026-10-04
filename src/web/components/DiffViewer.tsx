@@ -243,7 +243,7 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented, onReadyCha
                   const path = files[r.fileIndex]!.path;
                   const has = line !== undefined && commented?.has(`${path}:${line}`);
                   return onLineClick && line !== undefined ? (
-                    <button className={`sticky left-0 z-10 bg-background w-9 sm:w-10 shrink-0 text-right pr-2 select-none hover:text-orange-700 dark:hover:text-orange-400 ${has ? "text-orange-700 dark:text-orange-400 font-bold" : "text-muted-foreground"}`} aria-label={`Comment on ${path} line ${line}`} onClick={() => onLineClick(path, line)}>{line}</button>
+                    <button className={`sticky left-0 z-10 bg-background w-9 sm:w-10 shrink-0 text-right pr-2 select-none hover:text-orange-700 dark:hover:text-orange-400 ${has ? "text-orange-700 dark:text-orange-400 font-bold" : "text-muted-foreground"}`} aria-label={`Comment on ${path} ${row.b === undefined ? "base" : "candidate"} line ${line}`} onClick={() => onLineClick(path, line)}>{line}</button>
                   ) : (
                     <span className="sticky left-0 z-10 bg-background w-9 sm:w-10 shrink-0 text-right pr-2 text-muted-foreground select-none">{line ?? ""}</span>
                   );

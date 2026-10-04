@@ -30,7 +30,7 @@
     "POLAR_SERVER": "production",
     "PAID_CHECKOUT_ENABLED": "false",
     "POLAR_PRODUCT_ID": "e0bf2687-739c-4051-91e5-2ab15d24262c",
-    "REPOSITORY_PREVIEW_ORIGINS": "{\"pbd425298ee02\":\"https://repository-flaregit-preview-pbd425298ee02.simo-988.workers.dev\"}",
+    "REPOSITORY_PREVIEW_ORIGINS": "{\"pbd425298ee02\":\"https://repository-flaregit-preview-pbd425298ee02.simo-988.workers.dev\",\"pb0004cda6e6b\":\"https://repository-repository-flaregit-preview-pb0004cda6e6b.simo-988.workers.dev\"}",
     "CLERK_ISSUER": "https://clerk.flaregit.com",
     "CLERK_AUTHORIZED_PARTIES": "https://flaregit.com",
     "CLERK_PUBLISHABLE_KEY": "pk_live_Y2xlcmsuZmxhcmVnaXQuY29tJA"

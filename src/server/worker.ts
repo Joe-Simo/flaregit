@@ -1,3 +1,4 @@
+import {gitCloneCommand,taskGitCommands} from "./git-command-metadata.js";
 import { artifactStorageSlots } from "./storage-allocation.js";
 import {observeRerunInputs} from "./rerun-input-observations.js";
 import {LegacyRerunError} from "./legacy-candidate-rerun.js";
@@ -1182,7 +1183,7 @@ export default {
         if (sub === "/clone" && method === "POST") {
           const remote = gitRemote(url.origin,projectId,null);
           const {token}=await project.mintGitCapability(userId,null,false,await gitParentTokenHash(request));
-          return json({ remote, token, expiresInSeconds: 3600, command: `git -c http.extraHeader="Authorization: Bearer ${token}" clone ${remote}` });
+          return json({ remote, token, expiresInSeconds: 3600, command: gitCloneCommand(remote) });
         }
 
         // ----- changes (tasks) -----
@@ -1203,7 +1204,7 @@ export default {
               const {token}=await project.mintGitCapability(userId,replay.id,true,await gitParentTokenHash(request));
               const current=await project.taskCreationReplay(replay.id,userId,input.data);
               if(!current||current.status==="accepted"||current.status==="cancelled")return text("Saved change state changed during recovery; retry to read its current state",409);
-              return json({task:current.id,remote,branch:current.workspace.branch,token,expiresInSeconds:3600,replayed:true,terminal:false,status:current.status,agentRunId:current.agentRunId??null,commands:[`git -c http.extraHeader="Authorization: Bearer ${token}" clone ${remote} ${current.id} && cd ${current.id}`,`git checkout ${current.workspace.branch} || git checkout -b ${current.workspace.branch} ${current.currentCommit}   # resume the saved commit and branch`]});
+              return json({task:current.id,remote,branch:current.workspace.branch,token,expiresInSeconds:3600,replayed:true,terminal:false,status:current.status,agentRunId:current.agentRunId??null,commands:taskGitCommands({remote,taskId:current.id,branch:current.workspace.branch,commit:current.currentCommit,stacked:!!current.dependsOn,replayed:true})});
             }catch{return text("Saved change was found, but current Git access was not confirmed. No new workspace was allocated.",409);}
           }
           if (input.data.issue !== null && !(await project.getIssue(input.data.issue))) return text("Unknown issue", 400);
@@ -1245,12 +1246,7 @@ export default {
             branch: current.workspace.branch,
             token,
             expiresInSeconds: 3600,
-            commands: [
-              `git -c http.extraHeader="Authorization: Bearer ${token}" clone ${remote} ${b.taskId} && cd ${b.taskId}`,
-              ...(existing.dependsOn ? [`git checkout --detach ${existing.baseCommit}   # stacked: start from the recorded parent checkpoint`] : []),
-              `git checkout -b ${existing.workspace.branch}   # edit, then commit`,
-              `git -c http.extraHeader="Authorization: Bearer ${token}" push origin ${existing.workspace.branch}`,
-            ],
+            commands: taskGitCommands({remote,taskId:b.taskId,branch:existing.workspace.branch,commit:existing.baseCommit,stacked:!!existing.dependsOn,replayed:false}),
           }, 201);
         }
 

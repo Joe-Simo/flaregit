@@ -20,10 +20,11 @@ test("actual task POST replays lost acknowledgments without providers and preser
  try{
   const bootstrap=await call("/fixture/bootstrap");if(!bootstrap.ok)throw new Error(await bootstrap.text());const fixture=await bootstrap.json() as {actor:string;collision:string};
   const [creator,collision,owner]=await Promise.all([session(fixture.actor),session(fixture.collision),session("owner")]);
+  const cloneResponse=await call("/api/p/p123456789abc/clone",creator,{});expect(cloneResponse.status).toBe(200);const clone=await cloneResponse.json() as {remote:string;token:string;expiresInSeconds:number;command:string};expect(clone.token).toMatch(/^fgg_/);expect(clone.expiresInSeconds).toBe(3600);expect(clone.command).toBe(`git clone ${clone.remote}`);expect(clone.command).not.toContain(clone.token);expect(clone.command).not.toMatch(/Authorization|Bearer|extraHeader/);
   const initial=await snapshot();
   const response=await call(route,creator,body);expect(response.status).toBe(200);
-  const replay=await response.json() as {task:string;replayed:boolean;token:string;commands:string[];remote:string;branch:string};
-  expect(replay.replayed).toBe(true);expect(replay.task).toBe("working");expect(replay.token).toMatch(/^fgg_/);expect(replay.remote).toContain("/git/");expect(replay.branch).toBe("task/working");expect(replay.commands.join("\n")).toContain(replay.token);
+  const replay=await response.json() as {task:string;replayed:boolean;token:string;expiresInSeconds:number;commands:string[];remote:string;branch:string};
+  expect(replay.replayed).toBe(true);expect(replay.task).toBe("working");expect(replay.token).toMatch(/^fgg_/);expect(replay.remote).toContain("/git/");expect(replay.branch).toBe("task/working");expect(replay.expiresInSeconds).toBe(3600);expect(replay.commands.join("\n")).not.toContain(replay.token);expect(replay.commands.join("\n")).not.toMatch(/fgg_|Authorization|Bearer|extraHeader/);expect(replay.commands[0]).toBe(`git clone ${replay.remote} working && cd working`);
   const after=await snapshot();const {git_capabilities:initialCapabilities,...initialState}=initial;const {git_capabilities:afterCapabilities,...afterState}=after;
   expect(afterState).toEqual(initialState);expect((afterCapabilities as unknown[]).length).toBe((initialCapabilities as unknown[]).length+1);
   const second=await call(route,creator,{...body,name:"Different display name"});expect(second.status).toBe(200);expect((await second.json() as {token:string}).token).not.toBe(replay.token);

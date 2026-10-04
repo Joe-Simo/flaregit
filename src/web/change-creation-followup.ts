@@ -1,5 +1,5 @@
 import type { TaskStatus } from '@/core/types';
-export interface ChangeCreationResponse { commands: string[]; replayed: boolean; terminal: boolean; status: TaskStatus; agentRunId: string | null }
+export interface ChangeCreationResponse { commands: string[]; token?:string; expiresInSeconds?:number; replayed: boolean; terminal: boolean; status: TaskStatus; agentRunId: string | null }
 const statuses: readonly TaskStatus[] = ['working', 'checkpointed', 'ready', 'integrating', 'verifying', 'accepted', 'needs_decision', 'blocked', 'cancelled'];
 /** An acknowledged replay must never restart a terminal change or an existing run. */
 export function changeCreationFollowup(response: ChangeCreationResponse, useAgent: boolean): 'terminal' | 'existing-agent' | 'start-agent' | 'git' {

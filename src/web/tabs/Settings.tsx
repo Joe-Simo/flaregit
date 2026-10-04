@@ -73,7 +73,7 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
   return (
     <div className="space-y-4 max-w-3xl min-w-0">
       <h2 className="sr-only">Repository settings</h2>
-      <GitCredentialRevocation key={meta.id} projectId={meta.id}/>
+      <GitCredentialRevocation key={`git-credentials:${meta.id}`} projectId={meta.id}/>
       {error && <div role="alert" className={alertCls}>{error}</div>}
       {message && <div role="status" className={okCls}>{message}</div>}
 

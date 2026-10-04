@@ -1,3 +1,4 @@
+import {hasOlderAcceptedBase} from "../change-base-state";
 import {GitCredential} from "../components/GitCredential";
 import {separateGitCommands} from "../git-command-display";
 import React, { useEffect, useRef, useState } from "react";
@@ -122,7 +123,7 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
     }
   }
   const overlaps = [...paths.entries()].filter(([, contributors]) => contributors.length > 1);
-  const stale = active.filter((task) => task.baseCommit !== state.acceptedState.currentCommit && !task.dependsOn);
+  const stale = active.filter((task) => hasOlderAcceptedBase(task,state.acceptedState.currentCommit,state.tasks));
 
 
   const run = async (label: string, fn: () => Promise<void>) => {
@@ -162,11 +163,11 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
           setNotice("Agent run started. Its checkpoints and progress will appear on the change.");
         } catch (cause) {
           if (generation !== lifetime.current) return;
-          setInstructions({ ...separateGitCommands(created.commands), task: taskId });
+          setInstructions({ ...separateGitCommands(created.commands,created.token), task: taskId });
           setError(`Change saved, but the agent could not start: ${cause instanceof Error ? cause.message : "Unknown error"}. Resume from the change below or use its Git commands.`);
         }
       } else {
-        setInstructions({ ...separateGitCommands(created.commands), task: taskId });
+        setInstructions({ ...separateGitCommands(created.commands,created.token), task: taskId });
       }
       setGoal(""); setDependsOn(null); setIssue(null); setRelationships(false);
     });
