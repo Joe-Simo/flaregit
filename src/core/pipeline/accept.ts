@@ -39,6 +39,7 @@ function entry(
   id?: string
 ): PublicationJournalEntry {
   return {
+    ...(opts.candidate.acceptedTarget ? { acceptedTarget: structuredClone(opts.candidate.acceptedTarget) } : {}),
     id: id ?? `jrnl_${crypto.randomUUID().slice(0, 8)}`,
     candidateId: opts.candidate.id,
     candidateCommit: opts.candidate.candidateCommit ?? "",
@@ -67,6 +68,11 @@ export function publishAcceptedCandidate(opts: PublishOptions): PublishResult {
     return { success: false, journalEntry, error: message, staleBase: stale };
   };
 
+  // This compatibility publisher has no target-root authority or reconciliation.
+  // Explicit targets must never silently publish through its default branch.
+  if (candidate.acceptedTarget !== undefined || evidence.acceptedTarget !== undefined) {
+    return abort("Explicit accepted-target publication requires a target-aware publisher. No Git operation was dispatched.");
+  }
   if (!commit) return abort("Candidate has no commit.");
   if (evidence.status !== "passed") return abort("Candidate has not passed protected verification.");
   if (evidence.candidateCommit !== commit) return abort("Invariant violation: verified commit differs from candidate commit.");
