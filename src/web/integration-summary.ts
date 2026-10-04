@@ -1,9 +1,11 @@
+import {preservedCandidateSuccessors} from "./candidate-lineage";
 import type { FlareGitProjectState } from "@/core/types";
 import type { PipelineStage } from "./components/StatusBanner";
 
 export function summarizeIntegration(state: FlareGitProjectState): { stage: PipelineStage; message: string; detail: string } {
   const tasks = Object.values(state.tasks);
-  const candidates = Object.values(state.candidates);
+  const preserved=preservedCandidateSuccessors(state.candidates);
+  const candidates = Object.values(state.candidates).filter(candidate=>!preserved.has(candidate.id));
   if (Object.values(state.decisions).some((d) => d.status === "pending")) {
     return { stage: "decision_needed", message: "Decision needed", detail: "Two requirements contradict each other. The last accepted version stays live until you choose." };
   }

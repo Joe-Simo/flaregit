@@ -3,7 +3,7 @@ import type {Env} from "./env.js";
 import {projectOf,globalOf} from "./projects.js";
 import {admitNativeCompute,NativeComputeAdmissionError} from "./native-compute.js";
 import {admitGitOperation} from "./core-git-budget.js";
-import {verifyRebaseRecovery,RebaseRecoveryError} from "./rebase-recovery.js";
+import {RebaseRecoveryError} from "./rebase-recovery.js";
 import {resumeSavedRebaseGit,SavedRebaseGitError} from "./saved-rebase-git.js";
 import {validateRecoveryRemote} from "./private-recovery-bundle.js";
 export interface RebaseResumeParams{projectId:string;attemptId:string;generation:number}
@@ -20,7 +20,7 @@ export class FlareGitRebaseResumeWorkflow extends WorkflowEntrypoint<Env,RebaseR
      if(initial.receipt)return initial.receipt;
      await authorize();
      if(initial.application.input.canonicalRepoName===initial.application.input.workspaceRepoName)throw new RebaseRecoveryError("Workspace must be separate from the canonical repository",409);
-     const proof=await verifyRebaseRecovery(this.env.ARTIFACTS,initial.application,{authorize,reserveGroup:async()=>{await fund();return{allowed:true,existing:false,basis:"conservative_operation_envelope"};}});
+     const proof=await project.verifySavedResumeGit(attemptId,generation,event.instanceId);
      const app=initial.application;
      if(proof.workspaceHead===app.commit)return project.finishRebaseResume(attemptId,generation,event.instanceId,proof);
      if(proof.workspaceHead!==app.input.commit)throw new RebaseRecoveryError("Workspace contains newer work; saved recovery did not replace it",409);
@@ -45,7 +45,7 @@ export class FlareGitRebaseResumeWorkflow extends WorkflowEntrypoint<Env,RebaseR
      };
      const canonical=await connection("canonical"),workspace=await connection("workspace");
      await resumeSavedRebaseGit({application:app,directory:`/tmp/flaregit-rebase-resume-${attemptId}`,canonical,workspace,exec:(command,env)=>sandbox.exec(["sh","-c",command],{env,timeoutMs:120_000}),beforeCommand:async phase=>{if(phase==="before")await fund();else await authorize();}});
-     const confirmed=await verifyRebaseRecovery(this.env.ARTIFACTS,app,{authorize,reserveGroup:async()=>{await fund();return{allowed:true,existing:false,basis:"conservative_operation_envelope"};}});
+     const confirmed=await project.verifySavedResumeGit(attemptId,generation,event.instanceId);
      await authorize();return project.finishRebaseResume(attemptId,generation,event.instanceId,confirmed);
     }catch(error){await project.pauseRebaseResume(attemptId,generation,event.instanceId,error instanceof NativeComputeAdmissionError?"funding_refused":error instanceof RebaseRecoveryError||error instanceof SavedRebaseGitError?error.status===429?"funding_refused":error.status===409?"git_state_changed":"transport_unconfirmed":"transport_unconfirmed").catch(()=>undefined);throw new Error("Saved-result recovery was not confirmed; protected history and attempt remain available");}
    });

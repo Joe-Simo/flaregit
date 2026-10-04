@@ -1,3 +1,5 @@
+import {GitCredential} from "../components/GitCredential";
+import {separateGitCommands} from "../git-command-display";
 import React, { useEffect, useRef, useState } from "react";
 import { useAuth } from "@clerk/clerk-react";
 import { Input } from "@/components/ui/input";
@@ -107,7 +109,7 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
-  const [instructions, setInstructions] = useState<{ commands: string[]; task: string } | null>(null);
+  const [instructions, setInstructions] = useState<{ commands: string[]; task: string; token:string|null } | null>(null);
   const [copied, setCopied] = useState(false);
 
   const tasks = Object.values(state.tasks).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -160,11 +162,11 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
           setNotice("Agent run started. Its checkpoints and progress will appear on the change.");
         } catch (cause) {
           if (generation !== lifetime.current) return;
-          setInstructions({ commands: created.commands, task: taskId });
+          setInstructions({ ...separateGitCommands(created.commands), task: taskId });
           setError(`Change saved, but the agent could not start: ${cause instanceof Error ? cause.message : "Unknown error"}. Resume from the change below or use its Git commands.`);
         }
       } else {
-        setInstructions({ commands: created.commands, task: taskId });
+        setInstructions({ ...separateGitCommands(created.commands), task: taskId });
       }
       setGoal(""); setDependsOn(null); setIssue(null); setRelationships(false);
     });
@@ -339,6 +341,7 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
           <DialogDescription>Your credential works only for this change and expires in one hour. Push your commits, then press “Ready”.</DialogDescription>
         </DialogHeader>
         <pre aria-label="Git commands" className="text-xs bg-muted/40 rounded-md p-3 overflow-auto whitespace-pre-wrap break-all">{instructions?.commands.join("\n")}</pre>
+        {instructions?.token&&<GitCredential key={instructions.token} token={instructions.token}/>}
         <div className="flex justify-end gap-2 mt-3">
           <Button
             variant="outline"

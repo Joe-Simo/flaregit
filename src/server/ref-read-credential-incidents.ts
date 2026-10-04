@@ -1,6 +1,6 @@
 import {z} from "zod";
 import {isSafeRef} from "../core/sanitize";
-const contextSchema=z.object({kind:z.enum(["publication","task-ready"]),operationId:z.string().min(1).max(200),projectId:z.string().min(1).max(128),incarnation:z.string().uuid(),repoName:z.string().min(1).max(200),actorId:z.string().min(1).max(256),accountKey:z.string().min(1).max(200),snapshotDigest:z.string().regex(/^[a-f0-9]{64}$/),ref:z.string().refine(value=>value.startsWith("refs/")&&isSafeRef(value))}).strict();
+const contextSchema=z.object({kind:z.enum(["publication","task-ready","rebase-read"]),operationId:z.string().min(1).max(200),projectId:z.string().min(1).max(128),incarnation:z.string().uuid(),repoName:z.string().min(1).max(200),actorId:z.string().min(1).max(256),accountKey:z.string().min(1).max(200),snapshotDigest:z.string().regex(/^[a-f0-9]{64}$/),ref:z.string().refine(value=>value.startsWith("refs/")&&isSafeRef(value))}).strict();
 export type RefReadCredentialContext=z.infer<typeof contextSchema>;
 type Status="issuance_unknown"|"pending"|"revoked"|"expired_unverified";
 type Row={id:string;context:string;repo_name:string;account_key:string;intent_expires_at:number;token:string|null;fingerprint:string|null;expires_at:number|null;status:Status;attempts:number;automatic_sweeps:number};

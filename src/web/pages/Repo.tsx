@@ -1,3 +1,4 @@
+import {GitCredential} from "../components/GitCredential";
 import { StorageReconciliation } from "../components/StorageReconciliation";
 import { repositoryDeletionNotice } from "../repository-deletion-notice";
 import React, { useCallback, useEffect, useRef, useState } from "react";
@@ -44,7 +45,7 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
   const [meta, setMeta] = useState<Meta | null>(null);
   const [state, setState] = useState<State | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [clone, setClone] = useState<{ command: string; remote: string } | null>(null);
+  const [clone, setClone] = useState<{ token:string; remote: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const [stateError, setStateError] = useState<string | null>(null);
   const [cloneError, setCloneError] = useState<string | null>(null);
@@ -100,7 +101,7 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
     setCloning(true);
     setCloneError(null);
     try {
-      const credential = await apiJson<{ command: string; remote: string }>(`/p/${projectId}/clone`, { method: "POST" });
+      const credential = await apiJson<{ token:string; remote: string }>(`/p/${projectId}/clone`, { method: "POST" });
       if (generation === lifetime.current) setClone(credential);
     } catch (e) {
       if (generation === lifetime.current) setCloneError(e instanceof Error ? e.message : "Could not create a clone credential");
@@ -166,9 +167,10 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
           <DialogTitle>Clone with Git</DialogTitle>
           <DialogDescription>Read-only credential, valid for one hour. To contribute, start a change and push to its own copy.</DialogDescription>
         </DialogHeader>
-        <pre aria-label="Clone command" className="text-xs bg-muted/40 rounded-md p-3 overflow-auto whitespace-pre-wrap break-all">{clone?.command}</pre>
+        <pre aria-label="Clone command" className="text-xs bg-muted/40 rounded-md p-3 overflow-auto whitespace-pre-wrap break-all">{clone?`git clone ${clone.remote}`:""}</pre>
+        {clone&&<GitCredential key={clone.token} token={clone.token}/>}
         <div className="flex justify-end gap-2 mt-3">
-          <Button variant="outline" onClick={async () => { await navigator.clipboard.writeText(clone?.command ?? ""); setCopied(true); setTimeout(() => setCopied(false), 1500); }}>
+          <Button variant="outline" onClick={async () => { await navigator.clipboard.writeText(clone?`git clone ${clone.remote}`:""); setCopied(true); setTimeout(() => setCopied(false), 1500); }}>
             <Copy className="h-4 w-4 mr-1.5" aria-hidden="true" /> <span aria-live="polite">{copied ? "Copied" : "Copy"}</span>
           </Button>
           <Button variant="orange" onClick={() => setClone(null)}>Done</Button>

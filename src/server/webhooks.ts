@@ -40,7 +40,7 @@ export async function deliverWebhook(env: Env, projectId: string, deliveryId: st
   // resets the durable row to pending before enqueueing it again.
   if (delivery.status !== "pending") return null;
   if (!webhook.active) {
-    await ledger.markDelivery(deliveryId, { ok: false, error: "Webhook disabled", final: true });
+    await ledger.markDelivery(deliveryId, { generation: delivery.generation, ok: false, error: "Webhook disabled", final: true });
     return null;
   }
 
@@ -67,14 +67,14 @@ export async function deliverWebhook(env: Env, projectId: string, deliveryId: st
     });
     const latencyMs = Date.now() - started;
     if (res.status >= 200 && res.status < 300) {
-      await ledger.markDelivery(deliveryId, { ok: true, status: res.status, latencyMs });
+      await ledger.markDelivery(deliveryId, { generation: delivery.generation, ok: true, status: res.status, latencyMs });
       return null;
     }
-    const attempts = await ledger.markDelivery(deliveryId, { ok: false, status: res.status, error: `Receiver answered ${res.status}`, latencyMs, final: delivery.attempts + 1 >= MAX_ATTEMPTS });
-    return attempts >= MAX_ATTEMPTS ? null : Math.min(30 * 2 ** (attempts - 1), 3600);
+    const attempts = await ledger.markDelivery(deliveryId, { generation: delivery.generation, ok: false, status: res.status, error: `Receiver answered ${res.status}`, latencyMs, final: delivery.attempts + 1 >= MAX_ATTEMPTS });
+    return attempts === null || attempts >= MAX_ATTEMPTS ? null : Math.min(30 * 2 ** (attempts - 1), 3600);
   } catch {
     // Fetch exception text can contain the receiver URL, including query credentials.
-    const attempts = await ledger.markDelivery(deliveryId, { ok: false, error: "Delivery failed or timed out", latencyMs: Date.now() - started, final: delivery.attempts + 1 >= MAX_ATTEMPTS });
-    return attempts >= MAX_ATTEMPTS ? null : Math.min(30 * 2 ** (attempts - 1), 3600);
+    const attempts = await ledger.markDelivery(deliveryId, { generation: delivery.generation, ok: false, error: "Delivery failed or timed out", latencyMs: Date.now() - started, final: delivery.attempts + 1 >= MAX_ATTEMPTS });
+    return attempts === null || attempts >= MAX_ATTEMPTS ? null : Math.min(30 * 2 ** (attempts - 1), 3600);
   }
 }

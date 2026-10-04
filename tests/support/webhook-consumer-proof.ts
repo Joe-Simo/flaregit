@@ -58,7 +58,7 @@ try {
   const ledger = {
     getDelivery: async (id: string) => {
       const row = db.query('SELECT * FROM delivery WHERE id=?').get(id) as { id: string; status: string; attempts: number; payload: string } | null;
-      return row ? { delivery: { ...row, seq: 1 }, webhook: { active: 1, url: 'https://receiver.fixture.example/webhook', secret: signingSecret } } : null;
+      return row ? { delivery: { ...row, seq: 1, generation: 0 }, webhook: { active: 1, url: 'https://receiver.fixture.example/webhook', secret: signingSecret } } : null;
     },
     isBlocked: async () => false,
     markDelivery: async (id: string, result: { ok: boolean; final?: boolean }) => {

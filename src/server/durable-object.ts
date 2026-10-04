@@ -95,7 +95,7 @@ export interface WebhookRow {
 }
 export interface DeliveryRow {
   id: string;
-  /** Per-webhook sequence number; deliveries are sent strictly in this order. */
+  /** Per-webhook sequence number; pending earlier deliveries block later ones. */
   seq: number;
   /** Milliseconds from enqueue to the first attempt. */
   queue_ms: number | null;
@@ -474,8 +474,8 @@ export interface Ledger {
   listWebhooks(): Promise<WebhookRow[]>;
   removeWebhook(id: string): Promise<void>;
   listDeliveries(limit: number): Promise<DeliveryRow[]>;
-  getDelivery(id: string): Promise<{ delivery: DeliveryRow & { payload: string }; webhook: { url: string; secret: string; active: number } } | null>;
-  markDelivery(id: string, result: { ok: boolean; status?: number; error?: string; latencyMs?: number; final?: boolean }): Promise<number>;
+  getDelivery(id: string): Promise<{ delivery: DeliveryRow & { payload: string; generation: number }; webhook: { url: string; secret: string; active: number } } | null>;
+  markDelivery(id: string, result: { generation: number; ok: boolean; status?: number; error?: string; latencyMs?: number; final?: boolean }): Promise<number | null>;
   redeliver(id: string): Promise<boolean>;
   isBlocked(id: string): Promise<boolean>;
   beginRetainedCredential(input:RetainedInput,purpose:"workspace"|"canonical",expiresAt:number,scope:"read"|"write"):Promise<boolean>;
@@ -499,6 +499,7 @@ export interface Ledger {
   rebaseResumeNativeIntent(id:string,generation:number,workflowId:string):Promise<RebaseResumeAttempt>;
   rebaseResumeNativeStopped(id:string,generation:number,nativeRunId:string):Promise<RebaseResumeAttempt>;
   observeRebaseResume(id:string,generation:number,actor?:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<RebaseResumeAttempt>;
+  verifySavedResumeGit(id:string,generation:number,workflowId:string):Promise<RebaseRecoveryProof>;
   finishRebaseResume(id:string,generation:number,workflowId:string,proof:RebaseRecoveryProof):Promise<RebaseRecoveryReceipt>;
   reconcileRebaseApplication(id:string,actor:HumanDecisionActor,expectedVersion:number,idempotencyKey:string,credentialHash?:string,sessionExpiresAt?:number):Promise<OwnerRebaseRecoveryResult>;
   admitIntegrationNativeCommand(workflowId:string,candidateId:string,nativeId:string,commandId:string):Promise<IntegrationNativeRuntimeScope>;
@@ -1428,7 +1429,7 @@ export class RepositoryController extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS invites (token TEXT PRIMARY KEY, created_by TEXT NOT NULL, expires_at INTEGER NOT NULL, used_by TEXT);
       CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, type TEXT NOT NULL, summary TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS webhooks (id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL, events TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS deliveries (id TEXT PRIMARY KEY, seq INTEGER NOT NULL DEFAULT 0, queue_ms INTEGER, webhook_id TEXT NOT NULL, event TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_status INTEGER, last_error TEXT, latency_ms INTEGER, payload TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS deliveries (id TEXT PRIMARY KEY, seq INTEGER NOT NULL DEFAULT 0, queue_ms INTEGER, webhook_id TEXT NOT NULL, event TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0, last_status INTEGER, last_error TEXT, latency_ms INTEGER, payload TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS inbox (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, project_name TEXT NOT NULL, kind TEXT NOT NULL, type TEXT NOT NULL, title TEXT NOT NULL, created_at TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'unread');
       CREATE TABLE IF NOT EXISTS domains (domain TEXT NOT NULL, project_id TEXT NOT NULL, token TEXT NOT NULL, verified_at TEXT, PRIMARY KEY (domain, project_id));
       CREATE TABLE IF NOT EXISTS profile (id INTEGER PRIMARY KEY CHECK (id = 1), doc TEXT NOT NULL);
@@ -1451,7 +1452,7 @@ export class RepositoryController extends DurableObject<Env> {
     `);
     try{this.ctx.storage.sql.exec("ALTER TABLE project_workflows ADD COLUMN native_protocol INTEGER");}catch{/* Existing column. */}
     // Databases created before ordered delivery lack these columns.
-    for (const col of ["seq INTEGER NOT NULL DEFAULT 0", "queue_ms INTEGER"]) {
+    for (const col of ["seq INTEGER NOT NULL DEFAULT 0", "queue_ms INTEGER", "generation INTEGER NOT NULL DEFAULT 0"]) {
       try { this.ctx.storage.sql.exec(`ALTER TABLE deliveries ADD COLUMN ${col}`); } catch { /* already present */ }
     }
     try { this.ctx.storage.sql.exec("ALTER TABLE project_workflows ADD COLUMN actor_id TEXT"); } catch { /* already present */ }
@@ -1662,17 +1663,18 @@ export class RepositoryController extends DurableObject<Env> {
       .toArray() as unknown as DeliveryRow[];
   }
   async getDelivery(id: string) {
-    const d = this.ctx.storage.sql.exec("SELECT * FROM deliveries WHERE id = ?", id).toArray()[0] as unknown as (DeliveryRow & { payload: string }) | undefined;
+    const d = this.ctx.storage.sql.exec("SELECT * FROM deliveries WHERE id = ?", id).toArray()[0] as unknown as (DeliveryRow & { payload: string; generation: number }) | undefined;
     if (!d) return null;
     const w = this.ctx.storage.sql.exec("SELECT url, secret, active FROM webhooks WHERE id = ?", d.webhook_id).toArray()[0] as unknown as { url: string; secret: string; active: number } | undefined;
     return w ? { delivery: d, webhook: w } : null;
   }
-  /** Records an attempt. Returns the attempt count so the consumer can decide whether to back off or give up. */
-  async markDelivery(id: string, r: { ok: boolean; status?: number; error?: string; latencyMs?: number; final?: boolean }): Promise<number> {
-    const row = this.ctx.storage.sql.exec<{ attempts: number; status: string }>("SELECT attempts, status FROM deliveries WHERE id = ?", id).toArray()[0];
+  /** Records this generation only; null suppresses retries from stale or terminal completions. */
+  async markDelivery(id: string, r: { generation: number; ok: boolean; status?: number; error?: string; latencyMs?: number; final?: boolean }): Promise<number | null> {
+    const row = this.ctx.storage.sql.exec<{ attempts: number; status: string; generation: number }>("SELECT attempts, status, generation FROM deliveries WHERE id = ?", id).toArray()[0];
     if (!row) throw new Error("Unknown delivery");
-    // Concurrent queue deliveries can complete out of order. A confirmed success is terminal.
-    if (row.status === "success") return row.attempts;
+    // Replay preserves delivery identity but starts a fresh attempt generation.
+    // Completions from old in-flight requests cannot mutate it or schedule retries.
+    if (!Number.isSafeInteger(r.generation) || r.generation !== row.generation || row.status === "success" || (row.status === "failed" && !r.ok)) return null;
     const attempts = (row?.attempts ?? 0) + 1;
     if (attempts === 1) {
       this.ctx.storage.sql.exec("UPDATE deliveries SET queue_ms = MAX(0, CAST((julianday(?) - julianday(created_at)) * 86400000 AS INTEGER)) WHERE id = ?", new Date().toISOString(), id);
@@ -1907,6 +1909,15 @@ export class RepositoryController extends DurableObject<Env> {
     const agentBusy=Boolean(agent?["claimed","proposed","pushed"].includes(agent.phase):task.status==="working"&&(task.agentWorkflowInstanceId||task.agentRunId));
     return {projectId:state.projectId,incarnation:this.readRepositoryIncarnation(),canonicalRepoName:state.canonicalRepoName,accepted,task:{id:task.id,currentCommit:task.currentCommit,baseCommit:task.baseCommit,workspaceRepoName:task.workspace.repoName,branch:task.workspace.branch,dependsOn:task.dependsOn,status:task.status,busy:agentBusy||Boolean(active&&!["accepted","failed","stale"].includes(active.status))}};
   }
+  protected rebaseRefFetcher():(input:Parameters<typeof fetch>[0],init?:Parameters<typeof fetch>[1])=>Promise<Response>{return fetch;}
+  private async observeRebaseReadRefs(application:RebaseApplication,snapshot:RebaseRecoverySnapshot,actorId:string,accountKey:string,repoName:string,refs:string[],authorize:()=>Promise<void>):Promise<Array<string|null>>{
+    if(![application.input.canonicalRepoName,application.input.workspaceRepoName].includes(repoName)||refs.length<1||refs.length>4)throw new RebaseRecoveryError("Saved read scope unavailable",409);
+    const id=crypto.randomUUID(),ledger=new RefReadCredentialIncidents(this.ctx.storage),digest=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify({application,snapshot,refs})))),value=>value.toString(16).padStart(2,"0")).join("");
+    const fund=async()=>{await authorize();const admission=await globalOf(this.env).reserveCoreGitOperation(`rebase-ref-${crypto.randomUUID()}`,accountKey,this.currentGitBudget());if(!admission.allowed)throw new RebaseRecoveryError("Saved read funding unavailable",429);await authorize();};
+    await authorize();await this.ensureRecoveryAlarm();await fund();using repo=await this.env.ARTIFACTS.get(repoName);await authorize();
+    ledger.begin(id,{kind:"rebase-read",operationId:application.input.id,projectId:application.input.projectId,incarnation:application.input.incarnation,repoName,actorId,accountKey,snapshotDigest:digest,ref:refs[0]!},Date.now()+60000,()=>{const current=new RetainedInputs(this.ctx.storage).application(application.input.id);if(this.repositoryDeleting()||!current||JSON.stringify(current)!==JSON.stringify(application)||JSON.stringify(this.ownerRebaseSnapshot(application))!==JSON.stringify(snapshot))throw new RebaseRecoveryError("Saved read scope changed",409);});
+    let token:string|undefined;try{await fund();const issued=await repo.createToken("read",60);token=issued.plaintext;const expiry=Date.parse(issued.expiresAt);try{await ledger.record(id,repoName,token,expiry);}catch{await ledger.record(id,repoName,token,expiry);}if(issued.scope!=="read"||!Number.isSafeInteger(expiry)||expiry<=Date.now()||expiry>Date.now()+65000)throw new RebaseRecoveryError("Saved read credential unavailable",503);await fund();const remote=String((await repo.info()).remote);await authorize();const heads:Array<string|null>=[];for(const ref of refs)heads.push(await observeExactGitHead({remote,token,ref,authorize,fund,fetcher:this.rebaseRefFetcher()}));return heads;}finally{if(token&&!await this.revokeRefReadCredential(id))throw new RebaseRecoveryError("Saved read cleanup unconfirmed",503);}
+  }
   async ownerRebaseApplications(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<{applications:OwnerRebaseApplication[];truncated:boolean}>{
     const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();
     if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='rebase_applications'").toArray().length)return {applications:[],truncated:false};
@@ -1925,7 +1936,7 @@ export class RepositoryController extends DurableObject<Env> {
     const report=ledger.observe(application,snapshot);if(report.version!==expectedVersion||(!report.canReconcile&&report.status!=="already_applied"))throw new RebaseRecoveryError(report.detail,409,report);
     const authorize=async()=>{assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();if(JSON.stringify(this.ownerRebaseSnapshot(application))!==snapshotKey)throw new RebaseRecoveryError("Contribution changed while checking saved Git state",409);};
     const accountKey=await accountKeyFor(actor.userId);
-    const proof=application.status==="applied"?{workspaceHead:null,original:null,originalBase:null,result:null,targetBase:null}:await verifyRebaseRecovery(this.env.ARTIFACTS,application,{authorize,reserveGroup:operationId=>globalOf(this.env).reserveCoreGitOperation(operationId,accountKey,this.currentGitBudget())});
+    const proof=application.status==="applied"?{workspaceHead:null,original:null,originalBase:null,result:null,targetBase:null}:await verifyRebaseRecovery(this.env.ARTIFACTS,application,{authorize,reserveGroup:operationId=>globalOf(this.env).reserveCoreGitOperation(operationId,accountKey,this.currentGitBudget()),observeRefs:(repoName,refs)=>this.observeRebaseReadRefs(application,snapshot,actor.userId,accountKey,repoName,refs,authorize)});
     await authorize();
     try{return ledger.reconcile({application,snapshot,proof,actor,expectedVersion,idempotencyKey},plan=>{
       assert();if(JSON.stringify(this.ownerRebaseSnapshot(application))!==snapshotKey)throw new RebaseRecoveryError("Contribution changed before recovery",409);
@@ -2025,11 +2036,13 @@ export class RepositoryController extends DurableObject<Env> {
     if(status.status==="complete"||status.status==="errored"||status.status==="terminated"){attempts.terminal(id,generation,status.status==="complete"?"completed":"failed");await this.rebaseResumeNativeStopped(id,generation,attempt.nativeRunId).catch(()=>undefined);return attempts.get(id)!;}
     return attempts.get(id)!;
   }
+  async verifySavedResumeGit(id:string,generation:number,workflowId:string):Promise<RebaseRecoveryProof>{const {attempt,application,validate}=await this.authorizeSavedResume(id,generation,workflowId),accountKey=await accountKeyFor(attempt.actor.userId),snapshot=this.ownerRebaseSnapshot(application);const authorize=async()=>{await this.authorizeSavedResume(id,generation,workflowId);validate();};return verifyRebaseRecovery(this.env.ARTIFACTS,application,{authorize,reserveGroup:operationId=>globalOf(this.env).reserveCoreGitOperation(operationId,accountKey,this.currentGitBudget()),observeRefs:(repoName,refs)=>this.observeRebaseReadRefs(application,snapshot,attempt.actor.userId,accountKey,repoName,refs,authorize)});}
   async finishRebaseResume(id:string,generation:number,workflowId:string,proof:RebaseRecoveryProof):Promise<RebaseRecoveryReceipt>{
     const {attempt,application,validate,receipt}=await this.authorizeSavedResume(id,generation,workflowId);if(receipt)return receipt;
     // Caller proof is never sufficient: independently read all pinned objects and the branch.
     const accountKey=await accountKeyFor(attempt.actor.userId);
-    const verified=await verifyRebaseRecovery(this.env.ARTIFACTS,application,{authorize:async()=>{await this.authorizeSavedResume(id,generation,workflowId);validate();},reserveGroup:operationId=>globalOf(this.env).reserveCoreGitOperation(operationId,accountKey,this.currentGitBudget())});
+    const authorize=async()=>{await this.authorizeSavedResume(id,generation,workflowId);validate();};
+    const verified=await verifyRebaseRecovery(this.env.ARTIFACTS,application,{authorize,reserveGroup:operationId=>globalOf(this.env).reserveCoreGitOperation(operationId,accountKey,this.currentGitBudget()),observeRefs:(repoName,refs)=>this.observeRebaseReadRefs(application,this.ownerRebaseSnapshot(application),attempt.actor.userId,accountKey,repoName,refs,authorize)});
     if(JSON.stringify(verified)!==JSON.stringify(proof))throw new RebaseRecoveryError("Saved Git proof changed before recovery",409);
     validate();const applications=new RetainedInputs(this.ctx.storage),ledger=new RebaseRecoveryLedger(this.ctx.storage);
     try{return ledger.reconcile({application,snapshot:attempt.snapshot,proof:verified,actor:attempt.actor,expectedVersion:attempt.expectedVersion,idempotencyKey:attempt.requestId},plan=>{validate();const task=this.load().tasks[application.input.taskId]!;applications.remoteVerified(application.input.id,application.commit);applications.applyApplication(application.input.id,()=>{task.currentCommit=plan.commit;task.baseCommit=plan.base;if(plan.dependsOn===undefined)delete task.dependsOn;else task.dependsOn=plan.dependsOn;task.updatedAt=new Date().toISOString();this.save();});},validate);}catch(error){this.state=null;throw error;}
@@ -2070,7 +2083,7 @@ export class RepositoryController extends DurableObject<Env> {
   async redeliver(id: string): Promise<boolean> {
     const d = this.ctx.storage.sql.exec<{ id: string }>("SELECT id FROM deliveries WHERE id = ?", id).toArray()[0];
     if (!d) return false;
-    this.ctx.storage.sql.exec("UPDATE deliveries SET status = 'pending', attempts = 0, last_error = NULL, updated_at = ? WHERE id = ?", new Date().toISOString(), id);
+    this.ctx.storage.sql.exec("UPDATE deliveries SET status = 'pending', attempts = 0, generation = generation + 1, last_error = NULL, updated_at = ? WHERE id = ?", new Date().toISOString(), id);
     await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: this.load().projectId, deliveryId: id });
     return true;
   }

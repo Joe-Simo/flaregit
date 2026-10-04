@@ -7,14 +7,14 @@ export async function stableArtifactInventory(binding:InventoryReader):Promise<s
  const pass=async()=>{const names:string[]=[],cursors=new Set<string>();let cursor:string|undefined;for(let page=0;page<500;page++){const result=await binding.list({limit:200,...(cursor?{cursor}:{})});names.push(...result.repos.map(repo=>repo.name));if(!result.cursor){if(new Set(names).size!==names.length)throw new Error("Artifact inventory is unstable");return names.sort();}if(cursors.has(result.cursor))throw new Error("Artifact inventory cursor repeated");cursors.add(result.cursor);cursor=result.cursor;}throw new Error("Artifact inventory exceeds bounded reconciliation");};
  const first=await pass(),second=await pass();if(first.length!==second.length||first.some((name,index)=>name!==second[index]))throw new Error("Artifact inventory changed during reconciliation");return second;
 }
-function slots(value:string|undefined):number|null{if(!value||!/^(0|[1-9][0-9]*)$/.test(value))return null;const result=Number(value);return Number.isSafeInteger(result)?result:null;}
+export function artifactStorageSlots(value:string|undefined):number|null{if(!value||!/^(0|[1-9][0-9]*)$/.test(value))return null;const result=Number(value);return Number.isSafeInteger(result)?result:null;}
 /** Every provider allocation must call this BEFORE allocating. Unknown outcomes
  * retain their reservation and named project manifest for later recovery. */
 export async function reserveArtifactAllocation(env:Env,args:{name:string;projectId:string;userId:string;kind:ArtifactKind}):Promise<void>{
  if(!env.ARTIFACT_STORAGE_NAMESPACE)throw new Error("Storage admission namespace is unconfigured");
  const inventory=await stableArtifactInventory(env.ARTIFACTS);
  const global=globalOf(env);await global.reconcileArtifactInventory(env.ARTIFACT_STORAGE_NAMESPACE,inventory);
- const owner=await accountKeyFor(args.userId),policy={globalSlots:slots(env.ARTIFACT_STORAGE_GLOBAL_SLOTS),accountSlots:slots(env.ARTIFACT_STORAGE_ACCOUNT_SLOTS)};
+ const owner=await accountKeyFor(args.userId),policy={globalSlots:artifactStorageSlots(env.ARTIFACT_STORAGE_GLOBAL_SLOTS),accountSlots:artifactStorageSlots(env.ARTIFACT_STORAGE_ACCOUNT_SLOTS)};
  let result;
  try{result=await global.reserveArtifactStorage(args.name,owner,args.kind,args.projectId,policy);}
  catch(error){if(!inventory.includes(args.name))throw error;await global.claimArtifactExisting(args.name,args.userId,args.kind,args.projectId);result=await global.reserveArtifactStorage(args.name,owner,args.kind,args.projectId,policy);}

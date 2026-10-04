@@ -65,7 +65,7 @@ test('actual owner recovery HTTP verifies saved refs after original actor leaves
     expect(duringExpiry.ok).toBe(false);
     const expiryCalls = await (await call('/fixture/calls')).json() as string[];
     expect(expiryCalls.filter(value => value.startsWith('get:'))).toHaveLength(1);
-    expect(expiryCalls.filter(value => value.startsWith('log:'))).toHaveLength(0);
+    expect(expiryCalls.filter(value => value.startsWith('native:'))).toHaveLength(0);
     const afterExpiry = await (await call('/fixture/snapshot')).json() as {
         application: unknown;
         accepted: unknown;
@@ -99,7 +99,7 @@ test('actual owner recovery HTTP verifies saved refs after original actor leaves
     expect(applied.status).toBe(200);
     const receipt = await applied.json();
     const reads = await (await call('/fixture/calls')).json();
-    expect((reads as string[]).filter(x => x.startsWith('log:'))).toHaveLength(5);
+    expect((reads as string[]).filter(x => x.startsWith('native:'))).toHaveLength(5);
     const changed = await (await call('/fixture/snapshot')).json() as {
         accepted: unknown;
         task: {

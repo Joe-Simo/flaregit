@@ -1,3 +1,4 @@
+import {preservedCandidateSuccessors} from "../candidate-lineage";
 import {checkedScenarioDiscovery,checkedScenarioDispatch,checkedScenarioStatus,scenarioFinished,scenarioPreparationBanner,type SavedScenarioRun} from "../scenario-run-state";
 import {WORKFLOW_STATUS_LABELS,type WorkflowStatus} from "../workflow-run-state";
 import { summarizeIntegration } from "../integration-summary";
@@ -81,9 +82,10 @@ export function IntegrationTab({
   const preparationBanner=summary.stage==="accepted"?scenarioPreparationBanner(scenario,scenarioStatus):null;
   const describe = (c: CandidateGeneration) => c.participatingTaskIds.map((id) => state.tasks[id]?.goal ?? id).join(" + ");
   const all = Object.values(state.candidates);
+  const preserved=useMemo(()=>preservedCandidateSuccessors(state.candidates),[state.candidates]);
   const reviewing = all.filter((c) => c.status === "awaiting_review" || (c.review?.approved && c.status === "verified" && !state.journal.some((j) => j.candidateId === c.id)));
-  const running = all.filter((c) => (c.status === "composing" || c.status === "repairing" || c.status === "verifying" || c.status === "verified") && !reviewing.includes(c));
-  const savedRuns = useMemo(() => recordedWorkflowCandidates(Object.values(state.candidates)), [state.candidates]);
+  const running = all.filter((c) => !preserved.has(c.id) && (c.status === "composing" || c.status === "repairing" || c.status === "verifying" || c.status === "verified") && !reviewing.includes(c));
+  const savedRuns = useMemo(() => recordedWorkflowCandidates(Object.values(state.candidates).filter(candidate=>!preserved.has(candidate.id))), [state.candidates,preserved]);
   const [runPage, setRunPage] = useState(0);
   useEffect(() => setRunPage(0), [projectId]);
   const currentRunPage = Math.min(runPage, Math.max(0, Math.ceil(savedRuns.length / 10) - 1));
@@ -145,6 +147,7 @@ export function IntegrationTab({
       {scenario&&<section role="status" className="rounded-lg border border-border p-3 text-sm"><p>{scenario.instanceId?`Saved scenario · ${scenarioStatus?WORKFLOW_STATUS_LABELS[scenarioStatus]:"Status not checked"}`:"Scenario start is unconfirmed"}</p>{scenario.instanceId?<><code className="text-xs break-all">{scenario.instanceId}</code><Button size="sm" variant="ghost" disabled={scenarioChecking} onClick={()=>setScenarioCheck(value=>value+1)}>{scenarioChecking?"Checking…":"Check saved scenario"}</Button></>:<p className="text-xs text-muted-foreground">The request may have been dispatched. Inspect registered runs before starting another scenario.</p>}</section>}
       {kind==='demo'&&isOwner&&<Button size="sm" variant="ghost" disabled={scenarioStarting||scenarioDiscoveryPending} onClick={()=>{discoveredRuns.current.clear();setDiscoveryCursor(null);setNextDiscoveryCursor(null);setError(null);setDiscoveryRevision(value=>value+1);}}>Check registered runs</Button>}
       {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>}
+      {preserved.size>0&&<section aria-label="Preserved attempts" className="space-y-2 text-sm"><h2 className="font-semibold">Preserved attempts</h2>{[...preserved].map(([id,next])=>{const previous=state.candidates[id]!;return <div key={id} className="rounded-lg border border-border p-3"><p>Recorded original status: {previous.status.replaceAll('_',' ')}</p><div className="flex gap-3 text-xs"><a className="text-primary underline" href={`/#/p/${projectId}/review?candidate=${encodeURIComponent(id)}`}>Original review and context</a><a className="text-primary underline" href={`/#/p/${projectId}/review?candidate=${encodeURIComponent(next.id)}`}>Successor review · {next.id.slice(0,12)}</a></div>{isOwner&&previous.workflowInstanceId&&<WorkflowRunControls projectId={projectId} instanceId={previous.workflowInstanceId} isOwner readOnly onChange={reload}/>}</div>;})}</section>}
       <RebaseRecovery projectId={projectId} isOwner={isOwner} tasks={state.tasks} onRecovered={reload} />
       {isOwner && savedRuns.length > 0 && <section id="int-saved-runs" tabIndex={-1} aria-labelledby="int-saved-runs-title" className="space-y-3"><h2 id="int-saved-runs-title" className="text-sm font-semibold">Saved integration runs</h2><p className="text-xs text-muted-foreground">Check a saved run, pause it, or continue it after interruption. Review stays available.</p><ul className="space-y-3">{visibleRuns.map(candidate => <li key={`${projectId}:${candidate.workflowInstanceId}`} className="rounded-lg border border-border p-3 min-w-0"><a href={`/#/p/${projectId}/review?candidate=${encodeURIComponent(candidate.id)}`} className="text-sm font-medium break-words hover:underline">{describe(candidate)}</a><p className="mt-1 text-xs text-muted-foreground">Candidate {candidate.status.replaceAll("_", " ")} · {candidate.participatingTaskIds.length} {candidate.participatingTaskIds.length === 1 ? "recorded input" : "recorded inputs"} · base <code>{candidate.expectedAcceptedBase.slice(0, 12)}</code></p><WorkflowRunControls projectId={projectId} instanceId={candidate.workflowInstanceId!} savedDecision={savedWorkflowDecision(candidate, state.journal.some(entry => entry.candidateId === candidate.id))} isOwner={isOwner} onChange={reload} /></li>)}</ul><div className="flex flex-wrap gap-3 items-center"><p className="text-[11px] text-muted-foreground">Showing {currentRunPage * 10 + 1}–{currentRunPage * 10 + visibleRuns.length} of {savedRuns.length} saved runs</p>{savedRuns.length > 10 && <><Button size="sm" variant="outline" disabled={currentRunPage === 0} onClick={() => setRunPage(currentRunPage - 1)}>Newer runs</Button><Button size="sm" variant="outline" disabled={(currentRunPage + 1) * 10 >= savedRuns.length} onClick={() => setRunPage(currentRunPage + 1)}>Older runs</Button></>}</div></section>}
       <section aria-labelledby="int-review" className="space-y-2">
@@ -161,7 +164,7 @@ export function IntegrationTab({
                 <li key={c.id} className="text-sm min-w-0">
                   <div className="break-words">{describe(c)}</div>
                   <Badge variant="warning">{IN_PROGRESS[c.status] ?? c.status}</Badge>
-                  <LegacyCandidateRerun projectId={projectId} candidate={c} isOwner={isOwner} onDone={reload} />
+                  {!preserved.has(c.id)&&<LegacyCandidateRerun projectId={projectId} candidate={c} isOwner={isOwner} onDone={reload} />}
                 </li>
               ))}
             </ul>
@@ -185,13 +188,13 @@ export function IntegrationTab({
         </section>
         <section aria-labelledby="int-failed" className="rounded-lg border border-border p-3 space-y-2 min-w-0">
           <h2 id="int-failed" className="text-sm font-semibold">Failed ({all.filter((c) => c.status === "failed" || c.status === "stale").length})</h2>
-          {failed.length === 0 ? <p className="text-xs text-muted-foreground">No failures.</p> : (
+          {failed.length === 0 ? <p className="text-xs text-muted-foreground">No failed candidates are recorded.</p> : (
             <ul className="space-y-2">
               {failed.map((c) => (
                 <li key={c.id} className="text-sm min-w-0">
                   <div className="break-words">{describe(c)}</div>
                   <div className="text-xs"><Badge variant={c.status === "stale" ? "outline" : "destructive"}>{c.status === "stale" ? "Outdated" : "Failed"}</Badge> <span className="text-muted-foreground break-words">{c.failureBlocker ?? (c.status === "stale" ? "The accepted version moved on before this finished." : "No reason was recorded.")}</span></div>
-                  <LegacyCandidateRerun projectId={projectId} candidate={c} isOwner={isOwner} onDone={reload} />
+                  {!preserved.has(c.id)&&<LegacyCandidateRerun projectId={projectId} candidate={c} isOwner={isOwner} onDone={reload} />}
                 </li>
               ))}
             </ul>

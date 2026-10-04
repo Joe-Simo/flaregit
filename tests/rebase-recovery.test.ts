@@ -77,10 +77,13 @@ test("final synchronous authority rejection precedes mutation", () => {
 test("read verifier proves all protected refs and the workspace head, and denied funding prevents any lookup", async () => {
   const f = fixture(); let gets = 0, writes = 0; const requested: string[] = [];
   const refs = new Map([[f.input.protectedRef, f.input.commit], [f.input.protectedBaseRef, f.input.base], [retainedGitInputRef(f.input.incarnation, f.input.taskId, f.application.commit), f.application.commit], [retainedGitInputRef(f.input.incarnation, f.input.taskId, f.application.base), f.application.base], [`refs/heads/${f.input.branch}`, f.application.commit]]);
-  const binding = { async get(name: string) { gets++; if (!["canonical", "workspace"].includes(name)) throw new Error("Wrong synthetic namespace"); return { log: async ({ ref }: { ref: string }) => { requested.push(ref); const hash = refs.get(ref); return hash ? [{ hash, treeHash: "f".repeat(40), message: "Synthetic proof", author: { name: "Fixture", email: "private@example.test" }, parents: [], authoredAt: 1, committedAt: 1 }] : []; }, createToken: () => { writes++; throw new Error("No token issuance permitted"); }, [Symbol.dispose]() {} } as unknown as RepositoryReadCapability; } };
+  const binding = { async get(name: string) { gets++; if (!["canonical", "workspace"].includes(name)) throw new Error("Wrong synthetic namespace"); return { readCommit: async (hash:string) => ({ hash, treeHash: "f".repeat(40), message: "Synthetic proof", author: { name: "Fixture", email: "private@example.test" }, parents: [], authoredAt: 1, committedAt: 1 }), log:()=>{throw new Error("SDK mutable refs cannot authorize recovery");}, createToken: () => { writes++; throw new Error("No token issuance permitted"); }, [Symbol.dispose]() {} } as unknown as RepositoryReadCapability; } };
   try {
-    const options = { authorize: async () => {}, reserveGroup: async () => ({ allowed: true as const, existing: false, basis: "conservative_operation_envelope" as const }) };
-    expect(await verifyRebaseRecovery(binding, f.application, options)).toEqual(f.proof); expect(gets).toBe(2); expect(requested.length).toBe(5); expect(writes).toBe(0);
+    const options = { authorize: async () => {}, reserveGroup: async () => ({ allowed: true as const, existing: false, basis: "conservative_operation_envelope" as const }), observeRefs:async(_name:string,values:string[])=>{requested.push(...values);return values.map(ref=>refs.get(ref)??null);} };
+    expect(await verifyRebaseRecovery(binding, f.application, options)).toEqual(f.proof); expect(gets).toBe(1); expect(requested.length).toBe(5); expect(writes).toBe(0);
+    await expect(verifyRebaseRecovery(binding,f.application,{...options,observeRefs:async()=>["unsafe"]})).rejects.toMatchObject({status:503});
+    const wrongObject={get:async()=>({readCommit:async()=>({hash:"f".repeat(40)}),[Symbol.dispose]() {}} as unknown as RepositoryReadCapability)};
+    await expect(verifyRebaseRecovery(wrongObject,f.application,options)).rejects.toMatchObject({status:503});
     gets = 0;
     await expect(verifyRebaseRecovery(binding, f.application, { ...options, reserveGroup: async () => ({ allowed: false as const, reason: "account_budget" as const }) })).rejects.toMatchObject({ status: 429 }); expect(gets).toBe(0);
   } finally { f.close(); }

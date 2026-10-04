@@ -69,20 +69,21 @@ function projection(application: RebaseApplication, snapshot: RebaseRecoverySnap
   return { ...base, status: "reconcile_available", canReconcile: true, detail: "The branch already contains the exact saved result. Its contribution metadata can be reconciled without a Git push." };
 }
 
-/** Read-only SDK proof, funded before lookup; no credential issuance, VM or Git writes. */
-export async function verifyRebaseRecovery(binding: { get(name: string): Promise<RepositoryReadCapability> }, application: RebaseApplication, options: { authorize(): Promise<void>; reserveGroup(operationId: string): Promise<CoreGitAdmission> }): Promise<RebaseRecoveryProof> {
+/** Exact native full-ref proof plus immutable SDK object reads; no Git writes. */
+export async function verifyRebaseRecovery(binding: { get(name: string): Promise<RepositoryReadCapability> }, application: RebaseApplication, options: { authorize(): Promise<void>; reserveGroup(operationId: string): Promise<CoreGitAdmission>; observeRefs(repoName:string,refs:string[]):Promise<Array<string|null>> }): Promise<RebaseRecoveryProof> {
   const input = retainedInputSchema.parse(application.input);
   if (!isSafeRef(input.branch) || !sha.test(application.commit) || !sha.test(application.base) || input.followup) throw new RebaseRecoveryError("Saved rebase scope is invalid", 409);
   const resultRef = retainedGitInputRef(input.incarnation, input.taskId, application.commit), targetRef = retainedGitInputRef(input.incarnation, input.taskId, application.base);
   if (input.protectedRef !== retainedGitInputRef(input.incarnation, input.taskId, input.commit) || input.protectedBaseRef !== retainedGitInputRef(input.incarnation, input.taskId, input.base)) throw new RebaseRecoveryError("Protected source identity changed", 409);
-  const hashAt = async (repo: RepositoryReadCapability, ref: string) => { const rows = await repo.log({ ref, limit: 1 }); if (rows.length > 1 || (rows[0] && !sha.test(rows[0].hash))) throw new RebaseRecoveryError("Remote identity is unavailable", 503); return rows[0]?.hash ?? null; };
   try {
-    using canonical = await openRepositoryRead({ ARTIFACTS: binding }, { repoName: input.canonicalRepoName, ...options, limits: { maxProviderCalls: 8, maxMetadataBytes: 65536 } });
-    const original = await hashAt(canonical, input.protectedRef), originalBase = await hashAt(canonical, input.protectedBaseRef), result = await hashAt(canonical, resultRef), targetBase = await hashAt(canonical, targetRef);
-    using workspace = await openRepositoryRead({ ARTIFACTS: binding }, { repoName: input.workspaceRepoName, ...options, limits: { maxProviderCalls: 4, maxMetadataBytes: 65536 } });
-    const workspaceHead = await hashAt(workspace, `refs/heads/${input.branch}`);
+    const refs=[input.protectedRef,input.protectedBaseRef,resultRef,targetRef];
+    const canonicalHeads=await options.observeRefs(input.canonicalRepoName,refs),workspaceHeads=await options.observeRefs(input.workspaceRepoName,[`refs/heads/${input.branch}`]);
+    if(canonicalHeads.length!==4||workspaceHeads.length!==1||[...canonicalHeads,...workspaceHeads].some(value=>value!==null&&!sha.test(value)))throw new RebaseRecoveryError("Exact Git identity unavailable",503);
+    const [original,originalBase,result,targetBase]=canonicalHeads,workspaceHead=workspaceHeads[0]!;
+    using canonical=await openRepositoryRead({ARTIFACTS:binding},{repoName:input.canonicalRepoName,...options,limits:{maxProviderCalls:8,maxMetadataBytes:65536}});
+    for(const hash of canonicalHeads){if(hash!==null){const object=await canonical.readCommit(hash);if(!object||object.hash!==hash)throw new RebaseRecoveryError("Protected Git object unavailable",503);}}
     await options.authorize();
-    return { original, originalBase, result, targetBase, workspaceHead };
+    return { original:original!, originalBase:originalBase!, result:result!, targetBase:targetBase!, workspaceHead };
   } catch (error) {
     if (error instanceof RebaseRecoveryError) throw error;
     throw new RebaseRecoveryError(error instanceof RepositoryReadError ? error.message : "Saved rebase state could not be confirmed; no metadata changed", error instanceof RepositoryReadError && error.status === 429 ? 429 : 503);

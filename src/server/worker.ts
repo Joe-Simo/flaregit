@@ -1,3 +1,4 @@
+import { artifactStorageSlots } from "./storage-allocation.js";
 import {observeRerunInputs} from "./rerun-input-observations.js";
 import {LegacyRerunError} from "./legacy-candidate-rerun.js";
 export {FlareGitRebaseResumeWorkflow} from "./rebase-resume-workflow.js";
@@ -107,7 +108,7 @@ export default {
       if (!ip) return text("Public pricing is unavailable", 503);
       if (!(await env.API_LIMITER.limit({ key: `plan-price:${ip}` })).success) return text("Too many price requests; retry shortly", 429);
     }
-    if (url.pathname === "/plan-price" && request.method === "GET") return Response.json({ price: await readPublicPlanPrice(env), limits: planLimits(env), repositoryLimit: 10 }, { headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
+    if (url.pathname === "/plan-price" && request.method === "GET") return Response.json({ price: await readPublicPlanPrice(env), limits: planLimits(env), repositoryLimit: 10, sharedRetainedRepositorySlots: artifactStorageSlots(env.ARTIFACT_STORAGE_GLOBAL_SLOTS) }, { headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
     if (url.pathname === "/pricing" && request.method === "GET") {
       const limited = await env.API_LIMITER.limit({ key: `pricing:${request.headers.get("CF-Connecting-IP") ?? "unknown"}` });
       if (!limited.success) return text("Too many requests", 429);
