@@ -1387,7 +1387,8 @@ export default {
               const verifyHeads=async()=>{for(const task of attempt.snapshot.tasks){
                 using repository=await openRepositoryRead(env,{repoName:task.workspace.repoName,authorize,reserveGroup:operationId=>globalOf(env).reserveCoreGitOperation(operationId,accountKey,{accountUsdMicros:null,globalUsdMicros:null})});
                 const head=(await repository.log({ref:`refs/heads/${task.workspace.branch}`,limit:1}))[0]?.hash;
-                if(head!==task.currentCommit)throw new LegacyRerunError("A contributor branch advanced. Its newer work was preserved; rerun was not dispatched.");
+                if(head===undefined)throw new LegacyRerunError("A contributor branch tip is unavailable. Saved inputs were preserved; rerun was not dispatched.");
+                if(head!==task.currentCommit)throw new LegacyRerunError("A contributor branch tip differs from the saved input. Saved inputs were preserved; rerun was not dispatched.");
               }
               };await verifyHeads();
               await authorize();attempt=await project.stopLegacyCandidateRerun(attempt.id);await authorize();await verifyHeads();
