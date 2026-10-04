@@ -286,7 +286,7 @@ export interface FlareGitProjectState {
   /** Parameters of the protected verifier; changed only by an explicit product decision. */
   verificationPolicy: Record<string, unknown>;
   /** How the repository was created, and who owns it (set by the platform, not by contributors). */
-  kind?: "demo" | "import" | "empty";
+  kind?: "demo" | "import" | "empty" | "repository";
   /** The canonical branch that accepted work lands on ("main" for new repos, whatever was imported otherwise). */
   defaultBranch?: string;
   ownerId?: string;

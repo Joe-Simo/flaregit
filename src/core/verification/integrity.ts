@@ -65,7 +65,7 @@ export async function verifyNativeIntegrity(input: NativeIntegrityInput): Promis
     const finalPaths = paths(input.expectedBase, input.candidateCommit);
     assertAgentWrites({ allowedScope: input.allowedScope }, finalPaths, input.protectedPaths);
     assertAgentWrites({ allowedScope: input.contributors.flatMap((proof) => proof.allowedScope) }, finalPaths, input.protectedPaths);
-    items.push({ testId: "NATIVE-GIT-INTEGRITY", description: "Exact Git objects, frozen contributor refs, ancestry and protected scope verified; application CI is external and not evaluated", passed: true, durationMs: Date.now() - started });
+    items.push({ testId: "NATIVE-GIT-INTEGRITY", description: input.policy.kind === "git-integrity" ? "Exact Git objects, frozen contributor refs, ancestry and protected scope verified; application behavior checks are not configured by this policy" : "Exact Git objects, frozen contributor refs, ancestry and protected scope verified; application CI is external and not evaluated", passed: true, durationMs: Date.now() - started });
   } catch (error) {
     items.push({ testId: "NATIVE-GIT-INTEGRITY", description: "Native Git integrity only; no application commands executed", passed: false, message: error instanceof Error ? error.message : "Native inspection failed", durationMs: Date.now() - started });
   }

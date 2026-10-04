@@ -72,3 +72,14 @@ test('faulting digest cannot lose a returned secret or a positive revocation aft
     expect(f.ledger.settled(intent)).toBe(true);
   } finally { crypto.subtle.digest = originalDigest; f.db.close(); }
 });
+test('generic extraction reads and settles an existing fork row without changing legacy payload bytes', async () => {
+  const f = fixture(), intent = scope(), { initialForkCredentialScopeSchema } = await import('../src/server/initial-fork-credentials');
+  const payload = JSON.stringify(initialForkCredentialScopeSchema.parse(intent));
+  const token = 'synthetic-legacy-fork', hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))), byte => byte.toString(16).padStart(2, '0')).join('');
+  try {
+    f.db.query("INSERT INTO initial_fork_credentials VALUES(?,?,'pending',?,?,2,1)").run(intent.eventId, payload, token, hash);
+    expect(f.ledger.begin(intent, () => {})).toBe(false); expect(f.ledger.credentialForRevocation(intent.eventId)?.token).toBe(token);
+    expect(await f.ledger.markRevoked(intent, token, { repoName: intent.workspaceRepoName, revoked: true })).toBe(true);
+    expect(f.db.query('SELECT payload,status,token,attempts,automatic_sweeps FROM initial_fork_credentials').get()).toEqual({ payload, status: 'revoked', token: null, attempts: 2, automatic_sweeps: 1 });
+  } finally { f.db.close(); }
+});

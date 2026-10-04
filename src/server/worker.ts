@@ -1,3 +1,5 @@
+import {createReadmeRepository} from "./readme-repository";
+import {repositoryCreationRequestSchema} from "./repository-creation-request";
 import {conversationMigrationFailure,conversationCaptureFailure,ConversationMigrationAuthorityError,ConversationMigrationCapacityError} from "./conversation-migration-failure.js";
 import {readPublicGithubRepositoryIdentity} from "./github-migration-reader.js";
 import {repositoryReviewPolicySchema} from "./repository-review-ledger.js";
@@ -54,7 +56,7 @@ import { handlePreviewAsset } from "./preview-broker.js";
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { billingFromEvent, createCheckout, planLimits, reportUsage, verifyPolarWebhook } from "./polar.js";
 import { TICKET_BOOKING_POLICY } from "../fixtures/ticket-booking/policy.js";
-import { DEFAULT_PROTECTED_PATHS, isCommandPolicy, settingsFor, type CommandPolicy } from "../core/command-policy.js";
+import { DEFAULT_PROTECTED_PATHS, isCommandPolicy,isGitIntegrityPolicy, settingsFor, type CommandPolicy } from "../core/command-policy.js";
 import { currentStatus, runProbes, statusIncidents, statusPage, workflowHealth } from "./status.js";
 import { isPlausibleGithubToken, pushMirror, validateMirrorTarget } from "./mirror.js";
 import { lookupTxt, normalizeDomain, txtHost, txtValue } from "./dns.js";
@@ -744,7 +746,35 @@ export default {
       }
 
       if (path === "/projects" && method === "POST") {
-        const b = await body<{ kind?: string; name?: string; url?: string; branch?: string; install?: string; build?: string; test?: string }>();
+        const b = await body<{ kind?: string; name?: string; url?: string; branch?: string; install?: string; build?: string; test?: string;requestId?:string;initialization?:string;defaultBranch?:string;description?:string }>();
+        if(b.kind==="repository"){
+          const parsed=repositoryCreationRequestSchema.safeParse(b);if(!parsed.success)return text("Explicit README initialization, exact branch, name and stable request ID are required",400);
+          if(auth.viaToken&&(auth.tokenScope!=="full"||auth.tokenRepo))return text("Repository creation requires account-wide owner access",403);
+          let credential={viaToken:auth.viaToken===true,credentialHash:auth.viaToken?await gitParentTokenHash(request):undefined,sessionExpiresAt:auth.viaToken?undefined:auth.expiresAt};
+          let saved:Awaited<ReturnType<typeof account.prepareRepositoryInitialization>>|undefined;
+          const currentActor=async()=>{const current=await authenticate(request,env);if(current instanceof Response||current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||(current.viaToken&&(current.tokenScope!=="full"||current.tokenRepo)))throw Error("Repository creator authentication changed");credential={viaToken:current.viaToken===true,credentialHash:current.viaToken?await gitParentTokenHash(request):undefined,sessionExpiresAt:current.viaToken?undefined:current.expiresAt};if(!saved)throw Error("Repository initialization request unavailable");await account.authorizeRepositoryInitialization(saved.scope.eventId,userId,credential);if(!credential.viaToken&&(!credential.sessionExpiresAt||credential.sessionExpiresAt<=Date.now()))throw Error("Repository creator session expired");};
+          const pending=()=>{if(!saved)throw Error("Repository initialization request unavailable");return({id:saved.scope.projectId,kind:"repository",status:"pending",creation:{requestId:saved.scope.requestId,phase:saved.phase,commitRecorded:!!saved.commit,published:saved.published===true,nativeStopConfirmed:saved.nativeStopped===true}});};
+          try{saved=await account.prepareRepositoryInitialization(parsed.data,userId,credential);await currentActor();
+            if(saved.phase!=="prepared"&&saved.phase!=="ready")return repositoryReadJson(pending(),202);
+            if(saved.phase==="prepared"){
+              const scope=saved.scope;
+              await createReadmeRepository(env,{projectId:scope.projectId,canonicalName:scope.canonicalRepoName,name:scope.name,description:scope.description,authorName:scope.authorName,authorEmail:scope.authorEmail,defaultBranch:scope.defaultBranch,userId,operationId:scope.allocationId,eventId:scope.eventId,commitTimestamp:scope.commitTimestamp},{
+                authorize:currentActor,
+                beforeCreate:async()=>{await currentActor();if(!await account.beginRepositoryInitializationCreate(scope.eventId,userId,credential))throw Error("Original provider creation was already dispatched");},
+                created:async(metadata,token)=>{await account.recordRepositoryCreated(scope.eventId,metadata,token);},
+                nativeIntent:async(name)=>{await currentActor();if(!await account.beginRepositoryInitializationNative(scope.eventId,name,userId,credential))throw Error("Original native initialization remains unconfirmed");},
+                committed:async(receipt)=>{await account.recordRepositoryInitializationCommit(scope.eventId,receipt);},
+                beforePush:async()=>{await currentActor();return account.markRepositoryInitializationPushPossible(scope.eventId,userId,credential);},
+                published:async(receipt)=>{await account.confirmRepositoryInitializationPublished(scope.eventId,receipt);},
+                credentialRevoked:async()=>{if(!await account.confirmRepositoryInitializationCredentialRevoked(scope.eventId))throw Error("Initial repository credential cleanup is unconfirmed");},
+                nativeStopped:async()=>{if(!await account.confirmRepositoryInitializationStopped(scope.eventId))throw Error("Repository native shutdown is unconfirmed");},
+              });
+              await currentActor();saved=await account.completeRepositoryInitialization(scope.eventId,userId,credential);
+            }
+            await currentActor();await projectOf(env,saved.scope.projectId).initializeRepositoryReceipt(saved,credential);await currentActor();await account.registerInitializedRepository(saved.scope.eventId,userId,credential);await currentActor();
+            return repositoryReadJson({id:saved.scope.projectId,kind:"repository",status:"ready",head:saved.commit!.head,defaultBranch:saved.scope.defaultBranch},201);
+          }catch{if(saved){try{saved=await account.repositoryInitializationRecord(saved.scope.eventId,userId,credential)??saved;return repositoryReadJson({...pending(),error:"Repository creation remains unconfirmed. Its original request and recorded Git state are preserved; retry the same request ID."},409);}catch{/* Revoked access never returns initialization context. */}}return text("Repository creation was not confirmed; no demo or new retry identity was substituted",409);}
+        }
         const existing = await account.listProjects();
         const pendingImports = (await account.listImportJobs()).filter((job) => job.status !== "ready");
         if (existing.filter((project)=>project.role==="owner").length + pendingImports.length >= 10) return text("Owned repository limit reached (10).", 409);
@@ -761,6 +791,7 @@ export default {
           const created = await importRepository(env, account, { projectId, name, userId, url: source.toString(), branch: b.branch ?? "", credentialHash:auth.viaToken?await gitParentTokenHash(request):undefined,sessionExpiresAt:auth.expiresAt, install: clean(b.install, 300), build: clean(b.build, 300), test: clean(b.test, 300) });
           return json(created, created.status === "ready" ? 201 : created.status === "failed" ? 409 : 202);
         }
+        if(b.kind!=="demo")return text("Repository initialization was not confirmed. Normal repositories require an explicit README creation request; no demo was substituted",409);
         const created = await createDemoRepository(env, projectId, name, userId);
         await account.addProject({ id: projectId, name, role: "owner", kind: "demo" });
         return json({ id: projectId, ...created }, 201);
@@ -1167,7 +1198,7 @@ export default {
         if (sub === "/connections/policy" && method === "PUT") {
           if (!isOwner) return text("Only the owner can configure checks", 403);
           const policy = await body<ExternalCheckPolicy>();
-          if (policy.mode === "external" && !isCommandPolicy(state.verificationPolicy)) return text("External CI is available for imported custom repositories; this demo retains its protected checks", 409);
+          if (policy.mode === "external" && !isCommandPolicy(state.verificationPolicy)&&!isGitIntegrityPolicy(state.verificationPolicy)) return text("External CI is available for imported custom repositories; this demo retains its protected checks", 409);
           try { return json({ policy: await project.setConnectionPolicy(policy) }); } catch { return text("Invalid or stale check policy", 409); }
         }
         const connectionRoute = /^\/connections\/(svc_[a-f0-9-]{36})$/.exec(sub);
@@ -1776,7 +1807,7 @@ export default {
         }
 
         if (sub === "/scenarios/run" && method === "POST") {
-          if (state.kind === "import") return text("Scenarios run only on the demo repository", 400);
+          if (state.kind !== "demo") return text("Scenarios run only on the demo repository", 400);
           const b = await body<{ act?: string }>();
           if (b.act !== "act1" && b.act !== "act2" && b.act !== "act3") return text("act must be act1, act2 or act3", 400);
           const { plan } = await account.getBilling();

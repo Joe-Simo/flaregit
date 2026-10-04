@@ -19,7 +19,7 @@ import type { Env } from "./env.js";
 import type { ClaimResult, Ledger, PrepareResult } from "./durable-object.js";
 import { gitAuthEnv, q } from "./shell.js";
 import { ledgerOf } from "./scenario-workflow.js";
-import { settingsFor } from "../core/command-policy.js";
+import { settingsFor,isGitIntegrityPolicy } from "../core/command-policy.js";
 import { inAgentScope, isProtectedPath, redactSecrets } from "../agents/prompt.js";
 import { globalOf, reserveManagedAgent, assertManagedInitiator } from "./projects.js";
 import type { WorkflowOutcome } from "./durable-object.js";
@@ -407,12 +407,13 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     try{selectedBranch=integrationTargetBranch(candidate,state);if(candidate.acceptedTarget){assertCompatibleAcceptedTargetBatch([candidate.acceptedTarget,...tasks.map(task=>{if(!task?.acceptedTarget)throw Error("Frozen task target unavailable");return task.acceptedTarget;})]);}else if(tasks.some(task=>task?.acceptedTarget))throw Error("Frozen candidate target binding unavailable");}catch{return{ok:false,error:"Frozen integration target scope, base, requirements or policy could not be confirmed; saved contributions remain preserved"};}
     const settings = settingsFor(candidate.frozenVerificationPolicy);
     const externalOnly = candidate.frozenExternalChecksPolicy?.mode === "external";
-    if (externalOnly && (settings.fixture !== "custom" || !candidate.frozenExternalChecksPolicy?.checks.some((check) => check.required) || !candidate.frozenContributorProofs?.length)) return { ok: false, error: "External CI requires a custom repository, frozen contributor proofs and at least one required check" };
+    const nativeOnly=externalOnly||isGitIntegrityPolicy(candidate.frozenVerificationPolicy);
+    if (externalOnly && ((settings.fixture !== "custom"&&settings.fixture!=="git-integrity") || !candidate.frozenExternalChecksPolicy?.checks.some((check) => check.required) || !candidate.frozenContributorProofs?.length)) return { ok: false, error: "External CI requires a custom repository, frozen contributor proofs and at least one required check" };
     const spendRunId = `repair-${candidate.id}`;
     let spending: Awaited<ReturnType<typeof reserveManagedAgent>> | null = null;
     try {
-      if (!externalOnly) await assertManagedInitiator(this.env, stub, parentWorkflowId, params.accountKey);
-      spending = externalOnly ? null : await reserveManagedAgent(this.env, params.accountKey, spendRunId);
+      if (!nativeOnly) await assertManagedInitiator(this.env, stub, parentWorkflowId, params.accountKey);
+      spending = nativeOnly ? null : await reserveManagedAgent(this.env, params.accountKey, spendRunId);
       if (spending) await globalOf(this.env).consumeManagedSpend(spendRunId, 0, 0, 600);
     } catch {
       return { ok: false, error: "Managed verification budget unavailable; saved contributor checkpoints remain available. Configure a budget or use external checks." };
@@ -425,7 +426,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     let canonical: Awaited<ReturnType<FlareGitIntegrationWorkflow["canonicalRemote"]>> | undefined;
     try {
     const run = async (cmd: string, env?: Record<string, string>) => sb.exec(cmd, env);
-    if (externalOnly && (candidate.frozenContributorProofs!.length !== tasks.length || !candidate.participatingTaskIds.every((id) => candidate.frozenContributorProofs!.some((proof) => proof.id === id && proof.commit === candidate.participatingCommits[id] && proof.ref === `refs/flaregit/tasks/${id}`)))) return { ok: false, error: "Frozen contributor proofs do not match every participating checkpoint" };
+    if (nativeOnly && (candidate.frozenContributorProofs!.length !== tasks.length || !candidate.participatingTaskIds.every((id) => candidate.frozenContributorProofs!.some((proof) => proof.id === id && proof.commit === candidate.participatingCommits[id] && proof.ref === `refs/flaregit/tasks/${id}`)))) return { ok: false, error: "Frozen contributor proofs do not match every participating checkpoint" };
     canonical = await this.canonicalRemote(stub, inputs[0]!);
     const activeCanonical = canonical;
 
@@ -463,7 +464,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     candidate.repairAttempts = [];
     await stub.recordComposition(candidate.id, []);
     const repair = async (type: "text_conflict" | "behavior_failure", files: string[], evidence?: VerificationEvidence): Promise<boolean> => {
-      if (externalOnly) return false; // External CI never grants implicit model repair authority.
+      if (nativeOnly) return false; // Native integrity never grants implicit model repair authority.
       const started = Date.now();
       round += 1;
       if (round > MAX_REPAIR_ROUNDS) return false;
@@ -503,7 +504,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       const m = await run(`git -C ${WORK} merge --no-ff -m ${q(`FlareGit candidate ${candidate.id}: ${t.id}`)} refs/flaregit/tasks/${t.id}`);
       if (m.success) continue;
       const files = (await run(`git -C ${WORK} diff --name-only --diff-filter=U`)).stdout.split("\n").filter(Boolean);
-      if (externalOnly) return { ok: false, error: "Native Git conflict requires explicit contributor resolution; saved branches are preserved" };
+      if (nativeOnly) return { ok: false, error: "Native Git conflict requires explicit contributor resolution; saved branches are preserved" };
       if (files.length === 0 || !(await repair("text_conflict", files))) return { ok: false, error: "Conflict repair failed" };
     }
 
@@ -522,9 +523,9 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     for (;;) {
       if (!(await squash())) return { ok: false, error: "Could not create the squashed commit" };
       const commit = (await run(`git -C ${WORK} rev-parse HEAD`)).stdout.trim();
-      const tree = externalOnly ? (await run(`git -C ${WORK} rev-parse ${q(`${commit}^{tree}`)}`)).stdout.trim() : undefined;
+      const tree = nativeOnly ? (await run(`git -C ${WORK} rev-parse ${q(`${commit}^{tree}`)}`)).stdout.trim() : undefined;
       const nativeInput = { repoDir: WORK, candidateCommit: commit, candidateTree: tree, expectedBase: candidate.expectedAcceptedBase, requirementsVersion: candidate.frozenPolicyVersion, policy: candidate.frozenVerificationPolicy, protectedPaths: settings.protectedPaths, allowedScope: settings.allowedScope, contributors: candidate.frozenContributorProofs, landing: settings.landing };
-      const v = await run(externalOnly
+      const v = await run(nativeOnly
         ? `cd /opt/flaregit && bun src/core/verification/cli.ts --native-integrity ${q(JSON.stringify(nativeInput))}`
         : `cd /opt/flaregit && bun src/core/verification/cli.ts ${settings.fixture} ${WORK} ${commit} ${candidate.expectedAcceptedBase} ${candidate.frozenPolicyVersion} ${q(JSON.stringify(candidate.frozenVerificationPolicy))}`
       );
@@ -539,7 +540,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
         if (!shared.success) return { ok: false, error: "Could not store the candidate for review" };
         const previewKey=`build-${params.projectId}-${commit}`;
         try {
-          const hasPage = !externalOnly && settings.fixture === "ticket-booking" && (await run(`test -f ${WORK}/index.html`)).success;
+          const hasPage = !nativeOnly && settings.fixture === "ticket-booking" && (await run(`test -f ${WORK}/index.html`)).success;
           if (hasPage) {
             const built = await run(`bun /opt/flaregit/src/core/verification/build-preview.ts ${q(WORK)} /tmp/build-out`);
             if (!built.success) throw new Error("Optional preview build failed");
@@ -588,7 +589,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
         }
         return { ok: true, commit, evidenceId: evidence.id, branch };
       }
-      if (externalOnly) return { ok: false, error: "Native Git integrity failed; no customer commands or automatic repairs ran" };
+      if (nativeOnly) return { ok: false, error: "Native Git integrity failed; no customer commands or automatic repairs ran" };
       const editable = (await run(`git -C ${WORK} ls-files`)).stdout
         .split("\n")
         .filter((f) => f && inAgentScope({ allowedScope: settings.allowedScope }, f) && !isProtectedPath(f, settings.protectedPaths) && /\.(ts|tsx|js|jsx|mjs|css|json|html|md|py|go|rs|rb|java|c|h|cpp|sh)$/.test(f))

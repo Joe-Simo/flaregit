@@ -120,7 +120,7 @@ test("operation error survives failed shutdown and cleanup failure becomes durab
   expect(activities).toEqual(["container.cleanup_failed"]);
 });
 
-test.each(["normal","evidence-failure","preview-failure"] as const)("candidate remains durable through optional storage state: %s", async (mode) => {
+test.each(["normal","evidence-failure","preview-failure","git-integrity"] as const)("candidate remains durable through optional storage state: %s", async (mode) => {
   const uploadFails=mode==="evidence-failure",previewFails=mode==="preview-failure";
   const root = await mkdtemp(join(tmpdir(), "external-workflow-"));
   const canonical = join(root, "canonical.git"), seed = join(root, "seed"), work = join(root, "integration");
@@ -160,6 +160,7 @@ test.each(["normal","evidence-failure","preview-failure"] as const)("candidate r
     const task = { id: "one", baseCommit: base, currentCommit: head, allowedScope: ["src/feature.ts"], workspace: { repoName: "repo", branch: "task/one" }, contributor: { name: "Fixture", id: "one" } };
     const candidate: CandidateGeneration = { id: "external-one", attemptNumber: 1, frozenRequirements: [], repairAttempts: [], status: "composing", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), expectedAcceptedBase: base, participatingTaskIds: ["one"], participatingCommits: { one: head }, frozenPolicyVersion: 1, frozenVerificationPolicy: { kind: "command", test: "touch CUSTOMER_COMMAND_EXECUTED", install: "touch CUSTOMER_INSTALL_EXECUTED", allowedScope: ["src/feature.ts"], protectedPaths: ["tests/"] }, frozenExternalChecksPolicy: { version: 1, mode: "external", checks: [{ id: "check", providerId: "provider", required: true }] }, frozenContributorProofs: [{ id: "one", commit: head, baseCommit: base, ref: "refs/flaregit/tasks/one", allowedScope: ["src/feature.ts"] }] };
     if(previewFails){delete candidate.frozenExternalChecksPolicy;candidate.frozenVerificationPolicy={};}
+    if(mode==="git-integrity"){delete candidate.frozenExternalChecksPolicy;candidate.frozenVerificationPolicy={kind:"git-integrity",allowedScope:["*"],protectedPaths:[".flaregit/"],landing:"merge"};}
     const evidence: import("../src/core/types.js").VerificationEvidence[] = [];
     const activities:string[]=[];
     const ledger = {...retention,recordScopedEvidenceCopy:async()=>{},previewStorageScope:async(commit:string)=>({projectId:"p123456789abc",incarnation:"11111111-1111-4111-8111-111111111111",commit,accountKey:await accountKeyFor("fixture-human")}),getWorkflowRun:async()=>({actorId:"fixture-human"}),roleOf:async()=>"owner", logActivity:async(_actor:string,kind:string)=>{activities.push(kind);}, getState: async () => ({ canonicalRepoName: "repo", tasks: { one: task }, defaultBranch: "main" }), recordComposition: async () => {}, recordVerification: async (_id: string, _commit: string, proof: import("../src/core/types.js").VerificationEvidence) => { evidence.push(proof); } } as unknown as Ledger;

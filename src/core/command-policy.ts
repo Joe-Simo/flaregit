@@ -1,3 +1,19 @@
+/** Ordinary repositories can verify Git integrity without claiming application tests. */
+export interface GitIntegrityPolicy {
+  kind: "git-integrity";
+  allowedScope?: string[];
+  protectedPaths?: string[];
+  landing?: "merge" | "squash";
+}
+export const GIT_INTEGRITY_POLICY: GitIntegrityPolicy = {
+  kind: "git-integrity", allowedScope: ["*"], protectedPaths: [".flaregit/"], landing: "merge",
+};
+function validPaths(value:unknown):value is string[]{return Array.isArray(value)&&value.length>0&&value.every(path=>typeof path==="string"&&path.length>0&&!path.startsWith("/")&&!path.includes("\\")&&!path.split("/").some(part=>part==="."||part==="..")&&!/[\u0000-\u001f\u007f]/.test(path));}
+export function isGitIntegrityPolicy(policy:unknown):policy is GitIntegrityPolicy {
+  if(!policy||typeof policy!=="object"||!("kind" in policy)||policy.kind!=="git-integrity")return false;
+  return (!("allowedScope" in policy)||validPaths(policy.allowedScope))&&(!("protectedPaths" in policy)||validPaths(policy.protectedPaths))&&(!("landing" in policy)||policy.landing==="merge"||policy.landing==="squash");
+}
+
 /** Light-weight (Worker-safe) definition of a customer repository's protected verification settings. */
 export interface CommandPolicy {
   kind: "command";
@@ -24,7 +40,7 @@ export function isCommandPolicy(p: unknown): p is CommandPolicy {
 }
 
 export interface ProjectSettings {
-  fixture: "ticket-booking" | "custom";
+  fixture: "ticket-booking" | "custom" | "git-integrity";
   protectedPaths: string[];
   allowedScope: string[];
   checkCommand?: string;
@@ -35,6 +51,10 @@ const DEMO_PROTECTED = [".flaregit/", ".github/", "tests/", "verifier/", "packag
 
 /** What contributors may touch and how a candidate is verified, derived only from platform-held policy. */
 export function settingsFor(policy: Record<string, unknown> | undefined): ProjectSettings {
+  if(policy?.kind==="git-integrity"){
+    if(!isGitIntegrityPolicy(policy))throw new Error("Git integrity policy is invalid");
+    return {fixture:"git-integrity",protectedPaths:[...new Set([".flaregit/", ...(policy.protectedPaths??[])])],allowedScope:[...(policy.allowedScope??["*"])],landing:policy.landing==="squash"?"squash":"merge"};
+  }
   if (isCommandPolicy(policy)) {
     return {
       fixture: "custom",

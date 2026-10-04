@@ -66,3 +66,25 @@ test("corrupted candidate object fails native verification", async () => {
     expect((await verifyNativeIntegrity(f.input)).status).toBe("failed");
   } finally { await rm(f.dir, { recursive: true, force: true }); }
 });
+
+test("ordinary README repository mode proves real Git and reports application checks unconfigured", async () => {
+ const f=await fixture();
+ try{
+  await Bun.write(join(f.dir,"README.md"),"# Ordinary repository\nReviewed documentation contribution.\n");
+  f.git(["add","README.md"]);f.git(["commit","-m","Document normal repository"]);
+  const commit=f.git(["rev-parse","HEAD"]);f.git(["update-ref","refs/flaregit/tasks/one",commit]);
+  const policy={kind:"git-integrity",allowedScope:["*"],protectedPaths:[".flaregit/"],landing:"merge"};
+  const input:NativeIntegrityInput={...f.input,policy,candidateCommit:commit,candidateTree:f.git(["rev-parse","HEAD^{tree}"]),allowedScope:["*"],protectedPaths:policy.protectedPaths,contributors:[{...f.input.contributors[0]!,commit,allowedScope:["*"]}]};
+  const evidence=await verifyNativeIntegrity(input);
+  expect(evidence.status).toBe("passed");expect(evidence.candidateCommit).toBe(commit);
+  expect(evidence.testResults[0]?.items[0]?.description).toContain("application behavior checks are not configured");
+  expect(evidence.testResults[0]?.items).toHaveLength(1);
+  const cli=Bun.spawn([process.execPath,"src/core/verification/cli.ts","--native-integrity",JSON.stringify(input)],{stdout:"pipe",stderr:"pipe"});
+  const [output,code]=await Promise.all([new Response(cli.stdout).text(),cli.exited]);expect(code).toBe(0);
+  expect(JSON.parse(output).candidateTree).toBe(input.candidateTree);
+  await mkdir(join(f.dir,".flaregit"));await Bun.write(join(f.dir,".flaregit/policy.json"),"{}\n");
+  f.git(["add",".flaregit/policy.json"]);f.git(["commit","-m","Unauthorized platform configuration"]);
+  const changed=f.git(["rev-parse","HEAD"]);f.git(["update-ref","refs/flaregit/tasks/one",changed]);
+  expect((await verifyNativeIntegrity({...input,candidateCommit:changed,candidateTree:f.git(["rev-parse","HEAD^{tree}"]),contributors:[{...input.contributors[0]!,commit:changed}]})).status).toBe("failed");
+ }finally{await rm(f.dir,{recursive:true,force:true});}
+});
