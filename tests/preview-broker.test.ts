@@ -11,6 +11,7 @@ function fixture() {
   const keys: string[] = [];
   const lookups: string[] = [];
   const env = {
+    PREVIEW_ASSET_LIMITER: { limit: async () => ({ success: true }) },
     REPOSITORY_PREVIEW_ORIGINS: JSON.stringify({ [repository]: origin, "123456abcdef": "https://repo-b.account.workers.dev" }),
     PREVIEW_SIGNING_KEY: "unit-test-signing-key",
     REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: () => ({ previewLegacyGenerationAllowed: async () => true, previewAvailable: async () => true, activePreviewOrigin: async (id: string) => { lookups.push(id); return id === repository ? origin : "https://repo-b.account.workers.dev"; } }) },
@@ -147,4 +148,26 @@ describe("stateless preview child", () => {
     }
     expect(calls).toBe(0);
   });
+});
+
+test("preview admission refuses bursts before registry and R2 without leaking capabilities", async () => {
+  const { env, keys, lookups } = fixture();
+  const admissionKeys: string[] = [];
+  env.PREVIEW_ASSET_LIMITER = { limit: async ({ key }) => { admissionKeys.push(key); return { success: false }; } };
+  for (const method of ["GET", "HEAD"]) {
+    const response = await handlePreviewAsset(new Request(await link(env, "assets/main.js"), { method }), env, repository);
+    expect(response.status).toBe(429);
+    expect(response.headers.get("Retry-After")).toBe("60");
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+  }
+  expect(admissionKeys).toEqual([`preview-assets:${repository}`, `preview-assets:${repository}`]);
+  expect(keys).toEqual([]);
+  expect(lookups).toEqual([]);
+});
+test("preview limiter outage fails closed before paid reads", async () => {
+  const { env, keys, lookups } = fixture();
+  env.PREVIEW_ASSET_LIMITER = { limit: async () => { throw new Error("Unavailable"); } };
+  expect((await handlePreviewAsset(new Request(await link(env)), env, repository)).status).toBe(503);
+  expect(keys).toEqual([]);
+  expect(lookups).toEqual([]);
 });

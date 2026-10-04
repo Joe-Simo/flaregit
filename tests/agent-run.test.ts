@@ -223,3 +223,7 @@ test.each(["account", "membership"] as const)("%s revocation after funded contai
     expect(f.runs.get("run-revoked")?.proposal).toBeUndefined();
   } finally { await f.cleanup(); }
 });
+
+test.each(["account","membership"] as const)("checkpointed replay revalidates %s before returning saved success",async(kind)=>{
+ const f=await fixture();try{const first=await runAgentTask(f.env,f.ledger,f.task,"run-checkpointed",f.funding);expect(f.runs.get("run-checkpointed")?.phase).toBe("checkpointed");const saved=structuredClone(f.runs.get("run-checkpointed")),counts=f.counts();expect(await runAgentTask(f.env,f.ledger,f.task,"run-checkpointed",f.funding)).toEqual(first);expect(f.counts()).toEqual(counts);if(kind==="account")f.deleteAccount();else f.revokeMembership();await expect(runAgentTask(f.env,f.ledger,f.task,"run-checkpointed",f.funding)).rejects.toThrow("revoked");expect(f.runs.get("run-checkpointed")).toEqual(saved);expect(f.counts()).toEqual(counts);expect(f.task.currentCommit).toBe(first.commit);}finally{await f.cleanup();}
+});

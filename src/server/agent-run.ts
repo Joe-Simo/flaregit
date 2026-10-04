@@ -26,7 +26,10 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
   let durable = await ledger.getAgentRun(runId);
   if (durable && options?.resumeFrom && durable.resumedFrom !== options.resumeFrom) throw new Error("Resume selection differs from the durable run identity");
   if (durable && (durable.taskId !== task.id || durable.branch !== task.workspace.branch)) throw new Error("Durable agent run belongs to a different change");
-  if (durable?.phase === "checkpointed" && durable.pushedCommit) return { commit: durable.pushedCommit };
+  if (durable?.phase === "checkpointed" && durable.pushedCommit) {
+    await assertManagedInitiator(env,ledger,options?.parentWorkflowId,options?.accountKey,task.id);
+    return {commit:durable.pushedCommit};
+  }
   const state = await ledger.getState();
   if (stopped(state.tasks[task.id])) throw new Error("Change is no longer available for agent work");
   const settings = settingsFor(state.verificationPolicy);

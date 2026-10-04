@@ -40,7 +40,11 @@ export async function retainDeploymentTarget(env:Env,canonicalRepoName:string,ta
   }finally{
     let cleanupFailed=false;
     if(token){try{if(!await repository.revokeToken(token)){cleanupFailed=true;console.error("Deployment pin credential revocation was not confirmed");}}catch{cleanupFailed=true;console.error("Deployment pin credential revocation unavailable");}}
-    try{await sandbox.destroy();}catch{cleanupFailed=true;console.error("Deployment pin workspace cleanup unavailable");}
+    try{
+      await sandbox.destroy();
+      const lifetime=await sandbox.lifetimeStatus();
+      if(lifetime?.state!=="stopped")throw new Error("Native stop unconfirmed");
+    }catch{cleanupFailed=true;console.error("Deployment pin workspace cleanup unavailable");}
     if(verified&&cleanupFailed)throw new Error("Deployment pin cleanup could not be confirmed; no deployment request was dispatched");
   }
 }

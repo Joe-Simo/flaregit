@@ -14,6 +14,7 @@ function fixture(decisions: (boolean | Error)[] = [true, true]) {
   const keys: string[] = [];
   const checks: string[][] = [];
   const env = {
+    PREVIEW_ASSET_LIMITER: { limit: async () => ({ success: true }) },
     PREVIEW_SIGNING_KEY: "unit-test-key",
     REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: (id: string) => id === "global" ? { activePreviewOrigin: async () => origin } : {
       previewGenerationForRead: async (...args: string[]) => { checks.push(args); const result = decisions.shift(); if (result instanceof Error) throw result; return result; },

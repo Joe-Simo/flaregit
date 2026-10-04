@@ -32,6 +32,14 @@ export async function handlePreviewAsset(request: Request, env: Env, repositoryI
   if (/[\\%\u0000-\u001f\u007f]/.test(asset) || asset.startsWith("/") || asset.split("/").some((part) => part === "." || part === ".." || part === "" && asset !== "")) return failure(404);
   if (!env.PREVIEW_SIGNING_KEY) return failure(503);
   if (!(generationMatch ? await verifyPreviewGeneration(env, repositoryId, commit, incarnation!, generation!, url.origin, Number(expiry), signature) : await verifyPreview(env, repositoryId, commit, url.origin, Number(expiry), signature))) return failure(403);
+  // The child gateway strips visitor metadata. A repository-scoped key cannot
+  // be multiplied by rotating asset paths, capabilities or browser headers.
+  // This bounds preview bursts independently of managed execution credits.
+  try {
+    if (!(await env.PREVIEW_ASSET_LIMITER.limit({ key: `preview-assets:${repositoryId}` })).success) {
+      return new Response("Preview request capacity reached. Retry shortly.", { status: 429, headers: { ...securityHeaders, "Retry-After": "60" } });
+    }
+  } catch { return failure(503); }
   const registration = await lookupRepositoryPreviewOrigin(env, repositoryId);
   if (registration.status === "unavailable") return failure(503);
   if (registration.status !== "active" || registration.origin !== url.origin) return failure(404);

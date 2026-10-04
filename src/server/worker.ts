@@ -1087,6 +1087,7 @@ export default {
             let nativeStopConfirmed = false;
             try {
               await retainDeploymentTarget(env,accepted.canonicalRepoName,accepted.target,accountKey,`native-${computeLease}`);
+              // The pin helper returns only after its trusted native lifetime confirms stopped.
               nativeStopConfirmed = true;
               return json(await project.requestDeployment(accepted.target,input.serviceId,input.environment,input.idempotencyKey,userId),201);
             } catch(error) {

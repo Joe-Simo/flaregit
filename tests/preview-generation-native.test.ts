@@ -9,7 +9,7 @@ test("native SQLite generation CAS and actual R2 late legacy write preserve fund
   const build = Bun.spawn([process.execPath, "build", "tests/support/preview-generation-native-worker.ts", "--target=browser", "--external=cloudflare:workers", "--external=node:*", `--outfile=${file}`], { stdout: "ignore", stderr: "pipe" });
   const [error, code] = await Promise.all([new Response(build.stderr).text(), build.exited]); if (code) throw new Error(error);
   const script = await Bun.file(file).text(); await Bun.file(file).delete();
-  const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ name: "generation", modules: true, script, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], bindings: { PREVIEW_SIGNING_KEY: "fixture-secret-only", PREVIEW_STORAGE_GLOBAL_BYTES: "1000", PREVIEW_STORAGE_ACCOUNT_BYTES: "1000" }, r2Buckets: ["EVIDENCE_BUCKET"], durableObjects: { REPOSITORY_CONTROLLER: { className: "GenerationNativeFixture", useSQLite: true } } }] }));
+  const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ name: "generation", modules: true, script, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], bindings: { PREVIEW_SIGNING_KEY: "fixture-secret-only", PREVIEW_STORAGE_GLOBAL_BYTES: "1000", PREVIEW_STORAGE_ACCOUNT_BYTES: "1000" }, ratelimits: { PREVIEW_ASSET_LIMITER: { namespace_id: "1003", simple: { limit: 600, period: 60 } } }, r2Buckets: ["EVIDENCE_BUCKET"], durableObjects: { REPOSITORY_CONTROLLER: { className: "GenerationNativeFixture", useSQLite: true } } }] }));
   const call = async (path: string) => (await mf.getWorker("generation")).fetch(`http://fixture${path}`);
   const snapshot = async () => await (await call("/snapshot")).json() as Snapshot;
   try {

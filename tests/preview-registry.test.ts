@@ -17,7 +17,7 @@ test("real durable preview reservations are atomic, immutable, and retirement bl
   const repoA = "abcdef123456", repoB = "123456abcdef", repoC = "abcdef654321";
   const originA = "https://repo-a.fixture.workers.dev", originB = "https://repo-b.fixture.workers.dev";
   const mf = new Miniflare(convertV4MiniflareOptions({ workers: [
-    { name: "registry-main", modules: true, script: mainScript, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], unsafeDirectSockets: [{ host: "127.0.0.1" }], durableObjects: { REPOSITORY_CONTROLLER: { className: "PreviewRegistryFixture", useSQLite: true } }, r2Buckets: ["EVIDENCE_BUCKET"], bindings: { PREVIEW_SIGNING_KEY: "registry-test-only-secret", CLERK_AUTHORIZED_PARTIES: "https://flaregit.com", REPOSITORY_PREVIEW_ORIGINS: JSON.stringify({ [repoA]: originA }) } },
+    { name: "registry-main", modules: true, script: mainScript, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], unsafeDirectSockets: [{ host: "127.0.0.1" }], durableObjects: { REPOSITORY_CONTROLLER: { className: "PreviewRegistryFixture", useSQLite: true } }, ratelimits: { PREVIEW_ASSET_LIMITER: { namespace_id: "1003", simple: { limit: 600, period: 60 } } }, r2Buckets: ["EVIDENCE_BUCKET"], bindings: { PREVIEW_SIGNING_KEY: "registry-test-only-secret", CLERK_AUTHORIZED_PARTIES: "https://flaregit.com", REPOSITORY_PREVIEW_ORIGINS: JSON.stringify({ [repoA]: originA }) } },
     { name: "registry-child", modules: true, script: childScript, compatibilityDate: "2026-10-02", unsafeDirectSockets: [{ host: "127.0.0.1" }], bindings: { REPOSITORY_ID: repoA }, serviceBindings: { ASSET_BROKER: { name: "registry-main", entrypoint: "PreviewAssetBroker" } } },
   ] }));
   try {
