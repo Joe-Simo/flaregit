@@ -1,3 +1,4 @@
+import {GitTransferRecovery} from "../components/GitTransferRecovery";
 import React, { useCallback, useEffect, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -61,6 +62,7 @@ export function ReviewTab({ projectId, task, commit, baseCommit, returnTo, input
       {baseCommit && !candidate && !task && <p className="text-xs text-muted-foreground">Saved comparison <span className="font-mono" title={baseCommit}>{baseCommit.slice(0, 7)}</span> → <span className="font-mono" title={commit}>{commit?.slice(0, 7)}</span></p>}
       {candidate && <CandidatePurpose projectId={projectId} candidate={candidate} tasks={evidence?.tasks} />}
       {taskSnapshot && !candidate && <section aria-label="Contribution purpose" className="space-y-1 text-sm"><h2 className="font-semibold break-words">{taskSnapshot.goal}</h2><p className="text-xs text-muted-foreground">{taskSnapshot.contributor.name} · {taskSnapshot.contributor.type}{taskSnapshot.dependsOn ? ` · Builds on ${taskSnapshot.dependsOn}` : ""}{taskSnapshot.issue ? ` · Issue #${taskSnapshot.issue}` : ""}</p></section>}
+      {task && !candidate && <GitTransferRecovery key={`${projectId}:${task}`} projectId={projectId} taskId={task} isOwner={isOwner}/>}
       {task && evidence?.tasks[task]?.agentRunId && <AgentRecoveryPanel key={`${projectId}:${task}:${evidence.tasks[task]!.agentRunId}`} projectId={projectId} taskId={task} runId={evidence.tasks[task]!.agentRunId!} canResume={["working", "checkpointed", "blocked", "needs_decision"].includes(evidence.tasks[task]!.status)} onStarted={reload} />}
       {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}<Button size="sm" variant="outline" className="ml-3" onClick={() => setRevision((value) => value + 1)}>Retry diff</Button></div>}
       {!diff && !error && <p className="text-sm text-muted-foreground">Loading changes…</p>}
