@@ -1,3 +1,5 @@
+import {recoveryBranchMetadata,recoveryBranchMetadataMatches,recoveryBranchFields} from "./private-recovery-branch";
+export {recoveryBranchMetadata,recoveryBranchMetadataMatches} from "./private-recovery-branch";
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import type { Env } from "./env.js";
 import { accountOf, globalOf, projectOf } from "./projects.js";
@@ -14,9 +16,9 @@ export async function verifiedRecoveryReceipt(bucket: R2Bucket, operation: Priva
   if (!document) return null;
   let receipt: PrivateRecoveryReceipt;
   try { receipt = await document.json<PrivateRecoveryReceipt>(); } catch { return null; }
-  if (!receipt || receipt.projectId !== operation.projectId || receipt.incarnation !== operation.incarnation || receipt.commit !== operation.commit || receipt.tree !== operation.tree || receipt.journalId !== operation.journalId || receipt.objectScope !== "exact-accepted-reachable-closure" || !Number.isSafeInteger(receipt.size) || receipt.size < 1 || receipt.size > MAX_BUNDLE_BYTES || !Number.isSafeInteger(receipt.objectCount) || receipt.objectCount < 1 || !/^[a-f0-9]{64}$/.test(receipt.sha256) || !Number.isFinite(Date.parse(receipt.createdAt))) return null;
+  if (!receipt || receipt.projectId !== operation.projectId || receipt.incarnation !== operation.incarnation || receipt.commit !== operation.commit || receipt.tree !== operation.tree || receipt.journalId !== operation.journalId || receipt.objectScope !== "exact-accepted-reachable-closure" || receipt.acceptedRef!==operation.acceptedRef || receipt.acceptedRootVersion!==operation.acceptedRootVersion || !Number.isSafeInteger(receipt.size) || receipt.size < 1 || receipt.size > MAX_BUNDLE_BYTES || !Number.isSafeInteger(receipt.objectCount) || receipt.objectCount < 1 || !/^[a-f0-9]{64}$/.test(receipt.sha256) || !Number.isFinite(Date.parse(receipt.createdAt))) return null;
   const object = await bucket.head(key);
-  if (!object || (expectedETag !== undefined && object.etag !== expectedETag) || object.size !== receipt.size || object.customMetadata?.sha256 !== receipt.sha256 || object.customMetadata?.commit !== operation.commit || object.customMetadata?.tree !== operation.tree || object.customMetadata?.operationId !== operation.id || object.customMetadata?.scopeId !== recoveryScopeId(operation) || object.customMetadata?.objectCount !== String(receipt.objectCount) || object.customMetadata?.createdAt !== receipt.createdAt || object.customMetadata?.projectId !== operation.projectId || object.customMetadata?.incarnation !== operation.incarnation || object.customMetadata?.journalId !== operation.journalId || object.customMetadata?.objectScope !== receipt.objectScope) return null;
+  if (!object || !recoveryBranchMetadataMatches(operation,object.customMetadata) || (expectedETag !== undefined && object.etag !== expectedETag) || object.size !== receipt.size || object.customMetadata?.sha256 !== receipt.sha256 || object.customMetadata?.commit !== operation.commit || object.customMetadata?.tree !== operation.tree || object.customMetadata?.operationId !== operation.id || object.customMetadata?.scopeId !== recoveryScopeId(operation) || object.customMetadata?.objectCount !== String(receipt.objectCount) || object.customMetadata?.createdAt !== receipt.createdAt || object.customMetadata?.projectId !== operation.projectId || object.customMetadata?.incarnation !== operation.incarnation || object.customMetadata?.journalId !== operation.journalId || object.customMetadata?.objectScope !== receipt.objectScope) return null;
   return receipt;
 }
 
@@ -53,9 +55,9 @@ export class FlareGitPrivateRecoveryWorkflow extends WorkflowEntrypoint<Env, Pri
           if (completed) {
             const metadata = completed.customMetadata;
             const objectCount = Number(metadata?.objectCount);
-            if (!operation.tree || completed.size < 1 || completed.size > MAX_BUNDLE_BYTES || metadata?.projectId !== operation.projectId || metadata?.incarnation !== operation.incarnation || metadata?.operationId !== operation.id || metadata?.scopeId !== recoveryScopeId(operation) || metadata?.commit !== operation.commit || metadata?.tree !== operation.tree || metadata?.journalId !== operation.journalId || metadata?.objectScope !== "exact-accepted-reachable-closure" || !metadata.sha256 || !/^[a-f0-9]{64}$/.test(metadata.sha256) || !Number.isSafeInteger(objectCount) || objectCount < 1 || !metadata.createdAt || !Number.isFinite(Date.parse(metadata.createdAt))) throw new Error("Existing private recovery object needs confirmed cleanup");
+            if (!operation.tree || !recoveryBranchMetadataMatches(operation,metadata) || completed.size < 1 || completed.size > MAX_BUNDLE_BYTES || metadata?.projectId !== operation.projectId || metadata?.incarnation !== operation.incarnation || metadata?.operationId !== operation.id || metadata?.scopeId !== recoveryScopeId(operation) || metadata?.commit !== operation.commit || metadata?.tree !== operation.tree || metadata?.journalId !== operation.journalId || metadata?.objectScope !== "exact-accepted-reachable-closure" || !metadata.sha256 || !/^[a-f0-9]{64}$/.test(metadata.sha256) || !Number.isSafeInteger(objectCount) || objectCount < 1 || !metadata.createdAt || !Number.isFinite(Date.parse(metadata.createdAt))) throw new Error("Existing private recovery object needs confirmed cleanup");
             await authorize();
-            const reconstructed: PrivateRecoveryReceipt = { projectId, incarnation: operation.incarnation, commit: operation.commit, tree: operation.tree, journalId: operation.journalId, size: completed.size, sha256: metadata.sha256, objectCount, objectScope: "exact-accepted-reachable-closure", createdAt: metadata.createdAt };
+            const reconstructed: PrivateRecoveryReceipt = { ...recoveryBranchFields(operation),projectId, incarnation: operation.incarnation, commit: operation.commit, tree: operation.tree, journalId: operation.journalId, size: completed.size, sha256: metadata.sha256, objectCount, objectScope: "exact-accepted-reachable-closure", createdAt: metadata.createdAt };
             const pinned = await this.env.EVIDENCE_BUCKET.head(key);
             if (!pinned || pinned.etag !== completed.etag || pinned.size !== completed.size) throw new Error("Private recovery object changed during receipt recovery");
             await this.env.EVIDENCE_BUCKET.put(`${key}.json`, JSON.stringify(reconstructed), { httpMetadata: { contentType: "application/json" } });
@@ -79,17 +81,18 @@ export class FlareGitPrivateRecoveryWorkflow extends WorkflowEntrypoint<Env, Pri
           const info = await repository.info();
           const token = await repository.createToken("read", 1200);
           allocated = true;
-          const bundle = await createAcceptedBundle(sandbox, { remote: String(info.remote), token: token.plaintext, commit: operation.commit, tree: operation.tree, directory: `/tmp/flaregit-private-recovery-${crypto.randomUUID()}` });
+          const bundle = await createAcceptedBundle(sandbox, { remote: String(info.remote), token: token.plaintext, commit: operation.commit, tree: operation.tree, ...recoveryBranchFields(operation),directory: `/tmp/flaregit-private-recovery-${crypto.randomUUID()}` });
           if (operation.tree === null) {
             await ledger.privateRecoveryRecordTree(operationId, bundle.tree, event.instanceId);
             operation = await authorize();
           }
+          if(bundle.acceptedRef!==operation.acceptedRef||bundle.acceptedRootVersion!==operation.acceptedRootVersion)throw new Error("Recovery branch authority changed");
           if (operation.tree !== bundle.tree) throw new Error("Recovery tree authority changed");
           await authorize();
           const key = recoveryBundleKey(operation);
           await ledger.privateRecoveryBeginUpload(operationId, event.instanceId);
           const preparedAt = new Date().toISOString();
-          const upload = await this.env.EVIDENCE_BUCKET.createMultipartUpload(key, { httpMetadata: { contentType: "application/x-git-bundle" }, customMetadata: { projectId, incarnation: operation.incarnation, commit: operation.commit, tree: operation.tree, journalId: operation.journalId, objectScope: "exact-accepted-reachable-closure", scopeId: recoveryScopeId(operation), sha256: bundle.sha256, objectCount: String(bundle.objectCount), createdAt: preparedAt, operationId } });
+          const upload = await this.env.EVIDENCE_BUCKET.createMultipartUpload(key, { httpMetadata: { contentType: "application/x-git-bundle" }, customMetadata: { ...recoveryBranchMetadata(operation),projectId, incarnation: operation.incarnation, commit: operation.commit, tree: operation.tree, journalId: operation.journalId, objectScope: "exact-accepted-reachable-closure", scopeId: recoveryScopeId(operation), sha256: bundle.sha256, objectCount: String(bundle.objectCount), createdAt: preparedAt, operationId } });
           try {
             await ledger.privateRecoverySaveUpload(operationId, upload.uploadId, event.instanceId);
             const parts: R2UploadedPart[] = [];
@@ -109,7 +112,7 @@ export class FlareGitPrivateRecoveryWorkflow extends WorkflowEntrypoint<Env, Pri
             throw new Error("Private recovery bundle upload failed");
           }
           await authorize();
-          const document: PrivateRecoveryReceipt = { projectId, incarnation: operation.incarnation, commit: operation.commit, tree: operation.tree, journalId: operation.journalId, size: bundle.size, sha256: bundle.sha256, objectCount: bundle.objectCount, objectScope: "exact-accepted-reachable-closure", createdAt: preparedAt };
+          const document: PrivateRecoveryReceipt = { ...recoveryBranchFields(operation),projectId, incarnation: operation.incarnation, commit: operation.commit, tree: operation.tree, journalId: operation.journalId, size: bundle.size, sha256: bundle.sha256, objectCount: bundle.objectCount, objectScope: "exact-accepted-reachable-closure", createdAt: preparedAt };
           await this.env.EVIDENCE_BUCKET.put(`${key}.json`, JSON.stringify(document), { httpMetadata: { contentType: "application/json" } });
           const verified = await verifiedRecoveryReceipt(this.env.EVIDENCE_BUCKET, operation);
           if (!verified) throw new Error("Private recovery receipt verification failed");

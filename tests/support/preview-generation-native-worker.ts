@@ -17,6 +17,7 @@ export class GenerationNativeFixture extends RepositoryController {
     super(ctx, { ...env, ARTIFACTS: artifacts } as unknown as Env);
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS fixture_revocations(id INTEGER PRIMARY KEY)");
   }
+  async fixtureSetupOwner(){if(this.ctx.storage.sql.exec("SELECT 1 FROM members WHERE user_id='generation-fixture-owner' LIMIT 1").toArray().length)return;await this.initialize({projectId:identity.projectId,projectName:"Synthetic generation owner",canonicalRepoName:`flaregit-${identity.projectId}`,head:identity.commit,ownerId:"generation-fixture-owner",verificationPolicy:{}});}
   async fixtureAlarm() { await this.ctx.storage.deleteAlarm(); await super.alarm(); return { alarm: await this.ctx.storage.getAlarm(), attempts: this.ctx.storage.sql.exec<{ attempts: number; status: string; erased: number }>("SELECT attempts,status,token IS NULL AS erased FROM preview_credential_incidents").toArray(), providerCalls: this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM fixture_revocations").one().count }; }
   fixtureExpireCredentials() { this.ctx.storage.sql.exec("UPDATE preview_credential_incidents SET expires_at=? WHERE status='pending'", Date.now()-1); }
 
@@ -72,7 +73,8 @@ export default { async fetch(request: Request, env: Env) {
     if (url.pathname === "/asset") {
       // This adapter deliberately tests the production broker against the pure SQLite generation state;
       // authorization lifecycle integration remains a separate RepositoryController gate.
-      const adapter = { ...env, REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: (id: string) => id === "global" ? { activePreviewOrigin: async () => origin } : { previewGenerationForRead: (commit: string, inc: string, g: string) => repository.fixtureRead(commit, inc, g), previewAvailable: async () => true, previewLegacyGenerationAllowed: async () => false } } } as unknown as Env;
+      await repository.fixtureSetupOwner();
+      const adapter = { ...env, REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: (id: string) => id === "global" ? { activePreviewOrigin: async () => origin } : { previewGenerationForRead: (commit: string, inc: string, g: string) => repository.fixtureRead(commit, inc, g), admitPreviewRead:()=>repository.admitPreviewRead(), previewAvailable: async () => true, previewLegacyGenerationAllowed: async () => false } } } as unknown as Env;
       return handlePreviewAsset(new Request(url.searchParams.get("url")!), adapter, identity.projectId);
     }
     return new Response("missing", { status: 404 });

@@ -16,9 +16,9 @@ test("real child binding invokes the main named broker and isolates real R2 repo
   const [mainScript, childScript] = await Promise.all([bundle("tests/support/preview-service-worker.ts"), bundle("tests/support/preview-service-child.ts")]);
   const repoA = "abcdef123456", repoB = "123456abcdef", repoC = "abcdef123457", repoD = "abcdef123458";
   const mf = new Miniflare(convertV4MiniflareOptions({ workers: [
-    { name: "preview-main", modules: true, script: mainScript, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], unsafeDirectSockets: [{ host: "127.0.0.1" }], ratelimits: { PREVIEW_ASSET_LIMITER: { namespace_id: "1003", simple: { limit: 600, period: 60 } } }, r2Buckets: ["EVIDENCE_BUCKET"], durableObjects: { REPOSITORY_CONTROLLER: { className: "RepositoryController", useSQLite: true } }, bindings: { PREVIEW_SIGNING_KEY: "binding-test-only-secret", CLERK_AUTHORIZED_PARTIES: "https://flaregit.com", REPOSITORY_PREVIEW_ORIGINS: JSON.stringify({ [repoA]: "https://repo-a.preview-fixture.workers.dev", [repoB]: "https://repo-b.preview-fixture.workers.dev", [repoC]: "https://repo-c.preview-fixture.workers.dev", [repoD]: "https://repo-d.preview-fixture.workers.dev" }) } },
+    { name: "preview-main", modules: true, script: mainScript, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], unsafeDirectSockets: [{ host: "127.0.0.1" }], ratelimits: { PREVIEW_ASSET_LIMITER: { namespace_id: "1003", simple: { limit: 600, period: 60 } } }, r2Buckets: ["EVIDENCE_BUCKET"], durableObjects: { REPOSITORY_CONTROLLER: { className: "RepositoryController", useSQLite: true } }, bindings: { PREVIEW_READ_GLOBAL_MONTHLY_ATTEMPTS: "100000", PREVIEW_READ_OWNER_MONTHLY_ATTEMPTS: "25000", PREVIEW_SIGNING_KEY: "binding-test-only-secret", CLERK_AUTHORIZED_PARTIES: "https://flaregit.com", REPOSITORY_PREVIEW_ORIGINS: JSON.stringify({ [repoA]: "https://repo-a.preview-fixture.workers.dev", [repoB]: "https://repo-b.preview-fixture.workers.dev", [repoC]: "https://repo-c.preview-fixture.workers.dev", [repoD]: "https://repo-d.preview-fixture.workers.dev" }) } },
     { name: "preview-child", modules: true, script: childScript, compatibilityDate: "2026-10-02", unsafeDirectSockets: [{ host: "127.0.0.1" }], bindings: { REPOSITORY_ID: repoA }, serviceBindings: { ASSET_BROKER: { name: "preview-main", entrypoint: "PreviewAssetBroker" } } },
-    ...[repoC, repoD].map(repository => ({ name: `preview-child-${repository}`, modules: true as const, script: childScript, compatibilityDate: "2026-10-02", unsafeDirectSockets: [{ host: "127.0.0.1" }], bindings: { REPOSITORY_ID: repository }, serviceBindings: { ASSET_BROKER: { name: "preview-main", entrypoint: "PreviewAssetBroker" } } })),
+    ...[repoB, repoC, repoD].map(repository => ({ name: `preview-child-${repository}`, modules: true as const, script: childScript, compatibilityDate: "2026-10-02", unsafeDirectSockets: [{ host: "127.0.0.1" }], bindings: { REPOSITORY_ID: repository }, serviceBindings: { ASSET_BROKER: { name: "preview-main", entrypoint: "PreviewAssetBroker" } } })),
   ] }));
   try {
     const main = await mf.unsafeGetDirectURL("preview-main");
@@ -28,6 +28,7 @@ test("real child binding invokes the main named broker and isolates real R2 repo
       const url = new URL(child); url.searchParams.set("target", target);
       return fetch(url, { method, headers: { Connection: "close", Cookie: "fixture-secret=never-forward", Authorization: "Bearer never-forward", "x-preview-repository-id": repoB } });
     };
+    const readCount=async()=>{const value:unknown=await(await fetch(new URL("/preview-read-count",main))).json();if(typeof value!=="number"||!Number.isSafeInteger(value))throw new Error("Invalid fixture count");return value;};
     const index = await call(links[repoA]!);
     expect(index.status).toBe(200);
     expect(await index.text()).toBe(`private fixture ${repoA}`);
@@ -40,6 +41,9 @@ test("real child binding invokes the main named broker and isolates real R2 repo
     expect(await module.text()).toContain(repoA);
     const head = await call(links[repoA]!, "HEAD");
     expect(head.status).toBe(200); expect(await head.text()).toBe("");
+    expect(await readCount()).toBe(3);
+    expect((await call(new URL("missing.js",links[repoA]).href)).status).toBe(404);
+    expect(await readCount()).toBe(4);
     for (const target of [links[repoB]!, links[repoA]!.replace("repo-a", "repo-b"), links[repoA]!.replace("a".repeat(40), "b".repeat(40)), `${links[repoA]}x/%2e%2e%2fsecret`, links[repoA]!.replace(/\/[0-9a-f]{64}\/$/, `/${"0".repeat(64)}/`)]) {
       const response = await call(target);
       expect(response.status).toBeGreaterThanOrEqual(400);
@@ -57,5 +61,13 @@ test("real child binding invokes the main named broker and isolates real R2 repo
         expect(revoked.status).toBe(404); expect(await revoked.text()).not.toContain("private fixture");
       }
     }
+    await fetch(new URL("/exhaust-preview-reads",main));
+    const beforeExhaustion=await readCount();
+    const remainingRepo=repoB,remainingChild=await mf.unsafeGetDirectURL(`preview-child-${repoB}`);
+    const requestUrl=new URL(remainingChild);requestUrl.searchParams.set("target",links[remainingRepo]!);
+    const denied=await fetch(requestUrl);
+    expect(denied.status).toBe(429);expect(denied.headers.get("Retry-After")).not.toBeNull();
+    expect(await readCount()).toBe(beforeExhaustion);
+    expect(await(await fetch(new URL(`/core-state?repository=${remainingRepo}`,main))).json() as string).toBe("a".repeat(40));
   } finally { await mf.dispose(); }
 }, 30_000);

@@ -7,14 +7,16 @@ import child from "../src/server/preview-worker.js";
 const repository = "abcdef123456";
 const commit = "a".repeat(40);
 const origin = "https://repo-a.account.workers.dev";
-function fixture() {
+function fixture(admitPreviewRead: () => Promise<import("../src/server/preview-monthly-read-admission").PreviewReadAdmission> = async () => ({allowed:true,month:new Date().toISOString().slice(0,7),globalAttempts:1,ownerAttempts:1})) {
   const keys: string[] = [];
   const lookups: string[] = [];
   const env = {
+    PREVIEW_READ_GLOBAL_MONTHLY_ATTEMPTS: "100000",
+    PREVIEW_READ_OWNER_MONTHLY_ATTEMPTS: "25000",
     PREVIEW_ASSET_LIMITER: { limit: async () => ({ success: true }) },
     REPOSITORY_PREVIEW_ORIGINS: JSON.stringify({ [repository]: origin, "123456abcdef": "https://repo-b.account.workers.dev" }),
     PREVIEW_SIGNING_KEY: "unit-test-signing-key",
-    REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: () => ({ previewLegacyGenerationAllowed: async () => true, previewAvailable: async () => true, activePreviewOrigin: async (id: string) => { lookups.push(id); return id === repository ? origin : "https://repo-b.account.workers.dev"; } }) },
+    REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: () => ({ previewLegacyGenerationAllowed: async () => true, admitPreviewRead, previewAvailable: async () => true, activePreviewOrigin: async (id: string) => { lookups.push(id); return id === repository ? origin : "https://repo-b.account.workers.dev"; } }) },
     CLERK_AUTHORIZED_PARTIES: "https://flaregit.com",
     EVIDENCE_BUCKET: {
       async get(key: string) {
@@ -61,7 +63,7 @@ describe("repository preview broker", () => {
   });
   test("revocation during storage read withholds response headers and private bytes", async () => {
     const { env, keys } = fixture(); let active = true;
-    env.REPOSITORY_CONTROLLER = {idFromName: (name: string) => name, get: (id: string) => id === "global" ? {activePreviewOrigin:async()=>origin} : {previewLegacyGenerationAllowed: async () => true, previewAvailable:async()=>active}} as unknown as Env["REPOSITORY_CONTROLLER"];
+    env.REPOSITORY_CONTROLLER = {idFromName: (name: string) => name, get: (id: string) => id === "global" ? {activePreviewOrigin:async()=>origin} : {previewLegacyGenerationAllowed: async () => true, admitPreviewRead:async()=>({allowed:true,month:new Date().toISOString().slice(0,7),globalAttempts:1,ownerAttempts:1}),previewAvailable:async()=>active}} as unknown as Env["REPOSITORY_CONTROLLER"];
     const originalGet = env.EVIDENCE_BUCKET.get.bind(env.EVIDENCE_BUCKET);
     env.EVIDENCE_BUCKET.get = (async (key: string) => {const object=await originalGet(key);active=false;return object;}) as typeof env.EVIDENCE_BUCKET.get;
     const response = await handlePreviewAsset(new Request(await link(env)), env, repository);
@@ -170,4 +172,29 @@ test("preview limiter outage fails closed before paid reads", async () => {
   expect((await handlePreviewAsset(new Request(await link(env)), env, repository)).status).toBe(503);
   expect(keys).toEqual([]);
   expect(lookups).toEqual([]);
+});
+
+test("monthly preview exhaustion and unavailable admission never read R2", async () => {
+ for(const reason of ["global_capacity","owner_capacity","unconfigured"] as const){
+  const {env,keys}=fixture(async()=>({allowed:false,reason,month:new Date().toISOString().slice(0,7)}));
+  const response=await handlePreviewAsset(new Request(await link(env)),env,repository);
+  expect(response.status).toBe(reason==="unconfigured"?503:429);
+  if(reason!=="unconfigured"){
+   const now=new Date(),reset=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth()+1,1));
+   expect(response.headers.get("Retry-After")).toBe(reset.toUTCString());
+  }
+  expect(keys).toEqual([]);
+ }
+ const {env,keys}=fixture(async()=>{throw new Error("Unavailable");});
+ expect((await handlePreviewAsset(new Request(await link(env)),env,repository)).status).toBe(503);
+ expect(keys).toEqual([]);
+});
+test("missing or malformed operator monthly configuration fails closed", async () => {
+ for(const cap of [undefined,"1.5","-1"]){
+  let admissions=0;
+  const {env,keys}=fixture(async()=>{admissions++;return{allowed:true,month:new Date().toISOString().slice(0,7),globalAttempts:1,ownerAttempts:1};});
+  env.PREVIEW_READ_GLOBAL_MONTHLY_ATTEMPTS=cap;
+  expect((await handlePreviewAsset(new Request(await link(env)),env,repository)).status).toBe(503);
+  expect(admissions).toBe(0);expect(keys).toEqual([]);
+ }
 });

@@ -64,8 +64,10 @@ test("production Worker service routes verify signatures before user login and e
     expect((await request("/api/p/abcdef123456/deployments",{method:"POST",headers:memberHeaders,body:JSON.stringify(deploymentInput)})).status).toBe(403);
     expect((await request("/api/p/abcdef123456/deployments",{method:"POST",headers:humanHeaders,body:JSON.stringify({...deploymentInput,journalId:"unaccepted"})})).status).toBe(409);
     expect((await request("/api/p/abcdef123456/deployments",{method:"POST",headers:humanHeaders,body:JSON.stringify({...deploymentInput,environment:"x".repeat(101)})})).status).toBe(400);
-    const queuedResponse=await request("/api/p/abcdef123456/deployments",{method:"POST",headers:humanHeaders,body:JSON.stringify(deploymentInput)});expect(queuedResponse.status).toBe(201);
-    const queued=await queuedResponse.json() as{deployment:{id:string;requestEventId:string}};
+    expect((await request("/api/p/abcdef123456/deployments",{method:"POST",headers:humanHeaders,body:JSON.stringify({...deploymentInput,pin:{verified:true}})})).status).toBe(400);
+    const queuedResponse=await request("/api/p/abcdef123456/deployments",{method:"POST",headers:humanHeaders,body:JSON.stringify(deploymentInput)});if(queuedResponse.status!==201)throw Error(`Deployment fixture HTTP ${queuedResponse.status}: ${await queuedResponse.text()}`);expect(queuedResponse.status).toBe(201);
+    const queued=await queuedResponse.json() as{deployment:{id:string;requestEventId:string;target:{acceptedRef:string;commit:string;tree:string}}};
+    expect(queued.deployment.target).toMatchObject({acceptedRef:"refs/heads/main",commit:"a".repeat(40),tree:"b".repeat(40)});
     const fundedStats=await(await request("/native-stats")).json() as{vmStarts:number;reservations:number};expect(fundedStats).toEqual({vmStarts:1,reservations:1});
     const repeatedResponse=await request("/api/p/abcdef123456/deployments",{method:"POST",headers:humanHeaders,body:JSON.stringify(deploymentInput)});expect(repeatedResponse.status).toBe(200);
     const repeated=await repeatedResponse.json() as typeof queued;

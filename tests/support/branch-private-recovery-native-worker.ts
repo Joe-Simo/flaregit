@@ -1,0 +1,18 @@
+import {AcceptedTargetFixture} from './accepted-target-binding-worker';
+import {PrivateRecoveryOperations} from '../../src/server/private-recovery';
+import {accountKeyFor} from '../../src/server/projects';
+import type {Env} from '../../src/server/env';
+import type {PrivateRecoveryReceipt,PrivateRecoveryOperation} from '../../src/server/private-recovery';
+export class BranchPrivateRecoveryFixture extends AcceptedTargetFixture{
+ override async fetch(request:Request){const url=new URL(request.url);try{
+  if(url.pathname==='/prepare-recovery'){const input=await request.json() as {id:string;commit:string;tree:string;selected?:{journalId:string;acceptedRef?:string;acceptedRootVersion?:number}};return Response.json(await this.privateRecoveryPrepare(input.id,input.commit,input.tree,'owner',await accountKeyFor('owner'),input.selected));}
+  if(url.pathname==='/authorize-recovery')return Response.json(await this.privateRecoveryAuthorize(url.searchParams.get('id')!,'owner'));
+  if(url.pathname==='/complete-recovery'){const input=await request.json() as {id:string;wrongRef?:boolean};const ops=new PrivateRecoveryOperations(this.ctx.storage),op=ops.get(input.id)!;if(op.uploadState!=='closed'){ops.beginUpload(op.id);ops.saveUpload(op.id,'synthetic-upload');ops.closeUpload(op.id,'synthetic-upload');}const receipt:PrivateRecoveryReceipt={projectId:op.projectId,incarnation:op.incarnation,commit:op.commit,tree:op.tree!,journalId:op.journalId,size:128,sha256:'a'.repeat(64),objectCount:1,objectScope:'exact-accepted-reachable-closure',createdAt:'2026-10-04',...(op.acceptedRef?{acceptedRef:input.wrongRef?'refs/heads/wrong':op.acceptedRef}:{}),...(op.acceptedRootVersion!==undefined?{acceptedRootVersion:op.acceptedRootVersion}:{})};await this.privateRecoveryComplete(op.id,receipt);return Response.json(ops.get(op.id));}
+  if(url.pathname==='/readable-recovery')return Response.json(await this.privateRecoveryReadable(url.searchParams.get('id')!));
+  if(url.pathname==='/retire-recovery'){const id=url.searchParams.get('id')!;const op=await this.privateRecoveryBeginDeletion(id,'owner');await this.privateRecoveryFinishDeletion(id);return Response.json(await this.privateRecoveryOperation(id));}
+  if(url.pathname==='/legacy-recovery'){const input=await request.json() as {id:string;journalId:string};const selected=await this.acceptedDeploymentTarget(input.journalId);if(!selected)throw Error('Primary source unavailable');const state=await this.getState();const op:PrivateRecoveryOperation={id:input.id,projectId:state.projectId,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation(),journalId:input.journalId,commit:selected.target.commit,tree:selected.target.tree,canonicalRepoName:state.canonicalRepoName,ownerId:'owner',accountKey:await accountKeyFor('owner'),status:'pending',createdAt:'2026-10-04',uploadState:'not-started'};return Response.json(new PrivateRecoveryOperations(this.ctx.storage).create(op));}
+  if(url.pathname==='/public-sharing-proof'){this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS repository_visibility(id INTEGER PRIMARY KEY,visibility TEXT NOT NULL,version INTEGER NOT NULL,confirmed_by TEXT NOT NULL)");this.ctx.storage.sql.exec("INSERT OR REPLACE INTO repository_visibility VALUES(1,'public',1,'owner')");return Response.json(await this.publicGitSharingState('owner'));}
+  return super.fetch(request);
+ }catch(error){return Response.json({error:error instanceof Error?error.message:'Fixture failure'},{status:409});}}
+}
+export default{fetch(request:Request,env:Env){return(env.REPOSITORY_CONTROLLER.getByName('branch-private-recovery') as unknown as BranchPrivateRecoveryFixture).fetch(request);}};

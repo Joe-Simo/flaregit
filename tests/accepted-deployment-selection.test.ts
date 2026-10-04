@@ -86,3 +86,26 @@ test("trusted primary compatibility recovers a legacy request without changing i
     expect(events.length).toBe(1); expect(events[0]?.data.acceptedRef).toBeUndefined();
   } finally { db.close(); }
 });
+
+test("historical primary acceptance without recorded branch stays unbound rather than guessing main", () => {
+  const value = context(), original = value.journals[0]!;
+  value.primaryRef = null; value.roots = []; value.journals = [{ ...original, acceptedTarget: undefined }];
+  value.primaryHistory = [{ commit, candidateId: original.candidateId, acceptedAt: "2026-10-04T00:00:01Z", participatingTasks: ["task"], evidenceId: "evidence", outputDigest: original.outputDigest }];
+  const selection = selectAcceptedDeploymentJournal(value, journalId)!;
+  expect(selection.target).toMatchObject({ journalId, commit, tree });
+  expect(selection.target.acceptedRef).toBeUndefined(); expect(selection.target.acceptedRootVersion).toBeUndefined();
+  expect(confirmAcceptedDeploymentSelection(selection, { projectId: selection.projectId, incarnation, canonicalRepoName: selection.canonicalRepoName, ref: selection.target.recoverableRef, commit, tree, verified: true })).toEqual(selection.target);
+  expect(JSON.stringify(selection.target)).not.toContain("refs/heads/main");
+  value.journals = [original]; expect(selectAcceptedDeploymentJournal(value, journalId)).toBeNull();
+});
+
+test("older untargeted journal without candidateCommit still proves exact original primary acceptance", () => {
+  const value = context(), original = value.journals[0]!;
+  value.primaryRef = null; value.roots = [];
+  const { acceptedTarget: _target, candidateCommit: _candidate, ...legacy } = original;
+  value.journals = [legacy as typeof original];
+  value.primaryHistory = [{ commit, candidateId: original.candidateId, acceptedAt: "2026-10-04T00:00:01Z", participatingTasks: ["task"], evidenceId: "evidence", outputDigest: original.outputDigest }];
+  expect(selectAcceptedDeploymentJournal(value, journalId)?.target).toMatchObject({ commit, tree });
+  value.journals = [{ ...legacy, acceptedTarget: original.acceptedTarget } as typeof original];
+  expect(selectAcceptedDeploymentJournal(value, journalId)).toBeNull();
+});

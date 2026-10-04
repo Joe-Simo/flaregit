@@ -1,3 +1,4 @@
+import {selectAcceptedDeploymentJournal,confirmAcceptedDeploymentSelection,type CommittedDeploymentPin} from "../../src/server/accepted-deployment-selection";
 import {RepositoryController} from "../../src/server/durable-object";
 import worker from "../../src/server/worker";
 import {RepositoryDeployments} from "../../src/server/deployments";
@@ -15,6 +16,7 @@ export class ServiceApiFixture extends RepositoryController {
     const community=new RepositoryPublicCommunity(this.ctx.storage,repositoryId);
     const deployments=new RepositoryDeployments(this.ctx.storage,repositoryId);
     const acceptedTarget={journalId:"accepted-journal",candidateId:"accepted-candidate",commit:"a".repeat(40),tree:"b".repeat(40),acceptedAt:"2026-10-02T00:00:00.000Z",recoverableRef:"refs/flaregit/deployments/accepted-journal"};
+    const selection=selectAcceptedDeploymentJournal({projectId:repositoryId,incarnation:"11111111-1111-4111-8111-111111111111",canonicalRepoName:"fixture",primaryRef:"refs/heads/main",roots:[],primaryHistory:[{commit:acceptedTarget.commit,candidateId:acceptedTarget.candidateId,acceptedAt:acceptedTarget.acceptedAt,participatingTasks:["fixture-task"],evidenceId:"fixture-evidence",outputDigest:"fixture-build"}],journals:[{id:acceptedTarget.journalId,candidateId:acceptedTarget.candidateId,candidateCommit:acceptedTarget.commit,candidateTree:acceptedTarget.tree,expectedHead:"c".repeat(40),newHead:acceptedTarget.commit,outputDigest:"fixture-build",state:"ACCEPTED",timestamp:acceptedTarget.acceptedAt}]},acceptedTarget.journalId)!;
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS fixture_pin(id INTEGER PRIMARY KEY,pinned INTEGER);INSERT OR IGNORE INTO fixture_pin VALUES(1,0)");
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS fixture_vms(name TEXT PRIMARY KEY)");
     if(route==="/native-budget-deny"){await this.ctx.storage.put("native-budget-deny",true);return Response.json({ok:true});}
@@ -43,8 +45,8 @@ export class ServiceApiFixture extends RepositoryController {
           verifyApiToken: async (token: string) => token === `fgt_abcdef123456_${"x".repeat(32)}` ? { userId:"fixture-user",scope:"full",repo:null } : token === `fgt_abcdef123456_${"y".repeat(32)}` ? {userId:"fixture-member",scope:"full",repo:null} : null,
           repositoryDeletionPending: async () => false, roleOf: async(user:string) => user==="fixture-user"?"owner":"member",
           canGitAccess: async(user:string,task:string|null,write:boolean) => !write || user==="fixture-user" && task==="task-one",
-          acceptedDeploymentTarget: async(journal:string)=>journal===acceptedTarget.journalId?{canonicalRepoName:"fixture",target:acceptedTarget}:null,
-          acceptedDeploymentTargets: async()=>[acceptedTarget],
+          acceptedDeploymentTarget: async(journal:string)=>journal===acceptedTarget.journalId?{canonicalRepoName:"fixture",target:selection.target,selection}:null,
+          acceptedDeploymentTargets: async()=>[selection.target],
           listDeployments:async()=>deployments.list(),
           existingDeploymentRequest:async(...args:Parameters<typeof deployments.existingRequest>)=>deployments.existingRequest(...args),
           claimNativeCompute:async(key:string)=>this.claimNativeCompute(key),
@@ -53,7 +55,7 @@ export class ServiceApiFixture extends RepositoryController {
           reserveManagedSpend:async(...args:Parameters<typeof this.reserveManagedSpend>)=>this.reserveManagedSpend(...args),
           consumeManagedSpend:async(...args:Parameters<typeof this.consumeManagedSpend>)=>this.consumeManagedSpend(...args),
           listWebhooks:async()=>[{active:1,events:"deployment.requested"}],
-          requestDeployment:async(target:typeof acceptedTarget,serviceId:string,environment:string,key:string,actor:string)=>deployments.request(target,serviceId,environment,key,actor,()=>{}),
+          requestDeployment:async(target:typeof selection.target,serviceId:string,environment:string,key:string,actor:string,pin?:CommittedDeploymentPin)=>{if(!pin||!this.ctx.storage.sql.exec<{pinned:number}>("SELECT pinned FROM fixture_pin").toArray()[0]!.pinned)throw Error("Native deployment pin was not confirmed");const confirmed=confirmAcceptedDeploymentSelection(selection,pin);if(!confirmed||JSON.stringify(confirmed)!==JSON.stringify(target))throw Error("Deployment pin scope changed");return deployments.request(target,serviceId,environment,key,actor,()=>{});},
           getProfile: async()=>({displayName:"Verified unit actor"}),
           publicGrant: async()=>{const row=this.ctx.storage.sql.exec<{enabled:number;version:number}>("SELECT enabled,version FROM fixture_public").toArray()[0]!;return name===`project:${repositoryId}`&&row.enabled?{visibility:"public",confirmedByOwner:true,acceptedCommit:"a".repeat(40),name:"Fixture",version:row.version,canonicalRepoName:"fixture"}:null;},
           publicCommunity: async()=>{const result={policy:community.policy(),posts:community.listPublic()};if(this.ctx.storage.sql.exec<{revoke_during_read:number}>("SELECT revoke_during_read FROM fixture_public").toArray()[0]!.revoke_during_read)this.ctx.storage.sql.exec("UPDATE fixture_public SET enabled=0,version=version+1");return result;},

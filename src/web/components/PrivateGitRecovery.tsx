@@ -1,3 +1,5 @@
+import {deploymentTargetRefLabel} from "../deployment-target-display";
+import {recoverySelection,recoveryTargetKey,recoverySnapshotMatches,recoveryDownloadNotice,selectedRecoveryTarget,type RecoveryRevision,type RecoverySelection} from "../private-recovery-target";
 import { useAuth } from "@clerk/clerk-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -7,13 +9,17 @@ import { Dialog, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui
 import { Input } from "@/components/ui/input";
 import { apiFetch, apiJson } from "../api";
 
-interface Snapshot { cleanupAdvice?: {recoveryAction:"retry"|"provider-reconciliation";detail:string}|null; id: string; commit: string; tree: string | null; cacheState?: "deleting" | "deleted"; canRetry?: boolean; status: "pending" | "ready" | "failed"; createdAt: string; error?: string; size?: number }
-interface Target { journalId: string; commit: string; tree: string | null; acceptedAt: string }
-interface RecoveryInfo { snapshots: Snapshot[]; target: { commit: string; tree: string | null } | null; targets?: Target[] }
-interface Preparation { commit: string; expectedTree: string | null; idempotencyKey: string }
+interface Snapshot extends RecoveryRevision { cleanupAdvice?: {recoveryAction:"retry"|"provider-reconciliation";detail:string}|null; id: string; commit: string; tree: string | null; cacheState?: "deleting" | "deleted"; canRetry?: boolean; status: "pending" | "ready" | "failed"; createdAt: string; error?: string; size?: number }
+interface Target extends RecoveryRevision { journalId: string; commit: string; tree: string | null; acceptedAt: string }
+interface RecoveryInfo { snapshots: Snapshot[]; target: RecoveryRevision | null; targets?: Target[] }
+interface Preparation { selected?:RecoverySelection;commit: string; expectedTree: string | null; idempotencyKey: string }
 const BROWSER_DOWNLOAD_LIMIT = 16 * 1024 * 1024;
 const browserDownloadable = (snapshot: Snapshot) => snapshot.size !== undefined && Number.isSafeInteger(snapshot.size) && snapshot.size > 0 && snapshot.size <= BROWSER_DOWNLOAD_LIMIT;
 const errorText = (error: unknown) => error instanceof Error ? error.message : "Recovery request failed";
+
+export function RecoveryRevisionSummary({revision}:{revision:RecoveryRevision}){
+ return <dl className="grid min-w-0 gap-x-3 gap-y-1 text-xs sm:grid-cols-[auto_1fr]"><dt className="text-muted-foreground">Recorded branch</dt><dd className="break-all font-mono">{deploymentTargetRefLabel(revision)}</dd><dt className="text-muted-foreground">Commit</dt><dd className="break-all font-mono">{revision.commit}</dd><dt className="text-muted-foreground">Tree</dt><dd className="break-all font-mono text-muted-foreground">{revision.tree??"Not recorded"}</dd></dl>;
+}
 
 export function PrivateGitRecovery({ projectId, isOwner }: { projectId: string; isOwner: boolean }) {
   const { userId } = useAuth();
@@ -25,16 +31,16 @@ function RecoveryPanel({ projectId, isOwner }: { projectId: string; isOwner: boo
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [selectedCommit, setSelectedCommit] = useState<string | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [choosing, setChoosing] = useState(false);
   const [search, setSearch] = useState("");
   const [removing, setRemoving] = useState<Snapshot | null>(null);
   const [confirmation, setConfirmation] = useState("");
   const [draft, setDraft] = useState<Preparation | null>(null);
-  const selectedTarget = info?.targets?.find(target => target.commit === selectedCommit) ?? info?.target;
-  const activeSnapshot = (commit: string) => info?.snapshots.find(snapshot => snapshot.commit === commit && !snapshot.cacheState && (snapshot.status === "ready" || snapshot.status === "pending"));
-  const selectedActiveSnapshot = selectedTarget ? activeSnapshot(selectedTarget.commit) : undefined;
-  const matchingTargets = (info?.targets ?? []).filter(target => target.commit.includes(search.trim().toLowerCase()));
+  const selectedTarget = selectedRecoveryTarget(info?.targets,info?.target,selectedKey);
+  const activeSnapshot = (target: RecoveryRevision) => info?.snapshots.find(snapshot => recoverySnapshotMatches(snapshot,target) && !snapshot.cacheState && (snapshot.status === "ready" || snapshot.status === "pending"));
+  const selectedActiveSnapshot = selectedTarget ? activeSnapshot(selectedTarget) : undefined;
+  const matchingTargets = (info?.targets ?? []).filter(target => `${target.commit} ${deploymentTargetRefLabel(target)}`.toLowerCase().includes(search.trim().toLowerCase()));
   const context = `${projectId}:${isOwner ? "owner" : "member"}`;
   const identity = useRef(context);
   identity.current = context;
@@ -59,8 +65,8 @@ function RecoveryPanel({ projectId, isOwner }: { projectId: string; isOwner: boo
   }, [load]);
 
   const prepare = async (snapshot?: Snapshot) => {
-    if (!isOwner || busy || snapshot?.cacheState === "deleting" || (!snapshot && !draft && !selectedTarget) || (!draft && (snapshot ? activeSnapshot(snapshot.commit) !== undefined && !(snapshot.status === "pending" && snapshot.canRetry === true && activeSnapshot(snapshot.commit)?.id === snapshot.id) : selectedActiveSnapshot !== undefined))) return;
-    const preparation = draft ?? (snapshot ? { commit: snapshot.commit, expectedTree: snapshot.tree, idempotencyKey: snapshot.cacheState === "deleted" || snapshot.canRetry !== true ? crypto.randomUUID() : snapshot.id } : { commit: selectedTarget!.commit, expectedTree: selectedTarget!.tree, idempotencyKey: crypto.randomUUID() });
+    if (!isOwner || busy || snapshot?.cacheState === "deleting" || (!snapshot && !draft && !selectedTarget) || (!draft && (snapshot ? activeSnapshot(snapshot) !== undefined && !(snapshot.status === "pending" && snapshot.canRetry === true && activeSnapshot(snapshot)?.id === snapshot.id) : selectedActiveSnapshot !== undefined))) return;
+    const preparation = draft ?? (snapshot ? { selected:recoverySelection(snapshot),commit: snapshot.commit, expectedTree: snapshot.tree, idempotencyKey: snapshot.cacheState === "deleted" || snapshot.canRetry !== true ? crypto.randomUUID() : snapshot.id } : {selected:recoverySelection(selectedTarget!),commit: selectedTarget!.commit, expectedTree: selectedTarget!.tree, idempotencyKey: crypto.randomUUID() });
     setDraft(preparation); setBusy("prepare"); setError(null); setNotice(null);
     const request = ++epoch.current;
     try {
@@ -107,7 +113,7 @@ function RecoveryPanel({ projectId, isOwner }: { projectId: string; isOwner: boo
         link.remove();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       }
-      setNotice(`Download started for commit ${snapshot.commit}.`);
+      setNotice(recoveryDownloadNotice(snapshot));
     } catch (failure) {
       if (identity.current === context && request === epoch.current) setError(errorText(failure));
     } finally {
@@ -137,18 +143,19 @@ function RecoveryPanel({ projectId, isOwner }: { projectId: string; isOwner: boo
     {error && <p role="alert" className="break-words text-destructive">{error}{info && " Showing the last loaded recovery status."}</p>}
     {notice && <p role="status" className="break-all text-muted-foreground">{notice}</p>}
     {!info && !error && <p role="status" className="text-muted-foreground">Loading recovery status…</p>}
-    {selectedTarget && <p className="break-all text-xs text-muted-foreground">Preparation target <code>{selectedTarget.commit}</code><br />{selectedTarget.tree ? <>Tree <code>{selectedTarget.tree}</code></> : "Tree will be verified during preparation"}</p>}
-    {draft && <p className="break-all text-xs text-muted-foreground">Unconfirmed preparation for <code>{draft.commit}</code>. Retry preserves this request.</p>}
+    {selectedKey!==null&&!selectedTarget&&<p role="alert" className="text-xs text-destructive">The selected accepted revision is unavailable. Choose a recorded revision before preparing a bundle.</p>}
+    {selectedTarget && <div className="space-y-1"><p className="text-xs text-muted-foreground">Preparation target</p><RecoveryRevisionSummary revision={selectedTarget}/></div>}
+    {draft && <p className="break-all text-xs text-muted-foreground">Unconfirmed preparation for {draft.selected&&<><span className="font-mono">{deploymentTargetRefLabel(draft.selected)}</span><br/></>}<code>{draft.commit}</code>. Retry preserves this request.</p>}
     <div className="flex flex-wrap gap-2">
       {isOwner && <Button size="sm" disabled={busy !== null || (!selectedTarget && !draft) || (!draft && selectedActiveSnapshot !== undefined)} onClick={() => void prepare()}>{busy === "prepare" ? "Requesting…" : draft ? "Retry same preparation" : selectedActiveSnapshot?.status === "ready" ? "Bundle already ready" : selectedActiveSnapshot?.status === "pending" ? "Bundle preparing" : "Prepare Git bundle"}</Button>}
-      {isOwner && (info?.targets?.length ?? 0) > 1 && <Button size="sm" variant="outline" disabled={busy !== null || draft !== null} onClick={() => { setChoosing(true); setSearch(""); }}>Choose accepted commit</Button>}
+      {isOwner && ((info?.targets?.length??0)>0&&(!info?.target||(info?.targets?.length??0)>1||selectedKey!==null)) && <Button size="sm" variant="outline" disabled={busy !== null || draft !== null} onClick={() => { setChoosing(true); setSearch(""); }}>Choose accepted revision</Button>}
       <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void load()}>{busy === "load" ? "Checking…" : "Refresh status"}</Button>
     </div>
     {info && info.snapshots.length === 0 && <p className="text-muted-foreground">No recovery bundles have been prepared.</p>}
-    {info && !info.target && isOwner && <p className="text-muted-foreground">No commit is currently available to prepare.</p>}
+    {info && !selectedTarget && isOwner && <p className="text-muted-foreground">No commit is currently available to prepare.</p>}
     {info && info.snapshots.length > 0 && <ul className="divide-y divide-border">{info.snapshots.map(snapshot => <li key={snapshot.id} className="space-y-2 py-3">
       <div className="flex flex-wrap items-center gap-2"><Badge variant={snapshot.status === "ready" ? "success" : snapshot.status === "failed" ? "destructive" : "secondary"}>{snapshot.cacheState === "deleted" ? "Cache removed" : snapshot.cacheState === "deleting" ? "Removing cache" : snapshot.status === "ready" ? "Ready" : snapshot.status === "failed" ? "Failed" : "Preparing"}</Badge><span className="text-xs text-muted-foreground">{new Date(snapshot.createdAt).toLocaleString()}</span></div>
-      <p className="break-all text-xs">Commit <code>{snapshot.commit}</code><br /><span className="text-muted-foreground">Tree <code>{snapshot.tree}</code></span></p>
+      <RecoveryRevisionSummary revision={snapshot}/>
       {!snapshot.cacheState && snapshot.status === "pending" && <p className="text-xs text-muted-foreground">Preparation is pending. Refresh status to check progress.{isOwner && snapshot.canRetry === true && " Resume reconciles the saved request using the same identity."}</p>}
       {isOwner && !snapshot.cacheState && snapshot.status === "pending" && snapshot.canRetry === true && <Button size="sm" variant="outline" disabled={busy !== null || draft !== null} onClick={() => void prepare(snapshot)}>Resume preparation</Button>}
       {snapshot.cacheState && <p className="text-xs text-muted-foreground">{snapshot.cacheState === "deleted" ? "Cached bundle removed. Repository history is preserved." : snapshot.cleanupAdvice?.detail ?? "Cache cleanup is pending. Repository history is preserved; refresh or retry removal."}</p>}
@@ -160,12 +167,12 @@ function RecoveryPanel({ projectId, isOwner }: { projectId: string; isOwner: boo
       {isOwner && snapshot.cacheState !== "deleted" && snapshot.cleanupAdvice?.recoveryAction !== "provider-reconciliation" && <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => { setRemoving(snapshot); setConfirmation(""); }}>{snapshot.cacheState === "deleting" ? "Retry cache removal" : "Remove cached bundle"}</Button>}
     </li>)}</ul>}
     <Dialog open={choosing} onOpenChange={setChoosing}>
-      <DialogHeader><DialogTitle>Choose accepted commit</DialogTitle></DialogHeader>
+      <DialogHeader><DialogTitle>Choose accepted revision</DialogTitle></DialogHeader>
       <p className="mb-3 text-sm text-muted-foreground">Choose recorded accepted history. Preparing this commit uses repository compute and retained storage capacity.</p>
-      <label htmlFor="recovery-target-search" className="sr-only">Search accepted commit</label>
-      <Input id="recovery-target-search" placeholder="Search commit" value={search} onChange={event => setSearch(event.target.value)} />
+      <label htmlFor="recovery-target-search" className="sr-only">Search accepted branch or commit</label>
+      <Input id="recovery-target-search" placeholder="Search branch or commit" value={search} onChange={event => setSearch(event.target.value)} />
       <p className="my-2 text-xs text-muted-foreground">{matchingTargets.length} matching accepted commits{matchingTargets.length > 50 ? "; showing the first 50. Search to narrow the list." : "."}</p>
-      <ul className="max-h-72 overflow-y-auto space-y-2">{matchingTargets.slice(0, 50).map(target => <li key={target.journalId}><Button size="sm" variant={selectedTarget?.commit === target.commit ? "secondary" : "outline"} className="h-auto w-full justify-start whitespace-normal break-all text-left font-mono text-xs" disabled={busy !== null || draft !== null || activeSnapshot(target.commit) !== undefined} onClick={() => { setSelectedCommit(target.commit); setChoosing(false); }}>{target.commit}<span className="ml-2 font-sans text-muted-foreground">{activeSnapshot(target.commit)?.status === "ready" ? "Ready" : activeSnapshot(target.commit)?.status === "pending" ? "Preparing" : new Date(target.acceptedAt).toLocaleDateString()}</span></Button></li>)}</ul>
+      <ul className="max-h-72 overflow-y-auto space-y-2">{matchingTargets.slice(0, 50).map(target => <li key={recoveryTargetKey(target)}><Button size="sm" variant={selectedTarget!==null&&recoveryTargetKey(selectedTarget)===recoveryTargetKey(target) ? "secondary" : "outline"} className="h-auto w-full justify-start whitespace-normal break-all text-left font-mono text-xs" disabled={busy !== null || draft !== null || activeSnapshot(target) !== undefined} onClick={() => { setSelectedKey(recoveryTargetKey(target)); setChoosing(false); }}><span className="min-w-0"><span className="block">{deploymentTargetRefLabel(target)}</span><span className="block">{target.commit}</span></span><span className="ml-2 font-sans text-muted-foreground">{activeSnapshot(target)?.status === "ready" ? "Ready" : activeSnapshot(target)?.status === "pending" ? "Preparing" : new Date(target.acceptedAt).toLocaleDateString()}</span></Button></li>)}</ul>
       <DialogFooter><Button variant="outline" onClick={() => setChoosing(false)}>Cancel</Button></DialogFooter>
     </Dialog>
     <Dialog open={removing !== null} onOpenChange={open => { if (!open && busy !== "remove") { setRemoving(null); setConfirmation(""); } }}>

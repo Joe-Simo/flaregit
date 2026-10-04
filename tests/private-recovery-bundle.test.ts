@@ -16,6 +16,7 @@ test("native accepted bundle clones and fscks without private candidate objects"
   const unknownTreeDirectory = `/tmp/flaregit-private-recovery-${crypto.randomUUID()}`;
   const mismatchDirectory = `/tmp/flaregit-private-recovery-${crypto.randomUUID()}`;
   const contaminatedDirectory = `/tmp/flaregit-private-recovery-${crypto.randomUUID()}`;
+  const branchDirectory = `/tmp/flaregit-private-recovery-${crypto.randomUUID()}`;
   const repo = join(root, "repo");
   let passed=false;
   const diagnostics:Array<{argv:string[];stdout:string;stderr:string;code:number}>=[];
@@ -79,7 +80,17 @@ test("native accepted bundle clones and fscks without private candidate objects"
     await git("-C", clone, "fsck", "--full");
     expect((await native.exec(["git", "-C", clone, "cat-file", "-e", privateBlob])).success).toBe(false);
     expect(await Bun.file(join(clone, "private.txt")).exists()).toBe(false);
+    const acceptedRef = "refs/heads/release/staging";
+    const branchBundle = await createAcceptedBundle(executor, { remote, token: "fixture", commit, tree, directory: branchDirectory, acceptedRef, acceptedRootVersion: 3 });
+    expect(branchBundle).toMatchObject({ commit, tree, ref: acceptedRef, acceptedRef, acceptedRootVersion: 3 });
+    expect((await git("bundle", "list-heads", branchBundle.path)).split("\n").sort()).toEqual([`${commit} HEAD`, `${commit} ${acceptedRef}`].sort());
+    const branchClone = join(root, "branch-clone");
+    await git("clone", "-q", branchBundle.path, branchClone);
+    expect(await git("-C", branchClone, "symbolic-ref", "HEAD")).toBe(acceptedRef);
+    expect(await git("-C", branchClone, "rev-parse", "HEAD")).toBe(commit);
+    expect((await native.exec(["git", "-C", branchClone, "cat-file", "-e", privateBlob])).success).toBe(false);
+    await git("-C", branchClone, "fsck", "--full");
     passed=true;
   } catch(error){try{await Bun.write(join(root,"native-command-diagnostics.json"),JSON.stringify(diagnostics,null,2));}catch{/* Retain original failure when storage is exhausted. */}console.error(`Failed accepted-bundle fixture retained: ${[root,directory,unknownTreeDirectory,mismatchDirectory,contaminatedDirectory].join(" | ")}`);throw error;}
-  finally { if(passed){await rm(root, { recursive: true, force: true }); await rm(directory, { recursive: true, force: true }); await rm(unknownTreeDirectory, { recursive: true, force: true }); await rm(mismatchDirectory, { recursive: true, force: true }); await rm(contaminatedDirectory, { recursive: true, force: true }); }}
+  finally { if(passed){await rm(root, { recursive: true, force: true }); await rm(directory, { recursive: true, force: true }); await rm(unknownTreeDirectory, { recursive: true, force: true }); await rm(mismatchDirectory, { recursive: true, force: true }); await rm(contaminatedDirectory, { recursive: true, force: true }); await rm(branchDirectory, { recursive: true, force: true }); }}
 },60_000);

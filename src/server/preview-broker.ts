@@ -1,3 +1,4 @@
+import { previewReadAttemptCap } from "./preview-monthly-read-admission.js";
 import { lookupRepositoryPreviewOrigin } from "./preview-registry.js";
 import type { Env } from "./env.js";
 import { buildPrefix, generationBuildPrefix, verifyPreview, verifyPreviewGeneration } from "./preview-access.js";
@@ -47,6 +48,20 @@ export async function handlePreviewAsset(request: Request, env: Env, repositoryI
   const available = () => generationMatch ? repository.previewGenerationForRead(commit, incarnation!, generation!) : Promise.all([repository.previewAvailable(), repository.previewLegacyGenerationAllowed(commit)]).then(([active, legacyAllowed]) => active && legacyAllowed);
   try { if (!await available()) return failure(404); }
   catch { return failure(503); }
+  // Optional previews have their own funded read allowance. Git/review routes
+  // do not use this pool. Unknown/missing admission never authorizes an R2 read.
+  if (previewReadAttemptCap(env.PREVIEW_READ_GLOBAL_MONTHLY_ATTEMPTS) === null || previewReadAttemptCap(env.PREVIEW_READ_OWNER_MONTHLY_ATTEMPTS) === null) return failure(503);
+  try {
+    const admission = await repository.admitPreviewRead();
+    const currentMonth = new Date().toISOString().slice(0, 7);
+    if (admission.month !== currentMonth) return failure(503);
+    if (!admission.allowed) {
+      if (admission.reason === "unconfigured") return failure(503);
+      const start = new Date(`${currentMonth}-01T00:00:00Z`);
+      const reset = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1));
+      return new Response("Optional preview read capacity is exhausted for this month. Git history and review context are preserved. Retry after the allowance resets.", { status: 429, headers: { ...securityHeaders, "Retry-After": reset.toUTCString() } });
+    }
+  } catch { return failure(503); }
   let object: R2ObjectBody | null;
   try { object = await env.EVIDENCE_BUCKET.get(`${generationMatch ? generationBuildPrefix(repositoryId, commit, incarnation!, generation!) : buildPrefix(repositoryId, commit)}/${asset || "index.html"}`); }
   catch { return failure(503); }

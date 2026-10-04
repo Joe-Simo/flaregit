@@ -14,11 +14,13 @@ function fixture(decisions: (boolean | Error)[] = [true, true]) {
   const keys: string[] = [];
   const checks: string[][] = [];
   const env = {
+    PREVIEW_READ_GLOBAL_MONTHLY_ATTEMPTS: "100000",
+    PREVIEW_READ_OWNER_MONTHLY_ATTEMPTS: "25000",
     PREVIEW_ASSET_LIMITER: { limit: async () => ({ success: true }) },
     PREVIEW_SIGNING_KEY: "unit-test-key",
     REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: (id: string) => id === "global" ? { activePreviewOrigin: async () => origin } : {
       previewGenerationForRead: async (...args: string[]) => { checks.push(args); const result = decisions.shift(); if (result instanceof Error) throw result; return result; },
-      previewAvailable: async () => true, previewLegacyGenerationAllowed: async () => false,
+      admitPreviewRead: async () => ({allowed:true,month:new Date().toISOString().slice(0,7),globalAttempts:1,ownerAttempts:1}), previewAvailable: async () => true, previewLegacyGenerationAllowed: async () => false,
     } },
     EVIDENCE_BUCKET: { get: async (key: string) => { keys.push(key); return { arrayBuffer: async () => new TextEncoder().encode("private asset").buffer, body: new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("private asset")); controller.close(); } }), httpMetadata: { contentType: "text/html" } }; } },
   } as unknown as Env;

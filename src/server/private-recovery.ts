@@ -1,6 +1,7 @@
-export interface PrivateRecoveryReceipt { projectId:string; incarnation:string; commit:string; tree:string; journalId:string; size:number; sha256:string; objectCount:number; objectScope:"exact-accepted-reachable-closure"; createdAt:string }
-export type PrivateRecoveryTarget = Pick<import("./deployments.js").AcceptedDeploymentTarget,"journalId"|"commit"|"acceptedAt"> & { tree: string | null };
-export interface PrivateRecoveryOperation { id:string; projectId:string; incarnation:string; commit:string; tree:string|null; journalId:string; canonicalRepoName:string; ownerId:string; accountKey:string; status:"pending"|"ready"|"failed"; dispatchState?: "not-started" | "uncertain" | "started"; cacheState?: "deleting" | "deleted"; uploadState?: "not-started" | "allocating" | "active" | "closed"; uploadId?: string; createdAt:string; error?:string; receipt?:PrivateRecoveryReceipt }
+import { isSafeRef } from "../core/sanitize";
+export interface PrivateRecoveryReceipt { projectId:string; incarnation:string; commit:string; tree:string; journalId:string; size:number; sha256:string; objectCount:number; objectScope:"exact-accepted-reachable-closure"; createdAt:string; acceptedRef?:string; acceptedRootVersion?:number }
+export type PrivateRecoveryTarget = Pick<import("./deployments.js").AcceptedDeploymentTarget,"journalId"|"commit"|"acceptedAt"|"acceptedRef"|"acceptedRootVersion"> & { tree: string | null };
+export interface PrivateRecoveryOperation { id:string; projectId:string; incarnation:string; commit:string; tree:string|null; journalId:string; canonicalRepoName:string; ownerId:string; accountKey:string; acceptedRef?:string; acceptedRootVersion?:number; status:"pending"|"ready"|"failed"; dispatchState?: "not-started" | "uncertain" | "started"; cacheState?: "deleting" | "deleted"; uploadState?: "not-started" | "allocating" | "active" | "closed"; uploadId?: string; createdAt:string; error?:string; receipt?:PrivateRecoveryReceipt }
 const RECOVERY_UUID = "[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}";
 const RECOVERY_SCOPE_ID = new RegExp(`^[a-z0-9]{12,16}-${RECOVERY_UUID}-${RECOVERY_UUID}$`);
 export function recoveryScopeId(scope: Pick<PrivateRecoveryOperation, "projectId" | "incarnation" | "id">): string {
@@ -49,7 +50,8 @@ export class PrivateRecoveryOperations {
  all(): PrivateRecoveryOperation[] { return this.storage.sql.exec<{doc: string}>("SELECT doc FROM private_recovery_operations ORDER BY rowid").toArray().map(row => JSON.parse(row.doc) as PrivateRecoveryOperation); }
  list():PrivateRecoveryOperation[]{return this.storage.sql.exec<{doc:string}>("SELECT doc FROM private_recovery_operations ORDER BY CASE WHEN json_extract(doc, '$.cacheState')='deleted' THEN 1 ELSE 0 END, rowid DESC LIMIT 20").toArray().map(row=>JSON.parse(row.doc) as PrivateRecoveryOperation);}
  create(op:PrivateRecoveryOperation):PrivateRecoveryOperation {
-  const old=this.get(op.id);if(old){if(old.projectId!==op.projectId||old.incarnation!==op.incarnation||old.journalId!==op.journalId||old.accountKey!==op.accountKey||old.commit!==op.commit||old.tree!==op.tree||old.ownerId!==op.ownerId||old.canonicalRepoName!==op.canonicalRepoName)throw new Error("Recovery retry identity changed");return old;}
+  if((op.acceptedRef!==undefined&&(!op.acceptedRef.startsWith("refs/heads/")||!isSafeRef(op.acceptedRef)))||(op.acceptedRootVersion!==undefined&&(!op.acceptedRef||!Number.isSafeInteger(op.acceptedRootVersion)||op.acceptedRootVersion<1)))throw new Error("Invalid accepted recovery branch binding");
+  const old=this.get(op.id);if(old){if(old.projectId!==op.projectId||old.incarnation!==op.incarnation||old.journalId!==op.journalId||old.accountKey!==op.accountKey||old.commit!==op.commit||old.tree!==op.tree||old.ownerId!==op.ownerId||old.canonicalRepoName!==op.canonicalRepoName||old.acceptedRef!==op.acceptedRef||old.acceptedRootVersion!==op.acceptedRootVersion)throw new Error("Recovery retry identity changed");return old;}
   this.storage.sql.exec("INSERT INTO private_recovery_operations VALUES(?,?)",op.id,JSON.stringify(op));return op;
  }
  markDispatch(id: string, dispatchState: "uncertain" | "started"): void {
@@ -93,7 +95,7 @@ export class PrivateRecoveryOperations {
   const op=this.get(id);if(!op)throw new Error("Unknown recovery operation");
   if (op.cacheState) throw new Error("Recovery cache is retired");
   if (op.uploadState !== "closed") throw new Error("Recovery multipart closure is unconfirmed");
-  if(receipt.projectId!==op.projectId||receipt.incarnation!==op.incarnation||receipt.commit!==op.commit||receipt.tree!==op.tree||receipt.journalId!==op.journalId||receipt.objectScope!=="exact-accepted-reachable-closure"||! /^[a-f0-9]{64}$/.test(receipt.sha256)||!Number.isSafeInteger(receipt.size)||receipt.size<1||receipt.size>512*1024*1024||!Number.isSafeInteger(receipt.objectCount)||receipt.objectCount<1)throw new Error("Recovery receipt scope mismatch");
+  if(receipt.projectId!==op.projectId||receipt.incarnation!==op.incarnation||receipt.commit!==op.commit||receipt.tree!==op.tree||receipt.journalId!==op.journalId||receipt.acceptedRef!==op.acceptedRef||receipt.acceptedRootVersion!==op.acceptedRootVersion||receipt.objectScope!=="exact-accepted-reachable-closure"||! /^[a-f0-9]{64}$/.test(receipt.sha256)||!Number.isSafeInteger(receipt.size)||receipt.size<1||receipt.size>512*1024*1024||!Number.isSafeInteger(receipt.objectCount)||receipt.objectCount<1)throw new Error("Recovery receipt scope mismatch");
   if(op.receipt&&JSON.stringify(op.receipt)!==JSON.stringify(receipt))throw new Error("Recovery receipt is immutable");
   this.storage.sql.exec("UPDATE private_recovery_operations SET doc=? WHERE id=?",JSON.stringify({...op,status:"ready",receipt,error:undefined}),id);
  }

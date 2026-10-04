@@ -24,6 +24,8 @@ import { cleanupPrivateRecoveryRepositoryOutcome, cleanupPrivateRecoveryOutcome,
 import {FlareGitPrivateRecoveryWorkflow} from "./private-recovery-workflow.js";
 import {recoveryBundleKey,recoveryScopeId} from "./private-recovery.js";
 import {downloadPrivateRecovery} from "./private-recovery-download.js";
+import {privateRecoveryRequestSchema} from "./private-recovery-request.js";
+import {recoveryBranchFields} from "./private-recovery-branch.js";
 import {admitCredentialLookup} from "./lookup-admission.js";
 import { directoryQuerySchema, directoryUpdateSchema, projectPublicDirectory } from "./public-directory.js";
 import { publicPeople, privatePeople } from "./community-people-http.js";
@@ -834,15 +836,16 @@ export default {
 
         if(sub==="/recovery"&&method==="GET"){
           const targets=await project.privateRecoveryTargets();
-          return Response.json({snapshots:(await project.privateRecoveryList()).map(op=>({id:op.id,commit:op.commit,tree:op.tree,status:op.status,createdAt:op.createdAt,error:op.error,size:op.receipt?.size,cacheState:op.cacheState,...(op.cacheState === "deleting" ? {cleanupAdvice:privateRecoveryCleanupAdvice(op)} : {}),canRetry:isOwner&&op.ownerId===userId&&!op.cacheState})),target:targets.at(-1)??null,targets},{headers:{"Cache-Control":"no-store"}});
+          return Response.json({snapshots:(await project.privateRecoveryList()).map(op=>({id:op.id,journalId:op.journalId,commit:op.commit,tree:op.tree,...recoveryBranchFields(op),status:op.status,createdAt:op.createdAt,error:op.error,size:op.receipt?.size,cacheState:op.cacheState,...(op.cacheState === "deleting" ? {cleanupAdvice:privateRecoveryCleanupAdvice(op)} : {}),canRetry:isOwner&&op.ownerId===userId&&!op.cacheState})),target:targets.at(-1)??null,targets},{headers:{"Cache-Control":"no-store"}});
         }
         if(sub==="/recovery"&&method==="POST"){
           if(!isOwner)return text("Only the owner can prepare recovery snapshots",403);
           if(!env.PRIVATE_RECOVERY_WORKFLOW)return text("Private recovery preparation is not configured",503);
-          const b=await body<{commit:string;expectedTree:string|null;idempotencyKey:string}>();
-          if(Object.keys(b).some(key=>!["commit","expectedTree","idempotencyKey"].includes(key))||! /^[a-f0-9]{40}$/.test(b.commit)||(b.expectedTree!==null&&(typeof b.expectedTree!=="string"||! /^[a-f0-9]{40}$/.test(b.expectedTree)))||! /^[a-f0-9-]{36}$/.test(b.idempotencyKey))return text("Invalid recovery snapshot request",400);
+          const parsed=privateRecoveryRequestSchema.safeParse(await body<unknown>());
+          if(!parsed.success)return text("Exact recovery commit, tree, request identity and recorded target selection required",400);
+          const b=parsed.data;
           try{
-            const op=await project.privateRecoveryPrepare(b.idempotencyKey,b.commit,b.expectedTree,userId,accountKey);
+            const op=await project.privateRecoveryPrepare(b.idempotencyKey,b.commit,b.expectedTree,userId,accountKey,b.selected);
             if (op.cacheState) return text("This recovery snapshot is being removed or has been removed", 409);
             await globalOf(env).reservePrivateRecoveryStorage(recoveryScopeId(op),accountKey);
             if(op.status==="ready")return json(op);
@@ -871,8 +874,10 @@ export default {
         if(recoveryDownload&&(method==="GET"||method==="HEAD")){
           const op=await project.privateRecoveryOperation(recoveryDownload[1]!);
           if(!op?.receipt||op.status!=="ready")return text("Saved recovery bundle is not ready",409);
+          if(!op.tree)return text("Saved recovery tree is not confirmed",409);
           const receipt=op.receipt;
-          return downloadPrivateRecovery(request,{snapshot:receipt,receipt,objectKey:recoveryBundleKey(op),getObject:key=>env.EVIDENCE_BUCKET.get(key),authorize:async()=>{
+          const snapshot={projectId:op.projectId,incarnation:op.incarnation,commit:op.commit,tree:op.tree,journalId:op.journalId,objectScope:"exact-accepted-reachable-closure" as const,...recoveryBranchFields(op)};
+          return downloadPrivateRecovery(request,{snapshot,receipt,objectKey:recoveryBundleKey(op),getObject:key=>env.EVIDENCE_BUCKET.get(key),authorize:async()=>{
             try{const current=await authenticate(request,env);return !(current instanceof Response)&&current.id===userId&&(!current.tokenRepo||current.tokenRepo===projectId)&&await account.accountLifecycle()==="active"&&await project.canGitAccess(userId,null,false)&&await project.privateRecoveryReadable(op.id);}catch{return false;}
           }});
         }

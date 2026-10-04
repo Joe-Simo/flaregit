@@ -5,6 +5,9 @@ export interface Env {
   /** Retained optional preview assets only; unset disables new storage reservations. */
   EVIDENCE_STORAGE_GLOBAL_BYTES?: string;
   EVIDENCE_STORAGE_ACCOUNT_BYTES?: string;
+  /** Operator-funded optional preview read attempts, independent of managed compute. */
+  PREVIEW_READ_GLOBAL_MONTHLY_ATTEMPTS?: string;
+  PREVIEW_READ_OWNER_MONTHLY_ATTEMPTS?: string;
   PREVIEW_STORAGE_GLOBAL_BYTES?: string;
   PREVIEW_STORAGE_ACCOUNT_BYTES?: string;
   CORE_GIT_GLOBAL_MONTHLY_USD_MICROS?: string;

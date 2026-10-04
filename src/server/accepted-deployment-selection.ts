@@ -5,13 +5,13 @@ import type { AcceptedBranchRoot } from "./accepted-branch-roots";
 import type { AcceptedDeploymentTarget } from "./deployments";
 
 export interface AcceptedDeploymentContext {
-  projectId: string; incarnation: string; canonicalRepoName: string; primaryRef: string;
+  projectId: string; incarnation: string; canonicalRepoName: string; primaryRef: string | null;
   journals: readonly PublicationJournalEntry[]; primaryHistory: readonly AcceptanceRecord[];
   roots: readonly AcceptedBranchRoot[];
 }
 export interface AcceptedDeploymentSelection {
   projectId: string; incarnation: string; canonicalRepoName: string;
-  target: AcceptedDeploymentTarget & { acceptedRef: string; acceptedRootVersion?: number };
+  target: AcceptedDeploymentTarget;
   pinVerified: false;
 }
 export interface CommittedDeploymentPin {
@@ -30,14 +30,15 @@ function compatibleTarget(first: FrozenAcceptedTarget, second: FrozenAcceptedTar
  * Missing explicit branch authority never falls back to the primary branch.
  */
 export function selectAcceptedDeploymentJournal(context: AcceptedDeploymentContext, journalId: string): AcceptedDeploymentSelection | null {
-  if (!context.projectId || !context.canonicalRepoName || !/^[a-f0-9-]{36}$/.test(context.incarnation) || !branchRef(context.primaryRef) || context.journals.length > 2000 || context.roots.length > 1000 || context.primaryHistory.length > 2000) return null;
+  if (!context.projectId || !context.canonicalRepoName || !/^[a-f0-9-]{36}$/.test(context.incarnation) || context.primaryRef !== null && !branchRef(context.primaryRef) || context.journals.length > 2000 || context.roots.length > 1000 || context.primaryHistory.length > 2000) return null;
   const matches = context.journals.filter(entry => entry.id === journalId);
   if (matches.length !== 1) return null;
   const journal = matches[0]!;
-  if (journal.state !== "ACCEPTED" || journal.id.length > 200 || !isSafeRef(journal.id) || !sha(journal.newHead) || journal.candidateCommit !== journal.newHead || !sha(journal.candidateTree)) return null;
-  if (journal.publicationAuthority && (journal.publicationAuthority.commit !== journal.newHead || journal.publicationAuthority.tree !== journal.candidateTree)) return null;
   const frozen = journal.acceptedTarget ?? journal.publicationAuthority?.acceptedTarget;
-  let acceptedRef: string, acceptedRootVersion: number | undefined, acceptedAt: string;
+  const candidateCommitValid = journal.candidateCommit === journal.newHead || (!frozen && !journal.publicationAuthority && journal.candidateCommit === undefined);
+  if (journal.state !== "ACCEPTED" || journal.id.length > 200 || !isSafeRef(journal.id) || !sha(journal.newHead) || !candidateCommitValid || !sha(journal.candidateTree)) return null;
+  if (journal.publicationAuthority && (journal.publicationAuthority.commit !== journal.newHead || journal.publicationAuthority.tree !== journal.candidateTree)) return null;
+  let acceptedRef: string | undefined, acceptedRootVersion: number | undefined, acceptedAt: string;
   if (frozen) {
     if (frozen.projectId !== context.projectId || frozen.incarnation !== context.incarnation || frozen.canonicalRepoName !== context.canonicalRepoName || !branchRef(frozen.ref) || frozen.ref !== `refs/heads/${frozen.branch}` || frozen.acceptedCommit !== journal.expectedHead || !Number.isSafeInteger(frozen.acceptedVersion) || frozen.acceptedVersion < 0) return null;
     const roots = context.roots.filter(root => root.projectId === context.projectId && root.incarnation === context.incarnation && root.canonicalRepoName === context.canonicalRepoName && root.ref === frozen.ref);
@@ -47,7 +48,7 @@ export function selectAcceptedDeploymentJournal(context: AcceptedDeploymentConte
     if (journal.publicationAuthority && journal.publicationAuthority.policyVersion !== frozen.policyVersion) return null;
     if (journal.publicationAuthority?.acceptedTarget && !compatibleTarget(journal.publicationAuthority.acceptedTarget, frozen)) return null;
     if (root.kind === "primary") {
-      if (frozen.ref !== context.primaryRef) return null;
+      if (context.primaryRef !== null && frozen.ref !== context.primaryRef) return null;
       // Primary reconciliation stores plain commit/journal ancestry. Its genuine
       // acceptance metadata lives in primaryHistory, not invented branch receipts.
       const accepted = context.primaryHistory.filter(entry => entry.commit === journal.newHead && entry.candidateId === journal.candidateId && entry.outputDigest === journal.outputDigest && (!entry.acceptedTarget || compatibleTarget(entry.acceptedTarget, frozen)));
@@ -62,9 +63,9 @@ export function selectAcceptedDeploymentJournal(context: AcceptedDeploymentConte
     // Compatibility applies only to primary history records without a target.
     const accepted = context.primaryHistory.filter(entry => !entry.acceptedTarget && entry.commit === journal.newHead && entry.candidateId === journal.candidateId);
     if (accepted.length !== 1 || accepted[0]!.outputDigest !== journal.outputDigest || !time(accepted[0]!.acceptedAt)) return null;
-    acceptedRef = context.primaryRef; acceptedAt = accepted[0]!.acceptedAt;
+    acceptedRef = context.primaryRef ?? undefined; acceptedAt = accepted[0]!.acceptedAt;
   }
-  return { projectId: context.projectId, incarnation: context.incarnation, canonicalRepoName: context.canonicalRepoName, pinVerified: false, target: { journalId: journal.id, candidateId: journal.candidateId, commit: journal.newHead, tree: journal.candidateTree, acceptedAt, recoverableRef: `refs/flaregit/deployments/${journal.id}`, acceptedRef, ...(acceptedRootVersion !== undefined ? { acceptedRootVersion } : {}) } };
+  return { projectId: context.projectId, incarnation: context.incarnation, canonicalRepoName: context.canonicalRepoName, pinVerified: false, target: { journalId: journal.id, candidateId: journal.candidateId, commit: journal.newHead, tree: journal.candidateTree, acceptedAt, recoverableRef: `refs/flaregit/deployments/${journal.id}`, ...(acceptedRef !== undefined ? { acceptedRef } : {}), ...(acceptedRootVersion !== undefined ? { acceptedRootVersion } : {}) } };
 }
 
 /** The caller must obtain this proof through funded native readback, not a client

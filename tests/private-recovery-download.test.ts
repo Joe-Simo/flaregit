@@ -65,3 +65,41 @@ for (const mutation of ['last-byte', 'short', 'long'] as const) test(`actual str
   const response = await downloadPrivateRecovery(request(), f.options);
   await expect(response.arrayBuffer()).rejects.toThrow('interrupted');
 });
+
+test('recorded branch recovery binds operation, receipt, multipart metadata and download headers', async () => {
+  const f = fixture(7), acceptedRef = 'refs/heads/release', acceptedRootVersion = 2;
+  f.options.snapshot = { ...f.options.snapshot, acceptedRef, acceptedRootVersion };
+  f.options.receipt = { ...f.options.receipt, acceptedRef, acceptedRootVersion };
+  const original = f.options.getObject;
+  f.options.getObject = async key => { const object = await original(key); return object ? { ...object, customMetadata: { ...object.customMetadata, acceptedRef, acceptedRootVersion: '2' } } : null; };
+  const response = await downloadPrivateRecovery(request(), f.options);
+  expect(response.status).toBe(200); expect(response.headers.get('X-FlareGit-Accepted-Ref')).toBe(acceptedRef);
+  expect(response.headers.get('X-FlareGit-Accepted-Root-Version')).toBe('2'); expect((await response.arrayBuffer()).byteLength).toBe(7);
+});
+for (const corruption of ['receipt-ref', 'receipt-version', 'missing-ref', 'missing-version', 'other-ref', 'other-version', 'noncanonical-version', 'invented-legacy-ref'] as const) test(`private recovery refuses ${corruption} without releasing object bytes`, async () => {
+  const f = fixture(7), original = f.options.getObject;
+  if (corruption !== 'invented-legacy-ref') {
+    f.options.snapshot = { ...f.options.snapshot, acceptedRef: 'refs/heads/release', acceptedRootVersion: 2 };
+    f.options.receipt = { ...f.options.receipt, acceptedRef: 'refs/heads/release', acceptedRootVersion: 2 };
+  }
+  if (corruption === 'receipt-ref') f.options.receipt.acceptedRef = 'refs/heads/main';
+  if (corruption === 'receipt-version') f.options.receipt.acceptedRootVersion = 3;
+  f.options.getObject = async key => {
+    const object = await original(key); if (!object) return null;
+    const metadata = { ...object.customMetadata, acceptedRef: 'refs/heads/release', acceptedRootVersion: '2' } as Record<string, string>;
+    if (corruption === 'missing-ref') delete metadata.acceptedRef;
+    if (corruption === 'missing-version') delete metadata.acceptedRootVersion;
+    if (corruption === 'other-ref') metadata.acceptedRef = 'refs/heads/main';
+    if (corruption === 'other-version') metadata.acceptedRootVersion = '3';
+    if (corruption === 'noncanonical-version') metadata.acceptedRootVersion = '02';
+    return { ...object, customMetadata: metadata };
+  };
+  expect((await downloadPrivateRecovery(request(), f.options)).status).toBe(409);
+  if (corruption.startsWith('receipt-')) expect(f.counts().gets).toBe(0);
+  else expect(f.counts().cancelled).toBe(true);
+});
+test('legacy recovery does not invent accepted branch headers', async () => {
+  const f = fixture(7), response = await downloadPrivateRecovery(request(), f.options);
+  expect(response.status).toBe(200); expect(response.headers.has('X-FlareGit-Accepted-Ref')).toBe(false);
+  expect(response.headers.has('X-FlareGit-Accepted-Root-Version')).toBe(false); await response.arrayBuffer();
+});

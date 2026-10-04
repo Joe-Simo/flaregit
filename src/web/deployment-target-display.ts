@@ -1,7 +1,7 @@
 import {isSafeRef} from "../core/sanitize";
 import type {AcceptedDeploymentTarget} from "../server/deployments";
 /** Missing historical metadata never implies the current default branch. */
-export function deploymentTargetRefLabel(target:AcceptedDeploymentTarget):string{
+export function deploymentTargetRefLabel(target:Pick<AcceptedDeploymentTarget,"acceptedRef"|"acceptedRootVersion">):string{
  const ref=target.acceptedRef;
  if(!ref||!ref.startsWith("refs/heads/")||!isSafeRef(ref))return "Branch not recorded";
  const version=target.acceptedRootVersion;

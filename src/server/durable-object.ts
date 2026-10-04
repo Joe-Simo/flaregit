@@ -1,3 +1,4 @@
+import {PreviewMonthlyReadAdmission,previewReadAttemptCap,type PreviewReadAdmission} from "./preview-monthly-read-admission";
 import {selectAcceptedDeploymentJournal,confirmAcceptedDeploymentSelection,type AcceptedDeploymentSelection,type CommittedDeploymentPin} from "./accepted-deployment-selection";
 import {inspectGitGatewayRecovery} from "./git-gateway-recovery";
 import {GitGatewayLedger,type GitGatewayScope} from "./git-gateway-ledger";
@@ -319,7 +320,7 @@ export interface Ledger {
   privateRecoveryMarkDispatch(id: string, dispatchState: "uncertain" | "started", expectedScope: string): Promise<void>;
   privateRecoveryOperation(id:string):Promise<PrivateRecoveryOperation|null>;
   privateRecoveryList():Promise<PrivateRecoveryOperation[]>;
-  privateRecoveryPrepare(id:string,commit:string,tree:string|null,ownerId:string,accountKey:string):Promise<PrivateRecoveryOperation>;
+  privateRecoveryPrepare(id:string,commit:string,tree:string|null,ownerId:string,accountKey:string,selected?:{journalId:string;acceptedRef?:string;acceptedRootVersion?:number}):Promise<PrivateRecoveryOperation>;
   privateRecoveryAuthorize(id:string,ownerId:string):Promise<boolean>;
   privateRecoveryRecordTree(id:string,tree:string,expectedScope:string):Promise<PrivateRecoveryOperation>;
   privateRecoveryReadable(id:string):Promise<boolean>;
@@ -628,6 +629,8 @@ export interface Ledger {
   revokeGitCapabilities(userId: string): Promise<void>;
   resolveDecision(decisionId: string, selectedOptionId: string, actor: HumanDecisionActor, credentialHash?: string, sessionExpiresAt?:number): Promise<{ taskIds: string[];legacyRerunId?:string;continuationWorkflowId?:string }>;
   getState(): Promise<FlareGitProjectState>;
+  admitPreviewRead():Promise<PreviewReadAdmission>;
+  admitOwnerPreviewRead(ownerKey:string):Promise<PreviewReadAdmission>;
   agentTaskView(taskId:string):ReturnType<RepositoryController["agentTaskView"]>;
   ownerGitGatewayRecovery(taskId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number,options?:{limit?:number;cursor?:string}):ReturnType<RepositoryController["ownerGitGatewayRecovery"]>;
   beginGitGatewayAttempt(id:string,taskId:string|null,write:boolean,userId:string,parentTokenHash:string|null):Promise<GitGatewayScope>;
@@ -987,16 +990,20 @@ export class RepositoryController extends DurableObject<Env> {
   async privateRecoveryCleanupList(): Promise<PrivateRecoveryOperation[]> { return new PrivateRecoveryOperations(this.ctx.storage).all(); }
   async privateRecoveryOperation(id:string):Promise<PrivateRecoveryOperation|null>{return new PrivateRecoveryOperations(this.ctx.storage).get(id);}
   async privateRecoveryList():Promise<PrivateRecoveryOperation[]>{return new PrivateRecoveryOperations(this.ctx.storage).list();}
-  async privateRecoveryPrepare(id:string,commit:string,tree:string|null,ownerId:string,accountKey:string):Promise<PrivateRecoveryOperation>{
+  async privateRecoveryPrepare(id:string,commit:string,tree:string|null,ownerId:string,accountKey:string,selected?:{journalId:string;acceptedRef?:string;acceptedRootVersion?:number}):Promise<PrivateRecoveryOperation>{
    if(!/^[a-f0-9-]{36}$/.test(id)||this.repositoryDeleting()||await this.roleOf(ownerId)!=="owner")throw new Error("Owner recovery authorization required");
    const ops=new PrivateRecoveryOperations(this.ctx.storage),old=ops.get(id);
    if (old?.cacheState) throw new Error("Recovery cache is retired");
    if(tree===null&&old?.journalId==="baseline"&&old.commit===commit&&old.ownerId===ownerId)tree=old.tree;
-   const state=this.load(),target=(await this.privateRecoveryTargets()).find(item=>item.commit===commit&&item.tree===tree);
-   if(!target)throw new Error("Recovery requires an accepted journal or durable baseline target");
+   const state=this.load(),targets=(await this.privateRecoveryTargets()).filter(item=>item.commit===commit&&item.tree===tree),requested=selected??(old?{journalId:old.journalId,...(old.acceptedRef?{acceptedRef:old.acceptedRef}:{}),...(old.acceptedRootVersion!==undefined?{acceptedRootVersion:old.acceptedRootVersion}:{})}:undefined),matches=requested?targets.filter(item=>item.journalId===requested.journalId):targets;
+   if(matches.length!==1)throw new Error("Recovery requires one exact accepted journal or baseline target");const target=matches[0]!;
+   if(old){if(requested&&(requested.journalId!==old.journalId||requested.acceptedRef!==old.acceptedRef||requested.acceptedRootVersion!==old.acceptedRootVersion))throw Error("Saved recovery branch identity cannot be changed");}
+   else if(requested){if(requested.acceptedRef!==target.acceptedRef||requested.acceptedRootVersion!==target.acceptedRootVersion)throw Error("Exact accepted recovery branch and root version required");}
+   else if(target.acceptedRef){const deployment=this.selectRecordedDeployment(target.journalId);if(!deployment||!this.legacyPrimaryDeploymentCompatibility(deployment))throw Error("Branch recovery requires explicit accepted journal and ref selection");}
+   const binding=old?{...(old.acceptedRef?{acceptedRef:old.acceptedRef}:{}),...(old.acceptedRootVersion!==undefined?{acceptedRootVersion:old.acceptedRootVersion}:{})}:{...(target.acceptedRef?{acceptedRef:target.acceptedRef}:{}),...(target.acceptedRootVersion!==undefined?{acceptedRootVersion:target.acceptedRootVersion}:{})};
    if(accountKey!==await accountKeyFor(ownerId))throw new Error("Recovery account scope mismatch");
    if(this.repositoryDeleting()||await this.roleOf(ownerId)!=="owner")throw new Error("Recovery authorization changed");
-   const proposed: PrivateRecoveryOperation = {id,projectId:state.projectId,incarnation:ops.incarnation(),commit,tree,journalId:target.journalId,canonicalRepoName:state.canonicalRepoName,ownerId,accountKey,status:"pending",dispatchState:"not-started",uploadState:"not-started",createdAt:new Date().toISOString()};
+   const proposed: PrivateRecoveryOperation = {id,...binding,projectId:state.projectId,incarnation:ops.incarnation(),commit,tree,journalId:target.journalId,canonicalRepoName:state.canonicalRepoName,ownerId,accountKey,status:"pending",dispatchState:"not-started",uploadState:"not-started",createdAt:new Date().toISOString()};
    return this.ctx.storage.transactionSync(() => {
      const currentState = this.load(), legacy = this.legacyRecoveryTarget();
      const currentRole = this.ctx.storage.sql.exec<{role: string}>("SELECT role FROM members WHERE user_id=?", ownerId).toArray()[0]?.role;
@@ -1004,7 +1011,7 @@ export class RepositoryController extends DurableObject<Env> {
      if (captureLegacy) {
        if (!legacy || tree !== null || legacy.commit !== commit || legacy.acceptedAt !== target.acceptedAt || currentRole !== "owner" || proposed.projectId !== currentState.projectId || proposed.canonicalRepoName !== currentState.canonicalRepoName || proposed.incarnation !== ops.incarnation()) throw new Error("Legacy accepted baseline changed");
      } else if (!this.privateRecoveryScopeCurrent(proposed)) throw new Error("Recovery authorization changed");
-     if (!old && ops.all().some(operation => !operation.cacheState && operation.incarnation === proposed.incarnation && operation.canonicalRepoName === proposed.canonicalRepoName && operation.commit === proposed.commit && (operation.status === "pending" || operation.status === "ready"))) throw new Error("This accepted commit already has an active recovery snapshot");
+     if (!old && ops.all().some(operation => !operation.cacheState && operation.incarnation === proposed.incarnation && operation.canonicalRepoName === proposed.canonicalRepoName && operation.commit === proposed.commit && operation.journalId===proposed.journalId && operation.acceptedRef===proposed.acceptedRef && operation.acceptedRootVersion===proposed.acceptedRootVersion && (operation.status === "pending" || operation.status === "ready"))) throw new Error("This accepted commit already has an active recovery snapshot");
      const operation = ops.create(proposed);
      if (captureLegacy) {
        const previous = currentState.acceptedBaseline;
@@ -1024,15 +1031,31 @@ export class RepositoryController extends DurableObject<Env> {
   async privateRecoveryAuthorize(id:string,ownerId:string):Promise<boolean>{
    const ops=new PrivateRecoveryOperations(this.ctx.storage),op=ops.get(id);
    if(!op||op.cacheState||op.ownerId!==ownerId||this.repositoryDeleting()||await this.roleOf(ownerId)!=="owner"||op.incarnation!==ops.incarnation()||op.canonicalRepoName!==this.load().canonicalRepoName)return false;
-   const target=(await this.privateRecoveryTargets()).find(item=>item.journalId===op.journalId);return target?.commit===op.commit&&target.tree===op.tree;
+   return this.privateRecoveryScopeCurrent(op);
   }
+  private recordedPrivateRecoveryTarget(journalId:string):PrivateRecoveryTarget|null{
+    const state=this.load(),journals=state.journal.filter(item=>item.id===journalId&&item.state==="ACCEPTED");if(journals.length!==1)return null;const journal=journals[0]!;
+    const bound=journal.acceptedTarget??journal.publicationAuthority?.acceptedTarget??state.candidates[journal.candidateId]?.acceptedTarget;
+    if(bound){const selection=this.selectRecordedDeployment(journalId);if(!selection)return null;const target=selection.target;return{journalId:target.journalId,commit:target.commit,tree:target.tree,acceptedAt:target.acceptedAt,...(target.acceptedRef?{acceptedRef:target.acceptedRef}:{}),...(target.acceptedRootVersion!==undefined?{acceptedRootVersion:target.acceptedRootVersion}:{})};}
+    // Historical primary snapshots can be proven by their original journal and
+    // accepted history without inventing a branch name or new receipt metadata.
+    if(!isSafeSha(journal.newHead)||!journal.candidateTree||!isSafeSha(journal.candidateTree)||(journal.candidateCommit!==undefined&&journal.candidateCommit!==journal.newHead))return null;
+    const history=state.acceptedState.history.filter(entry=>entry.commit===journal.newHead&&entry.candidateId===journal.candidateId&&!entry.acceptedTarget);if(history.length!==1)return null;const accepted=history[0]!;if(journal.outputDigest!==undefined&&accepted.outputDigest!==undefined&&journal.outputDigest!==accepted.outputDigest)return null;
+    return{journalId:journal.id,commit:journal.newHead,tree:journal.candidateTree,acceptedAt:accepted.acceptedAt};
+  }
+  private privateRecoveryBindingMatches(op:PrivateRecoveryOperation,target:PrivateRecoveryTarget):boolean{
+    if(target.journalId!==op.journalId||target.commit!==op.commit||target.tree!==op.tree)return false;
+    if(op.acceptedRef!==undefined)return op.acceptedRef===target.acceptedRef&&op.acceptedRootVersion===target.acceptedRootVersion;
+    if(op.acceptedRootVersion!==undefined)return false;if(target.acceptedRef===undefined)return true;const selection=this.selectRecordedDeployment(op.journalId);return !!selection&&this.legacyPrimaryDeploymentCompatibility(selection)!==undefined;
+  }
+  private privateRecoveryIsPrimary(op:PrivateRecoveryOperation):boolean{if(op.journalId==="baseline")return op.acceptedRef===undefined&&op.acceptedRootVersion===undefined;const target=this.recordedPrivateRecoveryTarget(op.journalId);if(!target)return false;if(target.acceptedRef===undefined)return op.acceptedRef===undefined&&op.acceptedRootVersion===undefined;const selection=this.selectRecordedDeployment(op.journalId);return !!selection&&this.legacyPrimaryDeploymentCompatibility(selection)!==undefined;}
+
   private privateRecoveryScopeCurrent(op:PrivateRecoveryOperation):boolean {
     const state=this.load(),ops=new PrivateRecoveryOperations(this.ctx.storage);
     const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",op.ownerId).toArray()[0]?.role;
     if(op.cacheState||this.repositoryDeleting()||role!=="owner"||op.incarnation!==ops.incarnation()||op.projectId!==state.projectId||op.canonicalRepoName!==state.canonicalRepoName)return false;
-    if(op.journalId==="baseline")return state.acceptedBaseline?.commit===op.commit&&(state.acceptedBaseline.tree??null)===op.tree;
-    const journal=state.journal.find(item=>item.id===op.journalId&&item.state==="ACCEPTED"&&item.newHead===op.commit&&item.candidateTree===op.tree);
-    return !!journal&&state.acceptedState.history.some(item=>item.commit===journal.newHead&&item.candidateId===journal.candidateId);
+    if(op.journalId==="baseline")return op.acceptedRef===undefined&&op.acceptedRootVersion===undefined&&state.acceptedBaseline?.commit===op.commit&&(state.acceptedBaseline.tree??null)===op.tree;
+    const target=this.recordedPrivateRecoveryTarget(op.journalId);return !!target&&this.privateRecoveryBindingMatches(op,target);
   }
   async privateRecoveryRecordTree(id:string,tree:string,expectedScope:string):Promise<PrivateRecoveryOperation>{
     const ops=new PrivateRecoveryOperations(this.ctx.storage),op=ops.get(id);
@@ -1047,8 +1070,9 @@ export class RepositoryController extends DurableObject<Env> {
   }
   async privateRecoveryReadable(id:string):Promise<boolean>{
    const ops=new PrivateRecoveryOperations(this.ctx.storage),op=ops.get(id);
-   if(!op||op.cacheState||op.status!=="ready"||!op.receipt||this.repositoryDeleting()||op.incarnation!==ops.incarnation()||op.canonicalRepoName!==this.load().canonicalRepoName)return false;
-   const target=(await this.privateRecoveryTargets()).find(item=>item.journalId===op.journalId);return target?.commit===op.commit&&target.tree===op.tree;
+   if(!op||op.cacheState||op.status!=="ready"||!op.receipt||op.receipt.acceptedRef!==op.acceptedRef||op.receipt.acceptedRootVersion!==op.acceptedRootVersion||this.repositoryDeleting()||op.incarnation!==ops.incarnation()||op.canonicalRepoName!==this.load().canonicalRepoName)return false;
+   if(op.journalId==="baseline")return op.acceptedRef===undefined&&op.acceptedRootVersion===undefined&&this.load().acceptedBaseline?.commit===op.commit&&(this.load().acceptedBaseline?.tree??null)===op.tree;
+   const target=this.recordedPrivateRecoveryTarget(op.journalId);return !!target&&this.privateRecoveryBindingMatches(op,target);
   }
   async privateRecoveryComplete(id:string,receipt:PrivateRecoveryReceipt):Promise<void>{
     const op=await this.privateRecoveryOperation(id);if(!op||!await this.privateRecoveryAuthorize(id,op.ownerId))throw new Error("Recovery authorization changed");
@@ -1059,11 +1083,11 @@ export class RepositoryController extends DurableObject<Env> {
 
   private selectRecordedDeployment(journalId:string):AcceptedDeploymentSelection|null{
     const state=this.load();if(this.repositoryDeleting())return null;this.synchronizePrimaryAcceptedRegistry(state);
-    const incarnation=this.readRepositoryIncarnation();if(!incarnation)return null;
+    const incarnation=this.readRepositoryIncarnation()??new PrivateRecoveryOperations(this.ctx.storage).incarnation(),hasRegistry=!!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='accepted_branch_roots'").toArray().length;
     const journals=state.journal.filter(journal=>journal.id===journalId);if(journals.length!==1)return null;
-    const primaryRows=this.ctx.storage.sql.exec<{doc:string|null}>("SELECT CASE WHEN LENGTH(CAST(doc AS BLOB))<=1048576 THEN doc ELSE NULL END AS doc FROM accepted_branch_roots WHERE project_id=? AND incarnation=? AND repo_name=? AND kind='primary' ORDER BY ref LIMIT 2",state.projectId,incarnation,state.canonicalRepoName).toArray();if(primaryRows.length>1||primaryRows.some(row=>row.doc===null))return null;
-    const primary=primaryRows.map(row=>JSON.parse(row.doc!) as import("./accepted-branch-roots").AcceptedBranchRoot),primaryRef=primary[0]?.ref??(state.defaultBranch?`refs/heads/${state.defaultBranch}`:"");
-    const frozen=journals[0]!.acceptedTarget??journals[0]!.publicationAuthority?.acceptedTarget,selectedRows=frozen&&frozen.ref!==primaryRef?this.ctx.storage.sql.exec<{doc:string|null}>("SELECT CASE WHEN LENGTH(CAST(doc AS BLOB))<=1048576 THEN doc ELSE NULL END AS doc FROM accepted_branch_roots WHERE project_id=? AND incarnation=? AND repo_name=? AND ref=? LIMIT 2",state.projectId,incarnation,state.canonicalRepoName,frozen.ref).toArray():[];if(selectedRows.length>1||selectedRows.some(row=>row.doc===null))return null;
+    const primaryRows=hasRegistry?this.ctx.storage.sql.exec<{doc:string|null}>("SELECT CASE WHEN LENGTH(CAST(doc AS BLOB))<=1048576 THEN doc ELSE NULL END AS doc FROM accepted_branch_roots WHERE project_id=? AND incarnation=? AND repo_name=? AND kind='primary' ORDER BY ref LIMIT 2",state.projectId,incarnation,state.canonicalRepoName).toArray():[];if(primaryRows.length>1||primaryRows.some(row=>row.doc===null))return null;
+    const primary=primaryRows.map(row=>JSON.parse(row.doc!) as import("./accepted-branch-roots").AcceptedBranchRoot),primaryRef=primary[0]?.ref??(state.defaultBranch?`refs/heads/${state.defaultBranch}`:null);
+    const frozen=journals[0]!.acceptedTarget??journals[0]!.publicationAuthority?.acceptedTarget,selectedRows=hasRegistry&&frozen&&frozen.ref!==primaryRef?this.ctx.storage.sql.exec<{doc:string|null}>("SELECT CASE WHEN LENGTH(CAST(doc AS BLOB))<=1048576 THEN doc ELSE NULL END AS doc FROM accepted_branch_roots WHERE project_id=? AND incarnation=? AND repo_name=? AND ref=? LIMIT 2",state.projectId,incarnation,state.canonicalRepoName,frozen.ref).toArray():[];if(selectedRows.length>1||selectedRows.some(row=>row.doc===null))return null;
     const roots=[...primary,...selectedRows.map(row=>JSON.parse(row.doc!) as import("./accepted-branch-roots").AcceptedBranchRoot)],candidateIds=new Set(journals.map(journal=>journal.candidateId));
     return selectAcceptedDeploymentJournal({projectId:state.projectId,incarnation,canonicalRepoName:state.canonicalRepoName,primaryRef,journals,primaryHistory:state.acceptedState.history.filter(entry=>candidateIds.has(entry.candidateId)),roots},journalId);
   }
@@ -1088,7 +1112,7 @@ export class RepositoryController extends DurableObject<Env> {
     const state = this.load();
     if (visibility?.visibility !== "public" || !visibility.confirmed_by || new PublicationModeration(this.ctx.storage).state("repository",state.projectId).suppressed) return null;
     const operations = new PrivateRecoveryOperations(this.ctx.storage);
-    const op = operations.all().find(item => item.ownerId === ownerId && item.commit === state.acceptedState.currentCommit && item.status === "ready" && !!item.receipt && this.privateRecoveryScopeCurrent(item));
+    const op = operations.all().find(item => item.ownerId === ownerId && item.commit === state.acceptedState.currentCommit && item.status === "ready" && !!item.receipt && this.privateRecoveryScopeCurrent(item) && this.privateRecoveryIsPrimary(item));
     if (!op?.receipt || !op.tree || op.receipt.projectId !== state.projectId || op.receipt.incarnation !== operations.incarnation() || op.receipt.commit !== op.commit || op.receipt.tree !== op.tree || op.receipt.journalId !== op.journalId || op.receipt.objectScope !== "exact-accepted-reachable-closure") return null;
     return {incarnation:operations.incarnation(),commit:op.commit,tree:op.tree,publicationVersion:visibility.version};
   }
@@ -1110,7 +1134,7 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   async privateRecoveryTargets():Promise<PrivateRecoveryTarget[]>{
-    const state=this.load(),records=await Promise.all(state.journal.filter(entry=>entry.state==="ACCEPTED").map(entry=>this.acceptedDeploymentTarget(entry.id))),targets:PrivateRecoveryTarget[]=records.filter((entry):entry is NonNullable<typeof entry>=>entry!==null&&this.legacyPrimaryDeploymentCompatibility(entry.selection)!==undefined).map(({target})=>({journalId:target.journalId,commit:target.commit,tree:target.tree,acceptedAt:target.acceptedAt})),baseline=state.acceptedBaseline;
+    const state=this.load(),targets:PrivateRecoveryTarget[]=state.journal.filter(entry=>entry.state==="ACCEPTED").map(entry=>this.recordedPrivateRecoveryTarget(entry.id)).filter((target):target is PrivateRecoveryTarget=>target!==null),baseline=state.acceptedBaseline;
     if(baseline&&isSafeSha(baseline.commit)&&(!baseline.tree||isSafeSha(baseline.tree)))targets.unshift({journalId:"baseline",commit:baseline.commit,tree:baseline.tree??null,acceptedAt:baseline.acceptedAt});
     else { const legacy = this.legacyRecoveryTarget(); if (legacy) targets.unshift(legacy); }
     return targets;
@@ -1854,6 +1878,10 @@ export class RepositoryController extends DurableObject<Env> {
     return{...task,targetGeneration:{eventId:record.eventId,generation:record.generation,acceptedTarget:structuredClone(record.target),baseCommit:task.baseCommit,currentCommit:task.currentCommit}};
   }
   async agentTaskView(taskId:string){const task=this.load().tasks[taskId];if(!task)throw Error("Unknown task");const projected=this.projectedTask(task),record=new TaskTargetGenerations(this.ctx.storage).current(taskId);return{task:structuredClone(projected),...(record?{targetGeneration:{eventId:record.eventId,generation:record.generation,sourceSnapshotDigest:record.source.snapshotDigest}}:{})};}
+  async admitOwnerPreviewRead(ownerKey:string):Promise<PreviewReadAdmission>{return new PreviewMonthlyReadAdmission(this.ctx.storage).admit(ownerKey,{globalAttempts:previewReadAttemptCap(this.env.PREVIEW_READ_GLOBAL_MONTHLY_ATTEMPTS),ownerAttempts:previewReadAttemptCap(this.env.PREVIEW_READ_OWNER_MONTHLY_ATTEMPTS)});}
+  async admitPreviewRead():Promise<PreviewReadAdmission>{
+    if(this.repositoryDeleting())throw Error("Preview repository unavailable");const state=this.load(),ownerId=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id;if(!ownerId)throw Error("Preview owner scope unavailable");const scope={projectId:state.projectId,canonicalRepoName:state.canonicalRepoName,incarnation:this.readRepositoryIncarnation(),ownerId},accountKey=await accountKeyFor(ownerId);const authorize=async()=>{if(await accountOf(this.env,accountKey).accountLifecycle()!=="active")throw Error("Preview owner account unavailable");const current=this.load();if(this.repositoryDeleting()||current.projectId!==scope.projectId||current.canonicalRepoName!==scope.canonicalRepoName||this.readRepositoryIncarnation()!==scope.incarnation||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==ownerId)throw Error("Preview ownership changed");};await authorize();const result=await globalOf(this.env).admitOwnerPreviewRead(accountKey);await authorize();return result;
+  }
   async getState(): Promise<FlareGitProjectState> {
     const state=this.load(true);if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='task_target_generation_heads'").toArray().length)return state;
     if(!this.ctx.storage.sql.exec("SELECT task_id FROM task_target_generation_heads WHERE event_id IS NOT NULL LIMIT 1").toArray().length)return state;

@@ -3,7 +3,8 @@ import { createHash } from 'node:crypto';
 /** Cached private bundles only. The protected builder proves closure and digest; multipart R2 metadata binds those receipts.
  * R2 SHA256 is optional for multipart uploads. The streamed bytes are rehashed before the final chunk is released. */
 import type { PrivateRecoveryReceipt } from './private-recovery';
-export type RecoverySnapshot = Pick<PrivateRecoveryReceipt, 'projectId' | 'incarnation' | 'commit' | 'tree' | 'journalId' | 'objectScope'>;
+import { recoveryBranchFields, recoveryBranchMetadataMatches } from './private-recovery-branch';
+export type RecoverySnapshot = Pick<PrivateRecoveryReceipt, 'projectId' | 'incarnation' | 'commit' | 'tree' | 'journalId' | 'objectScope' | 'acceptedRef' | 'acceptedRootVersion'>;
 export interface RecoveryObject {
   body: ReadableStream<Uint8Array>;
   size: number;
@@ -28,7 +29,9 @@ export async function downloadPrivateRecovery(request: Request, options: Private
   if (request.headers.has('Range') || request.headers.has('X-HTTP-Method-Override')) return error(400);
   const snapshot = Object.freeze({ ...options.snapshot });
   const receipt = Object.freeze({ ...options.receipt });
+  try { recoveryBranchFields(snapshot); recoveryBranchFields(receipt); } catch { return error(409); }
   if (fields.some(field => !snapshot[field] || snapshot[field] !== receipt[field]) ||
+      snapshot.acceptedRef !== receipt.acceptedRef || snapshot.acceptedRootVersion !== receipt.acceptedRootVersion ||
       !/^[a-f0-9]{40,64}$/.test(snapshot.commit) || !/^[a-f0-9]{40,64}$/.test(snapshot.tree) ||
       snapshot.objectScope !== 'exact-accepted-reachable-closure' || !/^[a-f0-9]{64}$/.test(receipt.sha256) ||
       !options.objectKey || !Number.isSafeInteger(receipt.size) || receipt.size <= 0 || receipt.size > limit) return error(409);
@@ -50,10 +53,12 @@ export async function downloadPrivateRecovery(request: Request, options: Private
     reader = object.body.getReader();
     request.signal.addEventListener('abort', aborted, { once: true });
     if (object.size !== receipt.size || (object.checksums.sha256 && hex(object.checksums.sha256) !== receipt.sha256) || object.customMetadata?.sha256 !== receipt.sha256 ||
-        fields.some(field => object.customMetadata?.[field] !== receipt[field])) { await stop(); return error(409); }
+        fields.some(field => object.customMetadata?.[field] !== receipt[field]) || !recoveryBranchMetadataMatches(snapshot, object.customMetadata)) { await stop(); return error(409); }
     if (!await authorized()) { await stop(); return error(403); }
     const responseHeaders = { ...headers, 'Content-Type': 'application/x-git-bundle', 'Content-Length': String(receipt.size),
       'X-FlareGit-SHA256': receipt.sha256,
+      ...(snapshot.acceptedRef !== undefined ? { 'X-FlareGit-Accepted-Ref': snapshot.acceptedRef } : {}),
+      ...(snapshot.acceptedRootVersion !== undefined ? { 'X-FlareGit-Accepted-Root-Version': String(snapshot.acceptedRootVersion) } : {}),
       'Content-Disposition': `attachment; filename="recovery-${receipt.commit}.bundle"` };
     if (request.method === 'HEAD') { await stop(); return new Response(null, { headers: responseHeaders }); }
     let pending: Uint8Array | undefined, offset = 0, sent = 0;
