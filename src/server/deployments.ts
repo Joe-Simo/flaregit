@@ -3,15 +3,15 @@ import { redactSecrets } from "../agents/prompt.js";
 import { safeContent } from "./public-community.js";
 import { isSafeRef } from "../core/sanitize.js";
 
-export interface AcceptedDeploymentTarget { journalId:string;candidateId:string;commit:string;tree:string;acceptedAt:string;recoverableRef:string }
+export interface AcceptedDeploymentTarget { journalId:string;candidateId:string;commit:string;tree:string;acceptedAt:string;recoverableRef:string;acceptedRef?:string;acceptedRootVersion?:number }
 export type DeploymentStatus="requested"|"queued"|"running"|"succeeded"|"failed"|"cancelled";
 export interface DeploymentRecord { id:string;repositoryId:string;serviceId:string;environment:string;target:AcceptedDeploymentTarget;requestEventId:string;status:DeploymentStatus;sequence:number;summary?:string;detailsUrl?:string;createdAt:string;updatedAt:string }
-export interface DeploymentRequestedEvent { id:string;type:"deployment.requested";createdAt:string;repositoryId:string;data:{deploymentId:string;serviceId:string;environment:string;commit:string;tree:string;acceptedJournalId:string;recoverableRef:string} }
+export interface DeploymentRequestedEvent { id:string;type:"deployment.requested";createdAt:string;repositoryId:string;data:{deploymentId:string;serviceId:string;environment:string;commit:string;tree:string;acceptedJournalId:string;recoverableRef:string;acceptedRef?:string;acceptedRootVersion?:number} }
 const id=z.string().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/);
 const sha=z.string().regex(/^[a-f0-9]{40}$/);
 const environmentSchema=z.string().trim().min(1).max(100).refine(value=>!/[\x00-\x1f<>]/.test(value)&&redactSecrets(value)===value);
 export const deploymentRequestParametersSchema=z.object({journalId:id,serviceId:id,environment:environmentSchema,idempotencyKey:id}).strict();
-const targetSchema=z.object({journalId:id,candidateId:id,commit:sha,tree:sha,acceptedAt:z.string().datetime(),recoverableRef:z.string().refine(value=>value.startsWith("refs/flaregit/deployments/")&&isSafeRef(value))}).strict();
+const targetSchema=z.object({journalId:id,candidateId:id,commit:sha,tree:sha,acceptedAt:z.string().datetime(),recoverableRef:z.string().refine(value=>value.startsWith("refs/flaregit/deployments/")&&isSafeRef(value)),acceptedRef:z.string().refine(value=>value.startsWith("refs/heads/")&&isSafeRef(value)).optional(),acceptedRootVersion:z.number().int().positive().safe().optional()}).strict().refine(value=>value.acceptedRootVersion===undefined||value.acceptedRef!==undefined,"Accepted root version requires an explicit ref");
 const link=z.string().url().max(2048).refine(value=>{try{const url=new URL(value);decodeURIComponent(value);if(url.protocol!=="https:"||url.username||url.password)return false;for(const [key,entry]of url.searchParams)if(/(?:^|[_-])(?:token|sig|signature|secret|password|api[_-]?key|credential|authorization)(?:$|[_-])/i.test(key)||redactSecrets(entry)!==entry)return false;return redactSecrets(decodeURIComponent(url.pathname+url.hash))===decodeURIComponent(url.pathname+url.hash);}catch{return false;}});
 export const deploymentReportSchema=z.object({type:z.literal("deployment"),deploymentId:id,commit:sha,tree:sha,sequence:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),status:z.enum(["queued","running","succeeded","failed","cancelled"]),summary:z.string().max(4000).refine(value=>{try{safeContent(value);return true;}catch{return false;}}),detailsUrl:link.optional()}).strict();
 export type DeploymentReport=z.infer<typeof deploymentReportSchema> & {eventId:string};
@@ -41,7 +41,7 @@ export class RepositoryDeployments {
       if(this.storage.sql.exec<{n:number}>("SELECT COUNT(*) AS n FROM deployments").toArray()[0]!.n>=1000)throw new Error("Deployment record limit reached");
       const now=new Date().toISOString(),record:DeploymentRecord={id:`deploy_${crypto.randomUUID()}`,repositoryId:this.repositoryId,serviceId,environment:environment.trim(),target:frozen,requestEventId:`evt_${crypto.randomUUID()}`,status:"requested",sequence:-1,createdAt:now,updatedAt:now};
       this.storage.sql.exec("INSERT INTO deployments VALUES(?,?)",record.id,JSON.stringify(record));this.storage.sql.exec("INSERT INTO deployment_requests VALUES(?,?,?,?)",actorId,idempotencyKey,payload,record.id);
-      stage({id:record.requestEventId,type:"deployment.requested",createdAt:now,repositoryId:this.repositoryId,data:{deploymentId:record.id,serviceId,environment:record.environment,commit:frozen.commit,tree:frozen.tree,acceptedJournalId:frozen.journalId,recoverableRef:frozen.recoverableRef}});
+      stage({id:record.requestEventId,type:"deployment.requested",createdAt:now,repositoryId:this.repositoryId,data:{deploymentId:record.id,serviceId,environment:record.environment,commit:frozen.commit,tree:frozen.tree,acceptedJournalId:frozen.journalId,recoverableRef:frozen.recoverableRef,...(frozen.acceptedRef?{acceptedRef:frozen.acceptedRef}:{}),...(frozen.acceptedRootVersion!==undefined?{acceptedRootVersion:frozen.acceptedRootVersion}:{})}});
       return{kind:"created" as const,deployment:record};
     });
   }
