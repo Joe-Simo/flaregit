@@ -3,7 +3,7 @@
   "name": "flaregit",
   "main": "src/server/worker.ts",
   "compatibility_date": "2026-10-01",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "limits": { "subrequests": 50000 },
   "assets": { "directory": "./dist", "binding": "ASSETS", "run_worker_first": ["/api/*", "/git/*", "/preview/*", "/webhooks/*", "/auth-config", "/pricing", "/plan-price", "/status", "/status.json", "/health"], "not_found_handling": "single-page-application" },
   "vars": {

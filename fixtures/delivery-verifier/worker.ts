@@ -47,7 +47,7 @@ async function validSignature(request: Request, payload: string, env: ReceiverEn
   if (!deliveryId || !/^dlv_[a-z0-9-]{1,128}$/.test(deliveryId) || !timestamp || !/^\d{1,16}$/.test(timestamp) || !signatures || signatures.length > 1024) return false;
   if (!Number.isSafeInteger(Number(timestamp)) || Math.abs(Date.now() / 1000 - Number(timestamp)) > 300) return false;
   try {
-    const raw = atob(env.WEBHOOK_SECRET.replace(/^whsec_/, '')); if (raw.length < 32) return false;
+    const raw = atob(env.WEBHOOK_SECRET.replace(/^whsec_/, '')); if (raw.length < 24) return false;
     const key = await crypto.subtle.importKey('raw', Uint8Array.from(raw, v => v.charCodeAt(0)), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
     for (const signature of signatures.split(' ')) {
       if (!signature.startsWith('v1,')) continue;

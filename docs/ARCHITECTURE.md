@@ -74,12 +74,12 @@ The native [`wrangler preview` command](https://developers.cloudflare.com/worker
 
 ## Container naming
 
-Containers are addressed by name, so state never crosses repositories: `bootstrap-<projectId>` for imports and seeding, `<projectId>-<id>` for integration runs, `agent-<projectId>-<taskId>` for agents.
+Current integration, import, preview and recovery allocations use `native-<UUID>` identities; managed agent attempts use `agent-<projectId>-<taskId>-<UUID>`. Durable scope records and command admission bind tracked integration allocations to their repository incarnation, workflow and candidate. Random names alone do not establish authorization or shutdown. Recovery uses retained Git refs and saved attempt identities; unknown legacy allocations are not treated as confirmed stopped. See `workflow.ts`, `agent-run.ts`, `native-compute.ts` and `import-history-workflow.ts`.
 
 ## Known limits
 
-- Verification runs candidate code and checks in one process inside the container; a hostile candidate can fail the run (fails closed). Containers have outbound internet for Git, so candidate code could exfiltrate candidate source.
-- Imports: public HTTPS URLs, depth 200, no ongoing mirror.
+- The trusted verifier supervisor owns platform files and the original Git workspace. Contributor compilation, protected-check execution and preview builds use disposable snapshots under a separate Linux UID with scrubbed environments, time/output bounds and descendant cleanup before output export. Production requires this boundary (`FLAREGIT_REQUIRE_ISOLATION=1`); the explicit local test harness can use a weaker same-user boundary. Candidate code and behavioral checks share the short-lived check child, so hostile code can cause verification to fail closed. UID isolation does not provide network isolation: container outbound access remains a source-exfiltration risk. These source mechanisms do not establish that every historical deployed image used the current boundary.
+- Imports accept validated public HTTPS Git sources without requesting a shallow depth. Optional durable history inspection currently supports public `github.com` sources without redirects and compares selected-branch reachable commit metadata at the pinned imported head. Its bounded chunks and storage limits can leave inspection incomplete; a readable head does not prove blobs, annotated tags or unselected refs were preserved. Imports do not enable continuous inbound synchronization. Optional one-way GitHub mirroring runs after acceptance, never force-pushes, and reports delivery failures independently of canonical browsing and review. Hosted migration and mirror recovery require separate receipts.
 - Landing lease 20 min; review wait 7 days; at most 8 changes per integration.
 - Contradiction detection needs structured assertions (`input` + `expectedOutput`).
 - Per-line syntax highlighting.

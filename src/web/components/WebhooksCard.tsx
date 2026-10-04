@@ -8,7 +8,7 @@ import { timeAgo } from "../router";
 import { useVisiblePolling } from "../use-visible-polling";
 
 interface Hook { id: string; url: string; events: string; active: number }
-interface Delivery { id: string; seq: number; queue_ms: number | null; webhook_id: string; event: string; status: "pending" | "success" | "failed"; attempts: number; last_status: number | null; last_error: string | null; latency_ms: number | null; updated_at: string }
+interface Delivery { dispatch_state?: "unknown"|"sending"|"queued"|"failed"|"consumed"; dispatch_attempts?:number; dispatch_error?:string|null; id: string; seq: number; queue_ms: number | null; webhook_id: string; event: string; status: "pending" | "success" | "failed"; attempts: number; last_status: number | null; last_error: string | null; latency_ms: number | null; updated_at: string }
 
 type WebhookLoad = { hooks: Hook[]; deliveries: Delivery[] };
 class WebhookLoadError extends Error {
@@ -161,6 +161,9 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
                     <span className="font-medium break-all">{d.event}</span>
                     <span className="text-muted-foreground"> · #{d.seq} · {timeAgo(d.updated_at)} · {d.attempts} attempt{d.attempts === 1 ? "" : "s"}{d.queue_ms !== null ? ` · queued ${d.queue_ms} ms` : ""}{d.latency_ms !== null ? ` · ${d.latency_ms} ms` : ""}{d.last_status ? ` · last HTTP ${d.last_status}` : ""}</span>
                     <div className="mt-1 text-muted-foreground break-all">Delivery <code>{d.id}</code> · webhook <code>{d.webhook_id}</code></div>
+                    {d.status === "pending" && d.dispatch_state === "failed" && <div className="text-destructive">{d.dispatch_error ?? "Queue dispatch failed. The saved event will be retried."}</div>}
+                    {d.status === "pending" && d.attempts === 0 && d.dispatch_state === "queued" && <div className="text-muted-foreground">Queue accepted · receiver response not recorded</div>}
+                    {d.status === "pending" && d.attempts === 0 && (!d.dispatch_state || d.dispatch_state === "unknown" || d.dispatch_state === "sending") && <div className="text-muted-foreground">Event saved · queue dispatch unconfirmed</div>}
                     {d.last_error && d.status !== "success" && <div className="text-destructive break-all">{d.last_error}</div>}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">

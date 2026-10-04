@@ -2,11 +2,13 @@ import { expect, test } from 'bun:test';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { workerdChild } from './support/workerd-child';
 
-test('owned verifier validates signed scope, commits before failure, and deduplicates replay without executing deployment', async () => {
+test('owned verifier accepts platform 24-byte webhook keys, validates scope and deduplicates without executing deployment', async () => {
   if (await workerdChild('tests/owned-delivery-verifier.test.ts')) return;
   const build = await Bun.build({ entrypoints: ['fixtures/delivery-verifier/worker.ts'], target: 'browser', external: ['cloudflare:workers'] });
   if (!build.success) throw new Error(build.logs.join('\n'));
-  const secret = crypto.getRandomValues(new Uint8Array(32)), control = crypto.randomUUID();
+  // RepositoryController.addWebhook issues 24 random bytes (192 bits).
+  const secret = crypto.getRandomValues(new Uint8Array(24)), control = crypto.randomUUID();
+  expect(secret.byteLength).toBe(24);
   const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ name: 'owned-verifier', modules: true, script: await build.outputs[0]!.text(), compatibilityDate: '2026-10-02', bindings: { WEBHOOK_SECRET: `whsec_${Buffer.from(secret).toString('base64')}`, CONTROL_SECRET: control, EXPECTED_PROJECT: 'p123456789abc' }, durableObjects: { RECEIPTS: { className: 'DeliveryReceipts', useSQLite: true } } }] }));
   try {
     const worker = await mf.getWorker('owned-verifier');
@@ -23,6 +25,7 @@ test('owned verifier validates signed scope, commits before failure, and dedupli
       expect((await worker.fetch('https://owned.example/mode', { method: 'POST', headers: { Authorization: authorization }, body: JSON.stringify({ mode: 'healthy' }) })).status).toBe(401);
     }
     expect((await worker.fetch('https://owned.example/webhook', { method: 'POST', body })).status).toBe(401);
+    expect((await worker.fetch('https://owned.example/webhook', { method: 'POST', headers: { 'webhook-id': 'dlv_local', 'webhook-sequence': '1', 'webhook-timestamp': String(Math.floor(Date.now() / 1000)), 'webhook-signature': `v1,${Buffer.from(new Uint8Array(32)).toString('base64')}` }, body })).status).toBe(401);
     expect((await send(body, 'dlv_local', '1')).status).toBe(401);
     expect((await send(body.replace('p123456789abc', 'p123456789abd'))).status).toBe(403);
     expect((await report()).actions).toEqual([]);

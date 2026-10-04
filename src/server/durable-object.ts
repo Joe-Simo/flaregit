@@ -94,6 +94,10 @@ export interface WebhookRow {
   created_at: string;
 }
 export interface DeliveryRow {
+  dispatch_state: "unknown"|"sending"|"queued"|"failed"|"consumed";
+  dispatch_attempts: number;
+  dispatch_error: string|null;
+  dispatch_at: string|null;
   id: string;
   /** Per-webhook sequence number; pending earlier deliveries block later ones. */
   seq: number;
@@ -1020,7 +1024,7 @@ export class RepositoryController extends DurableObject<Env> {
     await this.ensureRecoveryAlarm();
     let deliveryIds:string[]=[];
     const result=new RepositoryDeployments(this.ctx.storage,this.load().projectId).request(target,serviceId,environment,key,actorId,event=>{deliveryIds=this.stageEvent(event.type,event.data,{id:event.id,createdAt:event.createdAt});});
-    await Promise.allSettled(deliveryIds.map(deliveryId=>this.env.INTEGRATION_QUEUE.send({type:"webhook.deliver",projectId:this.load().projectId,deliveryId})));
+    await Promise.all(deliveryIds.map(deliveryId=>this.enqueueWebhookDelivery(deliveryId)));
     return result;
   }
 
@@ -1458,7 +1462,7 @@ export class RepositoryController extends DurableObject<Env> {
     `);
     try{this.ctx.storage.sql.exec("ALTER TABLE project_workflows ADD COLUMN native_protocol INTEGER");}catch{/* Existing column. */}
     // Databases created before ordered delivery lack these columns.
-    for (const col of ["seq INTEGER NOT NULL DEFAULT 0", "queue_ms INTEGER", "generation INTEGER NOT NULL DEFAULT 0"]) {
+    for (const col of ["seq INTEGER NOT NULL DEFAULT 0", "queue_ms INTEGER", "generation INTEGER NOT NULL DEFAULT 0", "dispatch_state TEXT NOT NULL DEFAULT 'unknown'", "dispatch_attempts INTEGER NOT NULL DEFAULT 0", "dispatch_error TEXT", "dispatch_at TEXT"]) {
       try { this.ctx.storage.sql.exec(`ALTER TABLE deliveries ADD COLUMN ${col}`); } catch { /* already present */ }
     }
     try { this.ctx.storage.sql.exec("ALTER TABLE project_workflows ADD COLUMN actor_id TEXT"); } catch { /* already present */ }
@@ -1598,7 +1602,7 @@ export class RepositoryController extends DurableObject<Env> {
       });
     } catch (error) { this.state = null; throw error; }
     if (!applied) return { applied: false };
-    for (const deliveryId of deliveries) await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: s.projectId, deliveryId }).catch(() => undefined);
+    for (const deliveryId of deliveries) await this.enqueueWebhookDelivery(deliveryId);
     await this.logActivity(task.contributor.name, ev.ready ? "task.ready" : "task.pushed", `${task.id} ${ev.ready ? "is ready for integration" : "pushed a checkpoint"} (${ev.commit.slice(0, 7)})`, { exceptUser: task.contributor.id });
     return { applied: true };
   }
@@ -1665,7 +1669,7 @@ export class RepositoryController extends DurableObject<Env> {
   }
   async listDeliveries(limit: number): Promise<DeliveryRow[]> {
     return this.ctx.storage.sql
-      .exec("SELECT id, seq, queue_ms, webhook_id, event, status, attempts, last_status, last_error, latency_ms, created_at, updated_at FROM deliveries ORDER BY created_at DESC LIMIT ?", Math.min(limit, 100))
+      .exec("SELECT id, seq, queue_ms, webhook_id, event, status, attempts, last_status, last_error, latency_ms, created_at, updated_at, dispatch_state, dispatch_attempts, dispatch_error, dispatch_at FROM deliveries ORDER BY created_at DESC LIMIT ?", Math.min(limit, 100))
       .toArray() as unknown as DeliveryRow[];
   }
   async getDelivery(id: string) {
@@ -1687,7 +1691,7 @@ export class RepositoryController extends DurableObject<Env> {
     }
     const status = r.ok ? "success" : r.final ? "failed" : "pending";
     this.ctx.storage.sql.exec(
-      "UPDATE deliveries SET status = ?, attempts = ?, last_status = ?, last_error = ?, latency_ms = ?, updated_at = ? WHERE id = ?",
+      "UPDATE deliveries SET status = ?, attempts = ?, last_status = ?, last_error = ?, latency_ms = ?, updated_at = ?, dispatch_state = 'consumed', dispatch_error = NULL WHERE id = ?",
       status, attempts, r.status ?? null, r.error ? r.error.slice(0, 300) : null, r.latencyMs ?? null, new Date().toISOString(), id
     );
     return attempts;
@@ -2086,11 +2090,24 @@ export class RepositoryController extends DurableObject<Env> {
     if (!d || d.seq === 0) return false;
     return this.ctx.storage.sql.exec("SELECT 1 FROM deliveries WHERE webhook_id = ? AND seq < ? AND status = 'pending' LIMIT 1", d.webhook_id, d.seq).toArray().length > 0;
   }
+  /** Queue acknowledgement is distinct from a receiver attempt or successful delivery. */
+  protected async enqueueWebhookDelivery(id:string):Promise<boolean>{
+    await this.ensureRecoveryAlarm();
+    const row=this.ctx.storage.sql.exec<{generation:number;dispatch_attempts:number;status:string}>("SELECT generation,dispatch_attempts,status FROM deliveries WHERE id=?",id).toArray()[0];
+    if(!row||row.status!=="pending")return false;
+    const attempt=row.dispatch_attempts+1;
+    this.ctx.storage.sql.exec("UPDATE deliveries SET dispatch_state='sending',dispatch_attempts=?,dispatch_error=NULL,dispatch_at=? WHERE id=? AND generation=? AND status='pending'",attempt,new Date().toISOString(),id,row.generation);
+    let queued=false;
+    try{await this.env.INTEGRATION_QUEUE.send({type:"webhook.deliver",projectId:this.load().projectId,deliveryId:id});queued=true;}catch{/* Provider diagnostics may include private configuration; persist only a safe category. */}
+    this.ctx.storage.sql.exec("UPDATE deliveries SET dispatch_state=?,dispatch_error=?,dispatch_at=? WHERE id=? AND generation=? AND dispatch_attempts=? AND status='pending' AND dispatch_state='sending'",queued?"queued":"failed",queued?null:"Queue dispatch failed. The saved event remains available for retry.",new Date().toISOString(),id,row.generation,attempt);
+    return queued;
+  }
   async redeliver(id: string): Promise<boolean> {
     const d = this.ctx.storage.sql.exec<{ id: string }>("SELECT id FROM deliveries WHERE id = ?", id).toArray()[0];
     if (!d) return false;
-    this.ctx.storage.sql.exec("UPDATE deliveries SET status = 'pending', attempts = 0, generation = generation + 1, last_error = NULL, updated_at = ? WHERE id = ?", new Date().toISOString(), id);
-    await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: this.load().projectId, deliveryId: id });
+    this.ctx.storage.sql.exec("UPDATE deliveries SET status = 'pending', attempts = 0, generation = generation + 1, last_error = NULL, dispatch_state = 'unknown', dispatch_error = NULL, updated_at = ? WHERE id = ?", new Date().toISOString(), id);
+    await this.ensureRecoveryAlarm();
+    if(!await this.enqueueWebhookDelivery(id))throw new Error("Replay was saved, but queue dispatch is unavailable. The same delivery ID remains recoverable and will be retried.");
     return true;
   }
   private stageEvent(type: (typeof WEBHOOK_EVENTS)[number], data: Record<string, unknown>, identity?:{id:string;createdAt:string}): string[] {
@@ -2127,10 +2144,9 @@ export class RepositoryController extends DurableObject<Env> {
       .toArray()
       .filter((d) => (d.attempts === 0 ? now - Date.parse(d.created_at) > 2 * 60_000 : now - Date.parse(d.updated_at) > 70 * 60_000));
     if (stuck.length > 0) {
-      const projectId = this.load().projectId;
       for (const d of stuck) {
         this.ctx.storage.sql.exec("UPDATE deliveries SET updated_at = ? WHERE id = ?", new Date().toISOString(), d.id);
-        await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId, deliveryId: d.id }).catch(() => undefined);
+        await this.enqueueWebhookDelivery(d.id);
       }
     }
     const pending = this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries WHERE status = 'pending'").toArray()[0]?.n ?? 0;
@@ -3088,7 +3104,7 @@ export class RepositoryController extends DurableObject<Env> {
                     this.save();
                     });
             } catch (error) { this.state = null; throw error; }
-            for (const deliveryId of deliveries) await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: s.projectId, deliveryId }).catch(() => undefined);
+            for (const deliveryId of deliveries) await this.enqueueWebhookDelivery(deliveryId);
             return { decision };
           }
         }
@@ -3340,7 +3356,7 @@ export class RepositoryController extends DurableObject<Env> {
       this.state = null;
       throw error;
     }
-    for (const deliveryId of deliveries) await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: s.projectId, deliveryId }).catch(() => undefined);
+    for (const deliveryId of deliveries) await this.enqueueWebhookDelivery(deliveryId);
     // Issues resolved by accepted changes close with a pointer to the commit that is now in history.
     for (const id of c.participatingTaskIds) {
       const t = s.tasks[id]!;
@@ -3452,7 +3468,7 @@ export class RepositoryController extends DurableObject<Env> {
         this.save();
       });
     } catch (error) { this.state = null; throw error; }
-    for (const deliveryId of deliveries) await this.env.INTEGRATION_QUEUE.send({ type: "webhook.deliver", projectId: s.projectId, deliveryId }).catch(() => undefined);
+    for (const deliveryId of deliveries) await this.enqueueWebhookDelivery(deliveryId);
     await this.logActivity("FlareGit", outcome === "stale" ? "integration.stale" : "integration.blocked", outcome === "stale" ? "Base moved; will recompose" : `Blocked: ${reason}`.slice(0, 280));
   }
 

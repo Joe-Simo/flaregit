@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { apiJson } from "../api";
+import { deploymentStatusRead } from "../deployment-status-read";
 import type { AcceptedDeploymentTarget, DeploymentRecord } from "@/server/deployments";
 
 interface Service { id: string; name: string; active: boolean; capabilities: string[] }
@@ -25,15 +26,17 @@ export function DeploymentCard({ projectId }: { projectId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const generation = useRef(0);
+  const readSequence = useRef(0);
   const request = useRef<{ payload: string; key: string } | null>(null);
   const load = useCallback(async (current = generation.current) => {
+    const sequence = ++readSequence.current;
     const result = await Promise.allSettled([
-      apiJson<{ deployments: DeploymentRecord[] }>(`/p/${projectId}/deployments`),
-      apiJson<{ targets: AcceptedDeploymentTarget[] }>(`/p/${projectId}/deployment-targets`),
-      apiJson<{ connections: Service[] }>(`/p/${projectId}/connections`),
-      apiJson<Delivery[]>(`/p/${projectId}/deliveries`),
+      deploymentStatusRead(signal => apiJson<{ deployments: DeploymentRecord[] }>(`/p/${projectId}/deployments`, { signal })),
+      deploymentStatusRead(signal => apiJson<{ targets: AcceptedDeploymentTarget[] }>(`/p/${projectId}/deployment-targets`, { signal })),
+      deploymentStatusRead(signal => apiJson<{ connections: Service[] }>(`/p/${projectId}/connections`, { signal })),
+      deploymentStatusRead(signal => apiJson<Delivery[]>(`/p/${projectId}/deliveries`, { signal })),
     ]);
-    if (current !== generation.current) return;
+    if (current !== generation.current || sequence !== readSequence.current) return;
     const [history, accepted, connections, delivery] = result;
     if (history.status === "fulfilled") setRecords(history.value.deployments);
     if (accepted.status === "fulfilled") setTargets(accepted.value.targets); else { setTargets([]); setJournalId(""); }
@@ -58,7 +61,7 @@ export function DeploymentCard({ projectId }: { projectId: string }) {
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       {notice && <p role="status" className="text-sm">{notice}</p>}
       <Button size="sm" variant="outline" disabled={busy} onClick={async () => { const current = generation.current; setBusy(true); setError(null); try { await load(current); } catch { if (current === generation.current) setError("Could not refresh. Previously loaded records may be outdated."); } finally { if (current === generation.current) setBusy(false); } }}>Refresh deployment status</Button>
-      {!records && !error && <p role="status" className="text-sm text-muted-foreground">Loading deployments…</p>}
+      {!records && !error && sourceErrors.length === 0 && <p role="status" className="text-sm text-muted-foreground">Loading deployments…</p>}
       {records && <>
         <form className="space-y-3" onSubmit={async event => {
           event.preventDefault(); if (!configurationKnown) return; const current = generation.current;
