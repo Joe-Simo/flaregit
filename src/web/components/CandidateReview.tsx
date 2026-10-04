@@ -138,7 +138,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
     }
   };
 
-  const targetSummary=targetInvalid||recoveredTargetMismatch?<p role="alert" className="text-xs text-destructive">Frozen branch target metadata is unavailable or inconsistent. Review decisions are paused; read the diff and refresh before deciding.</p>:reviewTarget?<p className="text-xs text-muted-foreground break-words">Frozen target <strong>{reviewTarget.branch}</strong> · base <code title={reviewTarget.acceptedCommit}>{reviewTarget.acceptedCommit.slice(0,12)}</code> · version {reviewTarget.acceptedVersion}</p>:null;
+  const targetSummary=targetInvalid||recoveredTargetMismatch?<p role="alert" className="text-xs text-destructive">Frozen branch target metadata is unavailable or inconsistent. Review decisions are paused; read the diff and refresh before deciding.</p>:reviewTarget?<p className="text-xs text-muted-foreground break-words">Frozen target <strong>{reviewTarget.branch}</strong> · base <code title={reviewTarget.acceptedCommit??undefined}>{reviewTarget.acceptedCommit?.slice(0,12)??"empty accepted history"}</code> · version {reviewTarget.acceptedVersion}</p>:null;
 
   const delegatedRows=candidate.candidateCommit?<Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Checking reviewer evidence…</p>}><DelegatedCandidateReviews key={scope} projectId={projectId} candidateId={candidate.id} commit={candidate.candidateCommit} base={candidate.expectedAcceptedBase} tree={evidence?.candidateTree} verificationPolicyVersion={candidate.frozenPolicyVersion} reviewReady={reviewReady} editable={["awaiting_review","verified"].includes(candidate.status)} onGate={onDelegatedGate}/></Suspense>:null;
 
@@ -162,7 +162,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
     <section aria-label="Review needed" className="rounded-lg border border-amber-500/40 bg-amber-500/5 p-4 space-y-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="font-semibold">Waiting for your review</h3>
-        <code className="text-xs text-muted-foreground">{candidate.candidateCommit?.slice(0, 7)}{candidate.acceptedTarget===undefined&&<> on {candidate.expectedAcceptedBase.slice(0, 7)}</>}</code>
+        <code className="text-xs text-muted-foreground">{candidate.candidateCommit?.slice(0, 7)}{candidate.acceptedTarget===undefined&&<> on {candidate.expectedAcceptedBase?.slice(0, 7)??"empty accepted history"}</>}</code>
       </div>
       {targetSummary}
       <p className="text-sm text-muted-foreground">

@@ -31,3 +31,17 @@ test("failed push and unavailable acknowledgement never imply success",async()=>
 test("lease rejects a racing newer head and uncertain readback stays failed",async()=>{const f=await fixture();try{await expect(resumeSavedRebaseGit({...f.options,exec:async (command,env)=>{if(command.includes(" push "))await f.git(`git -C ${q(f.work)} push -q ${q(f.fork)} ${f.newer}:refs/heads/work`);return f.exec(command,env);}})).rejects.toMatchObject({status:409});expect(await f.git(`git -C ${q(f.fork)} rev-parse refs/heads/work`)).toBe(f.newer);}finally{await f.cleanup();}const g=await fixture();try{let pushed=false;await expect(resumeSavedRebaseGit({...g.options,exec:async (command,env)=>{if(pushed&&command.includes(" ls-remote "))return {success:false,stdout:""};const result=await g.exec(command,env);if(command.includes(" push ")){pushed=true;throw new Error("lost");}return result;}})).rejects.toMatchObject({status:503});}finally{await g.cleanup();}});
 
 test("saved nested dependency transports with parentAccepted false without recomposition",async()=>{const f=await fixture();try{const application={...f.options.application,parentAccepted:false,input:{...f.options.application.input,dependsOn:"parent-task"}};expect((await resumeSavedRebaseGit({...f.options,application})).status).toBe("pushed");expect(await f.git(`git -C ${q(f.fork)} rev-parse refs/heads/work`)).toBe(f.saved);expect(application.input.dependsOn).toBe("parent-task");expect(f.commands.filter(c=>c.includes(" push "))).toHaveLength(1);expect(f.commands.every(c=>!c.includes(" rebase ")&&!c.includes(" merge "))).toBe(true);}finally{await f.cleanup();}});
+
+test("saved first-root result transports without inventing a base pin", async () => {
+ const f=await fixture();try {
+  const root=f.options.application.input.base;
+  if(root===null)throw new Error("Fixture requires its actual root commit");
+  expect(await f.git(`git -C ${q(f.work)} rev-list --parents -n 1 ${root}`)).toBe(root);
+  await f.git(`git -C ${q(f.work)} push -q --force ${q(f.fork)} ${root}:refs/heads/work`);
+  const input=f.options.application.input;
+  const application:RebaseApplication={...f.options.application,input:{...input,commit:root,base:null,protectedRef:retainedGitInputRef(incarnation,input.taskId,root),protectedBaseRef:null,acceptedTarget:{kind:"unborn",projectId:input.projectId,incarnation,canonicalRepoName:input.canonicalRepoName,branch:"main",ref:"refs/heads/main",acceptedCommit:null,acceptedVersion:0,requirements:[],policyVersion:1,policy:{test:"bun test"}}}};
+  expect((await resumeSavedRebaseGit({...f.options,application})).status).toBe("pushed");
+  expect(await f.git(`git -C ${q(f.fork)} rev-parse refs/heads/work`)).toBe(f.saved);
+  expect(f.commands.some(command=>command.includes("/null")||command.includes("0000000000000000000000000000000000000000"))).toBe(false);
+ }finally{await f.cleanup();}
+});

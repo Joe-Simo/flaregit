@@ -1,3 +1,4 @@
+import {createEmptyRepository} from "./empty-repository";
 import {createReadmeRepository} from "./readme-repository";
 import {repositoryCreationRequestSchema} from "./repository-creation-request";
 import {conversationMigrationFailure,conversationCaptureFailure,ConversationMigrationAuthorityError,ConversationMigrationCapacityError} from "./conversation-migration-failure.js";
@@ -736,6 +737,17 @@ export default {
         }
       }
 
+      const initializationStatusRoute=/^\/repository-creations(?:\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}))?$/.exec(path);
+      if(initializationStatusRoute){
+        if(method!=="GET")return text("Repository creation inspection is read-only",405);
+        if(auth.viaToken&&(auth.tokenScope!=="full"||auth.tokenRepo))return text("Repository creation history requires account-wide access",403);
+        const requestId=initializationStatusRoute[1],keys=[...url.searchParams.keys()];if(keys.some(key=>!['limit','cursor'].includes(key))||keys.length!==new Set(keys).size||requestId&&keys.length)return text("Invalid repository creation query",400);
+        const rawLimit=url.searchParams.get("limit"),cursor=url.searchParams.get("cursor");if(rawLimit!==null&&(!/^[1-9][0-9]?$/.test(rawLimit)||Number(rawLimit)>20)||cursor!==null&&(!/^[1-9][0-9]{0,15}$/.test(cursor)||!Number.isSafeInteger(Number(cursor))))return text("Invalid repository creation page",400);
+        const currentCreator=async()=>{const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||(current.viaToken&&(current.tokenScope!=="full"||current.tokenRepo)))return text("Repository creator access changed",403);return{viaToken:current.viaToken===true,credentialHash:current.viaToken?await gitParentTokenHash(request):undefined,sessionExpiresAt:current.viaToken?undefined:current.expiresAt};};
+        const credential=await currentCreator();if(credential instanceof Response)return credential;const options={...(rawLimit!==null?{limit:Number(rawLimit)}:{}),...(cursor!==null?{cursor}:{})};
+        try{if(requestId)await account.repositoryInitializationStatusByRequest(requestId,userId,credential);else await account.repositoryInitializationStatuses(userId,credential,options);const fresh=await currentCreator();if(fresh instanceof Response)return fresh;const report=requestId?await account.repositoryInitializationStatusByRequest(requestId,userId,fresh):await account.repositoryInitializationStatuses(userId,fresh,options);if(!fresh.viaToken&&(!fresh.sessionExpiresAt||fresh.sessionExpiresAt<=Date.now()))return text("Repository creator session expired",401);if(report===null)return text("Saved repository creation unavailable",404);return repositoryReadJson(report);}catch{return repositoryReadJson({error:"Repository creation status is unavailable. Original requests and cleanup holds remain preserved."},409);}
+      }
+
       if (path === "/imports" && method === "GET") return json({ imports: (await account.listImportJobs()).filter((job) => job.ownerId === userId) });
       const resumeImport = /^\/imports\/([a-z0-9]{12,16})\/resume$/.exec(path);
       if (resumeImport && method === "POST") {
@@ -748,7 +760,7 @@ export default {
       if (path === "/projects" && method === "POST") {
         const b = await body<{ kind?: string; name?: string; url?: string; branch?: string; install?: string; build?: string; test?: string;requestId?:string;initialization?:string;defaultBranch?:string;description?:string }>();
         if(b.kind==="repository"){
-          const parsed=repositoryCreationRequestSchema.safeParse(b);if(!parsed.success)return text("Explicit README initialization, exact branch, name and stable request ID are required",400);
+          const parsed=repositoryCreationRequestSchema.safeParse(b);if(!parsed.success)return text("Explicit initialization, exact branch, name and stable request ID are required",400);
           if(auth.viaToken&&(auth.tokenScope!=="full"||auth.tokenRepo))return text("Repository creation requires account-wide owner access",403);
           let credential={viaToken:auth.viaToken===true,credentialHash:auth.viaToken?await gitParentTokenHash(request):undefined,sessionExpiresAt:auth.viaToken?undefined:auth.expiresAt};
           let saved:Awaited<ReturnType<typeof account.prepareRepositoryInitialization>>|undefined;
@@ -758,6 +770,22 @@ export default {
             if(saved.phase!=="prepared"&&saved.phase!=="ready")return repositoryReadJson(pending(),202);
             if(saved.phase==="prepared"){
               const scope=saved.scope;
+              if(scope.initialization === "empty") {
+                let readToken:string|undefined;
+                await createEmptyRepository(env,{projectId:scope.projectId,canonicalName:scope.canonicalRepoName,name:scope.name,description:scope.description,defaultBranch:scope.defaultBranch,userId,operationId:scope.allocationId,eventId:scope.eventId},{
+                  authorize:currentActor,
+                  beforeCreate:async()=>{await currentActor();return account.beginRepositoryInitializationCreate(scope.eventId,userId,credential);},
+                  created:async(metadata,token)=>{await account.recordRepositoryCreated(scope.eventId,metadata,token);},
+                  credentialRevoked:async()=>{if(!await account.confirmRepositoryInitializationCredentialRevoked(scope.eventId))throw Error("Initial repository credential cleanup is unconfirmed");},
+                  nativeIntent:async(name)=>{await currentActor();if(!await account.beginRepositoryInitializationNative(scope.eventId,name,userId,credential))throw Error("Original native initialization remains unconfirmed");},
+                  beforeReadCredential:async()=>{await currentActor();if(!await account.beginRepositoryInitializationReadCredential(scope.eventId,userId,credential))throw Error("Empty inspection credential issuance is unconfirmed");},
+                  readCredentialRecorded:async(token,expiry,access)=>{readToken=token;await account.recordRepositoryInitializationReadCredential(scope.eventId,token,Date.parse(expiry),access);},
+                  readCredentialRevoked:async()=>{if(!readToken||!await account.confirmRepositoryInitializationReadCredentialRevoked(scope.eventId,readToken))throw Error("Empty inspection credential cleanup is unconfirmed");},
+                  empty:async(proof)=>{await account.confirmRepositoryInitializationEmpty(scope.eventId,proof);},
+                  nativeStopped:async()=>{if(!await account.confirmRepositoryInitializationStopped(scope.eventId))throw Error("Repository native shutdown is unconfirmed");},
+                });
+              } else {
+              if(scope.authorName === null || scope.authorEmail === null || scope.commitTimestamp === null) throw Error("README author provenance is unavailable");
               await createReadmeRepository(env,{projectId:scope.projectId,canonicalName:scope.canonicalRepoName,name:scope.name,description:scope.description,authorName:scope.authorName,authorEmail:scope.authorEmail,defaultBranch:scope.defaultBranch,userId,operationId:scope.allocationId,eventId:scope.eventId,commitTimestamp:scope.commitTimestamp},{
                 authorize:currentActor,
                 beforeCreate:async()=>{await currentActor();if(!await account.beginRepositoryInitializationCreate(scope.eventId,userId,credential))throw Error("Original provider creation was already dispatched");},
@@ -769,10 +797,11 @@ export default {
                 credentialRevoked:async()=>{if(!await account.confirmRepositoryInitializationCredentialRevoked(scope.eventId))throw Error("Initial repository credential cleanup is unconfirmed");},
                 nativeStopped:async()=>{if(!await account.confirmRepositoryInitializationStopped(scope.eventId))throw Error("Repository native shutdown is unconfirmed");},
               });
+              }
               await currentActor();saved=await account.completeRepositoryInitialization(scope.eventId,userId,credential);
             }
             await currentActor();await projectOf(env,saved.scope.projectId).initializeRepositoryReceipt(saved,credential);await currentActor();await account.registerInitializedRepository(saved.scope.eventId,userId,credential);await currentActor();
-            return repositoryReadJson({id:saved.scope.projectId,kind:"repository",status:"ready",head:saved.commit!.head,defaultBranch:saved.scope.defaultBranch},201);
+            return repositoryReadJson({id:saved.scope.projectId,kind:"repository",status:"ready",head:saved.commit?.head??null,defaultBranch:saved.scope.defaultBranch},201);
           }catch{if(saved){try{saved=await account.repositoryInitializationRecord(saved.scope.eventId,userId,credential)??saved;return repositoryReadJson({...pending(),error:"Repository creation remains unconfirmed. Its original request and recorded Git state are preserved; retry the same request ID."},409);}catch{/* Revoked access never returns initialization context. */}}return text("Repository creation was not confirmed; no demo or new retry identity was substituted",409);}
         }
         const existing = await account.listProjects();
@@ -1033,7 +1062,7 @@ export default {
         }
 
         if (sub === "/state" && method === "GET") {
-          if (settings.fixture === "ticket-booking") {
+          if (settings.fixture === "ticket-booking" && state.acceptedState.currentCommit !== null) {
             ctx.waitUntil(ensureBuild(env, projectId, state.acceptedState.currentCommit, state.canonicalRepoName, accountKey).catch((e) => console.error("preview build failed", String(e))));
           }
           return json({ ...state, role });
@@ -1298,7 +1327,7 @@ export default {
             } else if (browseRequest.kind === "blob") result = await readBlobByHash(repo, browseRequest.hash);
             else {
               let headCommit = inputTaskId ? readContext.candidateInputCommit : candidate?.candidateCommit ?? task?.currentCommit ?? browseRequest.commit;
-              const baseCommit = inputTaskId ? readContext.candidateInputBase : candidate?.expectedAcceptedBase ?? task?.baseCommit ?? browseRequest.base;
+              const baseCommit = inputTaskId ? readContext.candidateInputBase : candidate ? candidate.expectedAcceptedBase : task ? task.baseCommit : browseRequest.base;
               if (browseRequest.commit && browseRequest.commit.length < 40) {
                 const recent = await listCommits(repo, undefined, 100, 0);
                 const matches = recent.filter((commit) => commit.hash.startsWith(browseRequest.commit!));
@@ -1307,9 +1336,10 @@ export default {
               }
               const head = await resolveCommit(repo, headCommit);
               if (!head) return inputTaskId ? repositoryReadJson({ error: "The recorded input commit is unavailable in its saved repository. No newer checkpoint was substituted." }, 503) : repositoryReadText("Commit not found", 404);
-              const base = baseCommit ? await resolveCommit(repo, baseCommit) : head.parents[0] ? await resolveCommit(repo, head.parents[0]) : null;
-              if ((baseCommit || head.parents[0]) && !base) return repositoryReadText("The comparison base could not be read; no complete diff is available. Retry.", 503);
-              result = { repo: taskId ? `task:${taskId}` : "canonical", base: base?.hash ?? null, head, files: await diffTrees(repo, base?.treeHash, head.treeHash), ...(inputTaskId ? { input: { taskId: inputTaskId, commit: head.hash, baseSource: baseCommit ? "recorded-contribution-base" : "commit-parent" } } : {}) };
+              const comparisonCommit = baseCommit === null ? null : baseCommit ?? head.parents[0];
+              const base = comparisonCommit ? await resolveCommit(repo, comparisonCommit) : null;
+              if (comparisonCommit && !base) return repositoryReadText("The comparison base could not be read; no complete diff is available. Retry.", 503);
+              result = { repo: taskId ? `task:${taskId}` : "canonical", base: base?.hash ?? null, head, files: await diffTrees(repo, base?.treeHash, head.treeHash), ...(inputTaskId ? { input: { taskId: inputTaskId, commit: head.hash, baseSource: baseCommit !== undefined ? "recorded-contribution-base" : "commit-parent" } } : {}) };
             }
             await authorizeRead();
             return Response.json(result, { headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
@@ -1332,7 +1362,7 @@ export default {
         if (sub === "/clone" && method === "POST") {
           const remote = gitRemote(url.origin,projectId,null);
           const {token}=await project.mintGitCapability(userId,null,false,await gitParentTokenHash(request));
-          return json({ remote, token, expiresInSeconds: 3600, command: gitCloneCommand(remote,undefined,{branch:/^[a-f0-9]{40}$/.test(state.acceptedState.currentCommit)&&!/^0{40}$/.test(state.acceptedState.currentCommit)?state.defaultBranch??"main":undefined}) });
+          return json({ remote, token, expiresInSeconds: 3600, command: gitCloneCommand(remote,undefined,{branch:state.acceptedState.currentCommit !== null && /^[a-f0-9]{40}$/.test(state.acceptedState.currentCommit)&&!/^0{40}$/.test(state.acceptedState.currentCommit)?state.defaultBranch??"main":undefined}) });
         }
 
         const creationStatusRoute=/^\/task-creations(?:\/([a-z0-9-]+))?$/.exec(sub);
@@ -1383,6 +1413,7 @@ export default {
           try{await assertCreation();
           const repoName=intent.workspaceRepoName;
           if(intent.phase==="prepared"){
+            if(selection.baseCommit===null){await project.inspectTaskCreationUnborn(intent.eventId,"source",userId,creationCredential);await assertCreation();}
             using source=await env.ARTIFACTS.get(selection.sourceRepoName);await assertCreation();
             try{await allocateArtifact(env,{name:repoName,projectId,userId,kind:"workspace",operationId:intent.allocationId},async()=>{
               await assertCreation();intent=await project.beginTaskCreationFork(intent.eventId,userId,creationCredential);
@@ -1401,8 +1432,11 @@ export default {
               return {known:true};
             });}catch{await project.markTaskCreationForkUnknown(intent.eventId);throw Error("Fork outcome is preserved but unconfirmed");}
           }else if(!await project.revokeTaskCreationForkToken(intent.eventId))throw Error("Saved fork acknowledgement or credential cleanup remains unconfirmed; no replacement fork was started");
-          await assertCreation();using destination=await env.ARTIFACTS.get(repoName);const fork=await destination.info();await assertCreation();const copied=await destination.readCommit(selection.baseCommit);await assertCreation();if(!copied||copied.hash!==selection.baseCommit)throw Error("Original accepted source commit is unavailable in the saved fork");
-          intent=await project.confirmTaskCreationFork(intent.eventId,{allocationId:intent.allocationId,workspaceRepoName:repoName,sourceRepoName:selection.sourceRepoName,sourceCommit:selection.baseCommit,providerRepoId:fork.id,nativeState:"not_allocated",credentialsComplete:true},userId,creationCredential);
+          await assertCreation();using destination=await env.ARTIFACTS.get(repoName);const fork=await destination.info();await assertCreation();
+          let emptySourceProof:{ref:string;refs:[]}|undefined;
+          if(selection.baseCommit===null){const observed=await project.inspectTaskCreationUnborn(intent.eventId,"workspace",userId,creationCredential);await assertCreation();if(observed.providerRepoId!==fork.id||observed.repositoryName!==repoName||observed.sourceRepoName!==selection.sourceRepoName||observed.defaultRef!==selection.acceptedTarget?.ref||observed.expectedHead!==null||observed.visibleRefs.length!==0)throw Error("Saved empty workspace proof differs from the original target");emptySourceProof={ref:observed.defaultRef,refs:[]};}
+          else{const copied=await destination.readCommit(selection.baseCommit);await assertCreation();if(!copied||copied.hash!==selection.baseCommit)throw Error("Original accepted source commit is unavailable in the saved fork");}
+          intent=await project.confirmTaskCreationFork(intent.eventId,{allocationId:intent.allocationId,workspaceRepoName:repoName,sourceRepoName:selection.sourceRepoName,sourceCommit:selection.baseCommit,providerRepoId:fork.id,nativeState:"not_allocated",credentialsComplete:true,...(emptySourceProof?{emptySourceProof}:{})},userId,creationCredential);
           await project.settleArtifactAllocation(repoName,intent.allocationId);await account.settleArtifactAllocation(repoName,intent.allocationId);
           const remote=gitRemote(url.origin,projectId,b.taskId);
           const creationSettings=selection.acceptedTarget?settingsFor(selection.acceptedTarget.policy):settings;
@@ -1498,9 +1532,9 @@ export default {
               using repo = await openRepositoryRead(env, { repoName: task.workspace.repoName, authorize, reserveGroup: (operationId) => globalOf(env).reserveRepositoryReadOperation(operationId, readContext.accountKey), limits: { maxProviderCalls: 10_016, deadlineMs: 120_000 } });
               const head = await project.observeTaskReadyGitHead(task.id,userId,readContext,credentialHash,auth.expiresAt);
               if (!head) return repositoryReadText(`Nothing pushed to ${task.workspace.branch} yet`, 409);
-              const [base, tip] = await Promise.all([resolveCommit(repo, task.baseCommit), resolveCommit(repo, head)]);
-              if (!base || !tip) return repositoryReadText("Could not read the saved change and base; retry without marking ready", 503);
-              const filesChanged = (await diffTrees(repo, base.treeHash, tip.treeHash)).map((file) => file.path);
+              const [base, tip] = await Promise.all([task.baseCommit===null?Promise.resolve(null):resolveCommit(repo, task.baseCommit), resolveCommit(repo, head)]);
+              if ((task.baseCommit!==null&&!base) || !tip) return repositoryReadText("Could not read the saved change and base; retry without marking ready", 503);
+              const filesChanged = (await diffTrees(repo, base?.treeHash, tip.treeHash)).map((file) => file.path);
               await authorize();
               await project.observeTaskReadyGitHead(task.id,userId,readContext,credentialHash,auth.expiresAt,head);
               await authorize();
@@ -1749,10 +1783,10 @@ export default {
           if (!isOwner) return text("Only the repository owner with a signed-in session or full-access token can review", 403);
           const b = await body<{ approved?: boolean; note?: string; expectedCommit?: string; expectedTarget?: unknown }>();
           if (Object.keys(b).some(key => !["approved", "note", "expectedCommit", "expectedTarget"].includes(key)) || (b.note !== undefined && (typeof b.note !== "string" || b.note.length > 5000))) return text("Invalid review fields", 400);
-          let expectedTarget: { ref: string; acceptedCommit: string; acceptedVersion: number } | undefined;
+          let expectedTarget: { ref: string; acceptedCommit: string|null; acceptedVersion: number } | undefined;
           if (b.expectedTarget !== undefined) {
             const target = b.expectedTarget;
-            if (!target || typeof target !== "object" || Array.isArray(target) || Object.keys(target).some(key => !["ref", "acceptedCommit", "acceptedVersion"].includes(key)) || !("ref" in target) || typeof target.ref !== "string" || !target.ref.startsWith("refs/heads/") || !isSafeRef(target.ref) || !("acceptedCommit" in target) || typeof target.acceptedCommit !== "string" || !/^[a-f0-9]{40}$/.test(target.acceptedCommit) || /^0{40}$/.test(target.acceptedCommit) || !("acceptedVersion" in target) || typeof target.acceptedVersion !== "number" || !Number.isSafeInteger(target.acceptedVersion) || target.acceptedVersion < 0) return text("The exact reviewed target branch, base and version are required", 400);
+            if (!target || typeof target !== "object" || Array.isArray(target) || Object.keys(target).some(key => !["ref", "acceptedCommit", "acceptedVersion"].includes(key)) || !("ref" in target) || typeof target.ref !== "string" || !target.ref.startsWith("refs/heads/") || !isSafeRef(target.ref) || !("acceptedCommit" in target) || (target.acceptedCommit !== null && (typeof target.acceptedCommit !== "string" || !/^[a-f0-9]{40}$/.test(target.acceptedCommit) || /^0{40}$/.test(target.acceptedCommit))) || !("acceptedVersion" in target) || typeof target.acceptedVersion !== "number" || !Number.isSafeInteger(target.acceptedVersion) || target.acceptedVersion < 0) return text("The exact reviewed target branch, base and version are required", 400);
             expectedTarget = { ref: target.ref, acceptedCommit: target.acceptedCommit, acceptedVersion: target.acceptedVersion };
           }
           if (typeof b.approved !== "boolean") return text("approved (true or false) is required", 400);
@@ -1859,6 +1893,7 @@ export default {
         // ----- previews: a member mints a short-lived link to the build of one commit of this repository -----
         if (sub === "/preview" && method === "GET") {
           const commit = url.searchParams.get("commit") ?? state.acceptedState.currentCommit;
+          if (commit === null) return json({ready:false,status:"unavailable",canRetry:false,reason:"No accepted commit is available for a preview"});
           if (!/^[0-9a-f]{40}$/.test(commit)) return text("Invalid commit", 400);
           const registration = await lookupRepositoryPreviewOrigin(env, projectId, url.origin);
           if (registration.status === "unavailable") return Response.json({ ready: false, status: "pending", canRetry: false, reason: "Preview service is temporarily unavailable. Status checks will continue shortly." }, { headers: { "Cache-Control": "no-store" } });
@@ -2118,6 +2153,7 @@ export default {
             throw error;
           }
           const commit = state.acceptedState.currentCommit;
+          if(commit===null){await cleanup();return text("No accepted commit is available to mirror",409);}
           ctx.waitUntil(
             pushMirror({ exec }, { canonicalRemote: remote, canonicalToken, target: cfg.target, githubToken: cfg.token, branch, commit })
               .then((r) => project.recordMirrorRun(commit, r.status, r.detail))

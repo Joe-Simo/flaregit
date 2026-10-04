@@ -1,5 +1,5 @@
 import {confirmCompositionBranch} from "./composition-branch";
-import { retainGitInput, retainedGitInputRef } from "./retained-git-input.js";
+import { retainGitInput, retainUnbornGitInput, retainedGitInputRef } from "./retained-git-input.js";
 import type { RetainedInput } from "./retained-inputs.js";
 import { validateRecoveryRemote } from "./private-recovery-bundle.js";
 import { admitGitOperation } from "./core-git-budget.js";
@@ -13,7 +13,7 @@ import { pushMirror } from "./mirror.js";
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { WorkersAIClient, DEFAULT_CODE_MODEL } from "../ai/workers-ai.js";
 import { buildRepairPrompt, parseRepairResponse, MAX_REPAIR_ROUNDS } from "../core/pipeline/repair.js";
-import {acceptedTargetSchema,assertCompatibleAcceptedTargetBatch} from "../core/accepted-target.js";
+import {acceptedTargetSchema,assertCompatibleAcceptedTargetBatch,effectiveTaskAcceptedTarget} from "../core/accepted-target.js";
 import type { CandidateGeneration, VerificationEvidence, FlareGitProjectState, PublicationJournalEntry } from "../core/types.js";
 import type { Env } from "./env.js";
 import type { ClaimResult, Ledger, PrepareResult } from "./durable-object.js";
@@ -29,13 +29,13 @@ export function integrationTargetBranch(candidate:Pick<CandidateGeneration,"acce
   if(!candidate.acceptedTarget)return state.defaultBranch;
   const target=acceptedTargetSchema.parse(candidate.acceptedTarget);
   if(target.projectId!==state.projectId||target.canonicalRepoName!==state.canonicalRepoName)throw Error("Frozen integration target repository scope changed");
-  assertCompatibleAcceptedTargetBatch([target,{...target,acceptedCommit:candidate.expectedAcceptedBase,policyVersion:candidate.frozenPolicyVersion,policy:candidate.frozenVerificationPolicy}]);
+  assertCompatibleAcceptedTargetBatch([target,acceptedTargetSchema.parse({...target,acceptedCommit:candidate.expectedAcceptedBase,policyVersion:candidate.frozenPolicyVersion,policy:candidate.frozenVerificationPolicy})]);
   return target.branch;
 }
 /** Bind protected evidence to the same immutable base and policy before ledger recording. */
 export function integrationVerificationEvidence(candidate:CandidateGeneration,evidence:VerificationEvidence):VerificationEvidence{
   if(!candidate.acceptedTarget)return evidence;
-  assertCompatibleAcceptedTargetBatch([candidate.acceptedTarget,{...candidate.acceptedTarget,acceptedCommit:evidence.expectedAcceptedBase,policyVersion:evidence.requirementsVersion,policy:evidence.policy}]);
+  assertCompatibleAcceptedTargetBatch([candidate.acceptedTarget,acceptedTargetSchema.parse({...candidate.acceptedTarget,acceptedCommit:evidence.expectedAcceptedBase,policyVersion:evidence.requirementsVersion,policy:evidence.policy})]);
   return{...evidence,acceptedTarget:structuredClone(candidate.acceptedTarget)};
 }
 /** A bound target requires an exact admitted journal, never the live primary alias. */
@@ -280,6 +280,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
               const targetRef = accepted.has(item.parentId) ? `refs/heads/${branch}` : retainedGitInputRef(input.incarnation,item.parentId,item.target);
               result = await run(`git -C ${WORK} fetch --quiet ${q(canonical.remote)} ${q(`${targetRef}:refs/flaregit/rebase-parent`)}`,gitAuthEnv(canonical.token));
               if(!result.success || (await run("git -C /workspace/integration rev-parse refs/flaregit/rebase-parent")).stdout.trim()!==item.target)throw new Error("The recorded rebase target is unavailable; no newer parent was substituted");
+              if (input.base === null) throw new Error("Unborn contributor history requires an explicit root rebase protocol");
               result = await run(`git -C ${WORK} checkout --quiet --detach ${q(input.commit)} && git -C ${WORK} rebase --onto ${q(item.target)} ${q(input.base)}`);
               if (!result.success) {
                 await run(`git -C ${WORK} rebase --abort`);
@@ -390,6 +391,12 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
   private async canonicalRemote(stub: Stub, input: RetainedInput) { return this.retainedRemote(stub, input, "canonical", "write"); }
   private async pinInput(input: RetainedInput, directory: string, remote: {remote:string;token:string}, stub: Stub, exec: (command:string,env?:Record<string,string>)=>Promise<{success:boolean;stdout:string}>) {
     const beforeCommand = async (phase: "before" | "after") => { if (phase === "before") await this.fundedRetainedCommand(input, stub); else await this.retainedAuthority(input, stub); };
+    if (input.base === null) {
+      if (input.acceptedTarget?.kind !== "unborn") throw new Error("Unborn preservation requires the frozen target");
+      const original = await retainUnbornGitInput({ exec, directory, remote: remote.remote, token: remote.token, incarnation: input.incarnation, taskId: input.taskId, commit: input.commit, beforeCommand, acceptedTarget: input.acceptedTarget });
+      if (original.ref !== input.protectedRef || input.protectedBaseRef !== null) throw new Error("Protected unborn contribution scope differs");
+      return stub.recordRetainedInput(input, { commit: original.commit, base: null, rootCommit: original.rootCommit, rootAncestryVerified: true });
+    }
     const original = await retainGitInput({ exec, directory, remote: remote.remote, token: remote.token, incarnation: input.incarnation, taskId: input.taskId, commit: input.commit, beforeCommand });
     const base = await retainGitInput({ exec, directory, remote: remote.remote, token: remote.token, incarnation: input.incarnation, taskId: input.taskId, commit: input.base, beforeCommand });
     if (original.ref !== input.protectedRef || base.ref !== input.protectedBaseRef) throw new Error("Protected contribution refs do not match the stored scope");
@@ -404,10 +411,11 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
   ): Promise<{ ok: true; commit: string; evidenceId: string; branch: string } | { ok: false; error: string }> {
     const state = await stub.getState(),tasks=candidate.participatingTaskIds.map(id=>state.tasks[id]!);
     let selectedBranch:string|undefined;
-    try{selectedBranch=integrationTargetBranch(candidate,state);if(candidate.acceptedTarget){assertCompatibleAcceptedTargetBatch([candidate.acceptedTarget,...tasks.map(task=>{if(!task?.acceptedTarget)throw Error("Frozen task target unavailable");return task.acceptedTarget;})]);}else if(tasks.some(task=>task?.acceptedTarget))throw Error("Frozen candidate target binding unavailable");}catch{return{ok:false,error:"Frozen integration target scope, base, requirements or policy could not be confirmed; saved contributions remain preserved"};}
+    try{selectedBranch=integrationTargetBranch(candidate,state);if(candidate.acceptedTarget){assertCompatibleAcceptedTargetBatch([candidate.acceptedTarget,...tasks.map(task=>{if(!task)throw Error("Frozen task target unavailable");const target=effectiveTaskAcceptedTarget(task);if(!target)throw Error("Frozen task target unavailable");return target;})]);}else if(tasks.some(task=>task&&effectiveTaskAcceptedTarget(task)))throw Error("Frozen candidate target binding unavailable");}catch{return{ok:false,error:"Frozen integration target scope, base, requirements or policy could not be confirmed; saved contributions remain preserved"};}
     const settings = settingsFor(candidate.frozenVerificationPolicy);
     const externalOnly = candidate.frozenExternalChecksPolicy?.mode === "external";
     const nativeOnly=externalOnly||isGitIntegrityPolicy(candidate.frozenVerificationPolicy);
+    if(candidate.expectedAcceptedBase===null && (!nativeOnly||candidate.acceptedTarget?.kind!=="unborn"||settings.landing!=="merge"))return{ok:false,error:"First publication requires an explicit unborn target and native merge verification preserving contributor roots"};
     if (externalOnly && ((settings.fixture !== "custom"&&settings.fixture!=="git-integrity") || !candidate.frozenExternalChecksPolicy?.checks.some((check) => check.required) || !candidate.frozenContributorProofs?.length)) return { ok: false, error: "External CI requires a custom repository, frozen contributor proofs and at least one required check" };
     const spendRunId = `repair-${candidate.id}`;
     let spending: Awaited<ReturnType<typeof reserveManagedAgent>> | null = null;
@@ -433,8 +441,8 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     await this.fundedRetainedCommand(inputs[0]!, stub);
     let r = await run(`rm -rf ${WORK} && git clone --quiet ${q(activeCanonical.remote)} ${WORK}`, gitAuthEnv(activeCanonical.token));
     if (!r.success) return { ok: false, error: "Could not clone canonical repository" };
-    const branch=await confirmCompositionBranch({branch:selectedBranch,expectedBase:candidate.expectedAcceptedBase,remote:activeCanonical.remote,token:activeCanonical.token,directory:WORK,exec:run,beforeCommand:async phase=>{if(phase==="before")await this.fundedRetainedCommand(inputs[0]!,stub);else await this.retainedAuthority(inputs[0]!,stub);}});
-    await run(`git -C ${WORK} config user.name FlareGit && git -C ${WORK} config user.email integrator@flaregit.com && git -C ${WORK} checkout --quiet --detach ${q(candidate.expectedAcceptedBase)}`);
+    const branch=await confirmCompositionBranch({branch:selectedBranch,expectedBase:candidate.expectedAcceptedBase,acceptedTarget:candidate.acceptedTarget,remote:activeCanonical.remote,token:activeCanonical.token,directory:WORK,exec:run,beforeCommand:async phase=>{if(phase==="before")await this.fundedRetainedCommand(inputs[0]!,stub);else await this.retainedAuthority(inputs[0]!,stub);}});
+    await run(`git -C ${WORK} config user.name FlareGit && git -C ${WORK} config user.email integrator@flaregit.com${candidate.expectedAcceptedBase === null ? "" : ` && git -C ${WORK} checkout --quiet --detach ${q(candidate.expectedAcceptedBase)}`}`);
 
     for (const input of inputs) {
       const t = tasks.find(task => task.id === input.taskId)!;
@@ -447,7 +455,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
         if (!r.success || head !== input.commit) return { ok: false, error: `Task ${t.id} head does not match the frozen checkpoint` };
         // Preserve both the original checkpoint and its recorded base before any squash or repair.
         await this.pinInput(input, WORK, activeCanonical, stub, run);
-        const changed = await run(`git -C ${WORK} diff --name-only -z ${q(input.base)} ${q(input.commit)}`);
+        const changed = await run(input.base === null ? `git -C ${WORK} ls-tree -r --name-only -z ${q(input.commit)}` : `git -C ${WORK} diff --name-only -z ${q(input.base)} ${q(input.commit)}`);
         if (!changed.success) return { ok: false, error: `Could not inspect contributor changes for ${t.id}` };
         const touched = changed.stdout.split("\0").filter(Boolean);
         const bad = touched.filter((f) => isProtectedPath(f, settings.protectedPaths) || !inAgentScope(t, f) || !inAgentScope({ allowedScope: settings.allowedScope }, f));
@@ -500,8 +508,13 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       return committed.success;
     };
 
-    for (const t of tasks) {
-      const m = await run(`git -C ${WORK} merge --no-ff -m ${q(`FlareGit candidate ${candidate.id}: ${t.id}`)} refs/flaregit/tasks/${t.id}`);
+    for (const [index, t] of tasks.entries()) {
+      if (candidate.expectedAcceptedBase === null && index === 0) {
+        const first = await run(`git -C ${WORK} checkout --quiet --detach ${q(candidate.participatingCommits[t.id]!)}`);
+        if (!first.success) return { ok: false, error: "First contributor checkpoint is unavailable" };
+        continue;
+      }
+      const m = await run(`git -C ${WORK} merge ${candidate.expectedAcceptedBase === null ? "--allow-unrelated-histories " : ""}--no-ff -m ${q(`FlareGit candidate ${candidate.id}: ${t.id}`)} refs/flaregit/tasks/${t.id}`);
       if (m.success) continue;
       const files = (await run(`git -C ${WORK} diff --name-only --diff-filter=U`)).stdout.split("\n").filter(Boolean);
       if (nativeOnly) return { ok: false, error: "Native Git conflict requires explicit contributor resolution; saved branches are preserved" };
@@ -512,6 +525,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     // verification, so the commit that is verified, reviewed and published is always the squashed one.
     const squash = async () => {
       if (settings.landing !== "squash") return true;
+      if (candidate.expectedAcceptedBase === null) return false;
       const tree = (await run(`git -C ${WORK} rev-parse ${q("HEAD^{tree}")}`)).stdout.trim();
       const coauthors = [...new Map(tasks.map((t) => [t.contributor.name, `Co-authored-by: ${t.contributor.name} <${t.contributor.id}@users.flaregit.com>`])).values()];
       const message = [`Land ${tasks.map((t) => t.id).join(" + ")}`, "", ...tasks.map((t) => `- ${t.goal}`), "", ...coauthors].join("\n");
@@ -524,7 +538,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       if (!(await squash())) return { ok: false, error: "Could not create the squashed commit" };
       const commit = (await run(`git -C ${WORK} rev-parse HEAD`)).stdout.trim();
       const tree = nativeOnly ? (await run(`git -C ${WORK} rev-parse ${q(`${commit}^{tree}`)}`)).stdout.trim() : undefined;
-      const nativeInput = { repoDir: WORK, candidateCommit: commit, candidateTree: tree, expectedBase: candidate.expectedAcceptedBase, requirementsVersion: candidate.frozenPolicyVersion, policy: candidate.frozenVerificationPolicy, protectedPaths: settings.protectedPaths, allowedScope: settings.allowedScope, contributors: candidate.frozenContributorProofs, landing: settings.landing };
+      const nativeInput = { repoDir: WORK, candidateCommit: commit, candidateTree: tree, expectedBase: candidate.expectedAcceptedBase, acceptedTarget: candidate.acceptedTarget, requirementsVersion: candidate.frozenPolicyVersion, policy: candidate.frozenVerificationPolicy, protectedPaths: settings.protectedPaths, allowedScope: settings.allowedScope, contributors: candidate.frozenContributorProofs, landing: settings.landing };
       const v = await run(nativeOnly
         ? `cd /opt/flaregit && bun src/core/verification/cli.ts --native-integrity ${q(JSON.stringify(nativeInput))}`
         : `cd /opt/flaregit && bun src/core/verification/cli.ts ${settings.fixture} ${WORK} ${commit} ${candidate.expectedAcceptedBase} ${candidate.frozenPolicyVersion} ${q(JSON.stringify(candidate.frozenVerificationPolicy))}`
@@ -633,12 +647,12 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     if (head !== commit) return { ok: false, error: "Stored candidate differs from the reviewed commit; nothing was published" };
     // A response can be lost after Git accepted the push. Prove ancestry from the real
     // canonical branch before retrying, including when another contributor advanced it.
-    const alreadyLanded = () => publicationInHistory((command, env) => sb.exec(command, env), dir, canonical.remote, canonical.token, publicationBranch, commit);
+    const alreadyLanded = () => publicationInHistory((command, env) => sb.exec(command, env), dir, canonical.remote, canonical.token, publicationBranch, commit, candidate.expectedAcceptedBase === null);
     if (await alreadyLanded()) return { ok: true };
     await this.fundedRetainedCommand(input,stub);
     if (!await stub.authorizeCandidatePublication(candidate.id, commit)) return { ok: false, error: "The approving owner no longer authorizes this exact publication; nothing was pushed" };
     const res = await sb.exec(
-      `git -C ${dir} push --quiet --force-with-lease=${q(`${targetRef}:${candidate.expectedAcceptedBase}`)} ${q(canonical.remote)} ${q(`${commit}:${targetRef}`)}`,
+      `git -C ${dir} push --quiet --force-with-lease=${q(`${targetRef}:${candidate.expectedAcceptedBase ?? ""}`)} ${q(canonical.remote)} ${q(`${commit}:${targetRef}`)}`,
       gitAuthEnv(canonical.token),
       ()=>authorizeIntegrationPublicationDispatch(candidate,journal,commit,stub)
     );

@@ -1,3 +1,4 @@
+import {acceptedCommitLabel} from "../accepted-commit-display";
 import {PendingTaskCreations} from "../components/PendingTaskCreations";
 import {readTaskCreationRecovery,restoreTaskCreationRequest,type TaskCreationRecoveryRow,type PendingTaskCreation} from "../task-creation-recovery";
 import {ContributionTargetChoices} from "../components/ContributionTargetChoices";
@@ -214,7 +215,7 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
             <h2 id="coordination-heading" className="mt-1 text-xl font-semibold tracking-tight">One repository. Independent contributions.</h2>
             <p className="mt-2 text-sm text-muted-foreground max-w-2xl">Follow each purpose and saved checkpoint, then review how the work comes together.</p>
           </div>
-          <div className="flex items-center gap-2 text-xs text-muted-foreground"><ShieldCheck className="h-4 w-4 text-emerald-400" aria-hidden="true" /><span>Accepted <code>{state.acceptedState.currentCommit.slice(0, 8)}</code></span></div>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground"><ShieldCheck className="h-4 w-4 text-emerald-400" aria-hidden="true" /><span>{state.acceptedState.currentCommit?<>Accepted <code>{acceptedCommitLabel(state.acceptedState.currentCommit,8)}</code></>:"No accepted commit yet"}</span></div>
         </div>
         <dl className="mt-5 grid grid-cols-3 gap-3 border-t border-border pt-4">
           {[["Active changes", active.length], ["Shared files", overlaps.length], ["Older bases", stale.length]].map(([label, count]) => <div key={label}><dt className="text-xs text-muted-foreground">{label}</dt><dd className="mt-1 text-2xl font-semibold tabular-nums">{count}</dd></div>)}
@@ -309,8 +310,8 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
                     <span>{timeAgo(t.createdAt)}</span>
                   </div>
                   <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                    <span className="inline-flex items-center gap-1"><GitBranch className="h-3 w-3" aria-hidden="true" />Base <code>{t.baseCommit.slice(0, 8)}</code></span>
-                    {t.checkpoints.length > 0 ? <span>Saved <code>{t.currentCommit.slice(0, 8)}</code> · {t.checkpoints.length} checkpoint{t.checkpoints.length === 1 ? "" : "s"}</span> : <span>No pushed checkpoint yet</span>}
+                    <span className="inline-flex items-center gap-1"><GitBranch className="h-3 w-3" aria-hidden="true" />Base <code>{t.baseCommit?acceptedCommitLabel(t.baseCommit,8):"Empty accepted history"}</code></span>
+                    {t.checkpoints.length > 0&&t.currentCommit ? <span>Saved <code>{t.currentCommit?.slice(0, 8)}</code> · {t.checkpoints.length} checkpoint{t.checkpoints.length === 1 ? "" : "s"}</span> : <span>No pushed checkpoint yet</span>}
                     {stale.some((task) => task.id === t.id) && <span className="text-amber-200">Accepted history advanced · candidate must use the latest base</span>}
                   </div>
                   {latestCheckpoint && <p className="mt-1 text-xs text-muted-foreground break-words">Latest checkpoint: {latestCheckpoint.message} · {timeAgo(latestCheckpoint.timestamp)}</p>}

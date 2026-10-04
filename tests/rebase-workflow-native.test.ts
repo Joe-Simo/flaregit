@@ -23,11 +23,14 @@ test.each(['push', 'ledger'] as const)('production rebase orchestration with nat
         expect(f.lostPushObserved()).toBe(true);
     expect(f.child.baseCommit).toBe(f.landed);
     expect(f.child.currentCommit).not.toBe(f.original);
-    expect(await f.git(`git --git-dir '${f.workspace}' rev-parse refs/heads/child`)).toBe(f.child.currentCommit);
+    const checkpoint = f.child.currentCommit;
+    if (checkpoint === null) throw new Error('Native rebase fixture did not produce its committed checkpoint');
+    expect(checkpoint).toMatch(/^[a-f0-9]{40}$/);
+    expect(await f.git(`git --git-dir '${f.workspace}' rev-parse refs/heads/child`)).toBe(checkpoint);
     const pins = await f.git(`git --git-dir '${f.canonical}' for-each-ref --format='%(objectname)' refs/flaregit/inputs/`);
     expect(pins.split('\n')).toContain(f.original);
     expect(pins.split('\n')).toContain(f.parent);
-    expect(pins.split('\n')).toContain(f.child.currentCommit);
+    expect(pins.split('\n')).toContain(checkpoint);
     expect(f.commands.some(command => command.includes('synthetic-server-only'))).toBe(false);
     if (mode === 'ledger')
         expect(interrupted).toBe(true);

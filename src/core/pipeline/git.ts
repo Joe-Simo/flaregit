@@ -50,8 +50,8 @@ export function authArgs(remote: string, token?: string): string[] {
 }
 
 export const PLATFORM_IDENTITY = ["-c","user.name=FlareGit Integrator","-c","user.email=integrator@flaregit.com"];
-export function changedFiles(repoDir: string, from: string, to: string): string[] {
-  const result=git(repoDir,["diff","--name-only","-z",`${from}..${to}`]);
+export function changedFiles(repoDir: string, from: string | null, to: string): string[] {
+  const result=git(repoDir,from===null?["ls-tree","--name-only","-r","-z",to]:["diff","--name-only","-z",`${from}..${to}`]);
   if(!result.ok)throw new Error(`Could not inspect changed files: ${result.stderr.trim()}`);
   return result.stdout.split("\0").filter(Boolean);
 }

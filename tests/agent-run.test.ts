@@ -8,14 +8,14 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runAgentTask, type AgentExecutionLedger } from "../src/server/agent-run.js";
-import type {FrozenAcceptedTarget} from "../src/core/accepted-target";
+import type {CommittedAcceptedTarget} from "../src/core/accepted-target";
 import type { Task } from "../src/core/types.js";
-import type { AgentRunInput, AgentRunRecord } from "../src/server/agent-run-ledger.js";
+import { AgentRunLedger, type AgentRunInput, type AgentRunRecord } from "../src/server/agent-run-ledger.js";
 import type { Env } from "../src/server/env.js";
 
 // Native Git with a deterministic model double and in-memory durable-store double.
 // These assertions verify recovery orchestration, not hosted provider execution.
-async function fixture(options: { lostPush?: boolean; lostCheckpoint?: boolean; infoFails?: boolean; secret?: boolean; revokeBeforeModel?: "account" | "membership";badTokenScope?:boolean;revokeFails?:boolean;stopFails?:boolean;revokeDuringModel?:"account"|"membership";primaryPolicy?:Record<string,unknown>;changeTargetDuringModel?:boolean;changePolicyDuringModel?:boolean;changeGenerationDuringModel?:boolean } = {}) {
+async function fixture(options: { unborn?:boolean; lostPush?: boolean; lostCheckpoint?: boolean; infoFails?: boolean; secret?: boolean; revokeBeforeModel?: "account" | "membership";badTokenScope?:boolean;revokeFails?:boolean;stopFails?:boolean;revokeDuringModel?:"account"|"membership";primaryPolicy?:Record<string,unknown>;changeTargetDuringModel?:boolean;changePolicyDuringModel?:boolean;changeGenerationDuringModel?:boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "agent-recovery-")), canonical = join(root, "repo.git"), seed = join(root, "seed");
   const git = async (args: string[]) => {
     const child = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@localhost", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@localhost" } });
@@ -23,9 +23,12 @@ async function fixture(options: { lostPush?: boolean; lostCheckpoint?: boolean; 
     if (code) throw new Error(error); return out.trim();
   };
   await git(["init", "--bare", "--initial-branch=main", canonical]); await git(["clone", canonical, seed]);
+  let base:string|null=null;
+  if(!options.unborn){
   await mkdir(join(seed, "src")); await Bun.write(join(seed, "src/app.ts"), options.secret ? 'const api_key = "privatecredentialvalue";\n' : "export const value = 1;\n");
   await git(["-C", seed, "add", "."]); await git(["-C", seed, "commit", "-m", "base"]); await git(["-C", seed, "push", "origin", "main"]);
-  const base = await git(["-C", seed, "rev-parse", "HEAD"]);
+  base = await git(["-C", seed, "rev-parse", "HEAD"]);
+  }
   const task: Task = { id: "change1", goal: "Change source", contributor: { id: "agent1", name: "Agent", type: "agent" }, baseCommit: base, currentCommit: base, status: "working", allowedScope: ["src/"], requirements: [], checkpoints: [], workspace: { repoName: "repo", remote: canonical, branch: "task/change1" }, createdAt: "2026-10-02", updatedAt: "2026-10-02" };
   const actorId = "fixture-human", accountKey = await accountKeyFor(actorId);
   let lifecycle: "active" | "deleted" = "active", membership = true,policyVersion=1;
@@ -241,14 +244,14 @@ test.each(["credential","native"] as const)("unconfirmed %s cleanup preserves du
 
 test.each(["account","membership"] as const)("%s withdrawn while model runs refuses persistence and Git publication",async(kind)=>{const f=await fixture({revokeDuringModel:kind});try{await expect(runAgentTask(f.env,f.ledger,f.task,"mid-model",f.funding)).rejects.toThrow("revoked");expect(f.counts().modelCalls).toBe(1);expect(f.order).not.toContain("proposal-saved");expect(f.order).not.toContain("materialize");expect(f.runs.get("mid-model")?.proposal).toBeUndefined();expect(f.counts().checkpoints).toBe(0);expect(await f.git(["--git-dir",f.canonical,"for-each-ref","--format=%(refname)"])).toBe("refs/heads/main");expect(f.counts().revoked).toBe(1);expect(f.native.hasUnconfirmed()).toBe(false);}finally{await f.cleanup();}});
 
-function targetFor(task:Task):FrozenAcceptedTarget{return{projectId:"project1",incarnation:"11111111-1111-4111-8111-111111111111",canonicalRepoName:"repo",ref:"refs/heads/release",branch:"release",acceptedCommit:task.baseCommit,acceptedVersion:1,policyVersion:2,policy:{kind:"command",test:"bun test selected-root",allowedScope:["src/"],protectedPaths:["target-protected/"]},requirements:[{id:"accepted-target-behavior",title:"Keep selected behavior",description:"Preserve selected root behavior",version:1,status:"approved",assertions:[],originTaskId:"accepted",approvedAt:"now"}]};}
+function targetFor(task:Task):CommittedAcceptedTarget{if(task.baseCommit===null)throw Error("Committed fixture requires an actual base");return{projectId:"project1",incarnation:"11111111-1111-4111-8111-111111111111",canonicalRepoName:"repo",ref:"refs/heads/release",branch:"release",acceptedCommit:task.baseCommit,acceptedVersion:1,policyVersion:2,policy:{kind:"command",test:"bun test selected-root",allowedScope:["src/"],protectedPaths:["target-protected/"]},requirements:[{id:"accepted-target-behavior",title:"Keep selected behavior",description:"Preserve selected root behavior",version:1,status:"approved",assertions:[],originTaskId:"accepted",approvedAt:"now"}]};}
 test("bound agent uses frozen selected policy and accepted behavior, preserves target through saved proposal interruption",async()=>{
  const f=await fixture({primaryPolicy:{kind:"command",test:"false primary-root-check",protectedPaths:["src/app.ts"]}});
  try{const target=targetFor(f.task);Object.assign(f.task,{acceptedTarget:target});const seed=join(f.root,"seed");await Bun.write(join(seed,"src/app.ts"),"export const value = 9;\n");await f.git(["-C",seed,"commit","-am","primary advanced"]);await f.git(["-C",seed,"push","origin","main"]);const primaryHead=await f.git(["--git-dir",f.canonical,"rev-parse","main"]);const proposed=await runAgentTask(f.env,f.ledger,f.task,"bound-run",{...f.funding,stopAfterProposal:true});expect(proposed.proposalId).toBe("bound-run");const prompt=f.prompts.join("\n");expect(prompt).toContain("bun test selected-root");expect(prompt).not.toContain("primary-root-check");expect(prompt).toContain("Existing accepted behavior on refs/heads/release");expect(prompt).toContain("Preserve selected root behavior");expect(prompt).toContain("export const value = 1;");expect(prompt).not.toContain("export const value = 9;");expect(f.runs.get("bound-run")?.acceptedTarget).toEqual(target);const saved=f.runs.get("bound-run")!;const resumed=await runAgentTask(f.env,f.ledger,f.task,"bound-run",f.funding);expect(resumed.commit).toBe(saved.pushedCommit!);expect(f.counts().modelCalls).toBe(1);expect(await f.git(["--git-dir",f.canonical,"rev-parse","task/change1"])).toBe(resumed.commit);expect(f.runs.get("bound-run")?.startingCommit).toBe(target.acceptedCommit);expect(await f.git(["--git-dir",f.canonical,"rev-parse","main"])).toBe(primaryHead);}
  finally{await f.cleanup();}
 },20000);
 test("bound agent refuses changed target after model await without saving proposal or pushing",async()=>{
- const f=await fixture({changeTargetDuringModel:true});try{Object.assign(f.task,{acceptedTarget:targetFor(f.task)});await expect(runAgentTask(f.env,f.ledger,f.task,"bound-run",f.funding)).rejects.toThrow(/target|batch/);expect(f.runs.get("bound-run")?.proposal).toBeUndefined();expect(f.counts().checkpoints).toBe(0);expect(await f.git(["--git-dir",f.canonical,"rev-parse","main"])).toBe(f.task.baseCommit);}
+ const f=await fixture({changeTargetDuringModel:true});try{Object.assign(f.task,{acceptedTarget:targetFor(f.task)});await expect(runAgentTask(f.env,f.ledger,f.task,"bound-run",f.funding)).rejects.toThrow(/target|batch/);expect(f.runs.get("bound-run")?.proposal).toBeUndefined();expect(f.counts().checkpoints).toBe(0);expect(await f.git(["--git-dir",f.canonical,"rev-parse","main"])).toBe(targetFor(f.task).acceptedCommit);}
  finally{await f.cleanup();}
 },20000);
 test("unbound agent keeps legacy project policy without acquiring a target snapshot",async()=>{
@@ -271,3 +274,25 @@ test("old saved proposal cannot apply after a new explicit generation even when 
 test("generation changes while model runs reject its proposal before persistence or Git publication",async()=>{
  const f=await fixture({changeGenerationDuringModel:true});try{const target=targetFor(f.task);Object.assign(f.task,{acceptedTarget:target,targetGeneration:{eventId:crypto.randomUUID(),generation:1,acceptedTarget:target,baseCommit:f.task.baseCommit,currentCommit:f.task.currentCommit}});await expect(runAgentTask(f.env,f.ledger,f.task,"generation-run",f.funding)).rejects.toThrow("generation changed");expect(f.runs.get("generation-run")?.proposal).toBeUndefined();expect(f.counts().checkpoints).toBe(0);}finally{await f.cleanup();}
 },20000);
+
+test("unborn agent preserves null baseline and publishes an actual parentless contribution",async()=>{
+ const f=await fixture({unborn:true});try{
+  Object.assign(f.task,{acceptedTarget:{kind:"unborn",projectId:"project1",incarnation:"11111111-1111-4111-8111-111111111111",canonicalRepoName:"repo",ref:"refs/heads/main",branch:"main",acceptedCommit:null,acceptedVersion:0,policyVersion:1,policy:{},requirements:[]}});
+  await runAgentTask(f.env,f.ledger,f.task,"first-root",{...f.funding,stopAfterProposal:true});
+  expect(f.runs.get("first-root")?.startingCommit).toBeNull();expect(f.task.currentCommit).toBeNull();
+  const result=await runAgentTask(f.env,f.ledger,f.task,"first-root",f.funding);
+  expect(result.commit).toMatch(/^[a-f0-9]{40}$/);expect(await f.git(["--git-dir",f.canonical,"rev-list","--parents","-n","1",result.commit])).toBe(result.commit);
+  expect(await f.git(["--git-dir",f.canonical,"rev-parse","task/change1"])).toBe(result.commit);expect(f.counts().modelCalls).toBe(1);
+  expect(f.prompts.join("\n")).toContain("no existing commit");
+ }finally{await f.cleanup();}
+});
+
+test("durable null agent baseline requires explicit unborn scope and survives SQLite reload",()=>{
+ const db=new Database(":memory:");const storage={sql:{exec(query:string,...bindings:Array<string|number>){if(query.trim().startsWith("CREATE")){db.exec(query);return{toArray:()=>[]};}const rows=db.query(query).all(...bindings);return{toArray:()=>rows};}},transactionSync<T>(fn:()=>T):T{return db.transaction(fn)();}} as unknown as DurableObjectStorage;
+ try{const ledger=new AgentRunLedger(storage),input:AgentRunInput={runId:"first",taskId:"task",startingCommit:null,startingBranchHead:null,branch:"task/first",goal:"First contribution",context:{comments:[]},allowedScope:["src/"],protectedPaths:[]};
+ expect(()=>ledger.claim(input)).toThrow();
+ const scoped:AgentRunInput={...input,acceptedTarget:{kind:"unborn",projectId:"project",incarnation:"11111111-1111-4111-8111-111111111111",canonicalRepoName:"repo",ref:"refs/heads/main",branch:"main",acceptedCommit:null,acceptedVersion:0,policyVersion:1,policy:{},requirements:[]}};
+ ledger.claim(scoped);expect(new AgentRunLedger(storage).get("first")?.startingCommit).toBeNull();
+ expect(()=>ledger.claim({...scoped,runId:"other",startingBranchHead:"a".repeat(40)})).toThrow();
+ }finally{db.close();}
+});

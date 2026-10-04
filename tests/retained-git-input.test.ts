@@ -2,7 +2,7 @@ import {test,expect} from "bun:test";
 import {mkdtemp,rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import {retainGitInput,retainedGitInputRef} from "../src/server/retained-git-input";
+import {retainGitInput,retainedGitInputRef,retainUnbornGitInput} from "../src/server/retained-git-input";
 import {q} from "../src/server/shell";
 const remote="https://"+"a".repeat(32)+".artifacts.cloudflare.net/repository.git";
 const incarnation="12345678-1234-1234-1234-123456789abc";
@@ -45,3 +45,13 @@ test("authority revocation before pin creation prevents any push",async()=>{
 });
 
 test("retained refs reject overlong or ref-unsafe task identities",()=>{const commit="a".repeat(40);for(const id of ["a".repeat(102),"task/main","task..one","task_one","-task-one"]){expect(()=>retainedGitInputRef(incarnation,id,commit)).toThrow("Invalid retained input identity");}});
+
+test("unborn contributor pin preserves real root history without a synthetic base ref",async()=>{
+ const f=await fixture(),unbornIncarnation=crypto.randomUUID();try{
+  const target={kind:"unborn" as const,projectId:"synthetic-project",incarnation:unbornIncarnation,canonicalRepoName:"synthetic-canonical",ref:"refs/heads/main",branch:"main",acceptedCommit:null,acceptedVersion:0 as const,policyVersion:1,policy:{kind:"git-integrity"},requirements:[] as []};
+  const receipt=await retainUnbornGitInput({exec:f.exec,directory:f.work,remote,token:"server-only",incarnation:unbornIncarnation,taskId:"first-root",commit:f.input,beforeCommand:async()=>{},acceptedTarget:target});
+  expect(receipt.base).toBeNull();expect(receipt.protectedBaseRef).toBeNull();expect(receipt.rootCommit).toBe(f.base);expect(receipt.rootAncestryVerified).toBe(true);
+  expect(await f.git(`git -C ${q(f.bare)} for-each-ref --format='%(refname)'`)).toBe(receipt.ref);
+  expect(await f.git(`git -C ${q(f.bare)} rev-list --max-parents=0 ${q(receipt.ref)}`)).toBe(f.base);
+ }finally{await f.cleanup();}
+});

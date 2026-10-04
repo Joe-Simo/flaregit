@@ -39,6 +39,7 @@ export async function detectCompatibility(opts: {
   requirementsVersion: number;
 }): Promise<DetectionResult> {
   const { repoDir, acceptedBase, taskA, taskB } = opts;
+  if(!taskA.currentCommit||!taskB.currentCommit)throw new Error("Both contributions need real Git checkpoints before compatibility analysis");
   const filesA = changedFiles(repoDir, acceptedBase, taskA.currentCommit);
   const filesB = changedFiles(repoDir, acceptedBase, taskB.currentCommit);
   const setB = new Set(filesB);

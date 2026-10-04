@@ -1,3 +1,4 @@
+import {acceptedCommitLabel,recordedAcceptedCommit} from "../accepted-commit-display";
 import React from "react";
 import { CheckCircle2, AlertTriangle, RefreshCw, Cpu, ShieldCheck, Users, Clock } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -18,7 +19,7 @@ interface StatusBannerProps {
   stage: PipelineStage;
   message: string;
   detail?: string;
-  lastAcceptedCommit: string;
+  lastAcceptedCommit: string|null;
 }
 
 export function StatusBanner({
@@ -89,6 +90,13 @@ export function StatusBanner({
       case "accepted":
       case "idle":
       default:
+        if (!recordedAcceptedCommit(lastAcceptedCommit)) return {
+          icon: <Clock className="h-4 w-4 text-slate-600 dark:text-slate-400" aria-hidden="true" />,
+          badgeVariant: "secondary" as const,
+          badgeText: "AWAITING FIRST ACCEPTANCE",
+          bg: "bg-muted/30 border-border",
+          textColor: "text-foreground",
+        };
         return {
           icon: <CheckCircle2 className="h-4 w-4 text-emerald-700 dark:text-emerald-400" />,
           badgeVariant: "success" as const,
@@ -123,12 +131,12 @@ export function StatusBanner({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 text-xs text-muted-foreground self-start sm:self-center">
+        {recordedAcceptedCommit(lastAcceptedCommit) && <div className="flex items-center gap-2 text-xs text-muted-foreground self-start sm:self-center">
           <span>Protected canonical HEAD:</span>
           <span className="font-mono text-foreground font-semibold px-2 py-0.5 rounded bg-background/80 border border-border">
-            {lastAcceptedCommit.slice(0, 7)}
+            {acceptedCommitLabel(lastAcceptedCommit)}
           </span>
-        </div>
+        </div>}
       </div>
     </div>
   );

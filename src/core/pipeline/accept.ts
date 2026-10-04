@@ -1,3 +1,5 @@
+import { NATIVE_INTEGRITY_IDENTITY } from "../verification/integrity.js";
+import { acceptedTargetSchema, type UnbornAcceptedTarget } from "../accepted-target.js";
 import * as crypto from "node:crypto";
 import { authArgs, git } from "./git.js";
 import type {
@@ -20,6 +22,9 @@ export interface PublishOptions {
   candidateRepoDir: string;
   candidateRef: string;
   /** Called synchronously at every journal transition so state survives a crash. */
+  /** Trusted recorded missing branch plus an explicit exact human decision. */
+  unbornTarget?: UnbornAcceptedTarget;
+  rootReview?: {candidateId:string;commit:string;tree:string;actorId:string};
   onJournal?: (entry: PublicationJournalEntry) => void;
 }
 
@@ -34,7 +39,7 @@ export interface PublishResult {
 function entry(
   opts: PublishOptions,
   state: PublicationJournalEntry["state"],
-  expectedHead: string,
+  expectedHead: string | null,
   error?: string,
   id?: string
 ): PublicationJournalEntry {
@@ -47,6 +52,7 @@ function entry(
     expectedHead,
     newHead: opts.candidate.candidateCommit ?? "",
     outputDigest: opts.evidence.builtOutputDigest,
+    ...(opts.rootReview?{publicationAuthority:{acceptedTarget:opts.candidate.acceptedTarget,actor:{userId:opts.rootReview.actorId,displayName:opts.rootReview.actorId,viaToken:false},reviewedAt:new Date().toISOString(),commit:opts.rootReview.commit,tree:opts.rootReview.tree,policyVersion:opts.candidate.frozenPolicyVersion,authorizedAt:new Date().toISOString()}}:{}),
     state,
     timestamp: new Date().toISOString(),
     ...(error ? { error } : {}),
@@ -70,7 +76,13 @@ export function publishAcceptedCandidate(opts: PublishOptions): PublishResult {
 
   // This compatibility publisher has no target-root authority or reconciliation.
   // Explicit targets must never silently publish through its default branch.
-  if (candidate.acceptedTarget !== undefined || evidence.acceptedTarget !== undefined) {
+  const unborn = candidate.expectedAcceptedBase === null;
+  if (unborn) {
+    const target=opts.unbornTarget,review=opts.rootReview;
+    if(evidence.verifierIdentity!==NATIVE_INTEGRITY_IDENTITY)return abort("Initial publication requires native Git integrity evidence");
+    if(!target||target.kind!=="unborn"||!review||!review.actorId||review.candidateId!==candidate.id||review.commit!==commit||review.tree!==evidence.candidateTree)return abort("Unborn publication requires its recorded target and exact human approval.");
+    try{if(JSON.stringify(acceptedTargetSchema.parse(candidate.acceptedTarget))!==JSON.stringify(acceptedTargetSchema.parse(target))||JSON.stringify(acceptedTargetSchema.parse(evidence.acceptedTarget))!==JSON.stringify(acceptedTargetSchema.parse(target))||target.ref!==ref)return abort("Unborn publication target changed.");}catch{return abort("Unborn publication target is invalid.");}
+  } else if (candidate.acceptedTarget !== undefined || evidence.acceptedTarget !== undefined) {
     return abort("Explicit accepted-target publication requires a target-aware publisher. No Git operation was dispatched.");
   }
   if (!commit) return abort("Candidate has no commit.");
@@ -99,10 +111,14 @@ export function publishAcceptedCandidate(opts: PublishOptions): PublishResult {
   const tree = git(verifyRepo, ["rev-parse", `${commit}^{tree}`], q).stdout.trim();
   if (tree !== evidence.candidateTree) return abort("Invariant violation: candidate tree differs from verified tree.");
 
-  const currentHead = remote
-    ? git(opts.candidateRepoDir, [...authArgs(canonicalRepoDir, opts.canonicalToken), "ls-remote", canonicalRepoDir, ref]).stdout.split("\t")[0]?.trim() ?? ""
-    : git(canonicalRepoDir, ["rev-parse", "--verify", ref], { gitDir: true }).stdout.trim();
-  if (currentHead !== candidate.expectedAcceptedBase) {
+  const observed = remote
+    ? git(opts.candidateRepoDir, [...authArgs(canonicalRepoDir, opts.canonicalToken), "ls-remote", "--refs", canonicalRepoDir, ref])
+    : git(canonicalRepoDir, ["for-each-ref", "--format=%(objectname) %(refname)", ref], { gitDir: true });
+  if(!observed.ok)return abort("Canonical branch observation is unavailable; publication was not dispatched.");
+  const rows=observed.stdout.trim().split("\n").filter(Boolean).map(row=>row.trim().split(/\s+/));
+  if(rows.length>1||rows.some(row=>row.length!==2||row[1]!==ref||!(/^[a-f0-9]{40}$/).test(row[0]??"")))return abort("Canonical branch observation is ambiguous; publication was not dispatched.");
+  const currentHead=rows[0]?.[0]??"";
+  if ((currentHead || null) !== candidate.expectedAcceptedBase) {
     return abort(
       `Canonical ${opts.defaultBranch} moved to ${currentHead.slice(0, 7) || "unknown"}; candidate must be recomposed against it.`,
       candidate.expectedAcceptedBase,
@@ -110,10 +126,12 @@ export function publishAcceptedCandidate(opts: PublishOptions): PublishResult {
     );
   }
 
-  const ancestor = git(verifyRepo, ["merge-base", "--is-ancestor", currentHead, commit], q);
-  if (!ancestor.ok) return abort("Ancestry check failed: candidate does not descend from canonical head (history rewrite refused).", currentHead);
+  if(!unborn){
+    const ancestor=git(verifyRepo,["merge-base","--is-ancestor",currentHead,commit],q);
+    if(!ancestor.ok)return abort("Ancestry check failed: candidate does not descend from canonical head (history rewrite refused).",currentHead);
+  }
 
-  const prepared = entry(opts, "PREPARED", currentHead);
+  const prepared = entry(opts, "PREPARED", currentHead || null);
   opts.onJournal?.(prepared);
 
   // Compare-and-swap: the ref moves only if it still equals the verified base.
@@ -129,20 +147,21 @@ export function publishAcceptedCandidate(opts: PublishOptions): PublishResult {
     : git(canonicalRepoDir, ["update-ref", "-m", `flaregit accept ${candidate.id}`, ref, commit, currentHead], { gitDir: true });
   if (!update.ok) {
     const stale = /stale info|rejected|lock/i.test(update.stderr) || (!remote && git(canonicalRepoDir, ["rev-parse", "--verify", ref], { gitDir: true }).stdout.trim() !== currentHead);
-    const aborted = { ...entry(opts, "ABORTED", currentHead, `Atomic ref update refused: ${update.stderr.trim()}`, prepared.id) };
+    const aborted = { ...entry(opts, "ABORTED", currentHead || null, `Atomic ref update refused: ${update.stderr.trim()}`, prepared.id) };
     opts.onJournal?.(aborted);
     return { success: false, journalEntry: aborted, error: aborted.error, staleBase: stale };
   }
 
-  const refUpdated = entry(opts, "REF_UPDATED", currentHead, undefined, prepared.id);
+  const refUpdated = entry(opts, "REF_UPDATED", currentHead || null, undefined, prepared.id);
   opts.onJournal?.(refUpdated);
-  const accepted = entry(opts, "ACCEPTED", currentHead, undefined, prepared.id);
+  const accepted = entry(opts, "ACCEPTED", currentHead || null, undefined, prepared.id);
   opts.onJournal?.(accepted);
 
   return {
     success: true,
     journalEntry: accepted,
     acceptanceRecord: {
+      ...(candidate.acceptedTarget?{acceptedTarget:structuredClone(candidate.acceptedTarget)}:{}),
       commit,
       candidateId: candidate.id,
       acceptedAt: new Date().toISOString(),

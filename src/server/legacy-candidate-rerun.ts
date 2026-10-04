@@ -27,10 +27,10 @@ export function assertLegacyRerunEligible(snapshot:LegacyRerunSnapshot,expectedC
   if(ids.length<1||ids.length>8||new Set(ids).size!==ids.length||snapshot.tasks.length!==ids.length)throw new LegacyRerunError("Frozen contribution scope is unavailable.");
   for(const id of ids){
     const task=snapshot.tasks.find(value=>value.id===id), proofs=candidate.frozenContributorProofs?.filter(value=>value.id===id);
-    if(!task||proofs?.length!==1||proofs[0]!.commit!==candidate.participatingCommits[id]||!isSafeSha(proofs[0]!.baseCommit)||!isSafeSha(proofs[0]!.commit)||task.currentCommit!==proofs[0]!.commit||task.baseCommit!==proofs[0]!.baseCommit||task.activeCandidateId!==candidate.id||["accepted","cancelled","working","checkpointed","needs_decision"].includes(task.status))throw new LegacyRerunError("Saved contribution inputs or assignment changed; no base is inferred.");
+    if(!task||proofs?.length!==1||proofs[0]!.commit!==candidate.participatingCommits[id]||!(proofs[0]!.baseCommit===null||isSafeSha(proofs[0]!.baseCommit))||!isSafeSha(proofs[0]!.commit)||task.currentCommit!==proofs[0]!.commit||task.baseCommit!==proofs[0]!.baseCommit||task.activeCandidateId!==candidate.id||["accepted","cancelled","working","checkpointed","needs_decision"].includes(task.status))throw new LegacyRerunError("Saved contribution inputs or assignment changed; no base is inferred.");
   }
 }
-export function legacyRerunInputFingerprint(inputs:Record<string,{commit:string;base:string}>):string {const keys=Object.keys(inputs).sort();if(!keys.length||keys.length>8||keys.some(key=>!isSafeSha(inputs[key]?.commit)||!isSafeSha(inputs[key]?.base)))throw new LegacyRerunError("Exact frozen contribution inputs are required.");return createHash("sha256").update(JSON.stringify(keys.map(key=>[key,inputs[key]!.commit,inputs[key]!.base]))).digest("hex");}
+export function legacyRerunInputFingerprint(inputs:Record<string,{commit:string;base:string|null}>):string {const keys=Object.keys(inputs).sort();if(!keys.length||keys.length>8||keys.some(key=>!isSafeSha(inputs[key]?.commit)||!(inputs[key]?.base===null||isSafeSha(inputs[key]?.base))))throw new LegacyRerunError("Exact frozen contribution inputs are required.");return createHash("sha256").update(JSON.stringify(keys.map(key=>[key,inputs[key]!.commit,inputs[key]!.base]))).digest("hex");}
 export class LegacyCandidateReruns {
   constructor(private readonly storage:DurableObjectStorage){
     storage.sql.exec("CREATE TABLE IF NOT EXISTS legacy_candidate_reruns(id TEXT PRIMARY KEY,candidate_id TEXT NOT NULL,workflow_id TEXT UNIQUE NOT NULL,payload TEXT NOT NULL,doc TEXT NOT NULL)");
@@ -54,7 +54,7 @@ export class LegacyCandidateReruns {
     if(!ids.length||ids.length>8||new Set(ids).size!==ids.length)throw new LegacyRerunError("One to eight distinct contribution identities are required.");
     return this.boundedRows(`id IN (SELECT rerun_id FROM legacy_candidate_rerun_reservations WHERE task_id IN (${ids.map(()=>"?").join(",")}))`,ids,8).map(row=>JSON.parse(row.doc) as LegacyCandidateRerun);
   }
-  prepare(input:{id:string;expectedCommit:string|null;actor:HumanDecisionActor;snapshot:LegacyRerunSnapshot;credentialHash?:string;sessionExpiresAt?:number;expectedInputs:Record<string,{commit:string;base:string}>}):LegacyCandidateRerun {
+  prepare(input:{id:string;expectedCommit:string|null;actor:HumanDecisionActor;snapshot:LegacyRerunSnapshot;credentialHash?:string;sessionExpiresAt?:number;expectedInputs:Record<string,{commit:string;base:string|null}>}):LegacyCandidateRerun {
     z.string().uuid().parse(input.id);const inputFingerprint=legacyRerunInputFingerprint(input.expectedInputs);
     return this.storage.transactionSync(()=>{
       const row=this.boundedRows("id=?",[input.id])[0],saved=row?JSON.parse(row.doc) as LegacyCandidateRerun:null;
@@ -62,7 +62,7 @@ export class LegacyCandidateReruns {
       const payload=JSON.stringify({candidateId:input.snapshot.candidate.id,expectedCommit:input.expectedCommit,userId:input.actor.userId,viaToken:input.actor.viaToken,incarnation:input.snapshot.incarnation,inputFingerprint,snapshotFingerprint});
       if(row&&saved){if(row.payload!==payload)throw new LegacyRerunError("Request identity belongs to another rerun.");if(input.snapshot.projectId!==saved.snapshot.projectId||input.snapshot.canonicalRepoName!==saved.snapshot.canonicalRepoName||JSON.stringify(input.snapshot.candidate)!==JSON.stringify(saved.snapshot.candidate)||(["prepared","stopped"].includes(saved.phase)&&JSON.stringify(input.snapshot)!==JSON.stringify(saved.snapshot)))throw new LegacyRerunError("The frozen rerun context changed.");return saved;}
       assertLegacyRerunEligible(input.snapshot,input.expectedCommit);
-      const frozen:Record<string,{commit:string;base:string}>={};for(const proof of input.snapshot.candidate.frozenContributorProofs??[])frozen[proof.id]={commit:proof.commit,base:proof.baseCommit};if(legacyRerunInputFingerprint(frozen)!==inputFingerprint)throw new LegacyRerunError("The observed frozen contribution inputs changed.");
+      const frozen:Record<string,{commit:string;base:string|null}>={};for(const proof of input.snapshot.candidate.frozenContributorProofs??[])frozen[proof.id]={commit:proof.commit,base:proof.baseCommit};if(legacyRerunInputFingerprint(frozen)!==inputFingerprint)throw new LegacyRerunError("The observed frozen contribution inputs changed.");
       const existing=this.storage.sql.exec("SELECT rerun_id FROM legacy_candidate_rerun_active WHERE candidate_id=? LIMIT 1",input.snapshot.candidate.id).toArray();
       if(existing.length)throw new LegacyRerunError("A saved rerun already exists for this candidate.");
       if(this.storage.sql.exec<{count:number}>("SELECT COUNT(*) AS count FROM legacy_candidate_reruns").toArray()[0]!.count>=10_000)throw new LegacyRerunError("Rerun audit capacity reached; saved requests remain available.",429);

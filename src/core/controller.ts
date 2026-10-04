@@ -1,3 +1,6 @@
+import { acceptedTargetSchema, type UnbornAcceptedTarget } from "./accepted-target.js";
+import { verifyNativeIntegrity } from "./verification/integrity.js";
+import { settingsFor } from "./command-policy.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ArtifactsClient } from "../artifacts/types.js";
@@ -30,6 +33,7 @@ export interface ControllerDeps {
   storageDir: string;
   /** Canonical branch contributors' work lands on. */
   defaultBranch?: string;
+  unbornTarget?: UnbornAcceptedTarget;
 }
 
 export interface IntegrationOutcome {
@@ -58,6 +62,10 @@ export class FlareGitRepositoryController {
     this.deps = deps;
     this.defaultBranch = deps.defaultBranch ?? "main";
     this.state = initialState;
+    if(initialState.acceptedState.kind==="unborn"){
+      const target=acceptedTargetSchema.parse(deps.unbornTarget);
+      if(target.kind!=="unborn"||target.projectId!==initialState.projectId||target.canonicalRepoName!==initialState.canonicalRepoName||target.branch!==this.defaultBranch)throw new Error("Recorded unborn target must match this controller");
+    }
     if (!this.state.verificationPolicy) this.state.verificationPolicy = { ...deps.verifier.defaultPolicy };
     fs.mkdirSync(deps.storageDir, { recursive: true });
     this.persist();
@@ -127,7 +135,8 @@ export class FlareGitRepositoryController {
     const token = remote ? await this.canonicalToken(canonical) : undefined;
     const head = remote
       ? gitOrThrow(this.deps.storageDir, [...authArgs(canonical, token), "ls-remote", canonical, ref]).split("\t")[0]?.trim() ?? ""
-      : gitOrThrow(canonical, ["rev-parse", "--verify", ref], { gitDir: true });
+      : git(canonical, ["rev-parse", "--verify", ref], { gitDir: true }).stdout.trim();
+    if (!head&&this.state.acceptedState.kind==="unborn"&&!this.state.journal.some(entry=>entry.state==="PREPARED"||entry.state==="REF_UPDATED")){this.persist();return;}
     if (!head) throw new Error("Could not read canonical head; interrupted publication remains pending.");
     const unfinished = this.state.journal.some((e) => e.state === "PREPARED" || e.state === "REF_UPDATED");
     const recoveryRepo = remote && unfinished ? fs.mkdtempSync(path.join(this.deps.storageDir, "recovery-")) : canonical;
@@ -147,8 +156,11 @@ export class FlareGitRepositoryController {
     const settled = this.state.journal.find((e) => e.state === "ACCEPTED" && e.newHead === head);
     if (head && head !== this.state.acceptedState.currentCommit && settled) {
       const candidate = this.state.candidates[settled.candidateId];
-      this.state.acceptedState.currentCommit = head;
-      this.state.acceptedState.buildDigest = settled.outputDigest;
+      if(this.state.acceptedState.kind==="unborn"){
+        const evidence=candidate?.evidenceId?this.state.evidence[candidate.evidenceId]:undefined;
+        if(!candidate||!evidence||evidence.status!=="passed"||evidence.candidateCommit!==head)throw new Error("First-root accepted journal evidence is unavailable");
+        this.state.acceptedState={kind:"committed",currentCommit:head,acceptedAt:settled.timestamp,buildDigest:settled.outputDigest,activeRequirements:candidate.frozenRequirements,history:[{acceptedTarget:candidate.acceptedTarget,commit:head,candidateId:candidate.id,acceptedAt:settled.timestamp,participatingTasks:candidate.participatingTaskIds,evidenceId:evidence.id,outputDigest:settled.outputDigest}]};
+      }else{this.state.acceptedState.currentCommit=head;this.state.acceptedState.buildDigest=settled.outputDigest;}
       if (candidate) {
         candidate.status = "accepted";
         for (const id of candidate.participatingTaskIds) {
@@ -175,7 +187,7 @@ export class FlareGitRepositoryController {
     allowedScope?: string[];
   }): Promise<Task> {
     if (this.state.tasks[opts.taskId]) throw new Error(`Task ${opts.taskId} already exists`);
-    const task = await isolateTaskWorkspace(this.deps.artifacts, {
+    const isolated = await isolateTaskWorkspace(this.deps.artifacts, {
       projectId: this.state.projectId,
       taskId: opts.taskId,
       goal: opts.goal,
@@ -183,9 +195,11 @@ export class FlareGitRepositoryController {
       contributorType: opts.contributorType,
       canonicalRepoName: this.state.canonicalRepoName,
       baseCommit: this.state.acceptedState.currentCommit,
-      allowedScope: opts.allowedScope,
+      ...(this.state.acceptedState.kind==="unborn"?{unbornTarget:this.deps.unbornTarget}:{}),
+      allowedScope: opts.allowedScope??(settingsFor(this.state.verificationPolicy).fixture==="git-integrity"?settingsFor(this.state.verificationPolicy).allowedScope:undefined),
       workspacesDir: path.join(this.deps.storageDir, "workspaces", opts.taskId),
     });
+    const task:Task=this.state.acceptedState.kind==="unborn"&&this.deps.unbornTarget?{...isolated,acceptedTarget:structuredClone(this.deps.unbornTarget)}:isolated;
     if (opts.requirements) task.requirements = opts.requirements;
     this.state.tasks[task.id] = task;
     this.persist();
@@ -229,6 +243,7 @@ export class FlareGitRepositoryController {
     const taskA = this.state.tasks[taskAId];
     const taskB = this.state.tasks[taskBId];
     if (!taskA || !taskB) throw new Error("Tasks not found");
+    if(this.state.acceptedState.currentCommit===null)throw new Error("Initial-root compatibility is reviewed through an explicit first-root candidate");
     const workspace = await this.prepareIntegrationWorkspace(`analysis-${Date.now()}`, [taskA, taskB]);
     try {
       const result = await detectCompatibility({
@@ -255,6 +270,7 @@ export class FlareGitRepositoryController {
     fs.mkdirSync(path.dirname(dir), { recursive: true });
     gitOrThrow(path.dirname(dir), [...authArgs(canonical, await this.canonicalToken(canonical)), "clone", "--quiet", "--no-hardlinks", canonical, dir]);
     for (const task of tasks) {
+      if(!task.currentCommit)throw new Error("Contribution has no committed checkpoint");
       gitOrThrow(dir, [...authArgs(task.workspace.remote, task.workspace.token), "fetch", "--quiet", task.workspace.remote, `+refs/heads/${task.workspace.branch}:refs/flaregit/tasks/${task.id}`]);
       const fetched = gitOrThrow(dir, ["rev-parse", `refs/flaregit/tasks/${task.id}`]);
       if (fetched !== task.currentCommit) {
@@ -265,13 +281,50 @@ export class FlareGitRepositoryController {
   }
 
   private policyViolations(repoDir: string, task: Task): string[] {
+    if(!task.currentCommit)throw new Error("Contribution has no committed checkpoint");
     const files = changedFiles(repoDir, this.state.acceptedState.currentCommit, task.currentCommit);
     const scoped = (f: string) =>
-      task.allowedScope.some((s) => (s.endsWith("/**/*") ? f.startsWith(s.slice(0, -4)) : s.endsWith("/") ? f.startsWith(s) : f === s));
+      task.allowedScope.some((s) => s==="*"||(s.endsWith("/**/*") ? f.startsWith(s.slice(0, -4)) : s.endsWith("/") ? f.startsWith(s) : f === s));
     const protectedHit = (f: string) => this.deps.verifier.protectedPaths.some((p) => (p.endsWith("/") ? f.startsWith(p) : f === p));
     return files.flatMap((f) =>
       protectedHit(f) ? [`${f} is protected verification/configuration`] : scoped(f) ? [] : [`${f} is outside the allowed scope`]
     );
+  }
+
+  /** Preparation never publishes the missing accepted branch. All original
+   * checkpoints are retained as parents when an initial batch composes cleanly. */
+  async prepareFirstRootCandidate(ids:string|string[]):Promise<IntegrationOutcome>{
+    const taskIds=typeof ids==="string"?[ids]:ids,target=this.deps.unbornTarget;
+    if(this.state.acceptedState.currentCommit!==null||!target)return{success:false,error:"Initial target is stale; preserve the contribution and explicitly rebase it"};
+    if(!taskIds.length||taskIds.length>8||new Set(taskIds).size!==taskIds.length)throw Error("One to eight distinct initial contributions required");
+    const tasks=taskIds.map(id=>{const task=this.state.tasks[id];if(!task||!task.currentCommit||task.baseCommit!==null||task.status==="cancelled")throw Error("Initial contribution checkpoints are unavailable");return task;});
+    for(let a=0;a<tasks.length;a++)for(let b=a+1;b<tasks.length;b++)for(const left of tasks[a]!.requirements.filter(requirement=>requirement.status==="approved"))for(const right of tasks[b]!.requirements.filter(requirement=>requirement.status==="approved")){if(detectContradiction(left,right)){const decision=createProductDecision(left,right);this.state.decisions[decision.id]=decision;this.setStatus(tasks,"needs_decision");return{success:false,decision,error:"Initial requirements conflict; a human decision is required before composition"};}}
+    const candidate=freezeCandidateGeneration({tasks,acceptedTarget:target,acceptedBaseCommit:null,policyVersion:this.state.policyVersion,verificationPolicy:this.state.verificationPolicy,approvedRequirements:tasks.flatMap(task=>task.requirements).filter(requirement=>requirement.status==="approved")});
+    this.state.candidates[candidate.id]=candidate;this.persist();this.emit("candidate.frozen",candidate);
+    const workspace=await this.prepareIntegrationWorkspace(candidate.id,tasks);
+    try{
+      const violations=tasks.flatMap(task=>this.policyViolations(workspace,task));if(violations.length)throw Error(violations.join("; "));
+      const first=candidate.participatingCommits[taskIds[0]!];if(!first)throw Error("First committed checkpoint unavailable");
+      const branch=`candidate/${candidate.id}`;gitOrThrow(workspace,["checkout","--quiet","-B",branch,first]);
+      for(const id of taskIds.slice(1)){const commit=candidate.participatingCommits[id];if(!commit)throw Error("Frozen checkpoint unavailable");const merged=git(workspace,["-c","user.name=FlareGit Integrator","-c","user.email=integrator@flaregit.com","merge","--allow-unrelated-histories","--no-ff","--no-edit",commit]);if(!merged.ok){candidate.status="failed";const files=git(workspace,["diff","--name-only","--diff-filter=U"]).stdout.trim().split("\n").filter(Boolean);candidate.repairAttempts.push({round:0,prompt:"Human resolution required",patch:"",affectedContracts:[],diagnosticError:`Initial Git conflict: ${files.join(", ")}`,durationMs:0,timestamp:new Date().toISOString()});this.persist();return{success:false,candidate,error:`Initial contributions conflict in ${files.join(", ")}; original checkpoints remain preserved for an explicit resolution`};}}
+      const commit=gitOrThrow(workspace,["rev-parse","HEAD"]),tree=gitOrThrow(workspace,["rev-parse","HEAD^{tree}"]),settings=settingsFor(this.state.verificationPolicy);
+      const evidence=await verifyNativeIntegrity({repoDir:workspace,candidateCommit:commit,candidateTree:tree,expectedBase:null,acceptedTarget:target,requirementsVersion:this.state.policyVersion,policy:this.state.verificationPolicy,protectedPaths:settings.protectedPaths,allowedScope:settings.allowedScope,landing:"merge",contributors:tasks.map(task=>({id:task.id,commit:candidate.participatingCommits[task.id]!,baseCommit:null,ref:`refs/flaregit/tasks/${task.id}`,allowedScope:task.allowedScope}))});
+      candidate.candidateCommit=commit;candidate.evidenceId=evidence.id;candidate.status=evidence.status==="passed"?"verified":"failed";this.state.evidence[evidence.id]=evidence;this.persist();this.emit(evidence.status==="passed"?"candidate.verified":"candidate.failed",{candidate,evidence});return{success:false,candidate,evidence,error:evidence.status==="passed"?"Exact initial candidate is ready for human review; no accepted branch was created":"Initial Git integrity verification failed"};
+    }catch(error){candidate.status="failed";this.persist();return{success:false,candidate,error:error instanceof Error?error.message:"Initial preparation failed"};}
+  }
+  /** Explicit local human review binds the exact prepared commit and tree. */
+  acceptFirstRootCandidate(id:string,review:{commit:string;tree:string;actorId:string}):Promise<IntegrationOutcome>{
+    const run=this.landingQueue.then(async()=>{
+      const candidate=this.state.candidates[id],evidence=candidate?.evidenceId?this.state.evidence[candidate.evidenceId]:undefined,target=this.deps.unbornTarget;
+      if(!candidate||!evidence||!target)return{success:false,candidate,evidence,error:"Initial candidate is unavailable"};
+      if(this.state.acceptedState.currentCommit!==null){candidate.status="stale";this.persist();return{success:false,candidate,evidence,error:"Initial target changed; original contributions remain preserved"};}
+      if(!review.actorId||candidate.candidateCommit!==review.commit||evidence.candidateTree!==review.tree)return{success:false,candidate,evidence,error:"Review must approve the exact prepared commit and tree"};
+      if(candidate.status!=="verified"||candidate.frozenPolicyVersion!==this.state.policyVersion||JSON.stringify(candidate.frozenVerificationPolicy)!==JSON.stringify(this.state.verificationPolicy)||candidate.participatingTaskIds.some(taskId=>!this.state.tasks[taskId]||this.state.tasks[taskId]!.status==="cancelled"))return{success:false,candidate,evidence,error:"Initial review context changed; prepare a fresh candidate"};
+      const workspace=path.join(this.deps.storageDir,"integration",id),canonical=await this.canonicalDir();
+      const published=publishAcceptedCandidate({canonicalRepoDir:canonical,canonicalToken:await this.canonicalToken(canonical),defaultBranch:this.defaultBranch,candidate,evidence,candidateRepoDir:workspace,candidateRef:`refs/heads/candidate/${id}`,unbornTarget:target,rootReview:{...review,candidateId:id},onJournal:entry=>this.upsertJournal(entry)});
+      if(!published.success||!published.acceptanceRecord){candidate.status=published.staleBase?"stale":"failed";this.persist();return{success:false,candidate,evidence,error:published.error};}
+      const record=published.acceptanceRecord;this.state.acceptedState={kind:"committed",currentCommit:record.commit,acceptedAt:record.acceptedAt,buildDigest:record.outputDigest,activeRequirements:candidate.frozenRequirements,history:[record]};candidate.status="accepted";for(const taskId of candidate.participatingTaskIds){const task=this.state.tasks[taskId];if(task&&task.currentCommit===candidate.participatingCommits[taskId])task.status="accepted";}this.persist();this.emit("candidate.accepted",{candidate,record,acceptedState:this.state.acceptedState});return{success:true,candidate,evidence};
+    });this.landingQueue=run.catch(()=>undefined);return run;
   }
 
   /** Public entry point: queued so concurrent landing attempts are strictly serialized. */
@@ -292,6 +345,8 @@ export class FlareGitRepositoryController {
     const tasks = taskIds.map((id) => this.state.tasks[id]);
     if (tasks.some((t) => !t)) throw new Error("Tasks not found for integration");
     const [taskA, taskB] = tasks as [Task, Task];
+    if(this.state.acceptedState.currentCommit===null)return{success:false,error:"Prepare initial contributions for exact human review before the first accepted commit"};
+    if(!taskA.currentCommit||!taskB.currentCommit)return{success:false,error:"Every contribution needs a real committed checkpoint"};
 
     for (const t of [taskA, taskB]) {
       if (t.status === "accepted") return { success: false, error: `Task ${t.id} is already accepted (duplicate request ignored).` };
@@ -486,10 +541,7 @@ export class FlareGitRepositoryController {
         t.status = t.currentCommit === candidate.participatingCommits[t.id] ? "accepted" : "ready";
         t.updatedAt = new Date().toISOString();
       }
-      this.state.acceptedState.currentCommit = record.commit;
-      this.state.acceptedState.buildDigest = record.outputDigest;
-      this.state.acceptedState.acceptedAt = record.acceptedAt;
-      this.state.acceptedState.history.push(record);
+      this.state.acceptedState = {kind:"committed",currentCommit:record.commit,buildDigest:record.outputDigest,acceptedAt:record.acceptedAt,history:[...this.state.acceptedState.history,record],activeRequirements:[...this.state.acceptedState.activeRequirements]};
       for (const req of [...taskA.requirements, ...taskB.requirements]) {
         if (req.status === "approved" && !this.state.acceptedState.activeRequirements.some((r) => r.id === req.id)) {
           this.state.acceptedState.activeRequirements.push(req);

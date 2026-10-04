@@ -10,8 +10,8 @@ function tokenValue(token: string) { if (typeof token !== 'string' || !token || 
  * Secret-bearing batches are trusted backend cleanup inputs, never UI data.
  */
 export class InitialArtifactCredentials<Scope extends { eventId: string }> {
-  constructor(private readonly storage: DurableObjectStorage, private readonly options: { table: 'initial_fork_credentials' | 'initial_repository_credentials'; parse(value: unknown): Scope; repositoryName(scope: Scope): string }) { if (!['initial_fork_credentials','initial_repository_credentials'].includes(options.table)) throw Error('Invalid initial credential ledger'); this.table=options.table; storage.sql.exec(`CREATE TABLE IF NOT EXISTS ${this.table}(event_id TEXT PRIMARY KEY,payload TEXT NOT NULL,status TEXT NOT NULL,token TEXT,fingerprint TEXT,attempts INTEGER NOT NULL DEFAULT 0,automatic_sweeps INTEGER NOT NULL DEFAULT 0)`); }
-  private readonly table: 'initial_fork_credentials' | 'initial_repository_credentials';
+  constructor(private readonly storage: DurableObjectStorage, private readonly options: { table: 'initial_fork_credentials' | 'initial_repository_credentials' | 'initial_repository_read_credentials'; parse(value: unknown): Scope; repositoryName(scope: Scope): string }) { if (!['initial_fork_credentials','initial_repository_credentials','initial_repository_read_credentials'].includes(options.table)) throw Error('Invalid initial credential ledger'); this.table=options.table; storage.sql.exec(`CREATE TABLE IF NOT EXISTS ${this.table}(event_id TEXT PRIMARY KEY,payload TEXT NOT NULL,status TEXT NOT NULL,token TEXT,fingerprint TEXT,attempts INTEGER NOT NULL DEFAULT 0,automatic_sweeps INTEGER NOT NULL DEFAULT 0)`); }
+  private readonly table: 'initial_fork_credentials' | 'initial_repository_credentials' | 'initial_repository_read_credentials';
   private row(eventId: string) { z.uuid().parse(eventId); return this.storage.sql.exec<Row>(`SELECT * FROM ${this.table} WHERE event_id=?`, eventId).toArray()[0]; }
   /** Persist before fork dispatch. False is an existing immutable issuance intent,
    * not permission to repeat the fork or assume no credential was issued. */

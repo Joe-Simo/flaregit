@@ -1,3 +1,4 @@
+import {recordedAcceptedCommit} from "../accepted-commit-display";
 import React, { useEffect, useRef, useState } from "react";
 import { Monitor } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
@@ -9,10 +10,11 @@ import { preservePreviewLink } from "../preview-display";
 type GenerationRecovery = { canRecover: boolean; expectedGeneration: string | null; detail: string };
 import { generationRecoveryDraft, requestGenerationRecovery, type RecoveryDraft } from "../preview-generation-recovery";
 type PreviewStatus = { ready: true; status: "available"; url: string; expiresAt?: string; generationId?: string; generationRecovery?: GenerationRecovery; replacement?: { generationId: string; status: "requested" | "building" | "failed" | "quarantined" | "ready" } } | { ready: false; status: "failed" | "unavailable" | "pending" | "not_started"; canRetry: boolean; reason?: string; generationRecovery?: GenerationRecovery };
-interface LivePreviewProps { projectId: string; currentCommit: string; isOwner?: boolean }
+interface LivePreviewProps { projectId: string; currentCommit: string|null; isOwner?: boolean }
 
 /** The accepted artifact and its preparation state are separate from repository review. */
-export function LivePreview({ projectId, currentCommit, isOwner = false }: LivePreviewProps) {
+export function LivePreview(props:LivePreviewProps){if(!recordedAcceptedCommit(props.currentCommit))return null;return <CommittedLivePreview key={`${props.projectId}:${props.currentCommit}`} {...props} currentCommit={props.currentCommit}/>;}
+function CommittedLivePreview({ projectId, currentCommit, isOwner = false }: Omit<LivePreviewProps,"currentCommit">&{currentCommit:string}) {
   const scope = `${projectId}:${currentCommit}`;
   const [result, setResult] = useState<{ scope: string; preview: PreviewStatus } | null>(null);
   const displayedResult = useRef<{ scope: string; preview: PreviewStatus } | null>(null);

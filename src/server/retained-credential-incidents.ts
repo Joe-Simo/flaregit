@@ -42,7 +42,7 @@ export class RetainedCredentialIncidents {
     begin(input: RetainedInput, purpose: RetainedCredentialPurpose, expiresAt: number, scope: "read" | "write", validate?: () => void, now = Date.now()): boolean {
         const value = retainedInputSchema.parse(input);
         key(value.id, purpose);
-        if (value.protectedRef !== `refs/flaregit/inputs/${value.incarnation}/${value.taskId}/${value.commit}` || value.protectedBaseRef !== `refs/flaregit/inputs/${value.incarnation}/${value.taskId}/${value.base}` || !Number.isSafeInteger(now) || !Number.isSafeInteger(expiresAt) || expiresAt <= now || expiresAt > now + TTL_MS || (scope !== "read" && scope !== "write") || (value.followup && (purpose !== "canonical" || scope !== "read")))
+        if (value.protectedRef !== `refs/flaregit/inputs/${value.incarnation}/${value.taskId}/${value.commit}` || (value.base === null ? value.protectedBaseRef !== null : value.protectedBaseRef !== `refs/flaregit/inputs/${value.incarnation}/${value.taskId}/${value.base}`) || !Number.isSafeInteger(now) || !Number.isSafeInteger(expiresAt) || expiresAt <= now || expiresAt > now + TTL_MS || (scope !== "read" && scope !== "write") || (value.followup && (purpose !== "canonical" || scope !== "read")))
             throw new Error("Invalid retained credential issuance intent");
         const payload = JSON.stringify(value), repoName = purpose === "workspace" ? value.workspaceRepoName : value.canonicalRepoName;
         return this.storage.transactionSync(() => {

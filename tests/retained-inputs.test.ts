@@ -27,3 +27,20 @@ test("retained input receipts require exact remote proof and preserve immutable 
     expect(() => ledger.prepareApplication(scope, "e".repeat(40), application.base, true)).toThrow("identity changed");
     expect(() => ledger.record({ ...scope, protectedRef: `refs/flaregit/retained/${crypto.randomUUID()}/input` }, { commit: scope.commit, base: scope.base })).toThrow("scope changed");
 });
+
+test("unborn retention stores only actual contributor pin and frozen target with root proof",()=>{
+ const db=new Database(":memory:");
+ const storage={sql:{exec(query:string,...bindings:Array<string|number|null>){const rows=db.query(query).all(...bindings);return{toArray:()=>rows};}},transactionSync<T>(callback:()=>T){return db.transaction(callback)();}};
+ const ledger=new RetainedInputs(storage as unknown as DurableObjectStorage),incarnation=crypto.randomUUID(),commit="a".repeat(40);
+ const target={kind:"unborn" as const,projectId:"p123456789abc",incarnation,canonicalRepoName:"canonical",ref:"refs/heads/main",branch:"main",acceptedCommit:null,acceptedVersion:0 as const,policyVersion:1,policy:{kind:"git-integrity"},requirements:[] as []};
+ const scope:RetainedInput={id:crypto.randomUUID(),projectId:target.projectId,incarnation,taskId:"first",commit,base:null,canonicalRepoName:"canonical",workspaceRepoName:"workspace",branch:"task/first",protectedRef:`refs/flaregit/inputs/${incarnation}/first/${commit}`,protectedBaseRef:null,acceptedTarget:target,workflowId:"workflow",candidateId:"candidate",actorId:"actor",ownerId:"owner",accountKey:"a".repeat(12),version:1};
+ expect(()=>ledger.record(scope,{commit,base:null})).toThrow("root ancestry");
+ expect(()=>ledger.record({...scope,acceptedTarget:undefined},{commit,base:null,rootCommit:commit,rootAncestryVerified:true})).toThrow();
+ expect(()=>ledger.record({...scope,protectedBaseRef:`refs/flaregit/inputs/${incarnation}/first/${"0".repeat(40)}`},{commit,base:null,rootCommit:commit,rootAncestryVerified:true})).toThrow();
+ const proof={commit,base:null,rootCommit:commit,rootAncestryVerified:true};
+ const receipt=ledger.record(scope,proof);expect(receipt.base).toBeNull();expect(receipt.protectedBaseRef).toBeNull();expect(receipt.rootCommit).toBe(commit);
+ expect(ledger.lookup(scope.taskId,scope.candidateId,commit,null)).toEqual(receipt);
+ expect(ledger.lookup(scope.taskId,scope.candidateId,commit,"b".repeat(40))).toBeNull();
+ expect(ledger.record(scope,proof)).toEqual(receipt);
+ expect(()=>ledger.record(scope,{...proof,rootCommit:"b".repeat(40)})).toThrow("identity changed");
+});

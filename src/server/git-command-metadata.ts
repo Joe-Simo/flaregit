@@ -7,7 +7,8 @@ export function gitCloneCommand(remote:string,directory?:string,options:{branch?
  if(branch!==undefined&&!isSafeRef(branch))throw new Error("Invalid Git command identity");
  return `git clone${noCheckout?" --no-checkout":""}${branch?` --branch ${branch}`:""} ${remote}${directory?` ${directory} && cd ${directory}`:""}`;
 }
-export function taskGitCommands(input:{remote:string;taskId:string;branch:string;commit:string;stacked:boolean;replayed:boolean}):string[]{
- if(!isSafeRef(input.branch)||!/^[a-f0-9]{40}$/.test(input.commit))throw new Error("Invalid Git command identity");
+export function taskGitCommands(input:{remote:string;taskId:string;branch:string;commit:string|null;stacked:boolean;replayed:boolean}):string[]{
+ if(!isSafeRef(input.branch)||input.commit!==null&&!/^[a-f0-9]{40}$/.test(input.commit))throw new Error("Invalid Git command identity");
+ if(input.commit===null){if(input.stacked)throw new Error("Stacked change requires a committed parent checkpoint");return [gitCloneCommand(input.remote,input.taskId,{noCheckout:true}),`git checkout --orphan ${input.branch}   # create the first contribution commit`,`git push origin ${input.branch}`];}
  return [gitCloneCommand(input.remote,input.taskId,{noCheckout:true}),...(input.replayed?[`git checkout ${input.branch} || git checkout -b ${input.branch} ${input.commit}   # resume the saved commit and branch`]:[...(input.stacked?[`git checkout --detach ${input.commit}   # stacked: start from the recorded parent checkpoint`]:[]),`git checkout -b ${input.branch} ${input.commit}   # edit, then commit`,`git push origin ${input.branch}`])];
 }

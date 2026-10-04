@@ -1,5 +1,6 @@
 import { validateRecoveryRemote } from "./private-recovery-bundle";
 import { gitAuthEnv, q } from "./shell";
+import { acceptedTargetSchema, type UnbornAcceptedTarget } from "../core/accepted-target";
 
 export interface RetainedGitInput { ref: string; commit: string }
 export interface RetainGitInputOptions {
@@ -52,4 +53,22 @@ export async function retainGitInput(options: RetainGitInputOptions): Promise<Re
   }
   if(!await inspect())throw new Error("Retained input push was not confirmed");
   return {ref,commit};
+}
+
+/** Pin only real contributor history for an unborn target; there is no base object to pin. */
+export async function retainUnbornGitInput(options: RetainGitInputOptions & { acceptedTarget: UnbornAcceptedTarget }): Promise<RetainedGitInput & { base: null; protectedBaseRef: null; rootCommit: string; rootAncestryVerified: true }> {
+  retainedGitInputRef(options.incarnation,options.taskId,options.commit);
+  const target=acceptedTargetSchema.parse(options.acceptedTarget);
+  if(target.kind!=="unborn"||target.incarnation!==options.incarnation)throw new Error("Retained unborn target scope differs");
+  await options.beforeCommand("before");
+  const roots=await options.exec(`git --no-replace-objects -C ${q(options.directory)} rev-list --max-parents=0 ${q(options.commit)}`);
+  await options.beforeCommand("after");
+  const values=roots.stdout.trim().split("\n");
+  if(!roots.success||values.length!==1||!sha.test(values[0]!)||/^0{40}$/.test(values[0]!))throw new Error("Actual contributor root lineage is unavailable");
+  await options.beforeCommand("before");
+  const ancestry=await options.exec(`git --no-replace-objects -C ${q(options.directory)} merge-base --is-ancestor ${q(values[0]!)} ${q(options.commit)}`);
+  await options.beforeCommand("after");
+  if(!ancestry.success)throw new Error("Contributor root ancestry was not confirmed");
+  const retained=await retainGitInput(options);
+  return{...retained,base:null,protectedBaseRef:null,rootCommit:values[0]!,rootAncestryVerified:true};
 }

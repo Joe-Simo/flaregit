@@ -270,7 +270,7 @@ async function main() {
     return out(await api("POST", `/p/${repository}/comments`, { subject, idempotencyKey: request, body: rest[0] ?? fail('Usage: flaregit comment <repo> "<text>" --change ID [--path P --line N]'), ...(flag("path") ? { path: flag("path") } : {}), ...(line ? { line: Number(line) } : {}) }));
   }
   if (cmd === "candidates") {
-    const st = await api<{ candidates: Record<string, { id: string; status: string; candidateCommit?: string; participatingTaskIds: string[]; expectedAcceptedBase: string }> }>("GET", `/p/${await repo(sub)}/state`);
+    const st = await api<{ candidates: Record<string, { id: string; status: string; candidateCommit?: string; participatingTaskIds: string[]; expectedAcceptedBase: string | null }> }>("GET", `/p/${await repo(sub)}/state`);
     return out(Object.values(st.candidates).filter((c) => flags.has("all") || c.status === "awaiting_review").map((c) => ({ id: c.id, status: c.status, commit: c.candidateCommit ?? null, base: c.expectedAcceptedBase, changes: c.participatingTaskIds })));
   }
   if (cmd === "accept" || cmd === "reject") {

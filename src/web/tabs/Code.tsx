@@ -11,8 +11,10 @@ const BranchControls=lazy(async()=>({default:(await import("../components/Branch
 interface Commit { hash: string; message: string; author: { name: string }; committedAt: number }
 interface Entry { name: string; type: "blob" | "tree" }
 
-export function CodeTab({ projectId,isOwner=false }: { projectId: string;isOwner?:boolean }) { return <CodeBrowser key={projectId} projectId={projectId} isOwner={isOwner}/>; }
-function CodeBrowser({ projectId,isOwner }: { projectId: string;isOwner:boolean }) {
+export function UnbornCodeState(){return <Card><CardContent className="p-5 space-y-2"><h3 className="text-sm font-semibold">No accepted commit yet</h3><p className="text-sm text-muted-foreground">The recorded default branch has no accepted history. Create a contribution, push its first commit, and review it before acceptance.</p></CardContent></Card>;}
+
+export function CodeTab({ projectId,isOwner=false,acceptedCommit }: { projectId: string;isOwner?:boolean;acceptedCommit?:string|null }) { return <CodeBrowser key={projectId} projectId={projectId} acceptedCommit={acceptedCommit} isOwner={isOwner}/>; }
+function CodeBrowser({ projectId,isOwner,acceptedCommit }: { projectId: string;isOwner:boolean;acceptedCommit?:string|null }) {
   const [selection,setSelection]=useState<BranchSelection|null>(null);
   const [path, setPath] = useState("");
   const [entries, setEntries] = useState<Entry[] | null>(null);
@@ -25,6 +27,7 @@ function CodeBrowser({ projectId,isOwner }: { projectId: string;isOwner:boolean 
   const [,refreshRetry]=useState(0);
   useEffect(()=>{if(!error?.retryAt)return;const timer=setTimeout(()=>refreshRetry(value=>value+1),Math.min(2147483647,Math.max(0,error.retryAt-Date.now())));return()=>clearTimeout(timer);},[error]);
   const open = async (target: string, isFile: boolean, ref: string | null | undefined=loadedRevision.current) => {
+    if(acceptedCommit===null&&!ref){setEntries(null);setFile(null);setCommit(null);setPath("");setError(null);setLoading(null);return true;}
     const sequence=++requestSequence.current;requestController.current?.abort();const controller=new AbortController();requestController.current=controller;
     const suffix=ref ? `&ref=${encodeURIComponent(ref)}` : "";
     setError(null);
@@ -57,9 +60,9 @@ function CodeBrowser({ projectId,isOwner }: { projectId: string;isOwner:boolean 
   };
 
   useEffect(() => {
-    void open("", false);
+    if(selection===null)void open("", false,acceptedCommit);
     return()=>{requestSequence.current++;requestController.current?.abort();};
-  }, [projectId]);
+  }, [projectId,acceptedCommit===null]);
 
   const crumbs = path.split("/").filter(Boolean);
   const dir = file ? file.path.split("/").slice(0, -1).join("/") : path;
@@ -68,6 +71,7 @@ function CodeBrowser({ projectId,isOwner }: { projectId: string;isOwner:boolean 
     <div className="space-y-3 min-w-0">
       <h2 className="sr-only">Code</h2>
       <Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Loading branch controls…</p>}><BranchControls projectId={projectId} isOwner={isOwner} selection={selection} viewedCommit={commit?.hash??null} onSelect={async next=>{const opened=await open("",false,next.commit);if(opened)setSelection(next);return opened;}}/></Suspense>
+      {acceptedCommit===null&&!commit&&<UnbornCodeState/>}
       <nav aria-label="Path" className="flex items-center gap-1 text-sm flex-wrap min-w-0">
         <button className="font-semibold hover:underline" onClick={() => void open("", false)}>root</button>
         {(file ? file.path.split("/") : crumbs).map((c, i, all) => {
@@ -94,7 +98,7 @@ function CodeBrowser({ projectId,isOwner }: { projectId: string;isOwner:boolean 
           {error.status!==413 && <Button size="sm" variant="outline" disabled={loading !== null || Boolean(error.retryAt && error.retryAt>Date.now())} onClick={() => void open(error.target, error.isFile, error.ref ?? null)}>Retry this request</Button>}
         </div>
       )}
-      {file ? (
+      {acceptedCommit===null&&!commit?null:file ? (
         <Card>
           <CardContent className="p-0">
             <div className="px-4 py-2 border-b border-border text-xs text-muted-foreground flex flex-wrap justify-between gap-2">

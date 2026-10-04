@@ -7,7 +7,7 @@ export type AgentRunPhase = "claimed" | "proposed" | "pushed" | "checkpointed" |
 export interface AgentRunInput {
   readonly acceptedTarget?:FrozenAcceptedTarget;
   readonly targetGeneration?:{eventId:string;generation:number};
-  runId: string; taskId: string; startingCommit: string; startingBranchHead: string | null; branch: string; goal: string;
+  runId: string; taskId: string; startingCommit: string|null; startingBranchHead: string | null; branch: string; goal: string;
   context: { issue?: { number: number; title: string; summary: string }; comments: Array<{ id: string | number; summary: string }> };
   allowedScope: string[]; protectedPaths: string[];
 }
@@ -19,10 +19,10 @@ export interface AgentRunRecord extends AgentRunInput {
 export type AgentRunClaim = { kind: "claimed" | "existing" | "busy"; run: AgentRunRecord };
 const id = z.string().min(1).max(200).regex(/^[A-Za-z0-9_-]+$/);
 const sha = z.string().regex(/^[0-9a-f]{40}$/);
-const inputSchema = z.object({ targetGeneration:z.object({eventId:z.uuid(),generation:z.number().int().positive().safe()}).strict().optional(), acceptedTarget:acceptedTargetSchema.optional(), runId: id, taskId: id, startingCommit: sha, startingBranchHead: sha.nullable(), branch: z.string().refine(isSafeRef), goal: z.string().min(1).max(1000),
+const inputSchema = z.object({ targetGeneration:z.object({eventId:z.uuid(),generation:z.number().int().positive().safe()}).strict().optional(), acceptedTarget:acceptedTargetSchema.optional(), runId: id, taskId: id, startingCommit: sha.nullable(), startingBranchHead: sha.nullable(), branch: z.string().refine(isSafeRef), goal: z.string().min(1).max(1000),
   context: z.object({ issue: z.object({ number: z.number().int().positive(), title: z.string().max(1000), summary: z.string().max(6000) }).strict().optional(), comments: z.array(z.object({ id: z.union([id, z.number().int().nonnegative()]), summary: z.string().max(1500) }).strict()).max(20) }).strict(),
   allowedScope: z.array(z.string().min(1).max(500)).min(1).max(100), protectedPaths: z.array(z.string().min(1).max(500)).max(100),
-}).strict();
+}).strict().refine(input=>input.startingCommit!==null||(input.acceptedTarget?.kind==="unborn"&&input.startingBranchHead===null&&!input.targetGeneration),"An absent starting commit requires an explicit unborn target");
 const proposalSchema = z.record(z.string(), z.string()).refine((files) => Object.keys(files).length > 0 && Object.keys(files).length <= 100 && new TextEncoder().encode(JSON.stringify(files)).length <= 120_000);
 
 /** Repository-local durable run ownership. No clock expiration can steal a live

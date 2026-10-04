@@ -27,3 +27,5 @@ test("generated commands honor the saved branch and commit when remote HEAD poin
   await run(["sh","-c",gitCloneCommand(fixtureRemote,"canonical",{branch:"codex/source"})]);expect(await run(["git","branch","--show-current"],join(directory,"canonical"))).toBe("codex/source");expect(await run(["git","rev-parse","HEAD"],join(directory,"canonical"))).toBe(saved);
  }finally{server.stop(true);await rm(directory,{recursive:true,force:true});}
 });
+
+test("unborn contribution commands create an orphan without inventing a commit",()=>{const commands=taskGitCommands({remote,taskId,branch,commit:null,stacked:false,replayed:true});expect(commands[1]).toBe(`git checkout --orphan ${branch}   # create the first contribution commit`);expect(commands.join("\n")).not.toContain("null");expect(()=>taskGitCommands({remote,taskId,branch,commit:null,stacked:true,replayed:false})).toThrow("committed parent");});

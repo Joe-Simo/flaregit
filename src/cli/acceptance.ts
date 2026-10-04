@@ -13,10 +13,10 @@ const receiptSchema = z.object({
   contextComments: z.array(z.object({ subject: z.string(), id: z.number() })).optional(), pendingAction: z.string().optional(), pendingAgents: z.array(z.string()).optional(), integration: z.string().optional(), observations: z.array(z.unknown()), verification: z.object({ commit: sha, cloneHead: sha, verifiedAt: z.string() }).optional(),
 });
 type Receipt = z.infer<typeof receiptSchema>;
-const stateSchema = z.object({
-  acceptedState: z.object({ currentCommit: sha }),
-  tasks: z.record(z.string(), z.object({ status: z.string(), agentWorkflowInstanceId: z.string().optional(), baseCommit: sha, currentCommit: sha, checkpoints: z.array(z.object({ commitHash: sha, timestamp: z.string(), filesChanged: z.array(z.string()) })) })),
-  candidates: z.record(z.string(), z.object({ status: z.string(), candidateCommit: sha.optional(), expectedAcceptedBase: sha, evidenceId: z.string().optional(), workflowInstanceId: z.string().optional(), compositionMethod: z.string().optional(), repairAttempts: z.array(z.object({ round: z.number(), affectedContracts: z.array(z.string()), timestamp: z.string(), durationMs: z.number() })), review: z.object({ approved: z.boolean(), at: z.string(), commit: sha }).optional() })),
+export const acceptanceStateSchema = z.object({
+  acceptedState: z.union([z.object({ kind: z.literal("unborn"), currentCommit: z.null() }), z.object({ kind: z.literal("committed").optional(), currentCommit: sha })]),
+  tasks: z.record(z.string(), z.object({ status: z.string(), agentWorkflowInstanceId: z.string().optional(), baseCommit: sha.nullable(), currentCommit: sha.nullable(), checkpoints: z.array(z.object({ commitHash: sha, timestamp: z.string(), filesChanged: z.array(z.string()) })) })),
+  candidates: z.record(z.string(), z.object({ status: z.string(), candidateCommit: sha.optional(), expectedAcceptedBase: sha.nullable(), acceptedTarget: z.object({ kind: z.enum(["unborn", "committed"]).optional(), acceptedCommit: sha.nullable(), acceptedVersion: z.number().int(), requirements: z.array(z.unknown()) }).optional(), evidenceId: z.string().optional(), workflowInstanceId: z.string().optional(), compositionMethod: z.string().optional(), repairAttempts: z.array(z.object({ round: z.number(), affectedContracts: z.array(z.string()), timestamp: z.string(), durationMs: z.number() })), review: z.object({ approved: z.boolean(), at: z.string(), commit: sha }).optional() }).refine(candidate => candidate.expectedAcceptedBase !== null || (candidate.acceptedTarget?.kind === "unborn" && candidate.acceptedTarget.acceptedCommit === null && candidate.acceptedTarget.acceptedVersion === 0 && candidate.acceptedTarget.requirements.length === 0), { message: "An unborn candidate requires its explicit frozen unborn target" })),
   evidence: z.record(z.string(), z.object({ status: z.string() })), decisions: z.record(z.string(), z.unknown()),
 });
 
@@ -31,6 +31,10 @@ export async function saveReceipt(file: string, receipt: Receipt) {
 }
 
 class AcceptanceError extends Error {}
+export function requireAcceptedCommit(state: z.infer<typeof acceptanceStateSchema>): string {
+  if (state.acceptedState.currentCommit === null) throw new AcceptanceError("This repository has no accepted commit yet. Review and accept its first real contribution before proving durable integration.");
+  return state.acceptedState.currentCommit;
+}
 
 export function assertReceiptOrigin(stored: string, configured: string) {
   const expected = new URL(configured), actual = new URL(stored);
@@ -155,7 +159,7 @@ async function main() {
   }
   if (!receipt.projectId) throw new AcceptanceError("Prepare did not finish repository creation; inspect the owned account before retrying");
   const prefix = `/p/${receipt.projectId}`;
-  const state = await api(`${prefix}/state`, stateSchema);
+  const state = await api(`${prefix}/state`, acceptanceStateSchema);
   if (phase === "integrate") {
     if (receipt.integration) throw new AcceptanceError("An integration is already recorded; inspect status rather than enqueueing another");
     if (receipt.tasks.length !== 2 || !receipt.tasks.every((id) => state.tasks[id]?.status === "ready")) throw new AcceptanceError("Both actual agent changes must be ready before integration; inspect failures in the app");
@@ -177,7 +181,7 @@ async function main() {
       if (cursor) query.set("cursor", cursor);
       return api(`${prefix}/comments?${query}`, z.object({ comments: z.array(z.object({ id: z.number() })).max(100), nextCursor: z.string().max(4096).nullable() }));
     })));
-    const observation = { exercise: receipt.exercise ?? "comment-only-hosted-diagnostic", pendingAction: receipt.pendingAction ?? null, pendingAgents: receipt.pendingAgents ?? [], recordedContextComments: receipt.contextComments ?? [], context, at: new Date().toISOString(), acceptedCommit: state.acceptedState.currentCommit,
+    const observation = { exercise: receipt.exercise ?? "comment-only-hosted-diagnostic", pendingAction: receipt.pendingAction ?? null, pendingAgents: receipt.pendingAgents ?? [], recordedContextComments: receipt.contextComments ?? [], context, at: new Date().toISOString(), acceptedCommit: state.acceptedState.currentCommit, acceptedHistory: state.acceptedState.currentCommit === null ? "unborn; no accepted commit" : "committed",
       tasks: receipt.tasks.map((id) => ({ id, ...state.tasks[id] })), candidates: state.candidates,
       checks: Object.entries(state.evidence).map(([id, evidence]) => ({ id, status: evidence.status })), decisionIds: Object.keys(state.decisions), runs };
     receipt.observations.push(observation); await saveReceipt(file, receipt);
@@ -185,7 +189,7 @@ async function main() {
     if (Object.values(state.candidates).some((c) => c.status === "awaiting_review")) console.log("Pending human acceptance: inspect the exact candidate diff and checks in the app. This runner never approves review.");
     return;
   }
-  const accepted = state.acceptedState.currentCommit;
+  const accepted = requireAcceptedCommit(state);
   const landed = Object.values(state.candidates).find((c) => c.status === "accepted" && c.candidateCommit === accepted && c.review?.approved && c.review.commit === accepted);
   if (!landed || accepted === receipt.base) throw new AcceptanceError("No reviewed, accepted landing matching the current committed state. Finish human review in the app, then retry verify.");
   const credential = await api(`${prefix}/clone`, z.object({ remote: z.string().url(), token: z.string().min(1) }), {});
@@ -210,7 +214,7 @@ async function main() {
     if (cloneHead !== accepted) throw new AcceptanceError("Fresh native clone differs from observed accepted state; inspect concurrent landings before retrying");
     await git(["-C", checkout, "cat-file", "-e", `${accepted}^{commit}`]);
     await git(["-C", checkout, "fsck", "--no-reflogs", "--full"]);
-    const freshState = await api(`${prefix}/state`, stateSchema);
+    const freshState = await api(`${prefix}/state`, acceptanceStateSchema);
     if (freshState.acceptedState.currentCommit !== accepted) throw new AcceptanceError("Accepted state advanced during verification; rerun verify for a consistent receipt");
     receipt.verification = { commit: accepted, cloneHead: sha.parse(cloneHead), verifiedAt: new Date().toISOString() };
     await saveReceipt(file, receipt);

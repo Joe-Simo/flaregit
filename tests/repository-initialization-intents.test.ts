@@ -1,8 +1,8 @@
 import { Database } from 'bun:sqlite';
 import { expect, test } from 'bun:test';
-import { RepositoryInitializationIntents, type RepositoryInitializationScope } from '../src/server/repository-initialization-intents';
+import { RepositoryInitializationIntents, type RepositoryInitializationScope, type ReadmeRepositoryInitializationScope, type RepositoryEmptyProof } from '../src/server/repository-initialization-intents';
 function fixture() { const db = new Database(':memory:'), storage = { sql: { exec(query: string, ...bindings: Array<string | number>) { const rows = db.query(query).all(...bindings); return { toArray: () => rows }; } }, transactionSync<T>(fn: () => T) { return db.transaction(fn)(); } } as unknown as DurableObjectStorage; return { db, ledger: new RepositoryInitializationIntents(storage) }; }
-function scope(): RepositoryInitializationScope { return { requestId: crypto.randomUUID(), eventId: crypto.randomUUID(), allocationId: crypto.randomUUID(), projectId: 'project', incarnation: crypto.randomUUID(), canonicalRepoName: 'canonical', accountKey: 'account', actorId: 'Original_Actor', name: 'Example', description: 'Requested README', defaultBranch: 'release', readme: '# Example\n\nRequested README\n', authorName: 'Original author', authorEmail: 'account@users.noreply.flaregit.com', commitTimestamp: '2026-10-04T00:00:00.000Z' }; }
+function scope(): ReadmeRepositoryInitializationScope { return { requestId: crypto.randomUUID(), eventId: crypto.randomUUID(), allocationId: crypto.randomUUID(), projectId: 'project', incarnation: crypto.randomUUID(), canonicalRepoName: 'canonical', accountKey: 'account', actorId: 'Original_Actor', name: 'Example', description: 'Requested README', defaultBranch: 'release', readme: '# Example\n\nRequested README\n', authorName: 'Original author', authorEmail: 'account@users.noreply.flaregit.com', commitTimestamp: '2026-10-04T00:00:00.000Z' }; }
 const metadata = { id: 'provider-id', name: 'canonical', remote: 'https://provider.example/canonical.git' };
 test('initialization becomes ready only after real-shaped commit and exact positive credential/native receipts', async () => {
   const f = fixture(), intent = scope();
@@ -74,4 +74,52 @@ test('lost push acknowledgement preserves original author/time/SHA and requires 
     f.ledger.confirmPublished(intent.eventId, commit); expect(f.ledger.complete(intent.eventId, () => {}).phase).toBe('ready');
     expect(f.ledger.get(intent.eventId)?.commit).toEqual(commit);
   } finally { f.db.close(); }
+});
+
+function emptyScope():RepositoryInitializationScope{return {...scope(),initialization:'empty',readme:null,authorName:null,authorEmail:null,commitTimestamp:null};}
+test('empty initialization records authoritative absence and cleanup without inventing initial history',async()=>{
+ const f=fixture(),intent=emptyScope();try{
+  const prepared=f.ledger.prepare(intent,()=>{});expect(prepared.scope.initialization).toBe('empty');
+  expect(f.ledger.beginCreate(intent.eventId,()=>{})).toBe(true);
+  await f.ledger.recordCreated(intent.eventId,{...metadata,defaultBranch:'release'},'synthetic-empty-token');
+  expect(await f.ledger.confirmCredentialRevoked(intent.eventId,'synthetic-empty-token',{repoName:'canonical',revoked:true})).toBe(true);
+  expect(f.ledger.beginNative(intent.eventId,`empty-${intent.eventId}`,()=>{})).toBe(true);
+  expect(f.ledger.beginReadCredential(intent.eventId,()=>{})).toBe(true);await f.ledger.recordReadCredential(intent.eventId,'synthetic-empty-read-token');
+  const proof:RepositoryEmptyProof={repositoryId:metadata.id,canonicalRepoName:'canonical',defaultRef:'refs/heads/release',refs:[],symbolicHead:null};
+  expect(()=>f.ledger.complete(intent.eventId,()=>{})).toThrow('unconfirmed');
+  expect(()=>f.ledger.recordEmpty(intent.eventId,{...proof,repositoryId:'other'})).toThrow('scope');
+  expect(()=>f.ledger.recordEmpty(intent.eventId,{...proof,symbolicHead:'refs/heads/main'})).toThrow('scope');
+  f.ledger.recordEmpty(intent.eventId,proof);expect(f.ledger.get(intent.eventId)?.phase).toBe('empty_verified');
+  expect(()=>f.ledger.recordCommit(intent.eventId,{head:'a'.repeat(40),tree:'b'.repeat(40),defaultBranch:'release'})).toThrow('native intent');
+  expect(()=>f.ledger.beginPush(intent.eventId,()=>{})).toThrow('initial Git publication');
+  expect(()=>f.ledger.complete(intent.eventId,()=>{})).toThrow('unconfirmed');
+  expect(f.ledger.confirmNativeStopped(intent.eventId,{name:`empty-${intent.eventId}`,stopped:true,sealed:true})).toBe(true);
+  expect(()=>f.ledger.complete(intent.eventId,()=>{})).toThrow('unconfirmed');
+  expect(await f.ledger.confirmReadCredentialRevoked(intent.eventId,'synthetic-empty-read-token',{repoName:'wrong',revoked:true})).toBe(false);
+  expect(()=>f.ledger.complete(intent.eventId,()=>{})).toThrow('unconfirmed');
+  expect(await f.ledger.confirmReadCredentialRevoked(intent.eventId,'synthetic-empty-read-token',{repoName:'canonical',revoked:true})).toBe(true);
+  const ready=f.ledger.complete(intent.eventId,()=>{});expect(ready.phase).toBe('ready');expect(ready.emptyProof).toEqual(proof);expect(ready.commit).toBeUndefined();expect(ready.published).toBeUndefined();
+  expect(f.ledger.complete(intent.eventId,()=>{})).toEqual(ready);expect(f.ledger.getByRequest(intent.requestId,intent.actorId)?.scope).toEqual(intent);
+  expect(()=>f.ledger.prepare({...intent,defaultBranch:'main'},()=>{})).toThrow('identity');
+ }finally{f.db.close();}
+});
+test('unadvertised empty HEAD requires the actual matching SDK default branch receipt',async()=>{
+ const f=fixture(),intent=emptyScope();try{
+  f.ledger.prepare(intent,()=>{});f.ledger.beginCreate(intent.eventId,()=>{});await f.ledger.recordCreated(intent.eventId,metadata,'synthetic-empty-token');await f.ledger.confirmCredentialRevoked(intent.eventId,'synthetic-empty-token',{repoName:'canonical',revoked:true});f.ledger.beginNative(intent.eventId,`empty-${intent.eventId}`,()=>{});f.ledger.beginReadCredential(intent.eventId,()=>{});await f.ledger.recordReadCredential(intent.eventId,'synthetic-empty-read-token');
+  const proof:RepositoryEmptyProof={repositoryId:metadata.id,canonicalRepoName:'canonical',defaultRef:'refs/heads/release',refs:[],symbolicHead:null};
+  expect(()=>f.ledger.recordEmpty(intent.eventId,proof)).toThrow('HEAD proof');
+  f.ledger.recordEmpty(intent.eventId,{...proof,symbolicHead:'refs/heads/release'});
+  expect(f.ledger.get(intent.eventId)?.emptyProof?.symbolicHead).toBe('refs/heads/release');
+  expect(()=>f.ledger.recordEmpty(intent.eventId,{...proof,symbolicHead:'refs/heads/main'})).toThrow('scope');
+ }finally{f.db.close();}
+});
+
+test('lost empty READ issuance stays held rather than minting twice or inferring cleanup',async()=>{
+ const f=fixture(),intent=emptyScope();try{
+  f.ledger.prepare(intent,()=>{});f.ledger.beginCreate(intent.eventId,()=>{});await f.ledger.recordCreated(intent.eventId,{...metadata,defaultBranch:'release'},'synthetic-empty-token');await f.ledger.confirmCredentialRevoked(intent.eventId,'synthetic-empty-token',{repoName:'canonical',revoked:true});f.ledger.beginNative(intent.eventId,`empty-${intent.eventId}`,()=>{});
+  expect(f.ledger.beginReadCredential(intent.eventId,()=>{})).toBe(true);expect(f.ledger.beginReadCredential(intent.eventId,()=>{})).toBe(false);
+  expect(f.ledger.readCredentials.summary(intent.eventId)?.status).toBe('issuance_unknown');
+  expect(()=>f.ledger.recordEmpty(intent.eventId,{repositoryId:metadata.id,canonicalRepoName:'canonical',defaultRef:'refs/heads/release',refs:[],symbolicHead:null})).toThrow('Active empty');
+  f.ledger.confirmNativeStopped(intent.eventId,{name:`empty-${intent.eventId}`,stopped:true,sealed:true});expect(()=>f.ledger.complete(intent.eventId,()=>{})).toThrow('unconfirmed');expect(f.ledger.get(intent.eventId)?.phase).toBe('native_possible');
+ }finally{f.db.close();}
 });

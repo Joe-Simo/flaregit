@@ -39,7 +39,7 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
     if(!selectedTarget){if(durable?.acceptedTarget)throw new Error("Saved agent accepted target binding changed");return;}
     const target=acceptedTargetSchema.parse(selectedTarget);
     if(currentState.policyVersion!==state.policyVersion)throw new Error("Repository policy changed during bound agent execution");
-    if(!currentTarget||target.projectId!==currentState.projectId||target.canonicalRepoName!==currentState.canonicalRepoName||!SHA.test(task.baseCommit)||!task.dependsOn&&task.baseCommit!==target.acceptedCommit)throw new Error("Agent accepted target scope or recorded base changed");
+    if(!currentTarget||target.projectId!==currentState.projectId||target.canonicalRepoName!==currentState.canonicalRepoName||!(task.baseCommit===null?target.kind==="unborn":SHA.test(task.baseCommit))||!task.dependsOn&&task.baseCommit!==target.acceptedCommit)throw new Error("Agent accepted target scope or recorded base changed");
     assertCompatibleAcceptedTargetBatch([target,currentTarget]);
     if(task.dependsOn){const parent=currentState.tasks[task.dependsOn];if(!parent?.acceptedTarget)throw new Error("Agent stack target is unavailable");const parentTarget=acceptedTargetSchema.parse(effectiveTaskAcceptedTarget(parent));if(parent.status==="accepted"){if((["projectId","incarnation","canonicalRepoName","ref","branch"] as const).some(key=>target[key]!==parentTarget[key]))throw new Error("Accepted parent target identity differs");}else assertCompatibleAcceptedTargetBatch([target,parentTarget]);}
     if(durable){if(!durable.acceptedTarget)throw new Error("Saved agent run has no frozen accepted target");assertCompatibleAcceptedTargetBatch([target,durable.acceptedTarget]);}
@@ -117,8 +117,9 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
     if (ownership.kind === "busy" || ownership.run.runId !== runId) throw new Error("Another durable agent generation owns this change");
     durable = ownership.run;
     assertTarget();
+    if (durable.startingCommit===null && (selectedTarget?.kind!=="unborn" || durable.startingBranchHead!==null)) throw new Error("An absent baseline requires an unchanged unborn target and empty workspace branch");
     if (durable.taskId !== task.id || durable.branch !== task.workspace.branch || durable.phase === "failed") throw new Error("Agent generation is unavailable; inspect its saved proposal and branch");
-    r = await run(`git -C ${WORK} checkout --quiet -B ${q(task.workspace.branch)} ${q(durable.startingCommit)}`);
+    r = await run(durable.startingCommit===null ? `git -C ${WORK} checkout --quiet --orphan ${q(task.workspace.branch)} && git -C ${WORK} rm --quiet -rf --ignore-unmatch .` : `git -C ${WORK} checkout --quiet -B ${q(task.workspace.branch)} ${q(durable.startingCommit)}`);
     if (!r.success) throw new Error("Agent could not restore its branch; no changes were made");
     const frozenTask = { ...task, goal: durable.goal, allowedScope: durable.allowedScope };
     if (!durable.proposal) {
@@ -135,8 +136,8 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
         if (content.length > MAX_FILE_BYTES || total + content.length > MAX_CONTEXT_BYTES) continue;
         total += content.length; files[file] = content;
       }
-      const acceptedContext=durable.acceptedTarget?`Existing accepted behavior on ${durable.acceptedTarget.ref} at ${durable.acceptedTarget.acceptedCommit} (preserve unless this task explicitly proposes a change):\n${durable.acceptedTarget.requirements.filter(requirement=>requirement.status==="approved").map(requirement=>`- ${requirement.title}: ${requirement.description}`).join("\n")}`:"";
-      const context = [acceptedContext,durable.context.issue ? `Issue #${durable.context.issue.number}: ${durable.context.issue.title}\n${durable.context.issue.summary}` : "", ...durable.context.comments.map((comment) => comment.summary), `Continue from saved Git commit ${durable.startingCommit}.`].filter(Boolean).join("\n\n");
+      const acceptedContext=durable.acceptedTarget&&durable.acceptedTarget.kind!=="unborn"?`Existing accepted behavior on ${durable.acceptedTarget.ref} at ${durable.acceptedTarget.acceptedCommit} (preserve unless this task explicitly proposes a change):\n${durable.acceptedTarget.requirements.filter(requirement=>requirement.status==="approved").map(requirement=>`- ${requirement.title}: ${requirement.description}`).join("\n")}`:"";
+      const context = [acceptedContext,durable.context.issue ? `Issue #${durable.context.issue.number}: ${durable.context.issue.title}\n${durable.context.issue.summary}` : "", ...durable.context.comments.map((comment) => comment.summary), durable.startingCommit===null ? "Create the first contribution in this empty Git repository; no existing commit or accepted behavior exists." : `Continue from saved Git commit ${durable.startingCommit}.`].filter(Boolean).join("\n\n");
       const ai = new WorkersAIClient({ binding: env.AI, gatewayId: env.AI_GATEWAY_ID, model: DEFAULT_CODE_MODEL, maxCalls: spending.maxCalls, maxOutputTokens: spending.maxOutputTokens, beforeDispatch: async ({ model, inputBytes, maxOutputTokens }) => {
         if (model !== DEFAULT_CODE_MODEL || Date.now() >= deadline) throw new Error("Managed execution model or deadline unavailable");
         await authorize();
@@ -173,7 +174,7 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
     if (!r.success) throw new Error("Agent could not reconstruct its saved proposal commit");
     const commit = (await run(`git -C ${WORK} rev-parse HEAD`)).stdout.trim();
     if (!SHA.test(commit) || (durable.pushedCommit && durable.pushedCommit !== commit)) throw new Error("Reconstructed proposal differs from the saved pushed commit");
-    const changed = await run(`git -C ${WORK} diff --name-only -z ${q(durable.startingCommit)} ${q(commit)}`);
+    const changed = await run(durable.startingCommit===null ? `git -C ${WORK} diff-tree --root --no-commit-id --name-only -r -z ${q(commit)}` : `git -C ${WORK} diff --name-only -z ${q(durable.startingCommit)} ${q(commit)}`);
     if (!changed.success) throw new Error("Agent could not inspect its saved proposal");
     const filesChanged = changed.stdout.split("\0").filter(Boolean);
     assertAgentWrites({ allowedScope: durable.allowedScope }, filesChanged, durable.protectedPaths);

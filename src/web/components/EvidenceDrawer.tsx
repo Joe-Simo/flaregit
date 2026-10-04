@@ -66,7 +66,7 @@ export function EvidenceDrawer({
 
                     <div className="grid grid-cols-2 gap-2 text-[11px] font-mono text-muted-foreground pt-1 border-t border-border/40">
                       <div>Commit: {latestEvidence.candidateCommit.slice(0, 7)}</div>
-                      <div>Base: {latestEvidence.expectedAcceptedBase.slice(0, 7)}</div>
+                      <div>Base: {latestEvidence.expectedAcceptedBase?.slice(0, 7)??"empty accepted history"}</div>
                       <div>Toolchain: {latestEvidence.toolchainDigest}</div>
                       <div>Output Digest: {latestEvidence.builtOutputDigest.slice(0, 16)}...</div>
                     </div>
@@ -187,7 +187,7 @@ export function EvidenceDrawer({
                     </Badge>
                   </div>
                   <div className="text-[11px] text-muted-foreground">
-                    Expected Head: {entry.expectedHead.slice(0, 7)}
+                    Expected Head: {entry.expectedHead?.slice(0, 7)??"empty accepted history"}
                   </div>
                   <div className="text-[11px] text-muted-foreground">
                     New Head: {entry.newHead.slice(0, 7)}

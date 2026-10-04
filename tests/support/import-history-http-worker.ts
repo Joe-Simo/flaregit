@@ -4,6 +4,7 @@ import {RepositoryController} from '../../src/server/durable-object';
 import {accountKeyFor} from '../../src/server/projects';
 import {ImportHistoryAttempts} from '../../src/server/import-history-attempts';
 import type {Env} from '../../src/server/env';
+import type {FlareGitProjectState} from '../../src/core/types';
 const projectId='p123456789abc',head='a'.repeat(40),canonicalRepoName='fixture';
 const calls:string[]=[];let lastDispatch:unknown=null;let providerStatus='unavailable';
 export class HistoryNativeFixture extends DurableObject {
@@ -22,7 +23,7 @@ export class HistoryHttpFixture extends RepositoryController {
  driftJob(){this.ctx.storage.sql.exec("UPDATE import_jobs SET doc=json_set(doc,'$.importedBranch','release') WHERE id=?",projectId);}
 
  async moveAcceptedHead(){await this.ctx.storage.put('syntheticAcceptedHead','b'.repeat(40));}
- override async getState(){const state=await super.getState();const moved=await this.ctx.storage.get<string>('syntheticAcceptedHead');return moved?{...state,acceptedState:{...state.acceptedState,currentCommit:moved}}:state;}
+ override async getState():Promise<FlareGitProjectState>{const state=await super.getState();const moved=await this.ctx.storage.get<string>('syntheticAcceptedHead');if(!moved)return state;if(state.acceptedState.kind==='unborn'||state.acceptedState.currentCommit===null)throw new Error('Committed import fixture state required');return{...state,acceptedState:{...state.acceptedState,currentCommit:moved}};}
  async cleanupAttempt(id:string,mode:string){const key=await accountKeyFor('owner');await this.beginHistoryInspection(id,key,head);const ledger=new ImportHistoryAttempts(this.ctx.storage);const first=ledger.start(id,0);if(mode==='saved')return first;ledger.observed(id,1,'terminated');ledger.nativeStopped(id,1,first.nativeRunId);const latest=ledger.start(id,1);ledger.dispatchUnknown(id,2);if(mode==='native-unknown')ledger.nativeAllocationIntent(id,2);return latest;}
  nativePossible(id:string){const ledger=new ImportHistoryAttempts(this.ctx.storage),attempt=ledger.get(id)!;return ledger.nativeAllocationIntent(id,attempt.generation);}
  async pauseNative(id:string){const attempt=new ImportHistoryAttempts(this.ctx.storage).get(id)!;await this.pauseHistoryInspection(id,'native_execution_unavailable',{generation:attempt.generation,workflowId:attempt.workflowId});return attempt;}

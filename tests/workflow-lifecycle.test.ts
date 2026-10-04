@@ -14,11 +14,11 @@ import {RetainedCredentialIncidents} from "../src/server/retained-credential-inc
 import {CoreGitOperationLedger} from "../src/server/core-git-budget";
 const fixtureRemote="https://"+"a".repeat(32)+".artifacts.cloudflare.net/repo";
 /** Synthetic authority fixture; receipt and funding modules use real SQLite. Git refs use local bare repositories. */
-function retainedFixture(base:string,commit:string,candidateId:string){
+function retainedFixture(base:string|null,commit:string,candidateId:string,acceptedTarget?:import("../src/core/accepted-target").UnbornAcceptedTarget,additional:Record<string,string>={}){
  const db=new Database(':memory:');const storage={sql:{exec(query:string,...bindings:Array<string|number>){const rows=db.query(query).all(...bindings);return{toArray:()=>rows,one:()=>rows[0]};}},transactionSync<T>(callback:()=>T){return db.transaction(callback)();}} as unknown as DurableObjectStorage;
  const pins=new RetainedInputs(storage),credentials=new RetainedCredentialIncidents(storage),funding=new CoreGitOperationLedger(storage);const issued=new Map<string,RetainedInput>();
  return {savedPins:()=>db.query<{doc:string},[]>("SELECT doc FROM retained_inputs").all().map(row=>JSON.parse(row.doc) as RetainedInput),pendingCredentials:()=>db.query<{n:number},[]>("SELECT COUNT(*) AS n FROM retained_credential_incidents WHERE status<>'revoked'").get()!.n,reserveCoreGitOperation:async(id:string,key:string)=>funding.reserve(id,key,{accountUsdMicros:10000000,globalUsdMicros:10000000}),
- prepareRetainedInput:async(taskId:string,workflowId:string,selectedCandidate:string,id:string)=>{if(taskId!=='one'||workflowId!=='registered-parent'||selectedCandidate!==candidateId)throw Error('Synthetic authority scope mismatch');const incarnation='11111111-1111-4111-8111-111111111111';const input=retainedInputSchema.parse({id,version:1,projectId:'p123456789abc',incarnation,taskId,commit,base,canonicalRepoName:'repo',workspaceRepoName:'repo',branch:'task/one',protectedRef:`refs/flaregit/inputs/${incarnation}/${taskId}/${commit}`,protectedBaseRef:`refs/flaregit/inputs/${incarnation}/${taskId}/${base}`,workflowId,candidateId,actorId:'fixture-human',ownerId:'fixture-human',accountKey:await accountKeyFor('fixture-human')});issued.set(id,input);return input;},
+ prepareRetainedInput:async(taskId:string,workflowId:string,selectedCandidate:string,id:string)=>{if((taskId!=='one'&&!additional[taskId])||workflowId!=='registered-parent'||selectedCandidate!==candidateId)throw Error('Synthetic authority scope mismatch');const incarnation='11111111-1111-4111-8111-111111111111';const selectedCommit=additional[taskId]??commit;const input=retainedInputSchema.parse({id,version:1,projectId:'p123456789abc',incarnation,taskId,commit:selectedCommit,base,canonicalRepoName:'repo',workspaceRepoName:'repo',branch:`task/${taskId}`,protectedRef:`refs/flaregit/inputs/${incarnation}/${taskId}/${selectedCommit}`,protectedBaseRef:base===null?null:`refs/flaregit/inputs/${incarnation}/${taskId}/${base}`,...(acceptedTarget?{acceptedTarget}:{}),workflowId,candidateId,actorId:'fixture-human',ownerId:'fixture-human',accountKey:await accountKeyFor('fixture-human')});issued.set(id,input);return input;},
  assertRetainedInput:async(input:RetainedInput)=>JSON.stringify(issued.get(input.id))===JSON.stringify(retainedInputSchema.parse(input)),
  beginRetainedCredential:async(...args:Parameters<RetainedCredentialIncidents['begin']>)=>credentials.begin(...args),recordRetainedCredential:async(...args:Parameters<RetainedCredentialIncidents['record']>)=>credentials.record(...args),
  revokeRetainedCredential:async(id:string,purpose:'workspace'|'canonical')=>{const receipt=credentials.credentialForRevocation(id,purpose);if(!receipt)return false;credentials.markAttempt(id,purpose);await credentials.markRevoked(id,purpose,receipt.token);return true;},
@@ -81,7 +81,7 @@ test("publication releases its ephemeral checkout while preserving the reviewed 
     const publication = { id: "test", expectedAcceptedBase: base,participatingTaskIds:["one"] } as CandidateGeneration;
     const denied = await callable.casPush(publication, commit, ledger, "main");
     expect(denied.ok).toBe(false);
-    expect(await git(["--git-dir", canonical, "rev-parse", "main"])).toBe(base);
+    if(base===null)expect(await git(["--git-dir",canonical,"for-each-ref","--format=%(refname)","refs/heads/main"])).toBe("");else expect(await git(["--git-dir", canonical, "rev-parse", "main"])).toBe(base);
     authorized=true;withdrawAfterFunding=true;publicationReadbackObserved=false;
     const withdrawn=await callable.casPush(publication,commit,ledger,"main");expect(withdrawn.ok).toBe(false);expect(await git(["--git-dir",canonical,"rev-parse","main"])).toBe(base);expect(retention.pendingCredentials()).toBe(0);
     withdrawAfterFunding=false;
@@ -120,7 +120,7 @@ test("operation error survives failed shutdown and cleanup failure becomes durab
   expect(activities).toEqual(["container.cleanup_failed"]);
 });
 
-test.each(["normal","evidence-failure","preview-failure","git-integrity"] as const)("candidate remains durable through optional storage state: %s", async (mode) => {
+test.each(["normal","evidence-failure","preview-failure","git-integrity","unborn-one","unborn-batch","unborn-conflict"] as const)("candidate remains durable through optional storage state: %s", async (mode) => {
   const uploadFails=mode==="evidence-failure",previewFails=mode==="preview-failure";
   const root = await mkdtemp(join(tmpdir(), "external-workflow-"));
   const canonical = join(root, "canonical.git"), seed = join(root, "seed"), work = join(root, "integration");
@@ -133,11 +133,15 @@ test.each(["normal","evidence-failure","preview-failure","git-integrity"] as con
     await git(["init", "--bare", "--initial-branch=main", canonical]); await git(["clone", canonical, seed]);
     await import("node:fs/promises").then(fs=>fs.mkdir(join(seed,"src"),{recursive:true})); await Bun.write(join(seed, "src/feature.ts"), "throw new Error('Customer code must never execute');");
     await git(["-C", seed, "add", "."]); await git(["-C", seed, "commit", "-m", "base"]); await git(["-C", seed, "push", "origin", "main"]);
-    const base = await git(["-C", seed, "rev-parse", "HEAD"]);
+    const base = mode.startsWith("unborn")?null:await git(["-C", seed, "rev-parse", "HEAD"]);
+    if(mode.startsWith("unborn"))await git(["--git-dir",canonical,"update-ref","-d","refs/heads/main"]);
     await git(["-C", seed, "checkout", "-b", "task/one"]); await import("node:fs/promises").then(fs=>fs.mkdir(join(seed,"src"),{recursive:true})); await Bun.write(join(seed, "src/feature.ts"), "throw new Error('Functional source still must never execute');");
     await git(["-C", seed, "commit", "-am", "feature"]); await git(["-C", seed, "push", "origin", "task/one"]);
     const head = await git(["-C", seed, "rev-parse", "HEAD"]);
-    const retention=retainedFixture(base,head,"external-one");
+    const unbornTarget:import("../src/core/accepted-target").UnbornAcceptedTarget|undefined=mode.startsWith("unborn")?{kind:"unborn",projectId:"p123456789abc",incarnation:"11111111-1111-4111-8111-111111111111",canonicalRepoName:"repo",ref:"refs/heads/main",branch:"main",acceptedCommit:null,acceptedVersion:0,requirements:[],policyVersion:1,policy:{kind:"git-integrity",allowedScope:["*"],protectedPaths:[".flaregit/"],landing:"merge"}}:undefined;
+    let secondHead:string|undefined;
+    if(mode==="unborn-batch"||mode==="unborn-conflict"){await git(["-C",seed,"checkout","--orphan","task/two"]);await git(["-C",seed,"rm","-rf","."]);const secondPath=mode==="unborn-conflict"?"src/feature.ts":"second.txt";await import("node:fs/promises").then(fs=>fs.mkdir(join(seed,"src"),{recursive:true}));await Bun.write(join(seed,secondPath),"Actual second independent contributor\n");await git(["-C",seed,"add","."]);await git(["-C",seed,"commit","-m","Second independent contributor"]);secondHead=await git(["-C",seed,"rev-parse","HEAD"]);await git(["-C",seed,"push","origin","task/two"]);}
+    const retention=retainedFixture(base,head,"external-one",unbornTarget,secondHead?{two:secondHead}:{});
     let destroyed = 0, aiCalls = 0;
     const commands: string[] = [], stored: string[] = [];
     const env = {
@@ -157,18 +161,21 @@ test.each(["normal","evidence-failure","preview-failure","git-integrity"] as con
         return { success: exitCode === 0, stdout, stderr, exitCode };
       }, readFileBytes:async()=>new TextEncoder().encode("synthetic asset"), destroy: async () => { destroyed++; await rm(work, { recursive: true, force: true }); } }) },
     } as unknown as Env;
-    const task = { id: "one", baseCommit: base, currentCommit: head, allowedScope: ["src/feature.ts"], workspace: { repoName: "repo", branch: "task/one" }, contributor: { name: "Fixture", id: "one" } };
-    const candidate: CandidateGeneration = { id: "external-one", attemptNumber: 1, frozenRequirements: [], repairAttempts: [], status: "composing", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), expectedAcceptedBase: base, participatingTaskIds: ["one"], participatingCommits: { one: head }, frozenPolicyVersion: 1, frozenVerificationPolicy: { kind: "command", test: "touch CUSTOMER_COMMAND_EXECUTED", install: "touch CUSTOMER_INSTALL_EXECUTED", allowedScope: ["src/feature.ts"], protectedPaths: ["tests/"] }, frozenExternalChecksPolicy: { version: 1, mode: "external", checks: [{ id: "check", providerId: "provider", required: true }] }, frozenContributorProofs: [{ id: "one", commit: head, baseCommit: base, ref: "refs/flaregit/tasks/one", allowedScope: ["src/feature.ts"] }] };
+    const task = { ...(unbornTarget?{acceptedTarget:unbornTarget}:{}),id: "one", baseCommit: base, currentCommit: head, allowedScope: ["src/feature.ts"], workspace: { repoName: "repo", branch: "task/one" }, contributor: { name: "Fixture", id: "one" } };
+    const candidate: CandidateGeneration = { ...(unbornTarget?{acceptedTarget:unbornTarget}:{}),id: "external-one", attemptNumber: 1, frozenRequirements: [], repairAttempts: [], status: "composing", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), expectedAcceptedBase: base, participatingTaskIds: ["one"], participatingCommits: { one: head }, frozenPolicyVersion: 1, frozenVerificationPolicy: { kind: "command", test: "touch CUSTOMER_COMMAND_EXECUTED", install: "touch CUSTOMER_INSTALL_EXECUTED", allowedScope: ["src/feature.ts"], protectedPaths: ["tests/"] }, frozenExternalChecksPolicy: { version: 1, mode: "external", checks: [{ id: "check", providerId: "provider", required: true }] }, frozenContributorProofs: [{ id: "one", commit: head, baseCommit: base, ref: "refs/flaregit/tasks/one", allowedScope: ["src/feature.ts"] }] };
     if(previewFails){delete candidate.frozenExternalChecksPolicy;candidate.frozenVerificationPolicy={};}
-    if(mode==="git-integrity"){delete candidate.frozenExternalChecksPolicy;candidate.frozenVerificationPolicy={kind:"git-integrity",allowedScope:["*"],protectedPaths:[".flaregit/"],landing:"merge"};}
+    if(mode==="git-integrity"||mode.startsWith("unborn")){delete candidate.frozenExternalChecksPolicy;candidate.frozenVerificationPolicy={kind:"git-integrity",allowedScope:["*"],protectedPaths:[".flaregit/"],landing:"merge"};}
+    if(secondHead){candidate.participatingTaskIds.push("two");candidate.participatingCommits.two=secondHead;candidate.frozenContributorProofs!.push({id:"two",commit:secondHead,baseCommit:null,ref:"refs/flaregit/tasks/two",allowedScope:[mode==="unborn-conflict"?"src/feature.ts":"second.txt"]});}
     const evidence: import("../src/core/types.js").VerificationEvidence[] = [];
     const activities:string[]=[];
-    const ledger = {...retention,recordScopedEvidenceCopy:async()=>{},previewStorageScope:async(commit:string)=>({projectId:"p123456789abc",incarnation:"11111111-1111-4111-8111-111111111111",commit,accountKey:await accountKeyFor("fixture-human")}),getWorkflowRun:async()=>({actorId:"fixture-human"}),roleOf:async()=>"owner", logActivity:async(_actor:string,kind:string)=>{activities.push(kind);}, getState: async () => ({ canonicalRepoName: "repo", tasks: { one: task }, defaultBranch: "main" }), recordComposition: async () => {}, recordVerification: async (_id: string, _commit: string, proof: import("../src/core/types.js").VerificationEvidence) => { evidence.push(proof); } } as unknown as Ledger;
+    const ledger = {...retention,recordScopedEvidenceCopy:async()=>{},previewStorageScope:async(commit:string)=>({projectId:"p123456789abc",incarnation:"11111111-1111-4111-8111-111111111111",commit,accountKey:await accountKeyFor("fixture-human")}),getWorkflowRun:async()=>({actorId:"fixture-human"}),roleOf:async()=>"owner", logActivity:async(_actor:string,kind:string)=>{activities.push(kind);}, getState: async () => ({ projectId:"p123456789abc",canonicalRepoName: "repo", tasks: { one: task,...(secondHead?{two:{...task,id:"two",currentCommit:secondHead,allowedScope:[mode==="unborn-conflict"?"src/feature.ts":"second.txt"],workspace:{repoName:"repo",branch:"task/two"}}}:{}) }, defaultBranch: "main" }), recordComposition: async () => {}, recordVerification: async (_id: string, _commit: string, proof: import("../src/core/types.js").VerificationEvidence) => { evidence.push(proof); } } as unknown as Ledger;
     const workflow = new FlareGitIntegrationWorkflow({} as ExecutionContext, env);
     Object.assign(workflow,{projectId:"p123456789abc",computeAccountKey:await accountKeyFor("fixture-human"),computeWorkflowId:"registered-parent"});
     const callable = workflow as unknown as { composeRepairVerify(candidate: CandidateGeneration, params: { projectId: string; taskIds: string[] }, ledger: Ledger,parentWorkflowId?:string): Promise<{ ok: boolean; commit?: string }> };
     const result = await callable.composeRepairVerify(candidate, { projectId: "p123456789abc", taskIds: ["one"],accountKey:await accountKeyFor("fixture-human") } as {projectId:string;taskIds:string[]}, ledger,"registered-parent");
-    expect(result.ok).toBe(true); expect(destroyed).toBe(1); expect(aiCalls).toBe(0);expect(retention.pendingCredentials()).toBe(0);const savedPins=retention.savedPins();expect(savedPins).toHaveLength(1);expect(await git(["--git-dir",canonical,"rev-parse",savedPins[0]!.protectedRef])).toBe(head);expect(await git(["--git-dir",canonical,"rev-parse",savedPins[0]!.protectedBaseRef])).toBe(base);
+    if(mode==="unborn-conflict"){expect(result.ok).toBe(false);expect(retention.savedPins()).toHaveLength(2);expect(evidence).toHaveLength(0);expect(await git(["--git-dir",canonical,"rev-parse","refs/heads/task/one"])).toBe(head);expect(await git(["--git-dir",canonical,"rev-parse","refs/heads/task/two"])).toBe(secondHead!);expect(await git(["--git-dir",canonical,"for-each-ref","--format=%(refname)","refs/heads/main"])).toBe("");expect(retention.pendingCredentials()).toBe(0);expect(destroyed).toBe(1);return;}
+    expect(result.ok).toBe(true); expect(destroyed).toBe(1); expect(aiCalls).toBe(0);expect(retention.pendingCredentials()).toBe(0);const savedPins=retention.savedPins();expect(savedPins).toHaveLength(secondHead?2:1);expect(await git(["--git-dir",canonical,"rev-parse",savedPins[0]!.protectedRef])).toBe(head);const protectedBase=savedPins[0]!.protectedBaseRef;if(base===null){expect(protectedBase).toBeNull();expect(await git(["--git-dir",canonical,"rev-list","--max-parents=0",head])).toMatch(/^[a-f0-9]{40}$/);}else{if(protectedBase===null)throw Error("Committed fixture needs a retained base ref");expect(await git(["--git-dir",canonical,"rev-parse",protectedBase])).toBe(base);}
+    if(secondHead){expect((await git(["--git-dir",canonical,"rev-list","--max-parents=0",result.commit!])).split("\n")).toHaveLength(2);expect(await git(["--git-dir",canonical,"ls-tree","--name-only",result.commit!])).toContain("second.txt");}
     expect(evidence[0]?.verifierIdentity).toBe(previewFails?"synthetic-test-only":"flaregit-native-integrity-v1");
     expect(activities.includes("evidence.copy_failed")).toBe(uploadFails);
     expect(stored).toHaveLength(previewFails?2:1);
@@ -177,6 +184,6 @@ test.each(["normal","evidence-failure","preview-failure","git-integrity"] as con
     expect(commands.some((command) => command.includes("--native-integrity"))).toBe(!previewFails);
     expect(commands.some((command) => command.includes("build-preview") || command.includes("verification/cli.ts custom "))).toBe(previewFails);
     expect(await git(["--git-dir", canonical, "rev-parse", "refs/flaregit/candidates/external-one"])).toBe(result.commit!);
-    expect(await git(["--git-dir", canonical, "rev-parse", "main"])).toBe(base);
+    if(base===null)expect(await git(["--git-dir",canonical,"for-each-ref","--format=%(refname)","refs/heads/main"])).toBe("");else expect(await git(["--git-dir", canonical, "rev-parse", "main"])).toBe(base);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

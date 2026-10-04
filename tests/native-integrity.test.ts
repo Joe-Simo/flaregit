@@ -18,7 +18,7 @@ async function fixture() {
   git(["commit", "-am", "contribution"]);
   const commit = git(["rev-parse", "HEAD"]);
   git(["update-ref", "refs/flaregit/tasks/one", commit]);
-  const input: NativeIntegrityInput = { repoDir: dir, candidateCommit: commit, candidateTree: git(["rev-parse", "HEAD^{tree}"]), expectedBase: base, requirementsVersion: 1, policy: { mode: "external" }, protectedPaths: ["tests/"], allowedScope: ["src/"], contributors: [{ id: "one", commit, baseCommit: base, ref: "refs/flaregit/tasks/one", allowedScope: ["src/"] }], landing: "merge" };
+  const input: NativeIntegrityInput & { expectedBase: string } = { repoDir: dir, candidateCommit: commit, candidateTree: git(["rev-parse", "HEAD^{tree}"]), expectedBase: base, requirementsVersion: 1, policy: { mode: "external" }, protectedPaths: ["tests/"], allowedScope: ["src/"], contributors: [{ id: "one", commit, baseCommit: base, ref: "refs/flaregit/tasks/one", allowedScope: ["src/"] }], landing: "merge" };
   return { dir, git, input };
 }
 

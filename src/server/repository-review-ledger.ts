@@ -1,12 +1,13 @@
 import {z} from 'zod';
+import {acceptedTargetSchema,type UnbornAcceptedTarget} from '../core/accepted-target';
 const principal=z.string().min(1).max(256).regex(/^[^\x00-\x1f\x7f]+$/);
 const event=z.string().min(8).max(200).regex(/^[A-Za-z0-9_-]+$/);
 const sha=z.string().regex(/^[a-f0-9]{40}$/);
 const version=z.number().int().nonnegative();
 export const repositoryReviewPolicySchema=z.object({requiredApprovals:z.number().int().min(0).max(10),allowAuthorApproval:z.boolean()}).strict();
 export type RepositoryReviewPolicy=z.infer<typeof repositoryReviewPolicySchema>;
-export const candidateReviewScopeSchema=z.object({candidateId:event,commit:sha,tree:sha,base:sha,verificationPolicyVersion:version,reviewPolicyVersion:version,authorIds:z.array(principal).max(100)}).strict();
-export type CandidateReviewScope=z.infer<typeof candidateReviewScopeSchema>;
+export const candidateReviewScopeSchema=z.object({candidateId:event,commit:sha,tree:sha,base:sha.nullable(),unbornTarget:acceptedTargetSchema.transform((target,ctx)=>{if(target.kind!=='unborn'){ctx.addIssue({code:'custom',message:'Review unborn context must be explicitly unborn'});return z.NEVER;}return target;}).optional(),verificationPolicyVersion:version,reviewPolicyVersion:version,authorIds:z.array(principal).max(100)}).strict().refine(value=>value.base===null?value.unbornTarget?.kind==='unborn'&&value.unbornTarget.policyVersion===value.verificationPolicyVersion:value.unbornTarget===undefined,'A null review base requires its exact explicit unborn target');
+export type CandidateReviewScope=Omit<z.infer<typeof candidateReviewScopeSchema>,"unbornTarget">&{unbornTarget?:UnbornAcceptedTarget};
 export type ReviewDecision='approve'|'request_changes'|'withdraw';
 export interface ReviewGrant {userId:string;version:number;enabled:boolean}
 export interface CandidateApproval {eventId:string;scope:CandidateReviewScope;reviewerId:string;grantVersion:number;decision:ReviewDecision;note:string;at:number}

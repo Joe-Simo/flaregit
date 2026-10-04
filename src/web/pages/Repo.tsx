@@ -1,3 +1,4 @@
+import {acceptedCommitLabel} from "../accepted-commit-display";
 import {GitCredential} from "../components/GitCredential";
 import { StorageReconciliation } from "../components/StorageReconciliation";
 import { repositoryDeletionNotice } from "../repository-deletion-notice";
@@ -123,7 +124,7 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
           {meta.role === "member" && <Badge variant="secondary">collaborator</Badge>}
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground hidden sm:inline">accepted <code>{state.acceptedState.currentCommit.slice(0, 7)}</code></span>
+          <span className="text-xs text-muted-foreground hidden sm:inline"><code>{state.acceptedState.currentCommit?`accepted ${acceptedCommitLabel(state.acceptedState.currentCommit)}`:acceptedCommitLabel(null)}</code></span>
           <Button size="sm" variant="outline" disabled={cloning} onClick={getClone}>{cloning ? "Preparing…" : "Clone"}</Button>
         </div>
       </div>
@@ -149,7 +150,7 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
       {current && <p className="text-xs text-muted-foreground mb-5">{current[2]}</p>}
 
       <div id="repo-tabpanel" aria-labelledby={current ? `tab-${current[0]}` : undefined} className="min-w-0">
-      {tab === "code" && <CodeTab projectId={projectId} isOwner={ownerActionsAvailable} />}
+      {tab === "code" && <CodeTab projectId={projectId} acceptedCommit={state.acceptedState.currentCommit} isOwner={ownerActionsAvailable} />}
       {tab === "commits" && <CommitsTab projectId={projectId} />}
       {tab === "changes" && <ChangesTab projectId={projectId} state={state} reload={reload} />}
       {tab === "integration" && <IntegrationTab isOwner={ownerActionsAvailable} projectId={projectId} state={state} reload={reload} kind={meta.kind} />}

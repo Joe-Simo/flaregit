@@ -25,8 +25,8 @@ export async function resumeSavedRebaseGit(options: SavedRebaseGitOptions): Prom
     validateRecoveryRemote(connection.remote);
     if (!connection.token || connection.token.length>4096 || /[\r\n\0]/.test(connection.token)) throw new SavedRebaseGitError("Invalid saved rebase credential",409);
   }
-  const pins = [input.commit,input.base,app.commit,app.base].map(commit=>({commit,ref:retainedGitInputRef(input.incarnation,input.taskId,commit)}));
-  if(input.protectedRef!==pins[0]!.ref || input.protectedBaseRef!==pins[1]!.ref) throw new SavedRebaseGitError("Saved input pin scope changed",409);
+  const pins = [input.commit,...(input.base === null ? [] : [input.base]),app.commit,app.base].map(commit=>({commit,ref:retainedGitInputRef(input.incarnation,input.taskId,commit)}));
+  if(input.protectedRef!==pins[0]!.ref || input.protectedBaseRef!==(input.base===null?null:retainedGitInputRef(input.incarnation,input.taskId,input.base))) throw new SavedRebaseGitError("Saved input pin scope changed",409);
   const run=async(command:string,token?:string)=>{
     await options.beforeCommand("before");
     const result=await options.exec(command,token?{...gitAuthEnv(token),GIT_CONFIG_COUNT:"2",GIT_CONFIG_KEY_1:"http.followRedirects",GIT_CONFIG_VALUE_1:"false"}:undefined);

@@ -1,4 +1,4 @@
-import { git, gitOrThrow } from "./git.js";
+import { git, gitOrThrow, changedFiles } from "./git.js";
 import * as crypto from "node:crypto";
 import type { Checkpoint, Task } from "../types.js";
 
@@ -35,9 +35,8 @@ export function recordCheckpoint(opts: RecordCheckpointOptions): {
   }
 
   const commitHash = gitOrThrow(workspacePath, ["rev-parse", "HEAD"]);
-  const filesChanged = git(workspacePath, ["diff", "--name-only", `${task.baseCommit}..${commitHash}`])
-    .stdout.split("\n")
-    .filter(Boolean);
+  if(!/^[a-f0-9]{40}$/.test(commitHash)||/^0{40}$/.test(commitHash))throw Error("Checkpoint requires an actual Git commit");
+  const filesChanged = changedFiles(workspacePath,task.baseCommit,commitHash);
 
   // The task repository is the source of truth the integrator reads; a failed push must not be silent.
   gitOrThrow(workspacePath, ["push", "--quiet", "origin", `${task.workspace.branch}:${task.workspace.branch}`]);

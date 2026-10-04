@@ -12,7 +12,7 @@ export interface RebaseRecoverySnapshot {
   projectId: string; incarnation: string | null; canonicalRepoName: string;
   /** Derived from the committed parent candidate's history/journal, never caller JSON. */
   accepted: boolean;
-  task: { id: string; currentCommit: string; baseCommit: string; workspaceRepoName: string; branch: string; dependsOn?: string; status: TaskStatus; busy?: boolean };
+  task: { id: string; currentCommit: string | null; baseCommit: string | null; workspaceRepoName: string; branch: string; dependsOn?: string; status: TaskStatus; busy?: boolean };
 }
 export interface RebaseRecoveryProof {
   workspaceHead: string | null;
@@ -20,7 +20,7 @@ export interface RebaseRecoveryProof {
 }
 export type RebaseRecoveryStatus = "already_applied" | "reconciled" | "reconcile_available" | "remote_old_resume_required" | "newer_work" | "metadata_changed" | "unavailable";
 export interface RebaseRecoveryReport {
-  id: string; taskId: string; originalCommit: string; originalBase: string; commit: string; base: string; parentAccepted: boolean;
+  id: string; taskId: string; originalCommit: string; originalBase: string | null; commit: string; base: string; parentAccepted: boolean;
   status: RebaseRecoveryStatus; savedStatus: RebaseApplication["status"]; createdAt: string; version: number;
   observedHead: string | null; canReconcile: boolean; detail: string;
 }
@@ -74,12 +74,12 @@ export async function verifyRebaseRecovery(binding: { get(name: string): Promise
   const input = retainedInputSchema.parse(application.input);
   if (!isSafeRef(input.branch) || !sha.test(application.commit) || !sha.test(application.base) || input.followup) throw new RebaseRecoveryError("Saved rebase scope is invalid", 409);
   const resultRef = retainedGitInputRef(input.incarnation, input.taskId, application.commit), targetRef = retainedGitInputRef(input.incarnation, input.taskId, application.base);
-  if (input.protectedRef !== retainedGitInputRef(input.incarnation, input.taskId, input.commit) || input.protectedBaseRef !== retainedGitInputRef(input.incarnation, input.taskId, input.base)) throw new RebaseRecoveryError("Protected source identity changed", 409);
+  if (input.protectedRef !== retainedGitInputRef(input.incarnation, input.taskId, input.commit) || input.protectedBaseRef !== (input.base === null ? null : retainedGitInputRef(input.incarnation, input.taskId, input.base))) throw new RebaseRecoveryError("Protected source identity changed", 409);
   try {
-    const refs=[input.protectedRef,input.protectedBaseRef,resultRef,targetRef];
+    const refs=input.protectedBaseRef === null ? [input.protectedRef,resultRef,targetRef] : [input.protectedRef,input.protectedBaseRef,resultRef,targetRef];
     const canonicalHeads=await options.observeRefs(input.canonicalRepoName,refs),workspaceHeads=await options.observeRefs(input.workspaceRepoName,[`refs/heads/${input.branch}`]);
-    if(canonicalHeads.length!==4||workspaceHeads.length!==1||[...canonicalHeads,...workspaceHeads].some(value=>value!==null&&!sha.test(value)))throw new RebaseRecoveryError("Exact Git identity unavailable",503);
-    const [original,originalBase,result,targetBase]=canonicalHeads,workspaceHead=workspaceHeads[0]!;
+    if(canonicalHeads.length!==refs.length||workspaceHeads.length!==1||[...canonicalHeads,...workspaceHeads].some(value=>value!==null&&!sha.test(value)))throw new RebaseRecoveryError("Exact Git identity unavailable",503);
+    const [original,originalBase,result,targetBase]=input.protectedBaseRef===null?[canonicalHeads[0],null,canonicalHeads[1],canonicalHeads[2]]:canonicalHeads,workspaceHead=workspaceHeads[0]!;
     using canonical=await openRepositoryRead({ARTIFACTS:binding},{repoName:input.canonicalRepoName,...options,limits:{maxProviderCalls:8,maxMetadataBytes:65536}});
     for(const hash of canonicalHeads){if(hash!==null){const object=await canonical.readCommit(hash);if(!object||object.hash!==hash)throw new RebaseRecoveryError("Protected Git object unavailable",503);}}
     await options.authorize();

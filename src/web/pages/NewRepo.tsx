@@ -1,3 +1,5 @@
+import {readRepositoryCreations,restoreRepositoryCreation,type RepositoryCreationRecovery} from "../repository-creation-recovery";
+import {SavedRepositoryCreations} from "../components/SavedRepositoryCreations";
 import {repositoryCreationRequest,type RepositoryCreationRequest} from "../repository-creation-request";
 import {RepositoryInitializationFields} from "../components/RepositoryInitializationFields";
 import {Input} from "@/components/ui/input";
@@ -22,6 +24,8 @@ export function NewRepo() {
   const lifetime = useRef(new AbortController()), readSequence = useRef(0), mutationLock = useRef(false);
   const [unconfirmed, setUnconfirmed] = useState(false);
   const [mode, setMode] = useState("repository");
+  const [initialization,setInitialization]=useState<RepositoryCreationRequest["initialization"]>("readme");
+  const allowEmptyInitialization=false; // Activated after the complete server readiness gate.
   const [description,setDescription]=useState(""),[defaultBranch,setDefaultBranch]=useState("main");
   const savedRepositoryRequest=useRef<RepositoryCreationRequest|null>(null);
   const [name, setName] = useState("");
@@ -36,12 +40,16 @@ export function NewRepo() {
   const [importsError, setImportsError] = useState<string | null>(null);
   const [activeImport, setActiveImport] = useState<ImportJob | null>(null);
   const [checkingId, setCheckingId] = useState<string | null>(null);
+  const [savedCreations,setSavedCreations]=useState<RepositoryCreationRecovery[]>([]),[savedCreationsError,setSavedCreationsError]=useState<string|null>(null),[savedCreationsCursor,setSavedCreationsCursor]=useState<string|null>(null),[restoredCreation,setRestoredCreation]=useState<RepositoryCreationRecovery|null>(null);
+  const creationReadSequence=useRef(0);
+  const loadCreations=useCallback(async(cursor?:string)=>{const current=++creationReadSequence.current;try{const result=await readRepositoryCreations(repositoryRequestSignal(lifetime.current.signal),cursor);if(current===creationReadSequence.current&&!lifetime.current.signal.aborted){setSavedCreations(result.initializations);setSavedCreationsCursor(result.nextCursor);setSavedCreationsError(null);setRestoredCreation(previous=>{const requestId=previous?.requestId??savedRepositoryRequest.current?.requestId;return requestId?result.initializations.find(row=>row.requestId===requestId)??previous:previous;});}}catch{if(current===creationReadSequence.current&&!lifetime.current.signal.aborted)setSavedCreationsError("Saved repository request status is unavailable. No pending initialization is treated as a ready repository.");}},[]);
+  const restoreCreation=(record:RepositoryCreationRecovery)=>{const request=restoreRepositoryCreation(record);savedRepositoryRequest.current=request;setMode("repository");setName(request.name);setDescription(request.description??"");setDefaultBranch(request.defaultBranch);setInitialization(request.initialization);setUnconfirmed(true);setRestoredCreation(record);setActiveImport(null);setError(null);};
   const loadImports = useCallback(async () => {
     const current = ++readSequence.current;
     try { const response = await apiJson<{ imports: ImportJob[] }>("/imports", { signal: repositoryRequestSignal(lifetime.current.signal) }); if(lifetime.current.signal.aborted || current !== readSequence.current)return; setImports(response.imports); setActiveImport((previous) => previous ? response.imports.find((job) => job.id === previous.id) ?? previous : previous); setImportsError(null); }
     catch (cause) { if(lifetime.current.signal.aborted || current !== readSequence.current)return; setImportsError(cause instanceof Error ? cause.message : "Could not load saved imports"); }
   }, []);
-  useEffect(() => { lifetime.current = new AbortController(); void loadImports(); return () => { lifetime.current.abort(); readSequence.current++; }; }, [loadImports]);
+  useEffect(() => { lifetime.current = new AbortController(); void loadImports();void loadCreations(); return () => { lifetime.current.abort(); readSequence.current++;creationReadSequence.current++; }; }, [loadImports,loadCreations]);
   const remember = (job: ImportJob) => { readSequence.current++; setActiveImport(job); setImports((previous) => [job, ...(previous ?? []).filter((item) => item.id !== job.id)]); };
   const restore = (job: ImportJob) => {
     setMode("import"); setName(job.name); setUrl(job.source); setBranch(job.branch); setInstall(job.verificationPolicy.install ?? ""); setBuild(job.verificationPolicy.build ?? ""); setTest(job.verificationPolicy.test ?? ""); setError(null); setActiveImport(job);
@@ -59,15 +67,15 @@ export function NewRepo() {
     finally { mutationLock.current=false; if(!lifetime.current.signal.aborted){setBusy(false); setCheckingId(null);} }
   };
 
-  const disabled = busy || (unconfirmed&&mode==="import") || activeImport !== null || !name.trim() || (mode === "import" && (!url || !test || !name));
+  const disabled = busy || (unconfirmed&&mode==="import") || activeImport !== null || mode==="repository"&&restoredCreation!==null&&!restoredCreation.canRetryOriginal || !name.trim() || (mode === "import" && (!url || !test || !name));
 
   const submit = async () => {
-    if(mutationLock.current || unconfirmed&&mode==="import")return; mutationLock.current=true;
+    if(mutationLock.current || unconfirmed&&mode==="import"||mode==="repository"&&restoredCreation&&!restoredCreation.canRetryOriginal)return; mutationLock.current=true;
     let rejectedBeforeAllocation = true;
     setBusy(true);
     setError(null);
     try {
-      const body = mode === "import" ? { kind: "import" as const, name, url, branch, install, build, test } : repositoryCreationRequest(savedRepositoryRequest.current,{name,defaultBranch,description},()=>crypto.randomUUID());
+      const body = mode === "import" ? { kind: "import" as const, name, url, branch, install, build, test } : repositoryCreationRequest(savedRepositoryRequest.current,{name,defaultBranch,description,initialization},()=>crypto.randomUUID());
       if(body.kind==="repository")savedRepositoryRequest.current=body;
       rejectedBeforeAllocation=false;
       const response = await apiFetch("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: repositoryRequestSignal(lifetime.current.signal, true) });
@@ -78,7 +86,8 @@ export function NewRepo() {
       let created: CreationResponse;
       try { created = JSON.parse(raw) as CreationResponse; } catch { throw new Error(raw || "Could not read the creation result"); }
       if (created.status === "failed" && created.import) { remember(created.import); setError(created.import.detail || "The provider refused this import."); setBusy(false); return; }
-      if (!response.ok) throw new Error(raw || "Import request failed");
+      if(created.kind==="repository"&&created.status==="pending"){setUnconfirmed(true);setError(null);setBusy(false);void loadCreations();return;}
+      if (!response.ok) throw new Error(raw || "Repository request failed");
       if (created.status === "ready") navigate(`/p/${created.id}`);
       else if (created.status === "pending" && created.import) remember(created.import);
       else throw new Error("Repository readiness was not confirmed. Recover the saved request before starting another creation.");
@@ -88,7 +97,7 @@ export function NewRepo() {
       setUnconfirmed(!rejectedBeforeAllocation);
       setError(`${e instanceof Error ? e.message : "Could not create the repository"}${!rejectedBeforeAllocation && mode === "import" ? " Check saved imports before submitting this import again." : ""}`);
       setBusy(false);
-      void loadImports();
+      void loadImports();void loadCreations();
     } finally { mutationLock.current=false; }
   };
 
@@ -101,7 +110,8 @@ export function NewRepo() {
         <p className="text-xs text-muted-foreground">{activeImport.status === "failed" ? "The saved source and protected checks remain below. Correcting the source creates a new import; this refused request is retained." : "The source and protected checks below are saved. Checking status inspects this existing import and does not request another provider import."}</p>
         <div className="flex flex-wrap gap-2">{activeImport.status !== "failed" && <Button size="sm" variant="outline" disabled={busy} onClick={() => activeImport.status === "ready" ? navigate(`/p/${activeImport.id}`) : void resume(activeImport)}>{checkingId === activeImport.id ? "Checking…" : activeImport.status === "ready" ? "Open repository" : "Check import status"}</Button>}{activeImport.status === "failed" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setActiveImport(null); setError(null); }}>Correct source and create a new import</Button>}<Button size="sm" variant="ghost" disabled={busy} onClick={() => { setActiveImport(null); setName(""); setUrl(""); setBranch(""); setError(null); }}>Start another repository</Button></div>
       </section>}
-      {unconfirmed && <p role="status" className="mb-4 text-sm text-muted-foreground">{mode==="repository"?"Creation could not be confirmed. Your original inputs and request identity are preserved. Retry the saved repository request before starting another creation.":"Import creation could not be confirmed. Your inputs are preserved. Check saved imports below before starting another import."}</p>}
+      {restoredCreation&&!restoredCreation.canRetryOriginal&&<p role="status" className="mb-4 text-sm text-muted-foreground">Original initialization inputs restored. Its allocation or cleanup is unconfirmed; refresh the saved request instead of recreating the repository.</p>}
+      {unconfirmed && !restoredCreation && <p role="status" className="mb-4 text-sm text-muted-foreground">{mode==="repository"?"Creation could not be confirmed. Your original inputs and request identity are preserved. Retry the saved repository request before starting another creation.":"Import creation could not be confirmed. Your inputs are preserved. Check saved imports below before starting another import."}</p>}
       <Card>
         <CardHeader className="pb-2">
           <Tabs value={mode} onValueChange={(value) => { if (!busy && !activeImport&&!unconfirmed) setMode(value); }}>
@@ -150,7 +160,7 @@ export function NewRepo() {
               </div>
             </>
           ) : (
-            <RepositoryInitializationFields description={description} defaultBranch={defaultBranch} disabled={busy||unconfirmed} onDescription={setDescription} onBranch={setDefaultBranch}/>
+            <RepositoryInitializationFields description={description} defaultBranch={defaultBranch} initialization={initialization} allowEmpty={allowEmptyInitialization} onInitialization={setInitialization} disabled={busy||unconfirmed} onDescription={setDescription} onBranch={setDefaultBranch}/>
           )}
           {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>}
           {busy && <p role="status" className="text-sm text-muted-foreground">{checkingId ? "Checking the saved import. No new import is requested." : mode === "import" ? "Submitting the import request. Repository availability is checked before opening it." : "Initializing the repository and checking its first committed Git state…"}</p>}
@@ -163,6 +173,7 @@ export function NewRepo() {
           </form>
         </CardContent>
       </Card>
+      <SavedRepositoryCreations records={savedCreations} busy={busy} error={savedCreationsError} onRefresh={()=>void loadCreations()} onRestore={restoreCreation} onOpen={id=>navigate(`/p/${id}`)} nextCursor={savedCreationsCursor} onNext={()=>{if(savedCreationsCursor)void loadCreations(savedCreationsCursor);}}/>
       <section className="mt-8" aria-labelledby="saved-imports-title"><div className="flex flex-wrap gap-2 items-center justify-between border-b border-border pb-3"><h2 id="saved-imports-title" className="text-sm font-semibold">Saved imports</h2><Button size="sm" variant="ghost" disabled={busy} onClick={() => void loadImports()}>Refresh imports</Button></div>
         {importsError && <p role="alert" className="py-3 text-sm text-destructive">{importsError}{imports ? " · showing previously loaded imports" : ""}</p>}
         {!imports && !importsError && <p role="status" className="py-3 text-sm text-muted-foreground">Loading saved imports…</p>}

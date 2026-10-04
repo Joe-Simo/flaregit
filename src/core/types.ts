@@ -75,7 +75,7 @@ export interface Task {
   agentWorkflowInstanceId?: string;
   /** Durable execution record, including scenario-owned agent runs. */
   agentRunId?: string;
-  baseCommit: string;
+  baseCommit: string | null;
   /** Stacked change: id of the change this one builds on. It cannot be marked ready until that change is accepted. */
   dependsOn?: string;
   /** Issue this change resolves; it closes automatically when the change is accepted. */
@@ -85,7 +85,7 @@ export interface Task {
   requirements: Requirement[];
   workspace: TaskWorkspace;
   checkpoints: Checkpoint[];
-  currentCommit: string;
+  currentCommit: string | null;
   activeCandidateId?: string;
   /** Human-readable reason when status is "blocked". */
   blockedReason?: string;
@@ -118,7 +118,7 @@ export interface CandidateGeneration {
   participatingTaskIds: string[];
   readonly participatingTargetGenerations?: Record<string, TaskTargetGeneration>;
   participatingCommits: Record<string, string>; // taskId -> commitHash
-  expectedAcceptedBase: string;
+  expectedAcceptedBase: string | null;
   frozenPolicyVersion: number;
   frozenVerificationPolicy: Record<string, unknown>;
   /** Owner policy and contributor inputs captured before composition; absent on legacy candidates. */
@@ -163,7 +163,7 @@ export interface VerificationEvidence {
   candidateCommit: string;
   /** Git tree hash of the verified commit; publication must find this exact tree. */
   candidateTree: string;
-  expectedAcceptedBase: string;
+  expectedAcceptedBase: string | null;
   requirementsVersion: number;
   policy: Record<string, unknown>;
   testBundleDigest: string;
@@ -190,7 +190,7 @@ export interface PublicationJournalEntry {
   candidateId: string;
   candidateCommit: string;
   candidateTree?: string;
-  expectedHead: string;
+  expectedHead: string | null;
   newHead: string;
   outputDigest: string;
   state: JournalState;
@@ -212,8 +212,8 @@ export interface HumanDecisionActor { userId: string; displayName: string; viaTo
 export interface ProductDecisionParticipant {
   targetGeneration?: {eventId:string;generation:number};
   taskId: string;
-  currentCommit: string;
-  baseCommit: string;
+  currentCommit: string | null;
+  baseCommit: string | null;
   workspaceRepoName: string;
   workspaceBranch: string;
   dependsOn?: string;
@@ -262,13 +262,24 @@ export interface AcceptanceRecord {
   outputDigest: string;
 }
 
-export interface AcceptedState {
+export interface CommittedAcceptedState {
+  /** Legacy committed snapshots omitted this discriminator. */
+  kind?: "committed";
   currentCommit: string;
   acceptedAt: string;
   buildDigest: string;
   activeRequirements: Requirement[];
   history: AcceptanceRecord[];
 }
+export interface UnbornAcceptedState {
+  kind: "unborn";
+  currentCommit: null;
+  acceptedAt: null;
+  buildDigest: null;
+  activeRequirements: [];
+  history: [];
+}
+export type AcceptedState = CommittedAcceptedState | UnbornAcceptedState;
 
 export interface FlareGitProjectState {
   projectId: string;

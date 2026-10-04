@@ -11,7 +11,8 @@ export interface RebaseResumeParams{projectId:string;attemptId:string;generation
 export class FlareGitRebaseResumeWorkflow extends WorkflowEntrypoint<Env,RebaseResumeParams>{
  override async run(event:WorkflowEvent<RebaseResumeParams>,step:WorkflowStep){
   const {projectId,attemptId,generation}=event.payload,project=projectOf(this.env,projectId);
-  const initial=await step.do("load-saved-resume",{retries:{limit:0,delay:"5 seconds",backoff:"constant"},timeout:"30 seconds"},async()=>project.assertRebaseResume(attemptId,generation,event.instanceId));
+  await step.do("load-saved-resume",{retries:{limit:0,delay:"5 seconds",backoff:"constant"},timeout:"30 seconds"},async()=>{await project.assertRebaseResume(attemptId,generation,event.instanceId);return {loaded:true};});
+  const initial=await project.assertRebaseResume(attemptId,generation,event.instanceId);
   const authorize=async()=>{await project.assertRebaseResume(attemptId,generation,event.instanceId);};
   const fund=async()=>{await authorize();const result=await admitGitOperation(this.env,initial.actor.userId,`resume-${crypto.randomUUID()}`);if(result instanceof Response)throw new RebaseRecoveryError("Saved-result transport capacity is unavailable",429);await authorize();};
   try{
@@ -51,7 +52,7 @@ export class FlareGitRebaseResumeWorkflow extends WorkflowEntrypoint<Env,RebaseR
    });
   }finally{
    try{await step.do("cleanup-saved-resume-credentials",{retries:{limit:0,delay:"5 seconds",backoff:"constant"},timeout:"30 seconds"},async()=>{const results=await Promise.allSettled((["canonical","workspace"] as const).map(purpose=>project.revokeRebaseResumeCredential(attemptId,generation,purpose)));if(results.some(result=>result.status==="rejected"||result.value!==true)){await project.pauseRebaseResume(attemptId,generation,event.instanceId,"cleanup_unconfirmed");throw new Error("Credential cleanup remains unconfirmed");}});}
-   finally{await step.do("confirm-saved-resume-stop",async()=>project.rebaseResumeNativeStopped(attemptId,generation,initial.nativeRunId));}
+   finally{await step.do("confirm-saved-resume-stop",async()=>{await project.rebaseResumeNativeStopped(attemptId,generation,initial.nativeRunId);return {checked:true};});}
   }
  }
 }

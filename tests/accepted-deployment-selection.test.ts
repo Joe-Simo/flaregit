@@ -1,3 +1,5 @@
+import type { CommittedAcceptedTarget } from "../src/core/accepted-target";
+import type { PublicationJournalEntry } from "../src/core/types";
 import { expect, test } from "bun:test";
 import { selectAcceptedDeploymentJournal, confirmAcceptedDeploymentSelection, type AcceptedDeploymentContext } from "../src/server/accepted-deployment-selection";
 import { RepositoryDeployments, type DeploymentRequestedEvent } from "../src/server/deployments";
@@ -5,8 +7,9 @@ import { Database } from "bun:sqlite";
 
 const base = "a".repeat(40), commit = "b".repeat(40), tree = "c".repeat(40), later = "d".repeat(40);
 const journalId = "jrnl_11111111-1111-4111-8111-111111111111", incarnation = "22222222-2222-4222-8222-222222222222";
-function context(): AcceptedDeploymentContext {
-  const target = { projectId: "p123456789abc", incarnation, canonicalRepoName: "owned", ref: "refs/heads/release", branch: "release", acceptedCommit: base, acceptedVersion: 0, requirements: [], policyVersion: 1, policy: {} };
+type CommittedFixtureContext = Omit<AcceptedDeploymentContext, "journals"> & { journals: Array<PublicationJournalEntry & { acceptedTarget?: CommittedAcceptedTarget }> };
+function context(): CommittedFixtureContext {
+  const target: CommittedAcceptedTarget = { projectId: "p123456789abc", incarnation, canonicalRepoName: "owned", ref: "refs/heads/release", branch: "release", acceptedCommit: base, acceptedVersion: 0, requirements: [], policyVersion: 1, policy: {} };
   return { projectId: target.projectId, incarnation, canonicalRepoName: target.canonicalRepoName, primaryRef: "refs/heads/main", primaryHistory: [], journals: [{ id: journalId, candidateId: "candidate-owned", candidateCommit: commit, candidateTree: tree, expectedHead: base, newHead: commit, outputDigest: "digest", state: "ACCEPTED", timestamp: "2026-10-04T00:00:00Z", acceptedTarget: target }], roots: [{ projectId: target.projectId, incarnation, canonicalRepoName: target.canonicalRepoName, ref: target.ref, kind: "branch", head: later, version: 2, requirementsSnapshot: { commit: later, requirements: [] }, status: "ready", provenance: { kind: "owner-created", sourceCommit: base }, history: [{ commit, operationId: journalId, acceptance: { journalId, candidateId: "candidate-owned", evidenceId: "evidence", tree, outputDigest: "digest", participatingTaskIds: ["task"], acceptedAt: "2026-10-04T00:00:01Z" } }, { commit: later, operationId: "later-publication" }] }] };
 }
 

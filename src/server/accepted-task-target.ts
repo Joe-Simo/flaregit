@@ -4,7 +4,7 @@ import {AcceptedBranchRoots} from './accepted-branch-roots';
 import {freezeAcceptedTarget} from './accepted-target-binding';
 import {taskCreationPayload,type TaskCreationInput} from './task-creation';
 export interface InternalTaskTargetOptions {acceptedTargetRef:string;expectedTarget?:FrozenAcceptedTarget}
-export interface TaskCreationSelection {acceptedTarget:FrozenAcceptedTarget|null;baseCommit:string;sourceRepoName:string;scope:string}
+export interface TaskCreationSelection {acceptedTarget:FrozenAcceptedTarget|null;baseCommit:string|null;sourceRepoName:string;scope:string}
 export interface TaskCreationCredential {viaToken:boolean;credentialHash?:string;sessionExpiresAt?:number}
 /** Opt-in backend binding only. Unbound legacy task objects remain untouched. */
 export function resolveNewTaskAcceptedTarget(roots:AcceptedBranchRoots,state:FlareGitProjectState,incarnation:string,dependsOn:string|undefined,options?:InternalTaskTargetOptions):FrozenAcceptedTarget|undefined {
