@@ -5,6 +5,10 @@ let epoch = 0;
 /** Recovery data is scoped to the captured active session, never an email or repository alone. */
 export function apiSessionIdentity(): string | null { return session?.identity ?? null; }
 const responseGuards = new WeakMap<Response, () => void>();
+let readRevision = 0;
+type SharedRead = { controller: AbortController; consumers: number; value: Promise<string> };
+const sharedReads = new Map<string, SharedRead>();
+function invalidateSharedReads() { readRevision++; sharedReads.clear(); }
 
 /** Bind the captured session resource, not Clerk's dynamically active session. */
 export function bindApiSession(principal: string, getToken: () => Promise<string | null>): () => void {
@@ -62,6 +66,12 @@ class SessionResponse extends Response {
 }
 
 export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const mutation = !["GET", "HEAD"].includes((init.method ?? "GET").toUpperCase());
+  if (mutation) invalidateSharedReads();
+  try { return await sessionFetch(input, init); }
+  finally { if (mutation) invalidateSharedReads(); }
+}
+async function sessionFetch(input: string, init: RequestInit): Promise<Response> {
   const binding = session;
   if(!binding&&identity!==null)throw new DOMException("Your secure session is temporarily unavailable. Wait for authentication before retrying.","AbortError");
   const assertCurrent = requestGuard(binding, epoch);
@@ -104,6 +114,37 @@ export class ApiError extends Error {
 }
 /** JSON helper: throws an Error carrying the server's message on any non-2xx response. */
 export async function apiJson<T>(path: string, init: RequestInit & { json?: unknown } = {}): Promise<T> {
+  const binding = session, requestEpoch = epoch, revision = readRevision;
+  const shareable = binding && Object.keys(init).every(key => key === "signal" || key === "method") && (init.method ?? "GET").toUpperCase() === "GET";
+  if (!shareable) return JSON.parse(await jsonText(path, init)) as T;
+  init.signal?.throwIfAborted();
+  const key = JSON.stringify([binding.identity, requestEpoch, revision, path]);
+  let shared = sharedReads.get(key);
+  if (!shared) {
+    const controller = new AbortController();
+    const entry: SharedRead = { controller, consumers: 0, value: Promise.resolve("") };
+    entry.value = jsonText(path, { signal: controller.signal }).finally(() => { if (sharedReads.get(key) === entry) sharedReads.delete(key); });
+    sharedReads.set(key, entry); shared = entry;
+  }
+  const entry = shared;
+  entry.consumers++;
+  let abort: (() => void) | undefined;
+  const cancelled = new Promise<never>((_, reject) => {
+    abort = () => reject(init.signal?.reason ?? new DOMException("Read cancelled", "AbortError"));
+    init.signal?.addEventListener("abort", abort, { once: true });
+  });
+  try {
+    const text = await Promise.race([entry.value, cancelled]);
+    requestGuard(binding, requestEpoch)();
+    if (revision !== readRevision) throw new DOMException("Repository state changed during this read. Refresh to get current state.", "AbortError");
+    return JSON.parse(text) as T;
+  } finally {
+    if (abort) init.signal?.removeEventListener("abort", abort);
+    entry.consumers--;
+    if (entry.consumers === 0) { entry.controller.abort(); if (sharedReads.get(key) === entry) sharedReads.delete(key); }
+  }
+}
+async function jsonText(path: string, init: RequestInit & { json?: unknown }): Promise<string> {
   const { json, ...rest } = init;
   const res = await apiFetch(`/api${path}`, {
     ...rest,
@@ -116,7 +157,7 @@ export async function apiJson<T>(path: string, init: RequestInit & { json?: unkn
     try { const problem: unknown=JSON.parse(text); if(problem && typeof problem==="object" && "error" in problem && typeof problem.error==="string")message=problem.error; } catch { /* Plain-text failure messages remain supported. */ }
     throw new ApiError(message,res.status,apiRetryAfterSeconds(res.headers.get("Retry-After")));
   }
-  return (text ? JSON.parse(text) : {}) as T;
+  return text || "{}";
 }
 import { clearSessionConversationDrafts } from "./conversation-recovery";
 
