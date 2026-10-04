@@ -29,7 +29,7 @@ export interface GitHttpProxyOptions {
   maxRequestBytes: number; maxResponseBytes: number; timeoutMs: number;
   fetcher?: (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => Promise<Response>;
   /** Called on completion, cancellation, or failure; never receives provider response text. */
-  finish: () => Promise<void>;
+  finish: (completed?:boolean) => Promise<void>;
   /** Header fences are unconditional; chunk fences may apply a bounded window. */
   authorize?: (phase:"dispatch"|"response"|"chunk",bytes:number)=>Promise<boolean>;
 }
@@ -39,14 +39,14 @@ export async function proxyGitHttp(request: Request, route: GitHttpRoute, option
   if (route.write && (!options.writeAllowed || route.taskId === null)) { await options.finish(); return new Response("Git writes are not permitted", { status: 403 }); }
   for (const limit of [options.maxRequestBytes, options.maxResponseBytes, options.timeoutMs]) if (!Number.isSafeInteger(limit) || limit <= 0) throw new Error("Invalid Git transport limit");
   const abort = new AbortController();
-  let finished = false;
-  const finish = async () => { if (finished) return; finished = true; clearTimeout(timer); request.signal.removeEventListener("abort", cancel); abort.abort(); await options.finish(); };
+  let finished = false,requestSettled=request.body===null;
+  const finish = async (completed=false) => { if (finished) return; finished = true; clearTimeout(timer); request.signal.removeEventListener("abort", cancel); abort.abort(); await options.finish(completed&&requestSettled); };
   const cancel = () => { abort.abort(); void finish().catch(() => {}); };
   const timer = setTimeout(cancel, options.timeoutMs);
   request.signal.addEventListener("abort", cancel, { once: true });
-  const bounded = (stream: ReadableStream<Uint8Array>, max: number, checkAuthority=false) => {
+  const bounded = (stream: ReadableStream<Uint8Array>, max: number, checkAuthority=false,requestStream=false) => {
     let bytes = 0;
-    return stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({ async transform(chunk, controller) { bytes += chunk.byteLength; if (bytes > max) { abort.abort(); throw new Error("Git transfer limit exceeded"); } for(let offset=0;offset<chunk.byteLength;offset+=65_536){const part=chunk.subarray(offset,Math.min(offset+65_536,chunk.byteLength));if(checkAuthority&&!await authorized("chunk",part.byteLength)){abort.abort();throw new Error("Git authority revoked");}controller.enqueue(part);} } }));
+    return stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({ async transform(chunk, controller) { bytes += chunk.byteLength; if (bytes > max) { abort.abort(); throw new Error("Git transfer limit exceeded"); } for(let offset=0;offset<chunk.byteLength;offset+=65_536){const part=chunk.subarray(offset,Math.min(offset+65_536,chunk.byteLength));if(checkAuthority&&!await authorized("chunk",part.byteLength)){abort.abort();throw new Error("Git authority revoked");}controller.enqueue(part);} },flush(){if(requestStream)requestSettled=true;} }));
   };
   const authorized=(phase:"dispatch"|"response"|"chunk",bytes=0)=>options.authorize?.(phase,bytes)??Promise.resolve(true);
   try {
@@ -58,7 +58,7 @@ export async function proxyGitHttp(request: Request, route: GitHttpRoute, option
     if (route.endpoint !== "info/refs") headers.set("Content-Type", `application/x-${route.service}-request`);
     const protocol = request.headers.get("Git-Protocol"); if (protocol) headers.set("Git-Protocol", protocol);
     if(!await authorized("dispatch")){await finish();return new Response("Git access changed; request was not forwarded",{status:403});}
-    const upstream = await (options.fetcher ?? fetch)(target, { method: request.method, headers, body: request.body ? bounded(request.body, options.maxRequestBytes,true) : null, redirect: "manual", signal: abort.signal });
+    const upstream = await (options.fetcher ?? fetch)(target, { method: request.method, headers, body: request.body ? bounded(request.body, options.maxRequestBytes,true,true) : null, redirect: "manual", signal: abort.signal });
     const type = `application/x-${route.service}-${route.endpoint === "info/refs" ? "advertisement" : "result"}`;
     if (upstream.status !== 200 || upstream.headers.get("Content-Type")?.split(";")[0] !== type || !upstream.body) { await upstream.body?.cancel(); await finish(); return new Response("Git provider unavailable; retry the operation", { status: 502 }); }
     if(!await authorized("response")){await upstream.body.cancel();await finish();return new Response("Git access changed; response was withheld",{status:403});}
@@ -66,7 +66,7 @@ export async function proxyGitHttp(request: Request, route: GitHttpRoute, option
     let pending:Uint8Array|undefined,offset=0;
     const body = new ReadableStream<Uint8Array>({
       async pull(controller) { try {
-        if(!pending||offset===pending.byteLength){const next=await reader.read();if(next.done){await finish();controller.close();return;}pending=next.value;offset=0;}
+        if(!pending||offset===pending.byteLength){const next=await reader.read();if(next.done){await finish(true);controller.close();return;}pending=next.value;offset=0;}
         const part=pending.subarray(offset,Math.min(offset+65_536,pending.byteLength));
         if(!await authorized("chunk",part.byteLength)){await reader.cancel().catch(()=>{});throw new Error("Git authority revoked");}
         offset+=part.byteLength;controller.enqueue(part);

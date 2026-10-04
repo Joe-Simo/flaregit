@@ -35,7 +35,7 @@ export class AcceptedTargetFixture extends AcceptedRegistryFixture {
  if(url.pathname==='/recovery-targets')return Response.json(await this.privateRecoveryTargets());
  if(url.pathname==='/mutate-default'){const state=await this.getState();state.defaultBranch=url.searchParams.get('branch')??'renamed-primary';this.ctx.storage.sql.exec('UPDATE project SET doc=? WHERE id=1',JSON.stringify(state));return Response.json({changed:true});}
  if(url.pathname==='/restore-policy'){const state=await this.getState(),candidate=state.candidates[url.searchParams.get('id')!]!;state.verificationPolicy=candidate.frozenVerificationPolicy;state.policyVersion=candidate.frozenPolicyVersion;this.ctx.storage.sql.exec('UPDATE project SET doc=? WHERE id=1',JSON.stringify(state));return Response.json({restored:true});}
- if(url.pathname==='/mutate-root'){const state=await this.getState();state.verificationPolicy={changed:true};state.policyVersion++;this.ctx.storage.sql.exec('UPDATE project SET doc=? WHERE id=1',JSON.stringify(state));return Response.json({changed:true});}
+ if(url.pathname==='/mutate-root'){await this.setVerificationPolicy({changed:true});return Response.json({changed:true});}
  }catch(error){return Response.json({error:error instanceof Error?error.message:'Failure'},{status:409});}return super.fetch(request);}
 }
 export default {fetch:(request:Request,env:Env)=>env.REPOSITORY_CONTROLLER.getByName(new URL(request.url).searchParams.get('name')??'fixture').fetch(request)};

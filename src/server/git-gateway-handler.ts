@@ -33,8 +33,8 @@ export async function handleGitGateway(request:Request,env:Env,admit:GitAdmissio
   if(!(await env.API_LIMITER.limit({key:`git:${await accountKeyFor(userId)}`})).success)return respond("Git request limit reached; retry shortly",429);
   const admission=await admit(account,userId,route,crypto.randomUUID());if(admission instanceof Response)return admission;
   let repo:Awaited<ReturnType<Artifacts["get"]>>|undefined,providerToken:string|undefined;
-  let finished=false;
-  const finish=async()=>{if(finished)return;finished=true;try{if(repo&&providerToken){const revoked=await repo.revokeToken(providerToken).catch(()=>false);if(!revoked)await project.logActivity("system","git.credential-cleanup-failed","A short-lived Git transport credential could not be revoked; it expires automatically.");}}finally{repo?.[Symbol.dispose]();await admission.finish();}};
+  let finished=false,attemptId:string|undefined;
+  const finish=async(completed=false)=>{if(finished)return;finished=true;let revoked=false;try{if(repo&&providerToken)revoked=await repo.revokeToken(providerToken).catch(()=>false);}finally{repo?.[Symbol.dispose]();if(attemptId){const settled=await project.finishGitGatewayAttempt(attemptId,{transportFinished:completed,credentialRevoked:revoked}).catch(()=>false);if(settled)await admission.finish();}else await admission.finish();}};
   let checkedAt=0,windowBytes=0;
   const authorize=async(phase:"dispatch"|"response"|"chunk",bytes:number):Promise<boolean>=>{
     windowBytes+=bytes;
@@ -45,6 +45,7 @@ export async function handleGitGateway(request:Request,env:Env,admit:GitAdmissio
       if(secret.startsWith("fgg_")){const current=await project.verifyGitCapability(secret,route.taskId,route.write);if(!current||current.userId!==userId||current.parentTokenHash!==parentTokenHash)return false;}
       else{const current=await authenticate(new Request(request.url,{headers:{Authorization:`Bearer ${secret}`}}),env);if(current instanceof Response||current.id!==userId||(current.tokenRepo&&current.tokenRepo!==route.projectId)||(route.write&&current.tokenScope==="read"))return false;}
       if(await account.accountLifecycle()!=="active"||(parentTokenHash&&!(await account.apiTokenHashActive(parentTokenHash)))||!(await project.canGitAccess(userId,route.taskId,route.write)))return false;
+      if(attemptId&&route.endpoint==="git-receive-pack"&&request.method==="POST"&&phase==="dispatch"&&!await project.markGitGatewayDispatch(attemptId))return false;
       checkedAt=Date.now();windowBytes=0;return true;
     }catch{return false;}
   };
@@ -53,8 +54,9 @@ export async function handleGitGateway(request:Request,env:Env,admit:GitAdmissio
     repo=await env.ARTIFACTS.get(repoName);const remote=String((await repo.info()).remote),provider=new URL(remote);
     if(provider.protocol!=="https:"||!/^[a-f0-9]{32}\.artifacts\.cloudflare\.net$/.test(provider.hostname)||provider.port||provider.username||provider.password||provider.search||provider.hash)throw new Error("Invalid provider origin");
     if(!(await project.canGitAccess(userId,route.taskId,route.write))||await account.accountLifecycle()!=="active")throw new Error("Git access changed");
-    providerToken=(await repo.createToken(route.write?"write":"read",600)).plaintext;
-    if(!await authorize("dispatch",0)){await finish();return respond("Git access changed before forwarding",403);}
+    if(route.write){attemptId=crypto.randomUUID();const scope=await project.beginGitGatewayAttempt(attemptId,route.taskId,true,userId,parentTokenHash??await gitParentTokenHash(request)??null);if(scope.repoName!==repoName)throw Error("Git workspace scope changed");}
+    const issued=await repo.createToken(route.write?"write":"read",600);providerToken=issued.plaintext;
+    if(attemptId)await project.recordGitGatewayCredential(attemptId,providerToken,Date.parse(issued.expiresAt),issued.scope);
     return await proxyGitHttp(request,route,{remote,providerOrigin:provider.origin,providerToken,writeAllowed:route.write,maxRequestBytes:100_000_000,maxResponseBytes:1_100_000_000,timeoutMs:600_000,finish,authorize});
   }catch{await finish().catch(()=>{});return respond("Git transport unavailable; inspect remote refs before retrying",503);}
 }

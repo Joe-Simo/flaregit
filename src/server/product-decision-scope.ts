@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { assertCompatibleAcceptedTargetBatch, type FrozenAcceptedTarget } from '../core/accepted-target';
+import { assertCompatibleAcceptedTargetBatch,effectiveTaskAcceptedTarget, type FrozenAcceptedTarget } from '../core/accepted-target';
 import type { ProductDecision, ProductDecisionParticipant, ProductDecisionScope, Requirement, Task } from '../core/types';
 
 type Context = { projectId: string; incarnation: string; tasks: Record<string, Task>; writerOf?: (taskId: string) => string | null };
@@ -7,6 +7,7 @@ function same(a: unknown, b: unknown): boolean { return JSON.stringify(a) === JS
 function participant(task: Task, conflictIds: readonly string[], writerOf?: Context['writerOf']): ProductDecisionParticipant {
   return { taskId: task.id, currentCommit: task.currentCommit, baseCommit: task.baseCommit, workspaceRepoName: task.workspace.repoName, workspaceBranch: task.workspace.branch,
     ...(task.dependsOn ? { dependsOn: task.dependsOn } : {}), ...(task.activeCandidateId ? { activeCandidateId: task.activeCandidateId } : {}),
+    ...(task.targetGeneration?{targetGeneration:{eventId:task.targetGeneration.eventId,generation:task.targetGeneration.generation}}:{}),
     ...(task.agentRunId ? { agentRunId: task.agentRunId } : {}), ...(task.agentWorkflowInstanceId ? { agentWorkflowInstanceId: task.agentWorkflowInstanceId } : {}),
     contributorId: task.contributor.id, contributorType: task.contributor.type, ...(task.initiatedBy ? { initiatedById: task.initiatedBy.id } : {}),
     ...(writerOf ? { writerId: writerOf(task.id) } : {}), conflictingRequirements: structuredClone(task.requirements.filter(requirement => conflictIds.includes(requirement.id))) };
@@ -14,7 +15,7 @@ function participant(task: Task, conflictIds: readonly string[], writerOf?: Cont
 function targetOf(tasks: Task[], expected?: FrozenAcceptedTarget): FrozenAcceptedTarget | undefined {
   if (!tasks.some(task => task.acceptedTarget !== undefined)) { if (expected) throw Error('Decision target is missing from its participants'); return undefined; }
   if (tasks.some(task => task.acceptedTarget === undefined)) throw Error('Bound and unbound decisions cannot share participants');
-  const targets = tasks.map(task => task.acceptedTarget!);
+  const targets = tasks.map(task => effectiveTaskAcceptedTarget(task)!);
   return assertCompatibleAcceptedTargetBatch(expected ? [expected, ...targets] : targets);
 }
 /** Trusted caller supplies the exact claim batch, not every waiting repository task. */

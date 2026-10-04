@@ -6,6 +6,7 @@ import { isSafeRef } from "../core/sanitize.js";
 export type AgentRunPhase = "claimed" | "proposed" | "pushed" | "checkpointed" | "failed";
 export interface AgentRunInput {
   readonly acceptedTarget?:FrozenAcceptedTarget;
+  readonly targetGeneration?:{eventId:string;generation:number};
   runId: string; taskId: string; startingCommit: string; startingBranchHead: string | null; branch: string; goal: string;
   context: { issue?: { number: number; title: string; summary: string }; comments: Array<{ id: string | number; summary: string }> };
   allowedScope: string[]; protectedPaths: string[];
@@ -18,7 +19,7 @@ export interface AgentRunRecord extends AgentRunInput {
 export type AgentRunClaim = { kind: "claimed" | "existing" | "busy"; run: AgentRunRecord };
 const id = z.string().min(1).max(200).regex(/^[A-Za-z0-9_-]+$/);
 const sha = z.string().regex(/^[0-9a-f]{40}$/);
-const inputSchema = z.object({ acceptedTarget:acceptedTargetSchema.optional(), runId: id, taskId: id, startingCommit: sha, startingBranchHead: sha.nullable(), branch: z.string().refine(isSafeRef), goal: z.string().min(1).max(1000),
+const inputSchema = z.object({ targetGeneration:z.object({eventId:z.uuid(),generation:z.number().int().positive().safe()}).strict().optional(), acceptedTarget:acceptedTargetSchema.optional(), runId: id, taskId: id, startingCommit: sha, startingBranchHead: sha.nullable(), branch: z.string().refine(isSafeRef), goal: z.string().min(1).max(1000),
   context: z.object({ issue: z.object({ number: z.number().int().positive(), title: z.string().max(1000), summary: z.string().max(6000) }).strict().optional(), comments: z.array(z.object({ id: z.union([id, z.number().int().nonnegative()]), summary: z.string().max(1500) }).strict()).max(20) }).strict(),
   allowedScope: z.array(z.string().min(1).max(500)).min(1).max(100), protectedPaths: z.array(z.string().min(1).max(500)).max(100),
 }).strict();
@@ -45,6 +46,7 @@ export class AgentRunLedger {
     return this.storage.transactionSync(() => {
       const existing = this.get(value.runId);
       if (existing) {
+        if(JSON.stringify(existing.targetGeneration)!==JSON.stringify(value.targetGeneration))throw new Error("Agent target generation changed");
         if(Boolean(existing.acceptedTarget)!==Boolean(value.acceptedTarget))throw new Error("Agent accepted target binding changed");
         if(existing.acceptedTarget&&value.acceptedTarget)assertCompatibleAcceptedTargetBatch([existing.acceptedTarget,value.acceptedTarget]);
         if (existing.taskId !== value.taskId) throw new Error("Run identity belongs to another task");
@@ -75,7 +77,7 @@ export class AgentRunLedger {
       if (!previous || previous.phase !== "failed" || !previous.proposal || newRunId === previousRunId || this.get(newRunId)) throw new Error("The exact failed proposal is unavailable for recovery");
       const frozenGoal = redactSecrets(z.string().min(1).max(1000).parse(goal));
       if (frozenGoal !== previous.goal) throw new Error("Task purpose changed; create a new proposal instead of replaying the old one");
-      const input = inputSchema.parse({ runId: newRunId, taskId, ...(previous.acceptedTarget?{acceptedTarget:previous.acceptedTarget}:{}), startingCommit: previous.startingCommit, startingBranchHead: previous.startingBranchHead, branch: previous.branch, goal: frozenGoal, context: previous.context, allowedScope, protectedPaths });
+      const input = inputSchema.parse({ runId: newRunId, taskId, ...(previous.acceptedTarget?{acceptedTarget:previous.acceptedTarget}:{}),...(previous.targetGeneration?{targetGeneration:previous.targetGeneration}:{}), startingCommit: previous.startingCommit, startingBranchHead: previous.startingBranchHead, branch: previous.branch, goal: frozenGoal, context: previous.context, allowedScope, protectedPaths });
       const files = proposalSchema.parse(previous.proposal.files);
       if (Object.values(files).some((content) => redactSecrets(content) !== content)) throw new Error("Saved proposal contains credentials and cannot be resumed");
       assertAgentWrites({ allowedScope }, Object.keys(files), protectedPaths);

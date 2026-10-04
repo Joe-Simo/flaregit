@@ -19,3 +19,15 @@ export function assertCompatibleAcceptedTargetBatch(values:readonly FrozenAccept
  if(targets.some(target=>fingerprint(target)!==expected))throw Error('Integration batch mixes accepted target scope, base, version, requirements or policy');
  return first;
 }
+
+export const taskTargetGenerationSchema=z.object({eventId:z.uuid(),generation:z.number().int().positive().safe(),acceptedTarget:acceptedTargetSchema,baseCommit:nonzeroCommit,currentCommit:nonzeroCommit}).strict();
+export type TaskTargetGeneration=Omit<z.infer<typeof taskTargetGenerationSchema>,"acceptedTarget">&{acceptedTarget:FrozenAcceptedTarget};
+/** A computed active generation never rewrites the task's original creation binding. */
+export function effectiveTaskAcceptedTarget(task:{acceptedTarget?:FrozenAcceptedTarget;targetGeneration?:TaskTargetGeneration;baseCommit:string;currentCommit:string}):FrozenAcceptedTarget|undefined{
+ if(!task.targetGeneration)return task.acceptedTarget;
+ const generation=taskTargetGenerationSchema.parse(task.targetGeneration),original=task.acceptedTarget&&acceptedTargetSchema.parse(task.acceptedTarget);
+ if(!original||generation.baseCommit!==task.baseCommit||generation.currentCommit!==task.currentCommit)throw Error('Active target generation does not match the contribution checkpoint');
+ const next=generation.acceptedTarget;
+ if(next.projectId!==original.projectId||next.incarnation!==original.incarnation||next.canonicalRepoName!==original.canonicalRepoName||next.ref!==original.ref||next.branch!==original.branch||next.acceptedVersion<original.acceptedVersion||next.policyVersion<original.policyVersion)throw Error('Active target generation changed repository scope or accepted base');
+ return structuredClone(next);
+}

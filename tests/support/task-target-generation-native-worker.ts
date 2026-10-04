@@ -1,0 +1,15 @@
+import {ProductDecisionFixture} from './product-decision-native-worker';
+import type {Env} from '../../src/server/env';
+export class TaskTargetGenerationFixture extends ProductDecisionFixture{
+ override async fetch(request:Request){const url=new URL(request.url);try{
+  if(url.pathname==='/agent-generation-proof'){const input=await request.json() as {taskId:string;runId:string};const task=(await this.getState()).tasks[input.taskId]!;await this.registerWorkflow(input.runId,'agent',input.taskId,'owner');const claimed=await this.claimAgentRun({runId:input.runId,taskId:input.taskId,startingCommit:task.currentCommit,startingBranchHead:task.currentCommit,branch:task.workspace.branch,goal:task.goal,context:{comments:[]},allowedScope:task.allowedScope,protectedPaths:[]});const native=await this.beginAgentNativeAttempt({workflowId:input.runId,runId:input.runId,taskId:input.taskId,phase:'proposal',attemptId:crypto.randomUUID(),nativeId:crypto.randomUUID()});const proposed=await this.saveAgentProposal(input.runId,input.taskId,{'src/new.ts':'export const refreshed = true;'}),pushed=await this.markAgentPushed(input.runId,input.taskId,'d'.repeat(40));return Response.json({claimed:claimed.kind,target:claimed.run.acceptedTarget,stamp:claimed.run.targetGeneration,native:!!native,proposed,pushed});}
+  if(url.pathname==='/begin-gateway'){const input=await request.json() as {id:string;taskId:string};return Response.json(await this.beginGitGatewayAttempt(input.id,input.taskId,true,'owner',null));}
+  if(url.pathname==='/settle-gateway'){const input=await request.json() as {id:string};await this.recordGitGatewayCredential(input.id,'synthetic-private-gateway-token',Date.now()+60000,'write');return Response.json(await this.finishGitGatewayAttempt(input.id,{transportFinished:false,credentialRevoked:true}));}
+  if(url.pathname==='/prepare-generation'){const input=await request.json() as {taskId:string;eventId:string;expectedGeneration:number};return Response.json(await this.prepareTaskTargetGeneration(input.taskId,input.eventId,input.expectedGeneration,{kind:'policy-refresh'},{userId:'owner',displayName:'Owner',viaToken:false},undefined,Date.now()+60000));}
+  if(url.pathname==='/activate-generation')return Response.json(await this.activateTaskTargetGeneration(url.searchParams.get('event')!,{userId:'owner',displayName:'Owner',viaToken:false},undefined,Date.now()+60000));
+  if(url.pathname==='/raw-state'){return Response.json(JSON.parse(this.ctx.storage.sql.exec<{doc:string}>('SELECT doc FROM project WHERE id=1').one().doc));}
+  if(url.pathname==='/creation-receipts')return Response.json(this.ctx.storage.sql.exec('SELECT task_id,payload FROM task_creation_receipts ORDER BY task_id').toArray());
+  return super.fetch(request);
+ }catch(error){return Response.json({error:error instanceof Error?error.message:'Fixture failure'},{status:409});}}
+}
+export default{fetch(request:Request,env:Env){const url=new URL(request.url);return(env.REPOSITORY_CONTROLLER.getByName(url.searchParams.get('name')??'task-generations') as unknown as TaskTargetGenerationFixture).fetch(request);}};

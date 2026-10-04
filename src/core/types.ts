@@ -1,4 +1,4 @@
-import type {FrozenAcceptedTarget} from "./accepted-target.js";
+import type {FrozenAcceptedTarget,TaskTargetGeneration} from "./accepted-target.js";
 import type { ExternalCheckPolicy } from "./external-checks.js";
 import type { FrozenContributorProof } from "./verification/integrity.js";
 export type ContributorType = "human" | "agent";
@@ -62,6 +62,8 @@ export interface TaskWorkspace {
 }
 
 export interface Task {
+  /** Server-computed validated active generation; original creation binding remains immutable. */
+  readonly targetGeneration?: TaskTargetGeneration;
   /** Explicit immutable repository-ledger target; absent on primary compatibility records. */
   readonly acceptedTarget?: FrozenAcceptedTarget;
   id: string;
@@ -114,6 +116,7 @@ export interface CandidateGeneration {
   id: string;
   attemptNumber: number;
   participatingTaskIds: string[];
+  readonly participatingTargetGenerations?: Record<string, TaskTargetGeneration>;
   participatingCommits: Record<string, string>; // taskId -> commitHash
   expectedAcceptedBase: string;
   frozenPolicyVersion: number;
@@ -207,6 +210,7 @@ export interface DecisionOption {
 export interface HumanDecisionActor { userId: string; displayName: string; viaToken: boolean }
 
 export interface ProductDecisionParticipant {
+  targetGeneration?: {eventId:string;generation:number};
   taskId: string;
   currentCommit: string;
   baseCommit: string;
