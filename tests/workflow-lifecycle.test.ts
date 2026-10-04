@@ -54,13 +54,14 @@ test("publication releases its ephemeral checkout while preserving the reviewed 
     const commit = await git(["-C", seed, "rev-parse", "HEAD"]);
     await git(["-C", seed, "push", "origin", `${commit}:refs/flaregit/candidates/test`]);
     const retention=retainedFixture(base,commit,"test");
-    let destroyed = 0;
+    let destroyed = 0,publicationReadbackObserved=false,withdrawAfterFunding=false;
     const env = {
       ...lifecycleFunding(retention),
       ARTIFACTS: { get: async () => ({ info: async () => ({ remote: fixtureRemote }), createToken: async (scope:string) => ({ plaintext: "fixture-token",scope,expiresAt:new Date(Date.now()+900000).toISOString() }),revokeToken:async()=>true,[Symbol.dispose]:()=>{} }) },
       INTEGRATOR: { getByName: () => ({
         exec: async (argv: string[]) => {
           const command = argv[2]!.replaceAll(fixtureRemote,canonical).replaceAll("/workspace/publish", workspace);
+          if(command.includes("merge-base --is-ancestor"))publicationReadbackObserved=true;
           const child = Bun.spawn(["sh", "-c", command], { stdout: "pipe", stderr: "pipe" });
           const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
           return { success: exitCode === 0, stdout, stderr, exitCode };
@@ -73,10 +74,15 @@ test("publication releases its ephemeral checkout while preserving the reviewed 
     const callable = workflow as unknown as { casPush(candidate: CandidateGeneration, commit: string, stub: Ledger, branch: string): Promise<{ ok: boolean }> };
     let authorized = false, authorizationCalls = 0;
     const ledger = { ...retention,getState: async () => ({ canonicalRepoName: "repo" }), authorizeCandidatePublication: async () => { authorizationCalls++; return authorized; } } as unknown as Ledger;
+    const funded=workflow as unknown as{fundedRetainedCommand(input:RetainedInput,stub:Ledger):Promise<void>};const originalFunded=funded.fundedRetainedCommand.bind(workflow);
+    funded.fundedRetainedCommand=async(input,stub)=>{await originalFunded(input,stub);if(withdrawAfterFunding&&publicationReadbackObserved)authorized=false;};
     const publication = { id: "test", expectedAcceptedBase: base,participatingTaskIds:["one"] } as CandidateGeneration;
     const denied = await callable.casPush(publication, commit, ledger, "main");
     expect(denied.ok).toBe(false);
     expect(await git(["--git-dir", canonical, "rev-parse", "main"])).toBe(base);
+    authorized=true;withdrawAfterFunding=true;publicationReadbackObserved=false;
+    const withdrawn=await callable.casPush(publication,commit,ledger,"main");expect(withdrawn.ok).toBe(false);expect(await git(["--git-dir",canonical,"rev-parse","main"])).toBe(base);expect(retention.pendingCredentials()).toBe(0);
+    withdrawAfterFunding=false;
     authorized = true;
     const result = await callable.casPush(publication, commit, ledger, "main");
     expect(result.ok).toBe(true);
@@ -84,8 +90,8 @@ test("publication releases its ephemeral checkout while preserving the reviewed 
     // Lost-ACK recovery proves the already committed SHA before checking new-dispatch authority.
     const recovered = await callable.casPush(publication, commit, ledger, "main");
     expect(recovered.ok).toBe(true);
-    expect(authorizationCalls).toBe(2);
-    expect(destroyed).toBe(3);expect(retention.pendingCredentials()).toBe(0);
+    expect(authorizationCalls).toBe(4);
+    expect(destroyed).toBe(4);expect(retention.pendingCredentials()).toBe(0);
     expect(await Bun.file(join(workspace, ".git", "HEAD")).exists()).toBe(false);
     expect(await git(["--git-dir", canonical, "rev-parse", "refs/flaregit/candidates/test"])).toBe(commit);
     expect(await git(["--git-dir", canonical, "rev-parse", "main"])).toBe(commit);

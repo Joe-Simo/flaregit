@@ -25,11 +25,13 @@ function reviewButtonDisabled(label: string, isOwner: boolean, reviewReady = tru
   if (!button) throw new Error(`Missing review control: ${label}`);
   return /\bdisabled=/.test(button[1]!);
 }
-test("rendered review controls enforce existing owner permission", () => {
+test("initial review fails closed for unknown delegated evidence while preserving owner rejection", () => {
   expect(reviewButtonDisabled("Accept into history", false)).toBe(true);
   expect(reviewButtonDisabled("Reject", false)).toBe(true);
-  expect(reviewButtonDisabled("Accept into history", true)).toBe(false);
+  expect(reviewButtonDisabled("Accept into history", true)).toBe(true);
   expect(reviewButtonDisabled("Reject", true)).toBe(false);
+  const html=renderToStaticMarkup(createElement(CandidateReview,{projectId:"synthetic-repository",candidate,onDone:()=>{},isOwner:true,reviewReady:true}));
+  expect(html).toContain("Checking reviewer evidence");
 });
 test("legacy review remains inspectable but cannot accept without a fresh protected candidate",()=>{
  expect(reviewButtonDisabled("Accept into history",true,true,{...candidate,preservationProtocolVersion:undefined})).toBe(true);

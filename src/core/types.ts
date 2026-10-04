@@ -134,6 +134,7 @@ export interface CandidateGeneration {
   /** The integration run waiting for a human decision on this exact candidate commit. */
   workflowInstanceId?: string;
   /** A human's decision. It is bound to the commit they saw; any other commit needs a new review. */
+  frozenReviewPolicy?: {version:number;policy:{requiredApprovals:number;allowAuthorApproval:boolean};authorIds:string[]};
   review?: { approved: boolean; by: string; note?: string; at: string; commit: string; actor?: HumanDecisionActor };
   createdAt: string;
   updatedAt: string;

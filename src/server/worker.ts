@@ -1,3 +1,4 @@
+import {repositoryReviewPolicySchema} from "./repository-review-ledger.js";
 import {importedAllocationReady} from "./import-allocation-readiness.js";
 import {inspectSavedImport} from "./import-read-lifecycle.js";
 import {gitCloneCommand,taskGitCommands} from "./git-command-metadata.js";
@@ -1509,6 +1510,42 @@ export default {
         }
 
         // ----- human review of a verified candidate -----
+        const delegatedReviewRoute=/^\/candidates\/([a-z0-9_-]{1,128})\/delegated-reviews$/.exec(sub);
+        const reviewAdministration=sub==="/review-settings"||sub==="/review-policy"||sub==="/review-grants";
+        if(reviewAdministration||delegatedReviewRoute){
+          const allowed=delegatedReviewRoute?["GET","POST"]:sub==="/review-settings"?["GET"]:sub==="/review-policy"?["PUT"]:["POST"];
+          if(!allowed.includes(method))return text("Unsupported review method",405);
+          if([...url.searchParams.keys()].length)return text("Invalid review query",400);
+          if(reviewAdministration&&!isOwner)return text("Only the repository owner can administer reviewer grants and policy",403);
+          if(method!=="GET"&&auth.viaToken&&auth.tokenScope==="read")return text("This token cannot record reviews",403);
+          if(delegatedReviewRoute&&method==="POST"&&auth.viaToken)return text("A signed-in human reviewer must record the review",403);
+          const freshReviewAuth=async()=>{const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||(current.viaToken&&((current.tokenRepo&&current.tokenRepo!==projectId)||(reviewAdministration&&current.tokenScope!=="full")||(method!=="GET"&&current.tokenScope==="read"))))return text("Review authentication changed",403);return current;};
+          const current=await freshReviewAuth();if(current instanceof Response)return current;
+          const actor={userId,displayName:"Repository contributor",viaToken:current.viaToken===true},credentialHash=current.viaToken?await gitParentTokenHash(request):undefined;
+          const eventValid=(value:unknown):value is string=>typeof value==="string"&&/^[A-Za-z0-9_-]{8,200}$/.test(value);
+          const versionValid=(value:unknown):value is number=>typeof value==="number"&&Number.isSafeInteger(value)&&value>=0;
+          try{
+            if(method==="GET"){
+              const finalAuth=await freshReviewAuth();if(finalAuth instanceof Response)return finalAuth;
+              return repositoryReadJson(delegatedReviewRoute?await project.candidateDelegatedReviews(delegatedReviewRoute[1]!,actor,credentialHash,finalAuth.expiresAt):await project.repositoryReviewSettings(actor,credentialHash,finalAuth.expiresAt));
+            }
+            if(sub==="/review-policy"){
+              const input=await body<{eventId?:unknown;expectedVersion?:unknown;policy?:unknown}>(),policy=repositoryReviewPolicySchema.safeParse(input.policy);
+              if(Object.keys(input).some(key=>!["eventId","expectedVersion","policy"].includes(key))||!eventValid(input.eventId)||!versionValid(input.expectedVersion)||!policy.success)return text("Exact policy, version, and stable event ID are required",400);
+              const result=await project.configureRepositoryReviewPolicy({eventId:input.eventId,expectedVersion:input.expectedVersion,policy:policy.data},actor,credentialHash,current.expiresAt);
+              return repositoryReadJson(result);
+            }
+            if(sub==="/review-grants"){
+              const input=await body<{eventId?:unknown;userId?:unknown;expectedVersion?:unknown;enabled?:unknown}>();
+              if(Object.keys(input).some(key=>!["eventId","userId","expectedVersion","enabled"].includes(key))||!eventValid(input.eventId)||!versionValid(input.expectedVersion)||typeof input.enabled!=="boolean"||typeof input.userId!=="string"||input.userId.length<1||input.userId.length>256||/[\x00-\x1f\x7f]/.test(input.userId))return text("Exact member, grant version, enabled state, and stable event ID are required",400);
+              return repositoryReadJson(await project.setRepositoryReviewGrant({eventId:input.eventId,userId:input.userId,expectedVersion:input.expectedVersion,enabled:input.enabled},actor,credentialHash,current.expiresAt));
+            }
+            const input=await body<{eventId?:unknown;expectedCommit?:unknown;grantVersion?:unknown;decision?:unknown;note?:unknown}>();
+            if(Object.keys(input).some(key=>!["eventId","expectedCommit","grantVersion","decision","note"].includes(key))||!eventValid(input.eventId)||!versionValid(input.grantVersion)||typeof input.expectedCommit!=="string"||!/^[a-f0-9]{40}$/.test(input.expectedCommit)||(input.decision!=="approve"&&input.decision!=="request_changes"&&input.decision!=="withdraw")||(input.note!==undefined&&(typeof input.note!=="string"||input.note.length>5000)))return text("Exact candidate commit, reviewer grant, decision, and stable event ID are required",400);
+            return repositoryReadJson(await project.recordCandidateDelegatedReview(delegatedReviewRoute![1]!,{eventId:input.eventId,expectedCommit:input.expectedCommit,grantVersion:input.grantVersion,decision:input.decision,...(typeof input.note==="string"?{note:input.note}:{})},actor,credentialHash,current.expiresAt));
+          }catch{return repositoryReadJson({error:"Review was not confirmed. Refresh the exact candidate and reviewer policy before retrying the same event ID; repository history remains preserved."},409);}
+        }
+
         const reviewRoute = /^\/candidates\/([a-z0-9_-]+)\/review$/.exec(sub);
         if (reviewRoute && method === "POST") {
           if (!isOwner) return text("Only the repository owner with a signed-in session or full-access token can review", 403);

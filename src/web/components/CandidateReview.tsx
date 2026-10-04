@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Check, Eye, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -11,6 +11,8 @@ import { blocksExternalAcceptance } from "../review-gate";
 import { navigate, timeAgo } from "../router";
 import { abandonLegacyRerun, checkedLegacyInputObservations, legacyRerunDraft, requestLegacyRerun, type LegacyRerunDraft, type LegacyRerunReport } from "../legacy-candidate-rerun";
 import type { CandidateGeneration, Task, VerificationEvidence } from "@/core/types";
+
+const DelegatedCandidateReviews=lazy(async()=>({default:(await import("./DelegatedCandidateReviews")).DelegatedCandidateReviews}));
 
 /** Requirements and input commits are frozen; legacy task descriptions are current context only. */
 export function CandidatePurpose({ projectId, candidate, tasks }: { projectId: string; candidate: CandidateGeneration; tasks?: Record<string, Task> }) {
@@ -35,6 +37,7 @@ export function CandidatePurpose({ projectId, candidate, tasks }: { projectId: s
  * Accept or Reject. Nothing becomes repository history without this decision on this exact commit.
  */
 export function CandidateReview({ projectId, candidate, evidence, tasks, onDone, showOpen = true, externalChecks, providerNames, onRetryExternalCheck, isOwner = false, reviewReady = true, savedDecisionRecoveryInPanel = false, onRecoverSavedRun }: { projectId: string; candidate: CandidateGeneration; evidence?: VerificationEvidence; tasks?: Record<string, Task>; onDone: () => void; showOpen?: boolean; externalChecks?: ExternalCheckState; providerNames?: Record<string, string>; onRetryExternalCheck?: (checkId: string) => Promise<void>; isOwner?: boolean; reviewReady?: boolean; savedDecisionRecoveryInPanel?: boolean; onRecoverSavedRun?: () => void }) {
+  const [delegatedGate,setDelegatedGate]=useState<{scope:string;passed:boolean|null}|null>(null);
   const [rerunReserved, setRerunReserved] = useState(false);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
@@ -44,6 +47,8 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
   const total = evidence?.testResults.reduce((n, s) => n + s.passedCount + s.failedCount, 0) ?? 0;
 
   const scope = `${projectId}:${candidate.id}:${candidate.candidateCommit ?? ""}`;
+  const onDelegatedGate=useCallback((passed:boolean|null)=>setDelegatedGate({scope,passed}),[scope]);
+  const delegatedKnown=delegatedGate?.scope===scope&&delegatedGate.passed===true;
   const checkScope = `${scope}:${isOwner ? "owner" : "member"}`;
   const decisionGeneration = useRef(0);
   useEffect(() => { decisionGeneration.current++; setBusy(null); setError(null); setRerunReserved(false); return () => { decisionGeneration.current++; }; }, [scope, isOwner]);
@@ -87,7 +92,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
   const identityMismatch = checks && (checks.frozen.repositoryId !== projectId || checks.frozen.candidateId !== candidate.id || checks.frozen.commit !== candidate.candidateCommit || (candidate.frozenExternalChecksPolicy && (checks.frozen.policy.version !== candidate.frozenExternalChecksPolicy.version || checks.frozen.policy.mode !== candidate.frozenExternalChecksPolicy.mode)) || (evidence && (checks.frozen.commit !== evidence.candidateCommit || checks.frozen.tree !== evidence.candidateTree)));
   const declaredRequiredChecks = candidate.frozenExternalChecksPolicy?.checks.some((check) => check.required) ?? false;
   const checkGate = checks ? externalCheckGate(checks) : declaredRequiredChecks ? "pending" : "passed";
-  const acceptanceBlocked = rerunReserved || candidate.preservationProtocolVersion !== 1 || !reviewReady || !candidate.candidateCommit || blocksExternalAcceptance({ required: declaredRequiredChecks, known: checksKnown, readFailed: checkError !== null, identityMismatch: Boolean(identityMismatch), gate: checkGate, retryingRequired });
+  const acceptanceBlocked = !delegatedKnown || rerunReserved || candidate.preservationProtocolVersion !== 1 || !reviewReady || !candidate.candidateCommit || blocksExternalAcceptance({ required: declaredRequiredChecks, known: checksKnown, readFailed: checkError !== null, identityMismatch: Boolean(identityMismatch), gate: checkGate, retryingRequired });
   const retryCheck = isOwner ? async (checkId: string) => {
     const sequence = ++requestSequence.current;
     retryInFlight.current = true; setRetryingCheck(true); setRetryingRequired(checks?.frozen.policy.checks.find((check) => check.id === checkId)?.required ?? declaredRequiredChecks);
@@ -122,12 +127,15 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
     }
   };
 
+  const delegatedRows=candidate.candidateCommit?<Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Checking reviewer evidence…</p>}><DelegatedCandidateReviews key={scope} projectId={projectId} candidateId={candidate.id} commit={candidate.candidateCommit} base={candidate.expectedAcceptedBase} tree={evidence?.candidateTree} verificationPolicyVersion={candidate.frozenPolicyVersion} reviewReady={reviewReady} editable={["awaiting_review","verified"].includes(candidate.status)} onGate={onDelegatedGate}/></Suspense>:null;
+
   if (candidate.review?.approved && candidate.status === "verified") {
     return (
       <section aria-label="Saved approval awaiting integration" className="rounded-lg border border-border p-4 space-y-2 text-sm">
         <p><span className="font-semibold">Approved by {candidate.review.by}</span> {candidate.review.note ? `(${candidate.review.note})` : ""}: approval saved for <code>{candidate.candidateCommit?.slice(0, 7)}</code>.</p>
         <p className="text-muted-foreground">The decision is saved for this exact commit. A paused or unavailable run may still need recovery. Repository history changes only after confirmed acceptance.</p>
         {connectedRows}
+        {delegatedRows}
         <LegacyCandidateRerun projectId={projectId} candidate={candidate} isOwner={isOwner} onDone={onDone} onReserved={setRerunReserved} />
         {identityMismatch && <p role="alert" className="text-destructive">Connected check evidence belongs to a different candidate or tree. Reload before accepting.</p>}
         {error && <p role="alert" className="text-destructive">{error}</p>}
@@ -158,6 +166,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
         </details>)}
       </div>}
       {connectedRows}
+      {delegatedRows}
       <LegacyCandidateRerun projectId={projectId} candidate={candidate} isOwner={isOwner} onDone={onDone} onReserved={setRerunReserved} />
       {candidate.preservationProtocolVersion !== 1 && <p role="status" className="text-xs text-muted-foreground">This older candidate cannot be accepted. Its review remains available; create a protected successor when eligible.</p>}
       {!reviewReady && <p role="status" className="text-xs text-muted-foreground">Diff files are loading or unavailable. Acceptance from this review is paused; comments and rejection remain available.</p>}

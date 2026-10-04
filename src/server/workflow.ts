@@ -262,7 +262,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     const sb = this.env.INTEGRATOR.getByName(allocationId);
     const command=async()=>{const commandId=crypto.randomUUID(),scope=await repository.admitIntegrationNativeCommand(this.computeWorkflowId!,this.nativeRuntimeCandidateId!,nativeId,commandId);return {commandId,scope};};
     return {
-      exec: async(cmd:string,env?:Record<string,string>)=>{if(!this.nativeRuntimeCandidateId)return sb.exec(["sh","-c",cmd],{env});const permit=await command();return sb.integrationExec(permit.scope,nativeId,permit.commandId,["sh","-c",cmd],{env});},
+      exec: async(cmd:string,env?:Record<string,string>,beforeDispatch?:()=>Promise<void>)=>{if(!this.nativeRuntimeCandidateId){await beforeDispatch?.();return sb.exec(["sh","-c",cmd],{env});}const permit=await command();try{await beforeDispatch?.();}catch(error){await repository.finishIntegrationNativeCommand(permit.scope,nativeId,permit.commandId,"refused");throw error;}return sb.integrationExec(permit.scope,nativeId,permit.commandId,["sh","-c",cmd],{env});},
       readFile: async(p:string)=>{if(!this.nativeRuntimeCandidateId)return {content:await sb.readFile(p)};const permit=await command();return {content:await sb.integrationReadFile(permit.scope,nativeId,permit.commandId,p)};},
       readFileBytes: async(p:string)=>{if(!this.nativeRuntimeCandidateId)return sb.readFileBytes(p);const permit=await command();return sb.integrationReadFileBytes(permit.scope,nativeId,permit.commandId,p);},
       writeFile: async(p:string,c:string)=>{if(!this.nativeRuntimeCandidateId)return sb.writeFile(p,c);const permit=await command();return sb.integrationWriteFile(permit.scope,nativeId,permit.commandId,p,c);},
@@ -562,11 +562,12 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     // canonical branch before retrying, including when another contributor advanced it.
     const alreadyLanded = () => publicationInHistory((command, env) => sb.exec(command, env), dir, canonical.remote, canonical.token, branch, commit);
     if (await alreadyLanded()) return { ok: true };
-    if (!await stub.authorizeCandidatePublication(candidate.id, commit)) return { ok: false, error: "The approving owner no longer authorizes this exact publication; nothing was pushed" };
     await this.fundedRetainedCommand(input,stub);
+    if (!await stub.authorizeCandidatePublication(candidate.id, commit)) return { ok: false, error: "The approving owner no longer authorizes this exact publication; nothing was pushed" };
     const res = await sb.exec(
       `git -C ${dir} push --quiet --force-with-lease=${q(`refs/heads/${branch}:${candidate.expectedAcceptedBase}`)} ${q(canonical.remote)} ${q(`${commit}:refs/heads/${branch}`)}`,
-      gitAuthEnv(canonical.token)
+      gitAuthEnv(canonical.token),
+      async()=>{if(!await stub.authorizeCandidatePublication(candidate.id,commit))throw new Error("Exact publication authority changed before dispatch; nothing was pushed");}
     );
     if (res.success) return { ok: true };
     // A retried step may find its own earlier push already landed: that is success, not a conflict.

@@ -18,6 +18,7 @@ import { MirrorCard } from "../components/MirrorCard";
 import { apiJson } from "../api";
 import { navigate } from "../router";
 
+const ReviewPolicySettings=lazy(async()=>({default:(await import("../components/ReviewPolicySettings")).ReviewPolicySettings}));
 const AgentCleanupRecovery=lazy(async()=>({default:(await import("../components/AgentCleanupRecovery")).AgentCleanupRecovery}));
 
 const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm";
@@ -76,6 +77,7 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
     <div className="space-y-4 max-w-3xl min-w-0">
       <h2 className="sr-only">Repository settings</h2>
       <GitCredentialRevocation key={`git-credentials:${meta.id}`} projectId={meta.id}/>
+      {isOwner&&<Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Loading review settings…</p>}><ReviewPolicySettings key={`review-policy:${meta.id}`} projectId={meta.id}/></Suspense>}
       {isOwner&&<Suspense fallback={null}><AgentCleanupRecovery key={`agent-cleanup:${meta.id}`} projectId={meta.id}/></Suspense>}
       {error && <div role="alert" className={alertCls}>{error}</div>}
       {message && <div role="status" className={okCls}>{message}</div>}

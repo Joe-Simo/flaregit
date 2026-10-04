@@ -14,6 +14,7 @@ import {openRepositoryRead,RepositoryReadError} from "./repository-read-budget.j
 import {SavedRebaseResumeCredentials,type SavedRebaseResumeCredentialPurpose} from "./saved-rebase-resume-credentials.js";
 import {RebaseResumeAttempts,assertRebaseResumeSessionDelegation,type RebaseResumeAttempt} from "./rebase-resume-attempts.js";
 import {RebaseRecoveryLedger,RebaseRecoveryError,verifyRebaseRecovery,type RebaseRecoverySnapshot,type RebaseRecoveryReport,type RebaseRecoveryReceipt,type RebaseRecoveryProof} from "./rebase-recovery.js";
+import { RepositoryReviewLedger, type RepositoryReviewPolicy, type CandidateReviewScope, type ReviewDecision } from "./repository-review-ledger.js";
 import { AgentRuntimeLedger, type AgentNativeAttemptIdentity } from "./agent-runtime-ledger.js";
 import { AgentCredentialIncidents, type AgentCredentialScope } from "./agent-credential-incidents.js";
 import {RetainedCredentialIncidents} from "./retained-credential-incidents.js";
@@ -364,6 +365,11 @@ export interface Ledger {
   recordAgentCredential(attemptId:string,issuanceId:string,token:string,expiresAt:number):Promise<void>;
   revokeAgentCredential(issuanceId:string):Promise<boolean>;
   confirmAgentNativeStopped(attemptId:string,nativeId:string):Promise<boolean>;
+  repositoryReviewSettings(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["repositoryReviewSettings"]>;
+  configureRepositoryReviewPolicy(input:{eventId:string;expectedVersion:number;policy:RepositoryReviewPolicy},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["configureRepositoryReviewPolicy"]>;
+  setRepositoryReviewGrant(input:{eventId:string;userId:string;expectedVersion:number;enabled:boolean},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["setRepositoryReviewGrant"]>;
+  candidateDelegatedReviews(candidateId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["candidateDelegatedReviews"]>;
+  recordCandidateDelegatedReview(candidateId:string,input:{eventId:string;expectedCommit:string;grantVersion:number;decision:ReviewDecision;note?:string},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["recordCandidateDelegatedReview"]>;
   agentNativeRecoverySummary(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<{attempts:Array<{attemptId:string;workflowId:string;runId:string;taskId:string;phase:"proposal"|"apply";generation:number;stopped:boolean;credentialStatuses:string[]}>;truncated:boolean;providerVerified:false}>;
   recoverAgentNativeAttempt(attemptId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<{stopped:boolean;credentialsComplete:boolean}>;
   getAgentRun(runId: string): Promise<AgentRunRecord | null>;
@@ -1240,6 +1246,22 @@ export class RepositoryController extends DurableObject<Env> {
   async accountArtifactDeleted(name:string):Promise<boolean> {this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS account_artifact_deletions(name TEXT PRIMARY KEY)");return this.ctx.storage.sql.exec("SELECT name FROM account_artifact_deletions WHERE name=?",name).toArray().length>0;}
   async recordAccountArtifactDeleted(name:string):Promise<void> {this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS account_artifact_deletions(name TEXT PRIMARY KEY)");this.ctx.storage.sql.exec("INSERT OR IGNORE INTO account_artifact_deletions VALUES(?)",name);}
 
+  private delegatedReviews(){return new RepositoryReviewLedger(this.ctx.storage);}
+  private reviewAuthors(tasks:Task[]):string[]{this.gitTables();const members=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members").toArray();return [...new Set(tasks.flatMap(task=>{const ids=[task.contributor,...(task.initiatedBy?[task.initiatedBy]:[])].filter(value=>value.type==="human").map(value=>value.id);const writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",task.id).toArray()[0]?.user_id;return [...(writer?[writer]:[]),...members.filter(member=>ids.some(id=>member.user_id===id||member.user_id.slice(-12)===id)).map(member=>member.user_id)];}))].sort();}
+  private delegatedReviewScope(candidateId:string):CandidateReviewScope {
+    const state=this.load(),candidate=state.candidates[candidateId],evidence=candidate?.evidenceId?state.evidence[candidate.evidenceId]:undefined,ledger=this.delegatedReviews();if(!candidate?.candidateCommit||!evidence?.candidateTree||evidence.status!=="passed"||evidence.candidateCommit!==candidate.candidateCommit||!candidate.expectedAcceptedBase)throw Error("Verified exact candidate unavailable");
+    if(!candidate.frozenReviewPolicy&&ledger.policy().version!==0)throw Error("This candidate predates the current review policy; create a fresh candidate");
+    const policy=candidate.frozenReviewPolicy??{...ledger.policy(),authorIds:this.reviewAuthors(candidate.participatingTaskIds.flatMap(id=>state.tasks[id]?[state.tasks[id]!]:[]))};
+    const scope:CandidateReviewScope={candidateId,commit:candidate.candidateCommit,tree:evidence.candidateTree,base:candidate.expectedAcceptedBase,verificationPolicyVersion:candidate.frozenPolicyVersion,reviewPolicyVersion:policy.version,authorIds:policy.authorIds};const frozen=ledger.frozen(candidateId);if(frozen){if(JSON.stringify(frozen.scope)!==JSON.stringify(scope))throw Error("Candidate review scope changed");}else ledger.freeze(scope,()=>{if(this.load().candidates[candidateId]?.candidateCommit!==scope.commit)throw Error("Candidate review scope changed");});return scope;
+  }
+  private async delegatedReviewGate(candidateId:string){const scope=this.delegatedReviewScope(candidateId),ledger=this.delegatedReviews(),users=this.ctx.storage.sql.exec<{reviewer_id:string}>("SELECT DISTINCT reviewer_id FROM candidate_approval_events WHERE candidate_id=? LIMIT 101",candidateId).toArray();if(users.length>100)throw Error("Review authority set exceeds bounded validation");const active=new Set<string>();for(const user of users){if(await this.roleOf(user.reviewer_id)&&await accountOf(this.env,await accountKeyFor(user.reviewer_id)).accountLifecycle()==="active")active.add(user.reviewer_id);}const current=this.delegatedReviewScope(candidateId);if(JSON.stringify(scope)!==JSON.stringify(current))throw Error("Candidate changed during reviewer authorization");return ledger.gate(current,user=>active.has(user)&&this.ctx.storage.sql.exec("SELECT user_id FROM members WHERE user_id=?",user).toArray().length>0);}
+  async repositoryReviewSettings(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authorize();const ledger=this.delegatedReviews(),rows=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM repository_review_grants ORDER BY user_id LIMIT 101").toArray();return{policy:ledger.policy(),grants:rows.slice(0,100).map(row=>ledger.grant(row.user_id)!),truncated:rows.length>100};}
+  async configureRepositoryReviewPolicy(input:{eventId:string;expectedVersion:number;policy:RepositoryReviewPolicy},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);return this.delegatedReviews().configurePolicy({...input,ownerId:actor.userId},authorize);}
+  async setRepositoryReviewGrant(input:{eventId:string;userId:string;expectedVersion:number;enabled:boolean},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);if(input.enabled&&!await this.roleOf(input.userId))throw Error("Reviewer must be a current repository member");authorize();return this.delegatedReviews().setGrant({...input,ownerId:actor.userId},()=>{authorize();if(input.enabled&&!this.ctx.storage.sql.exec("SELECT user_id FROM members WHERE user_id=?",input.userId).toArray().length)throw Error("Reviewer membership changed");});}
+  async candidateDelegatedReviews(candidateId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const userId=actor.userId,account=accountOf(this.env,await accountKeyFor(userId));if(!await this.roleOf(userId)||await account.accountLifecycle()!=="active"||(actor.viaToken?(!credentialHash||!await account.apiTokenHashActive(credentialHash)):(!Number.isFinite(sessionExpiresAt)||Date.now()>=sessionExpiresAt!)))throw Error("Repository membership and current authentication required");const scope=this.delegatedReviewScope(candidateId);let gate:ReturnType<RepositoryReviewLedger["gate"]>&{reason?:string};try{gate=await this.delegatedReviewGate(candidateId);}catch{gate={passed:false,required:this.delegatedReviews().frozen(candidateId)!.policy.requiredApprovals,approvedBy:[],blockingReviewers:[],reason:"Review scope or policy changed. Historical reviews remain available; create a fresh candidate before acceptance."};}if(!await this.roleOf(userId)||await account.accountLifecycle()!=="active"||(actor.viaToken?(!credentialHash||!await account.apiTokenHashActive(credentialHash)):Date.now()>=sessionExpiresAt!))throw Error("Reviewer access changed");const ledger=this.delegatedReviews();return{scope,policy:ledger.frozen(candidateId)!.policy,gate,history:ledger.history(candidateId),viewerGrant:ledger.grant(userId),canReview:ledger.grant(userId)?.enabled===true};}
+  async recordCandidateDelegatedReview(candidateId:string,input:{eventId:string;expectedCommit:string;grantVersion:number;decision:ReviewDecision;note?:string},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){
+    if(!actor?.userId||actor.viaToken)throw Error("Delegated human reviews require a signed-in session");if(!Number.isFinite(sessionExpiresAt)||Date.now()>=sessionExpiresAt!)throw Error("Review session expired");const account=accountOf(this.env,await accountKeyFor(actor.userId));if(await account.accountLifecycle()!=="active"||!await this.roleOf(actor.userId))throw Error("Reviewer authority unavailable");if(!["awaiting_review","verified"].includes(this.load().candidates[candidateId]?.status??""))throw Error("Candidate is not open for delegated review");const scope=this.delegatedReviewScope(candidateId);if(scope.commit!==input.expectedCommit)throw Error("The exact commit reviewed changed");return this.delegatedReviews().record({eventId:input.eventId,scope,reviewerId:actor.userId,grantVersion:input.grantVersion,decision:input.decision,note:input.note},()=>{if(this.repositoryDeleting()||Date.now()>=sessionExpiresAt!||!this.ctx.storage.sql.exec("SELECT user_id FROM members WHERE user_id=?",actor.userId).toArray().length||JSON.stringify(this.delegatedReviewScope(candidateId))!==JSON.stringify(scope))throw Error("Reviewer authority or candidate changed");});
+  }
   private agentNativeSnapshot(task:Task):string{return JSON.stringify({id:task.id,goal:task.goal,base:task.baseCommit,commit:task.currentCommit,workspace:task.workspace,scope:task.allowedScope});}
   private assertAgentNativeLocal(attempt:AgentNativeAttemptIdentity):void {
     const state=this.load(),task=state.tasks[attempt.taskId],registered=this.ctx.storage.sql.exec<{actor_id:string|null;kind:string}>("SELECT actor_id,kind FROM project_workflows WHERE instance_id=?",attempt.workflowId).toArray()[0];
@@ -3321,6 +3343,7 @@ export class RepositoryController extends DurableObject<Env> {
         if(rerun){this.assertLegacyRerunScope(rerun);candidate.predecessorCandidateId=rerun.predecessorCandidateId;candidate.legacyRerunId=rerun.id;rerun.successorCandidateId=candidate.id;rerun.phase="attached";reruns.save(rerun);}
         candidate.workflowInstanceId = req.holder;
         candidate.preservationProtocolVersion = 1;
+        candidate.frozenReviewPolicy = {...this.delegatedReviews().policy(),authorIds:this.reviewAuthors(tasks)};
         candidate.frozenExternalChecksPolicy = structuredClone(this.connections().policy());
         candidate.frozenContributorProofs = tasks.map((task) => ({ id: task.id, commit: task.currentCommit, baseCommit: task.baseCommit, ref: `refs/flaregit/tasks/${task.id}`, allowedScope: [...(task.allowedScope ?? settingsFor(s.verificationPolicy).allowedScope)] }));
         s.candidates[candidate.id] = candidate;
@@ -3451,6 +3474,7 @@ export class RepositoryController extends DurableObject<Env> {
     let assertCurrent: () => void;
     try { assertCurrent = await this.authorizeHumanDecision(recorded.actor); assertCurrent(); }
     catch { return { ok: false, error: "The approving owner no longer has publication authority" }; }
+    try{if(!(await this.delegatedReviewGate(candidateId)).passed)return {ok:false,error:"Required delegated reviews are no longer satisfied"};assertCurrent();}catch{return {ok:false,error:"Delegated review authority needs a fresh candidate"};}
     const s = this.load();
     const c = s.candidates[candidateId];
     const ev = c?.evidenceId ? s.evidence[c.evidenceId] : undefined;
@@ -3503,6 +3527,7 @@ export class RepositoryController extends DurableObject<Env> {
     let assertCurrent: () => void;
     try { assertCurrent = await this.authorizeHumanDecision(recorded.actor); assertCurrent(); }
     catch { return false; }
+    try{if(!(await this.delegatedReviewGate(candidateId)).passed)return false;assertCurrent();}catch{return false;}
     const state = this.load(), candidate = state.candidates[candidateId];
     if(!candidate||this.legacyCandidateRerunFrozen(candidateId)||this.candidatePreservationFailure(candidate))return false;
     const evidence = candidate?.evidenceId ? state.evidence[candidate.evidenceId] : undefined;
@@ -3609,6 +3634,7 @@ export class RepositoryController extends DurableObject<Env> {
   async recordReview(candidateId: string, review: { approved: boolean; actor: HumanDecisionActor; note?: string }, expectedCommit: string, credentialHash?: string): Promise<{ ok: boolean; instanceId?: string; error?: string; review?: CandidateGeneration["review"] }> {
     const assertCurrent = await this.authorizeHumanDecision(review.actor, credentialHash, true);
     assertCurrent();
+    if(review.approved&&!(await this.delegatedReviewGate(candidateId)).passed)return {ok:false,error:"Required delegated reviews have not passed for this exact candidate"};assertCurrent();
     const s = this.load();
     const c = s.candidates[candidateId];
     if(this.legacyCandidateRerunFrozen(candidateId))return {ok:false,error:"This preserved predecessor has a saved owner rerun. Review its linked fresh candidate."};
