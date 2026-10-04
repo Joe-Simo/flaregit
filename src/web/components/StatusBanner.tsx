@@ -1,5 +1,5 @@
 import React from "react";
-import { CheckCircle2, AlertTriangle, RefreshCw, Cpu, ShieldCheck, Users } from "lucide-react";
+import { CheckCircle2, AlertTriangle, RefreshCw, Cpu, ShieldCheck, Users, Clock } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
 export type PipelineStage =
@@ -8,6 +8,7 @@ export type PipelineStage =
   | "composing"
   | "repairing"
   | "verifying"
+  | "review_saved"
   | "accepted"
   | "decision_needed"
   | "working"
@@ -50,6 +51,14 @@ export function StatusBanner({
           icon: <ShieldCheck className="h-4 w-4 animate-bounce text-blue-700 dark:text-blue-400" />,
           badgeVariant: "info" as const,
           badgeText: "PROTECTED VERIFICATION",
+          bg: "bg-blue-50 dark:bg-blue-950/20 border-blue-500/30",
+          textColor: "text-blue-800 dark:text-blue-200",
+        };
+      case "review_saved":
+        return {
+          icon: <Clock className="h-4 w-4 text-blue-700 dark:text-blue-400" aria-hidden="true" />,
+          badgeVariant: "info" as const,
+          badgeText: "REVIEW SAVED",
           bg: "bg-blue-50 dark:bg-blue-950/20 border-blue-500/30",
           textColor: "text-blue-800 dark:text-blue-200",
         };

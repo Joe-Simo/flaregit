@@ -3,19 +3,34 @@
   "name": "flaregit",
   "main": "src/server/worker.ts",
   "compatibility_date": "2026-10-01",
-  "compatibility_flags": ["nodejs_compat"],
-  "assets": { "directory": "./dist", "binding": "ASSETS", "run_worker_first": ["/api/*", "/preview/*", "/webhooks/*", "/auth-config", "/pricing", "/status", "/status.json", "/health"], "not_found_handling": "single-page-application" },
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "limits": { "subrequests": 50000 },
+  "assets": { "directory": "./dist", "binding": "ASSETS", "run_worker_first": ["/api/*", "/git/*", "/preview/*", "/webhooks/*", "/auth-config", "/pricing", "/plan-price", "/status", "/status.json", "/health"], "not_found_handling": "single-page-application" },
   "vars": {
+    "EVIDENCE_STORAGE_GLOBAL_BYTES": "67108864",
+    "EVIDENCE_STORAGE_ACCOUNT_BYTES": "16777216",
+    "PREVIEW_STORAGE_GLOBAL_BYTES": "536870912",
+    "PREVIEW_STORAGE_ACCOUNT_BYTES": "134217728",
+    "ARTIFACT_STORAGE_NAMESPACE": "flaregit-default",
+    "ARTIFACT_STORAGE_GLOBAL_SLOTS": "32",
+    "ARTIFACT_STORAGE_ACCOUNT_SLOTS": "32",
     "CANONICAL_REPO": "flaregit-canonical",
     "AI_GATEWAY_ID": "default",
     "GLOBAL_RUNS_PER_DAY": "300",
+    "MANAGED_GLOBAL_MONTHLY_USD_MICROS": "10000000",
+    "MANAGED_ACCOUNT_MONTHLY_USD_MICROS": "5000000",
+    "CORE_GIT_GLOBAL_MONTHLY_USD_MICROS": "5000000",
+    "CORE_GIT_ACCOUNT_MONTHLY_USD_MICROS": "2500000",
+    "REPOSITORY_READ_GLOBAL_MONTHLY_USD_MICROS": "2000000",
+    "REPOSITORY_READ_ACCOUNT_MONTHLY_USD_MICROS": "1000000",
     "OPERATOR_ACCOUNTS": "d169eecdcf6e",
     "RUNS_ENABLED": "true",
     "FREE_RUNS_PER_DAY": "10",
     "PRO_RUNS_PER_DAY": "200",
     "POLAR_SERVER": "production",
+    "PAID_CHECKOUT_ENABLED": "false",
     "POLAR_PRODUCT_ID": "e0bf2687-739c-4051-91e5-2ab15d24262c",
-    "PREVIEW_ORIGIN": "https://preview.flaregit.com",
+    "REPOSITORY_PREVIEW_ORIGINS": "{\"pbd425298ee02\":\"https://repository-flaregit-preview-pbd425298ee02.simo-988.workers.dev\",\"pb0004cda6e6b\":\"https://repository-repository-flaregit-preview-pb0004cda6e6b.simo-988.workers.dev\"}",
     "CLERK_ISSUER": "https://clerk.flaregit.com",
     "CLERK_AUTHORIZED_PARTIES": "https://flaregit.com",
     "CLERK_PUBLISHABLE_KEY": "pk_live_Y2xlcmsuZmxhcmVnaXQuY29tJA"
@@ -48,14 +63,17 @@
   "workflows": [
     { "name": "flaregit-integration-workflow", "binding": "INTEGRATION_WORKFLOW", "class_name": "FlareGitIntegrationWorkflow" },
     { "name": "flaregit-scenario-workflow", "binding": "SCENARIO_WORKFLOW", "class_name": "FlareGitScenarioWorkflow" },
-    { "name": "flaregit-agent-workflow", "binding": "AGENT_WORKFLOW", "class_name": "FlareGitAgentWorkflow" }
+    { "name": "flaregit-agent-workflow", "binding": "AGENT_WORKFLOW", "class_name": "FlareGitAgentWorkflow" },
+    { "name": "flaregit-import-history-workflow", "binding": "IMPORT_HISTORY_WORKFLOW", "class_name": "FlareGitImportHistoryWorkflow" },
+    { "name": "flaregit-rebase-resume-workflow", "binding": "REBASE_RESUME_WORKFLOW", "class_name": "FlareGitRebaseResumeWorkflow" },
+    { "name": "flaregit-private-recovery-workflow", "binding": "PRIVATE_RECOVERY_WORKFLOW", "class_name": "FlareGitPrivateRecoveryWorkflow" }
   ],
   "routes": [
     { "pattern": "flaregit.com", "custom_domain": true },
     { "pattern": "preview.flaregit.com", "custom_domain": true }
   ],
   "workers_dev": true,
-  "ratelimits": [{ "name": "API_LIMITER", "namespace_id": "1001", "simple": { "limit": 60, "period": 60 } }],
+  "ratelimits": [{ "name": "PREVIEW_ASSET_LIMITER", "namespace_id": "1003", "simple": { "limit": 600, "period": 60 } }, { "name": "API_LIMITER", "namespace_id": "1001", "simple": { "limit": 60, "period": 60 } }, { "name": "LOOKUP_LIMITER", "namespace_id": "1002", "simple": { "limit": 240, "period": 60 } }],
   "triggers": { "crons": ["*/5 * * * *"] },
   "observability": { "enabled": true }
 }

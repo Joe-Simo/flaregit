@@ -11,10 +11,29 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun run lint
       - run: bun test
       - run: bun run build
+
+  native-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the production integrator image
+        run: docker build --tag flaregit-boundary-proof .
+      - name: Verify strict Linux execution isolation with synthetic canaries
+        run: |
+          docker run --rm --network none --entrypoint sh \
+            -e FLAREGIT_BOUNDARY_PROOF_REQUIRED=1 \
+            --mount type=bind,src="$PWD/tests/native-boundary-linux.test.ts",dst=/proof.ts,readonly \
+            --mount type=bind,src="$PWD/tests/verification-diagnostics.test.ts",dst=/diagnostics-proof.ts,readonly \
+            flaregit-boundary-proof -c 'mkdir -p /opt/flaregit/tests && cp /proof.ts /opt/flaregit/tests/native-boundary-linux.test.ts && cp /diagnostics-proof.ts /opt/flaregit/tests/verification-diagnostics.test.ts && bun test /opt/flaregit/tests/native-boundary-linux.test.ts /opt/flaregit/tests/verification-diagnostics.test.ts'

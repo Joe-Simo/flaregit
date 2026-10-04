@@ -4,11 +4,11 @@ import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 
 function state(newer = false) {
   return {
-    projectId: "test", projectName: "Test", canonicalRepoName: "repo", policyVersion: 1, verificationPolicy: {}, decisions: {}, evidence: {},
-    acceptedState: { currentCommit: newer ? "newer" : "base", buildDigest: "original", activeRequirements: [] as Array<{ id: string; status: string }>, history: [] },
-    tasks: { task: { id: "task", goal: "Checkpoint goal", contributor: { id: "person", name: "Person", type: "human" }, checkpoints: [] as Array<{ id: string }>, status: newer ? "integrating" : "verifying", currentCommit: "task-tip", activeCandidateId: newer ? "new-candidate" : "candidate", requirements: [{ id: "unverified", status: "approved" }], issue: undefined } },
-    candidates: { candidate: { id: "candidate", status: "verified", workflowInstanceId: "old-holder", participatingTaskIds: ["task"], participatingCommits: { task: "task-tip" }, evidenceId: "evidence", frozenPolicyVersion: 1, frozenRequirements: [{ id: "verified", status: "approved" }] } },
-    journal: [{ id: "journal", candidateId: "candidate", state: "PREPARED", expectedHead: "base", newHead: "landed", outputDigest: "build", candidateTree: "tree" }],
+    projectId: "p123456789abc", projectName: "Test", canonicalRepoName: "repo", policyVersion: 1, verificationPolicy: {}, decisions: {}, evidence: {},
+    acceptedState: { currentCommit: newer ? "newer" : "a".repeat(40), buildDigest: "original", activeRequirements: [] as Array<{ id: string; status: string }>, history: [] },
+    tasks: { task: { id: "task", goal: "Checkpoint goal", contributor: { id: "person", name: "Person", type: "human" }, checkpoints: [] as Array<{ id: string }>, status: newer ? "integrating" : "verifying", currentCommit: "e".repeat(40),baseCommit:"a".repeat(40),workspace:{repoName:"synthetic-workspace",remote:"https://fixture.invalid",branch:"task/task"},activeCandidateId: newer ? "new-candidate" : "candidate", requirements: [{ id: "unverified", status: "approved" }], issue: undefined } },
+    candidates: { candidate: { id: "candidate",preservationProtocolVersion:1,frozenContributorProofs:[{id:"task",commit:"e".repeat(40),baseCommit:"a".repeat(40),ref:"refs/flaregit/tasks/task",allowedScope:[]}], status: "verified", workflowInstanceId: "old-holder", participatingTaskIds: ["task"], participatingCommits: { task: "e".repeat(40) }, evidenceId: "evidence", frozenPolicyVersion: 1, frozenRequirements: [{ id: "verified", status: "approved" }] } },
+    journal: [{ id: "journal", candidateId: "candidate", state: "PREPARED", expectedHead: "a".repeat(40), newHead: "b".repeat(40), outputDigest: "build", candidateTree: "c".repeat(40) }],
   };
 }
 
@@ -19,15 +19,188 @@ test("local workerd SQLite executes production publication rollback and recovery
   if (await built.exited !== 0) throw new Error(await new Response(built.stderr).text());
   const script = await Bun.file(bundlePath).text();
   await Bun.file(bundlePath).delete();
-  const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ name: "publication-test", modules: true, script, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], durableObjects: { TEST: { className: "PublicationFixture", useSQLite: true } }, queueProducers: ["INTEGRATION_QUEUE"] }] }));
+  const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ name: "publication-test", modules: true, script, compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], durableObjects: { TEST: { className: "PublicationFixture", useSQLite: true },REPOSITORY_CONTROLLER:{className:"PublicationFixture",useSQLite:true} }, queueProducers: ["INTEGRATION_QUEUE"] }] }));
   const request = async (route: string, body?: unknown) => (await mf.getWorker("publication-test")).fetch(`http://test${route}`, body ? { method: "POST", body: JSON.stringify(body) } : undefined);
   try {
+    const baseCommit="a".repeat(40),baseTree="b".repeat(40),tip="c".repeat(40),tipTree="d".repeat(40);
+    const recoveryState={...state(),projectId:"p123456789abc",acceptedBaseline:{commit:baseCommit,tree:baseTree,acceptedAt:"baseline-time"},acceptedState:{...state().acceptedState,currentCommit:tip,history:[{commit:tip,candidateId:"accepted-candidate",acceptedAt:"accepted-time"}]},candidates:{candidate:{...state().candidates.candidate,candidateCommit:tip,candidateTree:"e".repeat(40)}},journal:[{id:"accepted-journal",state:"ACCEPTED",candidateId:"accepted-candidate",newHead:tip,candidateTree:tipTree},{id:"unaccepted-journal",state:"PREPARED",candidateId:"candidate",newHead:baseCommit,candidateTree:baseTree}]};
+    await request("/seed?name=recovery-authority",{state:recoveryState,holder:"holder"});
+    await request("/member?name=recovery-authority&user=owner&role=owner");
+    const targets=await(await request("/recovery-targets?name=recovery-authority")).json() as Array<{commit:string;tree:string;journalId:string}>;
+    expect(targets.map(t=>[t.commit,t.tree,t.journalId])).toEqual([[baseCommit,baseTree,"baseline"],[tip,tipTree,"accepted-journal"]]);
+    const recoveryId=crypto.randomUUID();
+    expect((await request("/recovery-prepare?name=recovery-authority",{id:recoveryId,commit:tip,tree:"e".repeat(40),ownerId:"owner"})).status).toBe(500);
+    expect((await request("/recovery-prepare?name=recovery-authority",{id:recoveryId,commit:baseCommit,tree:baseTree,ownerId:"owner",accountKey:"wrong-account"})).status).toBe(500);
+    expect((await request("/recovery-prepare?name=recovery-authority",{id:recoveryId,commit:baseCommit,tree:baseTree,ownerId:"owner"})).status).toBe(200);
+    expect(await(await request(`/recovery-authorize?name=recovery-authority&id=${recoveryId}&owner=owner`)).json()).toBe(true);
+    const originalOperation=await(await request(`/recovery-operation?name=recovery-authority&id=${recoveryId}`)).json();
+    expect((await request("/recovery-prepare?name=recovery-authority",{id:crypto.randomUUID(),commit:baseCommit,tree:baseTree,ownerId:"owner"})).status).toBe(500);
+    expect(await(await request("/recovery-prepare?name=recovery-authority",{id:recoveryId,commit:baseCommit,tree:baseTree,ownerId:"owner"})).json()).toEqual(originalOperation);
+    await request("/recovery-fail?name=recovery-authority",{id:recoveryId});
+    await request("/member?name=recovery-authority&user=owner&role=member");
+    expect(await(await request(`/recovery-authorize?name=recovery-authority&id=${recoveryId}&owner=owner`)).json()).toBe(false);
+    await request("/member?name=recovery-authority&user=new-owner&role=owner");
+    expect((await request("/recovery-prepare?name=recovery-authority",{id:recoveryId,commit:baseCommit,tree:baseTree,ownerId:"owner"})).status).toBe(500);
+    expect((await request("/recovery-prepare?name=recovery-authority",{id:recoveryId,commit:baseCommit,tree:baseTree,ownerId:"new-owner"})).status).toBe(500);
+    const newOwnerId=crypto.randomUUID();
+    expect((await request("/recovery-prepare?name=recovery-authority",{id:newOwnerId,commit:baseCommit,tree:baseTree,ownerId:"new-owner",accountKey:"former-owner-account"})).status).toBe(500);
+    expect((await request("/recovery-prepare?name=recovery-authority",{id:newOwnerId,commit:baseCommit,tree:baseTree,ownerId:"new-owner"})).status).toBe(200);
+    const replacement=await(await request(`/recovery-operation?name=recovery-authority&id=${newOwnerId}`)).json() as {accountKey:string};
+    expect(replacement.accountKey).not.toBe((originalOperation as {accountKey:string}).accountKey);
+    const legacyAcceptedAt="2026-10-02T00:00:00.000Z";
+    const legacyState={...recoveryState,acceptedBaseline:undefined,journal:[],acceptedState:{...recoveryState.acceptedState,acceptedAt:legacyAcceptedAt,history:[]}};
+    await request("/seed?name=legacy-no-baseline",{state:legacyState,holder:"holder"});
+    await request("/member?name=legacy-no-baseline&user=owner&role=owner");
+    const legacyBefore=await(await request("/snapshot?name=legacy-no-baseline")).json();
+    const legacyTargets=await(await request("/recovery-targets?name=legacy-no-baseline")).json();
+    expect(legacyTargets).toEqual([{journalId:"baseline",commit:tip,tree:null,acceptedAt:legacyAcceptedAt}]);
+    expect(await(await request("/recovery-targets?name=legacy-no-baseline")).json()).toEqual(legacyTargets);
+    expect(await(await request("/snapshot?name=legacy-no-baseline")).json()).toEqual(legacyBefore);
+    const legacyId=crypto.randomUUID(),legacyPrepare={id:legacyId,commit:tip,tree:null,ownerId:"owner"};
+    expect((await request("/recovery-prepare?name=legacy-no-baseline",{...legacyPrepare,commit:baseCommit})).status).toBe(500);
+    expect((await request("/recovery-prepare?name=legacy-no-baseline",{...legacyPrepare,tree:tipTree})).status).toBe(500);
+    expect((await request("/recovery-prepare?name=legacy-no-baseline",legacyPrepare)).status).toBe(200);
+    const legacyCaptured=await(await request("/snapshot?name=legacy-no-baseline")).json() as {state:{acceptedBaseline:unknown;candidates:unknown;journal:unknown}};
+    expect(legacyCaptured.state.acceptedBaseline).toEqual({commit:tip,acceptedAt:legacyAcceptedAt});
+    expect(legacyCaptured.state.candidates).toEqual(legacyState.candidates);
+    expect(legacyCaptured.state.journal).toEqual([]);
+    expect((await request("/recovery-record-tree?name=legacy-no-baseline",{id:legacyId,tree:tipTree})).status).toBe(200);
+    for(const [label,acceptedState,journal] of [
+      ["initial-pending",{...legacyState.acceptedState,currentCommit:"pending"},[]],
+      ["malformed-head",{...legacyState.acceptedState,currentCommit:"a".repeat(39)},[]],
+      ["malformed-date",{...legacyState.acceptedState,acceptedAt:"not-a-date"},[]],
+      ["missing-date",{...legacyState.acceptedState,acceptedAt:undefined},[]],
+      ["ambiguous-history",{...legacyState.acceptedState,history:[{commit:baseCommit,acceptedAt:legacyAcceptedAt}]},[]],
+      ["accepted-journal",legacyState.acceptedState,recoveryState.journal],
+    ] as const){
+      await request(`/seed?name=legacy-${label}`,{state:{...legacyState,acceptedState,journal},holder:"holder"});
+      await request(`/member?name=legacy-${label}&user=owner&role=owner`);
+      const rejectedTargets=await(await request(`/recovery-targets?name=legacy-${label}`)).json() as Array<{journalId:string}>;
+      expect(rejectedTargets.some(target=>target.journalId==="baseline")).toBe(false);
+      expect((await request(`/recovery-prepare?name=legacy-${label}`,{...legacyPrepare,id:crypto.randomUUID()})).status).toBe(500);
+    }
+    await request("/seed?name=legacy-history",{state:{...legacyState,acceptedState:{...legacyState.acceptedState,history:[{commit:tip,acceptedAt:legacyAcceptedAt}]}},holder:"holder"});
+    expect(await(await request("/recovery-targets?name=legacy-history")).json()).toEqual(legacyTargets);
+    await request("/seed?name=legacy-save-rollback",{state:legacyState,holder:"holder"});
+    await request("/member?name=legacy-save-rollback&user=owner&role=owner");
+    await request("/fail?name=legacy-save-rollback&enabled=true");
+    const rollbackPrepare={...legacyPrepare,id:crypto.randomUUID()};
+    expect((await request("/recovery-prepare?name=legacy-save-rollback",rollbackPrepare)).status).toBe(500);
+    expect(await(await request(`/recovery-operation?name=legacy-save-rollback&id=${rollbackPrepare.id}`)).json()).toBeNull();
+    expect(await(await request("/recovery-targets?name=legacy-save-rollback")).json()).toEqual(legacyTargets);
+    await request("/fail?name=legacy-save-rollback&enabled=false");
+    expect((await request("/recovery-prepare?name=legacy-save-rollback",rollbackPrepare)).status).toBe(200);
+    for(const change of ["head","owner","deletion"] as const){
+      const name=`legacy-change-${change}`;
+      await request(`/seed?name=${name}`,{state:legacyState,holder:"holder"});
+      await request(`/member?name=${name}&user=owner&role=owner`);
+      expect(await(await request(`/recovery-targets?name=${name}`)).json()).toEqual(legacyTargets);
+      if(change==="head")await request(`/fixture-recovery-head?name=${name}`,{commit:baseCommit});
+      else if(change==="owner")await request(`/member?name=${name}&user=owner&role=member`);
+      else await request(`/fixture-repository-deletion?name=${name}`);
+      expect((await request(`/recovery-prepare?name=${name}`,{...legacyPrepare,id:crypto.randomUUID()})).status).toBe(500);
+      const afterChange=await(await request(`/snapshot?name=${name}`)).json() as {state:{acceptedBaseline?:unknown}};
+      expect(afterChange.state.acceptedBaseline).toBeUndefined();
+    }
+    await request("/seed?name=import-baseline",{state:{...recoveryState,acceptedBaseline:{commit:baseCommit,acceptedAt:"import-time"},journal:[],acceptedState:{...recoveryState.acceptedState,currentCommit:baseCommit,history:[]}},holder:"holder"});
+    await request("/member?name=import-baseline&user=owner&role=owner");
+    const importId=crypto.randomUUID(),prepareImport={id:importId,commit:baseCommit,tree:null,ownerId:"owner"};
+    expect((await request("/recovery-prepare?name=import-baseline",{...prepareImport,tree:baseTree})).status).toBe(500);
+    expect((await request("/recovery-prepare?name=import-baseline",{...prepareImport,commit:tip})).status).toBe(500);
+    expect((await request("/recovery-prepare?name=import-baseline",prepareImport)).status).toBe(200);
+    expect((await request("/recovery-record-tree?name=import-baseline",{id:importId,tree:baseTree})).status).toBe(200);
+    expect((await request("/recovery-record-tree?name=import-baseline",{id:importId,tree:tipTree})).status).toBe(500);
+    expect((await request("/recovery-prepare?name=import-baseline",prepareImport)).status).toBe(200);
+    expect((await request("/recovery-prepare?name=import-baseline",{...prepareImport,tree:tipTree})).status).toBe(500);
+    const uploadRoute="/recovery-upload?name=import-baseline";
+    expect((await request("/recovery-complete?name=import-baseline",{id:importId})).status).toBe(500);
+    expect((await request(uploadRoute,{id:importId,action:"begin"})).status).toBe(200);
+    expect((await request(uploadRoute,{id:importId,action:"begin"})).status).toBe(500);
+    expect((await request(uploadRoute,{id:importId,action:"save",uploadId:"first-upload"})).status).toBe(200);
+    expect((await request(uploadRoute,{id:importId,action:"save",uploadId:"replacement-upload"})).status).toBe(500);
+    expect((await request(uploadRoute,{id:importId,action:"close",uploadId:"replacement-upload"})).status).toBe(500);
+    expect((await request("/recovery-complete?name=import-baseline",{id:importId})).status).toBe(500);
+    expect((await request(uploadRoute,{id:importId,action:"close",uploadId:"first-upload"})).status).toBe(200);
+    expect((await request("/recovery-complete?name=import-baseline",{id:importId})).status).toBe(200);
+    expect((await request(uploadRoute,{id:importId,action:"begin"})).status).toBe(500);
+    expect((await request("/recovery-prepare?name=import-baseline",{...prepareImport,tree:baseTree,id:crypto.randomUUID()})).status).toBe(500);
+    expect((await request("/recovery-cache-delete?name=import-baseline",{id:importId,ownerId:"intruder"})).status).toBe(500);
+    expect((await request("/recovery-cache-delete?name=import-baseline",{id:importId,ownerId:"owner"})).status).toBe(200);
+    expect(await(await request(`/recovery-authorize?name=import-baseline&id=${importId}&owner=owner`)).json()).toBe(false);
+    expect((await request("/recovery-complete?name=import-baseline",{id:importId})).status).toBe(500);
+    expect((await request(uploadRoute,{id:importId,action:"begin"})).status).toBe(500);
+    await request("/recovery-cache-finish?name=import-baseline",{id:importId});
+    await request("/seed?name=concurrent-preparation",{state:recoveryState,holder:"holder"});
+    await request("/member?name=concurrent-preparation&user=owner&role=owner");
+    const competing=[crypto.randomUUID(),crypto.randomUUID()];
+    const concurrentResults=await Promise.all(competing.map(id=>request("/recovery-prepare?name=concurrent-preparation",{id,commit:baseCommit,tree:baseTree,ownerId:"owner"})));
+    expect(concurrentResults.map(response=>response.status).sort()).toEqual([200,500]);
+    expect(await(await request("/recovery-cleanup-list?name=concurrent-preparation")).json()).toHaveLength(1);
+    await request("/seed?name=list-retention",{state:recoveryState,holder:"holder"});
+    await request("/member?name=list-retention&user=owner&role=owner");
+    const oldestReadyId=crypto.randomUUID();
+    await request("/recovery-prepare?name=list-retention",{id:oldestReadyId,commit:tip,tree:tipTree,ownerId:"owner"});
+    await request("/recovery-upload?name=list-retention",{id:oldestReadyId,action:"begin"});
+    await request("/recovery-upload?name=list-retention",{id:oldestReadyId,action:"save",uploadId:"retained-upload"});
+    await request("/recovery-upload?name=list-retention",{id:oldestReadyId,action:"close",uploadId:"retained-upload"});
+    await request("/recovery-complete?name=list-retention",{id:oldestReadyId});
+    for(let i=0;i<21;i++){
+      const retiredId=crypto.randomUUID();
+      expect((await request("/recovery-prepare?name=list-retention",{id:retiredId,commit:baseCommit,tree:baseTree,ownerId:"owner"})).status).toBe(200);
+      await request("/recovery-fail?name=list-retention",{id:retiredId});
+      await request("/recovery-cache-delete?name=list-retention",{id:retiredId,ownerId:"owner"});
+      await request("/recovery-cache-finish?name=list-retention",{id:retiredId});
+    }
+    const retainedList=await(await request("/recovery-list?name=list-retention")).json() as Array<{id:string;status:string;cacheState?:string}>;
+    expect(retainedList).toHaveLength(20);
+    expect(retainedList[0]).toMatchObject({id:oldestReadyId,status:"ready"});
+    expect(retainedList.slice(1).every(op=>op.cacheState==="deleted")).toBe(true);
+    expect(await(await request("/recovery-cleanup-list?name=list-retention")).json()).toHaveLength(22);
+    const storageRoute="/recovery-storage?name=recovery-quota",slotCountRoute="/recovery-slot-count?name=recovery-quota";
+    const recoveryIncarnation=crypto.randomUUID(), sharedRecoveryId=crypto.randomUUID();
+    const neverReservedId=`abcdef123456-${recoveryIncarnation}-${crypto.randomUUID()}`,reservedId=`abcdef123456-${recoveryIncarnation}-${sharedRecoveryId}`;
+    expect((await request(storageRoute,{id:neverReservedId,accountKey:"owner-account",action:"release"})).status).toBe(200);
+    expect((await request(storageRoute,{id:neverReservedId,accountKey:"owner-account",action:"reserve"})).status).toBe(500);
+    expect((await request(storageRoute,{id:neverReservedId,accountKey:"other-account",action:"reserve"})).status).toBe(500);
+    expect(await(await request(slotCountRoute)).json()).toBe(0);
+    expect((await request(storageRoute,{id:reservedId,accountKey:"owner-account",action:"reserve"})).status).toBe(200);
+    expect(await(await request(slotCountRoute)).json()).toBe(1);
+    expect((await request(storageRoute,{id:reservedId,accountKey:"other-account",action:"release"})).status).toBe(500);
+    expect(await(await request(slotCountRoute)).json()).toBe(1);
+    expect((await request(storageRoute,{id:reservedId,accountKey:"owner-account",action:"release"})).status).toBe(200);
+    expect((await request(storageRoute,{id:reservedId,accountKey:"owner-account",action:"reserve"})).status).toBe(500);
+    expect((await request(storageRoute,{id:reservedId,accountKey:"other-account",action:"release"})).status).toBe(500);
+    expect(await(await request(slotCountRoute)).json()).toBe(0);
+    const concurrentSharedId=crypto.randomUUID(),firstScope=`abcdef123456-${recoveryIncarnation}-${concurrentSharedId}`,secondScope=`fedcba654321-${recoveryIncarnation}-${concurrentSharedId}`;
+    expect((await request(storageRoute,{id:firstScope,accountKey:"owner-account",action:"reserve"})).status).toBe(200);
+    expect((await request(storageRoute,{id:secondScope,accountKey:"other-account",action:"reserve"})).status).toBe(200);
+    expect(await(await request(slotCountRoute)).json()).toBe(2);
+    expect((await request(storageRoute,{id:firstScope,accountKey:"owner-account",action:"release"})).status).toBe(200);
+    expect(await(await request(slotCountRoute)).json()).toBe(1);
+    expect((await request(storageRoute,{id:secondScope,accountKey:"other-account",action:"reserve"})).status).toBe(200);
+    expect(await(await request(slotCountRoute)).json()).toBe(1);
+    expect((await request(storageRoute,{id:secondScope,accountKey:"other-account",action:"release"})).status).toBe(200);
+    expect(await(await request(slotCountRoute)).json()).toBe(0);
+    const otherRepositoryId=`fedcba654321-${recoveryIncarnation}-${sharedRecoveryId}`;
+    expect((await request(storageRoute,{id:otherRepositoryId,accountKey:"other-account",action:"reserve"})).status).toBe(200);
+    expect(await(await request(slotCountRoute)).json()).toBe(1);
+    expect((await request(storageRoute,{id:reservedId,accountKey:"owner-account",action:"release"})).status).toBe(200);
+    expect(await(await request(slotCountRoute)).json()).toBe(1);
+    expect((await request(storageRoute,{id:otherRepositoryId,accountKey:"other-account",action:"release"})).status).toBe(200);
+    expect(await(await request(slotCountRoute)).json()).toBe(0);
+    expect((await request("/recovery-prepare?name=import-baseline",prepareImport)).status).toBe(500);
     const publishable = {
       ...state(),
-      evidence: { evidence: { id: "evidence", candidateCommit: "landed", candidateTree: "tree", status: "passed", verifierIdentity: "flaregit-ticket-booking-protected-verifier-v2", expectedAcceptedBase: "base", requirementsVersion: 1, builtOutputDigest: "build" } },
-      candidates: { candidate: { ...state().candidates.candidate, candidateCommit: "landed", expectedAcceptedBase: "base", frozenVerificationPolicy: {}, review: { approved: true, commit: "landed", by: "reviewer" } } },
+      evidence: { evidence: { id: "evidence", candidateCommit: "b".repeat(40), candidateTree: "c".repeat(40), status: "passed", verifierIdentity: "flaregit-ticket-booking-protected-verifier-v2", expectedAcceptedBase: "a".repeat(40), requirementsVersion: 1, builtOutputDigest: "build" } },
+      candidates: { candidate: { ...state().candidates.candidate, candidateCommit: "b".repeat(40), expectedAcceptedBase: "a".repeat(40), frozenVerificationPolicy: {}, review: { approved: true, commit: "b".repeat(40), by: "reviewer", at: "2026-10-03T00:00:00.000Z", actor: { userId: "test-reviewer", displayName: "reviewer", viaToken: false } } } },
     };
-    const agentTask = { ...publishable.tasks.task, status: "ready", baseCommit: "a".repeat(40), allowedScope: ["src/"], workspace: { repoName: "test-agent", remote: "https://git.example.com/test", branch: "task/task" }, currentCommit: "a".repeat(40) };
+    const reviewedCommit = "b".repeat(40);
+    await request("/seed?name=exact-review", { state: { ...publishable, journal: [], candidates: { candidate: { ...publishable.candidates.candidate, candidateCommit: reviewedCommit, status: "awaiting_review", review: undefined } } }, holder: "old-holder" });
+    expect((await (await request(`/review?name=exact-review&expected=${"a".repeat(40)}`)).json() as { ok: boolean }).ok).toBe(false);
+    expect((await (await request(`/review?name=exact-review&expected=${reviewedCommit}`)).json() as { ok: boolean }).ok).toBe(true);
+    expect((await (await request(`/review?name=exact-review&expected=${"a".repeat(40)}`)).json() as { ok: boolean }).ok).toBe(false);
+    expect((await (await request(`/review?name=exact-review&expected=${reviewedCommit}`)).json() as { ok: boolean }).ok).toBe(true);
+    const agentTask = { ...publishable.tasks.task, agentWorkflowInstanceId:"run-one", status: "ready", baseCommit: "a".repeat(40), allowedScope: ["src/"], workspace: { repoName: "test-agent", remote: "https://git.example.com/test", branch: "task/task" }, currentCommit: "a".repeat(40) };
     const agentState = { ...publishable, tasks: { task: agentTask } };
     const agentClaim = { runId: "run-one", taskId: "task", startingCommit: "a".repeat(40), startingBranchHead: null, branch: "task/task", goal: "Frozen goal", context: { comments: [] }, allowedScope: ["src/"], protectedPaths: [] };
     await request("/seed?name=agent-atomic", { state: agentState, holder: "old-holder" });
@@ -37,6 +210,7 @@ test("local workerd SQLite executes production publication rollback and recovery
     expect(((await (await request("/agent-state?name=agent-atomic")).json()) as { tasks: { task: { status: string } } }).tasks.task.status).toBe("ready");
     await request("/fail?name=agent-atomic&enabled=false");
     expect((await request("/agent-claim?name=agent-atomic", agentClaim)).status).toBe(200);
+    expect((await request("/agent-native-authority?name=agent-atomic",{runId:"run-one",taskId:"task"})).status).toBe(200);
     await request("/agent-proposal?name=agent-atomic", { runId: "run-one", taskId: "task", files: { "src/file.ts": "export const value=1;" } });
     await request("/agent-push?name=agent-atomic", { runId: "run-one", taskId: "task", commit: "b".repeat(40) });
     expect(await (await request("/agent-checkpoint?name=agent-atomic", { runId: "run-one", taskId: "task", commit: "b".repeat(40), eventId: "saved-checkpoint" })).json()).toBe(true);
@@ -54,6 +228,7 @@ test("local workerd SQLite executes production publication rollback and recovery
     await request("/fail?name=agent-atomic&enabled=false");
     await request("/seed?name=agent-resume", { state: agentState, holder: "old-holder" });
     await request("/agent-claim?name=agent-resume", agentClaim);
+    expect((await request("/agent-native-authority?name=agent-resume",{runId:"run-one",taskId:"task"})).status).toBe(200);
     await request("/agent-proposal?name=agent-resume", { runId:"run-one",taskId:"task",files:{"src/file.ts":"export const value=1;"} });
     await request("/agent-fail?name=agent-resume", { runId:"run-one",taskId:"task" });
     const resume={runId:"resumed-run",taskId:"task",previousRunId:"run-one"};
@@ -89,16 +264,101 @@ test("local workerd SQLite executes production publication rollback and recovery
     expect(revokedGrant.rows[0]?.version).toBe(2);
     await request("/visibility?name=visibility", { visibility: "public", confirmed: true, by: "owner" });
     expect((await visibilitySnapshot()).grant?.version).toBe(3);
+    const publicScopes={enabled:true,scopes:["issues","discussions","contribution-requests"]};
+    await request("/seed?name=community",{state:publishable,holder:"old-holder"});
+    await request("/member?name=community&user=community-owner&role=owner");
+    expect((await request("/community-configure?name=community&actor=owner",{policy:publicScopes,confirmed:true})).status).toBe(500);
+    await request("/visibility?name=community",{visibility:"public",confirmed:true,by:"community-owner"});
+    expect((await request("/community-configure?name=community&actor=author",{policy:publicScopes,confirmed:true})).status).toBe(500);
+    expect((await request("/community-configure?name=community&actor=owner",{policy:publicScopes,confirmed:"true"})).status).toBe(500);
+    expect((await request("/community-configure?name=community&actor=owner",{policy:publicScopes,confirmed:true})).status).toBe(200);
+    const post={scope:"issues",title:"Public issue",body:"New public discussion only",idempotencyKey:"community-post-123"};
+    expect((await request("/community-post?name=community",{...post,author:"Spoofed owner"})).status).toBe(500);
+    expect((await request("/community-post?name=community",post)).status).toBe(200);
+    const signedPosts = await(await request("/community-signed-posts?name=community")).json() as {posts:Array<{id:string;canEdit:boolean;canRemove:boolean}>;authorDisplayName:string};
+    const publicPostId=signedPosts.posts[0]!.id;
+    expect(signedPosts.posts[0]!.canEdit).toBe(true);expect(signedPosts.authorDisplayName).toBe("Public author");
+    const otherPosts=await(await request("/community-signed-posts?name=community&actor=other")).json() as typeof signedPosts;
+    expect(otherPosts.posts[0]!.canEdit).toBe(false);expect(otherPosts.posts[0]!.canRemove).toBe(false);
+    expect(JSON.stringify(otherPosts)).not.toMatch(/community-author|author-key/);
+    expect((await request("/community-edit?name=community&actor=other",{id:publicPostId,expectedVersion:1,title:"Unauthorized",body:"Wrong actor edit"})).status).toBe(500);
+    expect((await request("/community-edit?name=community",{id:publicPostId,expectedVersion:1,title:"Updated issue",body:"Author correction"})).status).toBe(200);
+    expect((await request("/community-edit?name=community&actor=owner",{id:publicPostId,expectedVersion:1,title:"Stale owner edit",body:"Must not replace the author correction"})).status).toBe(500);
+    expect((await request("/community-remove?name=community&actor=owner",{id:publicPostId,expectedVersion:1})).status).toBe(500);
+    const currentPosts=await(await request("/community-signed-posts?name=community")).json() as {posts:Array<{title:string;version:number}>};
+    expect(currentPosts.posts[0]).toMatchObject({title:"Updated issue",version:2});
+    expect((await request("/community-remove?name=community&actor=other",{id:publicPostId,expectedVersion:2})).status).toBe(500);
+    expect((await request("/community-remove?name=community&actor=owner",{id:publicPostId,expectedVersion:2})).status).toBe(200);
+    expect((await request("/community-remove?name=community",{id:publicPostId,expectedVersion:2})).status).toBe(200);
+    expect((await request("/community-post?name=community",post)).status).toBe(500);
+    const requested=await(await request("/community-request?name=community",{purpose:"I want to contribute to this project",idempotencyKey:"community-request-123"})).json() as {id:string;status:string};
+    expect(await(await request("/community-requests?name=community&actor=other")).json()).toEqual([]);
+    expect((await(await request("/community-requests?name=community&actor=owner")).json() as unknown[]).length).toBe(1);
+    expect((await request("/community-decide?name=community&actor=author",{id:requested.id,decision:"approved",confirmed:true})).status).toBe(500);
+    expect((await request("/community-decide?name=community&actor=owner",{id:requested.id,decision:"approved",confirmed:"true"})).status).toBe(500);
+    await request("/fail-membership?name=community&enabled=true");
+    expect((await request("/community-decide?name=community&actor=owner",{id:requested.id,decision:"approved",confirmed:true})).status).toBe(200);
+    expect((await(await request("/community-requests?name=community")).json() as Array<{status:string;registrationStatus:string}>)[0]).toMatchObject({status:"approved",registrationStatus:"pending"});
+    expect(await(await request("/member-role?name=community&user=community-author")).json()).toBeNull();
+    expect((await(await request("/registry")).json() as unknown[]).length).toBe(1);
+    await request("/fail-membership?name=community&enabled=false");
+    expect((await request("/community-decide?name=community&actor=owner",{id:requested.id,decision:"approved",confirmed:true})).status).toBe(200);
+    expect(await(await request("/member-role?name=community&user=community-author")).json()).toBe("member");
+    await request("/remove-member?name=community&user=community-author");
+    await request("/community-decide?name=community&actor=owner",{id:requested.id,decision:"approved",confirmed:true});
+    expect(await(await request("/member-role?name=community&user=community-author")).json()).toBeNull();
+    await request("/registration-reconcile?name=community");
+    expect(await(await request("/member-role?name=community&user=community-author")).json()).toBeNull();
+    const later=await(await request("/community-request?name=community",{purpose:"A new separately approved contribution",idempotencyKey:"later-public-request"})).json() as{id:string};
+    await request("/registration-fail?enabled=true");
+    await request("/community-configure?name=community&actor=owner",{policy:{enabled:false,scopes:[]},confirmed:false});
+    expect((await request("/community-request?name=community",{purpose:"Intake has been closed",idempotencyKey:"closed-intake-request"})).status).toBe(500);
+    const pending=await(await request("/community-decide?name=community&actor=owner",{id:later.id,decision:"approved",confirmed:true})).json() as{registrationStatus:string};
+    expect(pending.registrationStatus).toBe("pending");
+    expect(await(await request("/member-role?name=community&user=community-author")).json()).toBeNull();
+    await request("/registration-fail?enabled=false");
+    await request("/registration-alarm?name=community");
+    expect(await(await request("/member-role?name=community&user=community-author")).json()).toBe("member");
+    await request("/account-delete-start");
+    await request("/remove-member?name=community&user=community-author");
+    expect(await(await request("/account-delete-finish")).json()).toBe("deleted");
+    await request("/registration-alarm?name=community");
+    await request("/community-decide?name=community&actor=owner",{id:later.id,decision:"approved",confirmed:true});
+    expect(await(await request("/member-role?name=community&user=community-author")).json()).toBeNull();
+    expect(await(await request("/registry")).json()).toEqual([]);
+    await request("/seed?name=community-other",{state:publishable,holder:"old-holder"});
+    expect((await(await request("/community-public?name=community-other")).json() as {posts:unknown[]}).posts).toEqual([]);
+    await request("/visibility?name=community",{visibility:"private",confirmed:false,by:"community-owner"});
+    expect((await request("/community-post?name=community",{...post,idempotencyKey:"after-private-123"})).status).toBe(500);
+    const deploymentCommit="d".repeat(40),deploymentTree="e".repeat(40);
+    const deploymentState={...publishable,acceptedState:{...publishable.acceptedState,currentCommit:"f".repeat(40),history:[{commit:deploymentCommit,candidateId:"candidate",acceptedAt:"2026-10-02T00:00:00.000Z",participatingTasks:["task"],evidenceId:"evidence",outputDigest:"build"}]},journal:[{...publishable.journal[0]!,id:"accepted-journal",state:"ACCEPTED",newHead:deploymentCommit,candidateTree:deploymentTree}]};
+    await request("/seed?name=deployment",{state:deploymentState,holder:"old-holder"});
+    await request("/member?name=deployment&user=deployment-owner&role=owner");
+    const deploymentService=await(await request("/deployment-service?name=deployment")).json() as{metadata:{id:string}};
+    const targetRecord=await(await request("/deployment-target?name=deployment")).json() as{target:{journalId:string;candidateId:string;commit:string;tree:string;acceptedAt:string;recoverableRef:string}};
+    expect(targetRecord.target.commit).toBe(deploymentCommit);expect(targetRecord.target.tree).toBe(deploymentTree);
+    expect(await(await request("/deployment-target?name=deployment&journal=not-accepted")).json()).toBeNull();
+    const deploymentRequest={target:targetRecord.target,serviceId:deploymentService.metadata.id,environment:"production",key:"request-deployment-123",actorId:"deployment-owner"};
+    expect((await request("/deployment-request?name=deployment",deploymentRequest)).status).toBe(500);
+    await request("/subscribe?name=deployment",["deployment.requested"]);
+    expect((await request("/deployment-request?name=deployment",{...deploymentRequest,actorId:"not-owner"})).status).toBe(500);
+    expect((await request("/deployment-request?name=deployment",{...deploymentRequest,target:{...targetRecord.target,tree:"c".repeat(40)}})).status).toBe(500);
+    const createdDeployment=await(await request("/deployment-request?name=deployment",deploymentRequest)).json() as{kind:string;deployment:{requestEventId:string}};
+    expect(createdDeployment.kind).toBe("created");
+    expect((await(await request("/deployment-request?name=deployment",deploymentRequest)).json() as{kind:string}).kind).toBe("duplicate");
+    const dispatchSnapshot=await(await request("/snapshot?name=deployment")).json() as{deliveries:Array<{payload:string}>};
+    const deploymentEvents=dispatchSnapshot.deliveries.map(delivery=>JSON.parse(delivery.payload) as{id:string;type:string;data:{commit:string;tree:string;acceptedJournalId:string}}).filter(event=>event.type==="deployment.requested");
+    expect(deploymentEvents.length).toBe(1);expect(deploymentEvents[0]?.id).toBe(createdDeployment.deployment.requestEventId);expect(deploymentEvents[0]?.data.commit).toBe(deploymentCommit);expect(deploymentEvents[0]?.data.tree).toBe(deploymentTree);expect(deploymentEvents[0]?.data.acceptedJournalId).toBe("accepted-journal");
     const policy = { version: 2, mode: "external", checks: [{ id: "required-check", providerId: "provider-one", required: true }] };
     const nativeCandidate = {
       ...publishable,
       evidence: { evidence: { ...publishable.evidence.evidence, verifierIdentity: "flaregit-native-integrity-v1" } },
-      candidates: { candidate: { ...publishable.candidates.candidate, frozenVerificationPolicy: { kind: "command", test: "bun test" }, frozenExternalChecksPolicy: policy, frozenContributorProofs: [{ id: "task", commit: "task-tip", baseCommit: "base", ref: "refs/flaregit/tasks/task", allowedScope: ["src/"] }] } },
+      candidates: { candidate: { ...publishable.candidates.candidate, frozenVerificationPolicy: { kind: "command", test: "bun test" }, frozenExternalChecksPolicy: policy, frozenContributorProofs: [{ id: "task", commit: "e".repeat(40), baseCommit: "a".repeat(40), ref: "refs/flaregit/tasks/task", allowedScope: ["src/"] }] } },
     };
-    const externalPassed = { frozen: { repositoryId: "test", candidateId: "candidate", commit: "landed", tree: "tree", policy }, runs: { run: { id: "run", checkId: "required-check", sequence: 1, status: "passed" } }, selectedRuns: { "required-check": "run" }, receipts: {} };
+    const externalPassed = { frozen: { repositoryId: "p123456789abc", candidateId: "candidate", commit: "b".repeat(40), tree: "c".repeat(40), policy }, runs: { run: { id: "run", checkId: "required-check", sequence: 1, status: "passed" } }, selectedRuns: { "required-check": "run" }, receipts: {} };
     await request("/seed?name=native-alone", { state: nativeCandidate, holder: "old-holder" });
     expect((await (await request("/prepare?name=native-alone")).json() as { ok: boolean }).ok).toBe(false);
-    for (const [label, external] of [["commit", { ...externalPassed, frozen: { ...externalPassed.frozen, commit: "wrong" } }], ["tree", { ...externalPassed, frozen: { ...externalPassed.frozen, tree: "wrong" } }], ["policy", { ...externalPassed, frozen: { ...externalPassed.frozen, policy: { ...policy, version: 3 } } }]] as const) {
+    for (const [label, external] of [["commit", { ...externalPassed, frozen: { ...externalPassed.frozen, commit: "wrong" } }], ["c".repeat(40), { ...externalPassed, frozen: { ...externalPassed.frozen, tree: "wrong" } }], ["policy", { ...externalPassed, frozen: { ...externalPassed.frozen, policy: { ...policy, version: 3 } } }]] as const) {
       await request(`/seed?name=wrong-${label}`, { state: nativeCandidate, holder: "old-holder" });
       await request(`/external?name=wrong-${label}`, external);
       expect((await (await request(`/prepare?name=wrong-${label}`)).json() as { ok: boolean }).ok).toBe(false);
@@ -121,7 +381,7 @@ test("local workerd SQLite executes production publication rollback and recovery
     await request(`/await-review?name=frozen-policy&commit=${commit}`);
     const afterReplay = await (await request("/checks?name=frozen-policy")).json() as typeof beforeReplay;
     expect(afterReplay).toEqual(beforeReplay);
-    const mismatched = { frozen: { repositoryId: "test", candidateId: "candidate", commit: "different-commit", tree: "tree", policy: { version: 1, mode: "augment", checks: [] } }, runs: {}, selectedRuns: {}, receipts: {} };
+    const mismatched = { frozen: { repositoryId: "p123456789abc", candidateId: "candidate", commit: "different-commit", tree: "c".repeat(40), policy: { version: 1, mode: "augment", checks: [] } }, runs: {}, selectedRuns: {}, receipts: {} };
     await request("/seed?name=mismatched-review", { state: { ...publishable, candidates: { candidate: { ...publishable.candidates.candidate, status: "awaiting_review", review: undefined } } }, holder: "old-holder" });
     await request("/external?name=mismatched-review", mismatched);
     expect((await (await request("/review?name=mismatched-review")).json() as { ok: boolean }).ok).toBe(false);
@@ -169,7 +429,7 @@ test("local workerd SQLite executes production publication rollback and recovery
     const checkpointRollback = await (await request("/snapshot?name=checkpoint")).json() as typeof accepted & { events: unknown[] };
     expect(checkpointRollback.events).toHaveLength(0);
     expect(checkpointRollback.deliveries).toHaveLength(0);
-    expect(checkpointRollback.state.tasks.task.currentCommit).toBe("task-tip");
+    expect(checkpointRollback.state.tasks.task.currentCommit).toBe("e".repeat(40));
     await request("/fail?name=checkpoint&enabled=false");
     const checkpointSaved = await (await request("/checkpoint?name=checkpoint")).json() as typeof checkpointRollback;
     expect(checkpointSaved.events).toHaveLength(1);

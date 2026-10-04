@@ -21,7 +21,8 @@ export function buildPreview(source: string, destination: string) {
     if (tip.status !== 0 || checked.status !== 0) throw new Error("Preview snapshot could not restore its exact commit");
     fs.symlinkSync(path.resolve(import.meta.dirname, "..", "..", "..", "node_modules"), path.join(snapshot, "node_modules"), "dir");
     boundary = createExecutionBoundary(work, [snapshot, home, output], source);
-    const invocation = boundary.command(process.execPath, ["build", "index.html", "--outdir", output, "--minify", "--env=disable"]);
+    // Browser React needs a compile-time mode; never inline the supervisor environment.
+    const invocation = boundary.command(process.execPath, ["build", "index.html", "--outdir", output, "--minify", "--env=disable", "--define", 'process.env.NODE_ENV="production"']);
     const built = spawnSync(invocation.executable, invocation.args, { cwd: snapshot, env: executionEnv(home), timeout: 120_000, encoding: "utf8", maxBuffer: 1_000_000 });
     boundary.dispose(); boundary = undefined;
     if (built.status !== 0) throw new Error("Preview build failed in contributor isolation");

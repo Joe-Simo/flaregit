@@ -2,12 +2,25 @@ import type { ArtifactsBinding } from "../artifacts/cloudflare.js";
 import type { AiBinding } from "../ai/workers-ai.js";
 
 export interface Env {
+  /** Retained optional preview assets only; unset disables new storage reservations. */
+  EVIDENCE_STORAGE_GLOBAL_BYTES?: string;
+  EVIDENCE_STORAGE_ACCOUNT_BYTES?: string;
+  PREVIEW_STORAGE_GLOBAL_BYTES?: string;
+  PREVIEW_STORAGE_ACCOUNT_BYTES?: string;
+  CORE_GIT_GLOBAL_MONTHLY_USD_MICROS?: string;
+  CORE_GIT_ACCOUNT_MONTHLY_USD_MICROS?: string;
+  /** Browsing reservations inside the shared Git-operation allowance. */
+  REPOSITORY_READ_GLOBAL_MONTHLY_USD_MICROS?: string;
+  REPOSITORY_READ_ACCOUNT_MONTHLY_USD_MICROS?: string;
   REPOSITORY_CONTROLLER: DurableObjectNamespace;
   INTEGRATOR: DurableObjectNamespace<import("./integrator.js").IntegratorSandbox>;
   AGENT: DurableObjectNamespace<import("./integrator.js").AgentSandbox>;
   SCENARIO_WORKFLOW: Workflow;
   AGENT_WORKFLOW: Workflow;
   INTEGRATION_WORKFLOW: Workflow;
+  IMPORT_HISTORY_WORKFLOW: Workflow;
+  REBASE_RESUME_WORKFLOW?: Workflow;
+  PRIVATE_RECOVERY_WORKFLOW?: Workflow;
   INTEGRATION_QUEUE: Queue<QueueMessage>;
   EVIDENCE_BUCKET: R2Bucket;
   ARTIFACTS: ArtifactsBinding;
@@ -18,6 +31,9 @@ export interface Env {
   /** Comma-separated account keys of the people who handle abuse and impersonation reports (var). */
   OPERATOR_ACCOUNTS?: string;
   /** Per-user API rate limit (Workers Rate Limiting binding). */
+  /** Fixed per-IP credential/repository lookup admission, before any DO lookup. */
+  LOOKUP_LIMITER?: { limit(opts: { key: string }): Promise<{ success: boolean }> };
+  PREVIEW_ASSET_LIMITER: { limit(opts: { key: string }): Promise<{ success: boolean }> };
   API_LIMITER: { limit(opts: { key: string }): Promise<{ success: boolean }> };
   /** Clerk frontend API URL (the JWT issuer), e.g. https://example.clerk.accounts.dev (var). */
   CLERK_ISSUER?: string;
@@ -25,26 +41,37 @@ export interface Env {
   CLERK_AUTHORIZED_PARTIES?: string;
   /** Clerk publishable key; public by design, served to the SPA via /api/config-free endpoint (var). */
   CLERK_PUBLISHABLE_KEY?: string;
-  /** Dedicated origin serving previews (e.g. https://preview.flaregit.com), isolated from the app origin. */
-  PREVIEW_ORIGIN: string;
+  /** Deprecated shared preview origin; retained only for older configuration fixtures. */
+  PREVIEW_ORIGIN?: string;
+  /** Trusted JSON object mapping repository IDs to distinct HTTPS worker.workers.dev origins. */
+  REPOSITORY_PREVIEW_ORIGINS?: string;
   AI_GATEWAY_ID?: string;
   /** Daily model-backed run allowance per plan (spend control). */
   /** Platform-wide ceiling on model-backed runs per UTC day, across all customers (spend control). */
   GLOBAL_RUNS_PER_DAY?: string;
   /** Set to "false" to stop all model-backed runs immediately (kill switch). */
   RUNS_ENABLED?: string;
+  /** Explicit USD micros caps; unset disables managed execution. No customer billing effect. */
+  MANAGED_ACCOUNT_MONTHLY_USD_MICROS?: string;
+  MANAGED_GLOBAL_MONTHLY_USD_MICROS?: string;
   FREE_RUNS_PER_DAY?: string;
   PRO_RUNS_PER_DAY?: string;
   /** Polar billing: product for the Pro plan, API environment, and secrets set with `wrangler secret put`. */
   POLAR_PRODUCT_ID?: string;
   POLAR_SERVER?: "production" | "sandbox";
   POLAR_ACCESS_TOKEN?: string;
+  /** New paid checkout requires a verified offering; existing billing remains manageable. */
+  PAID_CHECKOUT_ENABLED?: string;
   POLAR_WEBHOOK_SECRET?: string;
+  /** Conservative retained-repository envelope, not customer storage entitlement. */
+  ARTIFACT_STORAGE_NAMESPACE?: string;
+  ARTIFACT_STORAGE_GLOBAL_SLOTS?: string;
+  ARTIFACT_STORAGE_ACCOUNT_SLOTS?: string;
   CANONICAL_REPO: string;
 }
 
 export type QueueMessage =
   | { type: "git.push"; projectId: string; taskId: string; commit: string; ready: boolean; eventId: string }
   | { type: "integration.requested"; projectId: string; taskIds: string[]; eventId: string }
-  | { type: "webhook.deliver"; projectId: string; deliveryId: string }
+  | { type: "webhook.deliver"; projectId: string; deliveryId: string; generation?: number; blockedSequence?: number }
   | { type: "probe"; sentAt: number };

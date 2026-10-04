@@ -9,6 +9,7 @@ const sha = z.string().regex(/^[0-9a-f]{40}$/);
 const receiptSchema = z.object({
   version: z.literal(1), exercise: z.enum(["functional-ticket-booking", "comment-only-hosted-diagnostic"]).optional(), origin: z.string().url(), createdAt: z.string(), projectId: z.string().optional(), base: sha.optional(),
   issue: z.number().optional(), tasks: z.array(z.string()), agentRuns: z.array(z.object({ taskId: z.string(), instanceId: z.string(), requestedAt: z.string() })),
+  contextCommentRequests: z.record(z.string(), z.string().uuid()).optional(),
   contextComments: z.array(z.object({ subject: z.string(), id: z.number() })).optional(), pendingAction: z.string().optional(), pendingAgents: z.array(z.string()).optional(), integration: z.string().optional(), observations: z.array(z.unknown()), verification: z.object({ commit: sha, cloneHead: sha, verifiedAt: z.string() }).optional(),
 });
 type Receipt = z.infer<typeof receiptSchema>;
@@ -47,6 +48,30 @@ export function observedAgentInstances(receipt: Pick<Receipt, "tasks" | "agentRu
     if (registered) instances.add(registered);
   }
   return [...instances];
+}
+
+export function contextCommentRequest(receipt: Pick<Receipt, "contextCommentRequests">, subject: string): string {
+  receipt.contextCommentRequests ??= {};
+  return receipt.contextCommentRequests[subject] ??= crypto.randomUUID();
+}
+
+export async function observeContextComments(subject: string, readPage: (cursor: string | null) => Promise<{ comments: Array<{ id: number }>; nextCursor: string | null }>) {
+  const ids = new Set<number>();
+  const cursors = new Set<string>();
+  let cursor: string | null = null;
+  let pages = 0;
+  try {
+    do {
+      const page = await readPage(cursor); pages++;
+      for (const comment of page.comments) ids.add(comment.id);
+      cursor = page.nextCursor;
+      if (cursor && cursors.has(cursor)) return { subject, commentIds: [...ids], count: null, observedCount: ids.size, complete: false, pages, reason: "Repeated pagination cursor" };
+      if (cursor) cursors.add(cursor);
+    } while (cursor && pages < 5);
+    return { subject, commentIds: [...ids], count: cursor ? null : ids.size, observedCount: ids.size, complete: cursor === null, pages, reason: cursor ? "Observation page limit reached" : null };
+  } catch {
+    return { subject, commentIds: [...ids], count: null, observedCount: ids.size, complete: false, pages, reason: "Comment page unavailable" };
+  }
 }
 
 async function main() {
@@ -103,9 +128,10 @@ async function main() {
     for (const taskId of receipt.tasks) {
       const subject = `change:${taskId}`;
       if (receipt.contextComments?.some((comment) => comment.subject === subject)) continue;
+      const idempotencyKey = contextCommentRequest(receipt, subject);
       receipt.pendingAction = `create-context-comment:${taskId}`; await saveReceipt(file, receipt);
       const comment = await api(`${prefix}/comments`, z.object({ id: z.number() }), {
-        subject,
+        subject, idempotencyKey,
         body: receipt.exercise === "functional-ticket-booking" ? "Shared approved policy: 15% group discount starts at four tickets; refundable tickets add $5 each. Discount applies to ticket subtotal, not the refund fee, so four refundable $40 tickets total $156. Preserve both contributors' features in the final integration. This is shared task context, not approval." : "Hosted diagnostic: another contributor is editing the same pricing file. Preserve existing exports and every checkout behavior. Keep this task's purpose visible and review any combined repair explicitly; this comment is shared task context, not approval.",
       });
       receipt.contextComments ??= []; receipt.contextComments.push({ subject, id: comment.id });
@@ -146,10 +172,11 @@ async function main() {
       catch { return { instanceId: id, status: "unavailable" }; }
     }));
     const subjects = [...receipt.tasks.map((id) => `change:${id}`), ...(receipt.issue ? [`issue:${receipt.issue}`] : [])];
-    const context = await Promise.all(subjects.map(async (subject) => {
-      try { const comments = await api(`${prefix}/comments?subject=${encodeURIComponent(subject)}`, z.array(z.object({ id: z.number() }))); return { subject, commentIds: comments.map((comment) => comment.id), count: comments.length }; }
-      catch { return { subject, commentIds: [], count: null }; }
-    }));
+    const context = await Promise.all(subjects.map(subject => observeContextComments(subject, cursor => {
+      const query = new URLSearchParams({ subject, page: "1" });
+      if (cursor) query.set("cursor", cursor);
+      return api(`${prefix}/comments?${query}`, z.object({ comments: z.array(z.object({ id: z.number() })).max(100), nextCursor: z.string().max(4096).nullable() }));
+    })));
     const observation = { exercise: receipt.exercise ?? "comment-only-hosted-diagnostic", pendingAction: receipt.pendingAction ?? null, pendingAgents: receipt.pendingAgents ?? [], recordedContextComments: receipt.contextComments ?? [], context, at: new Date().toISOString(), acceptedCommit: state.acceptedState.currentCommit,
       tasks: receipt.tasks.map((id) => ({ id, ...state.tasks[id] })), candidates: state.candidates,
       checks: Object.entries(state.evidence).map(([id, evidence]) => ({ id, status: evidence.status })), decisionIds: Object.keys(state.decisions), runs };

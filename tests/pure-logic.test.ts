@@ -23,6 +23,7 @@ describe("redactSecrets", () => {
     ["slack", "xoxb-1234567890-abcdefghij"],
     ["sk", "sk-" + "Z".repeat(32)],
     ["fgt", "fgt_0123456789ab_" + "x".repeat(40)],
+    ["fgg", "fgg_p0123456789ab_" + "a".repeat(64)],
     ["whsec", "whsec_" + "Q".repeat(24)],
     ["jwt", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlX3ZhbHVl"],
   ];
@@ -104,20 +105,20 @@ describe("buildRepairPrompt", () => {
 describe("preview signing", () => {
   const env = { PREVIEW_SIGNING_KEY: "unit-test-signing-key" } as unknown as Env;
   test("round trip and failures", async () => {
-    const { exp, sig } = await signPreview(env, "p1", "c1");
-    expect(await verifyPreview(env, "p1", "c1", exp, sig)).toBe(true);
-    expect(await verifyPreview(env, "p2", "c1", exp, sig)).toBe(false);
-    expect(await verifyPreview(env, "p1", "c2", exp, sig)).toBe(false);
+    const { exp, sig } = await signPreview(env, "p1", "c1", "https://repo.account.workers.dev");
+    expect(await verifyPreview(env, "p1", "c1", "https://repo.account.workers.dev", exp, sig)).toBe(true);
+    expect(await verifyPreview(env, "p2", "c1", "https://repo.account.workers.dev", exp, sig)).toBe(false);
+    expect(await verifyPreview(env, "p1", "c2", "https://repo.account.workers.dev", exp, sig)).toBe(false);
     const tampered = (sig[0] === "0" ? "1" : "0") + sig.slice(1);
-    expect(await verifyPreview(env, "p1", "c1", exp, tampered)).toBe(false);
-    expect(await verifyPreview(env, "p1", "c1", exp + 1, sig)).toBe(false);
+    expect(await verifyPreview(env, "p1", "c1", "https://repo.account.workers.dev", exp, tampered)).toBe(false);
+    expect(await verifyPreview(env, "p1", "c1", "https://repo.account.workers.dev", exp + 1, sig)).toBe(false);
   });
   test("expired fails", async () => {
-    const { exp, sig } = await signPreview(env, "p1", "c1", -10);
-    expect(await verifyPreview(env, "p1", "c1", exp, sig)).toBe(false);
+    const { exp, sig } = await signPreview(env, "p1", "c1", "https://repo.account.workers.dev", -10);
+    expect(await verifyPreview(env, "p1", "c1", "https://repo.account.workers.dev", exp, sig)).toBe(false);
   });
   test("missing key throws", async () => {
-    expect(signPreview({} as unknown as Env, "p", "c")).rejects.toThrow(/PREVIEW_SIGNING_KEY/);
+    expect(signPreview({} as unknown as Env, "p", "c", "https://repo.account.workers.dev")).rejects.toThrow(/PREVIEW_SIGNING_KEY/);
   });
 });
 

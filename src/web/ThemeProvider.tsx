@@ -25,18 +25,8 @@ export function AppearanceDialog({ open, onOpenChange }: { open: boolean; onOpen
   const panel = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
-    const previous = document.activeElement;
     const frame = requestAnimationFrame(() => panel.current?.querySelector<HTMLButtonElement>("button[aria-pressed=true]")?.focus());
-    const trap = (event: KeyboardEvent) => {
-      if (event.key !== "Tab") return;
-      const buttons = panel.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)");
-      if (!buttons?.length) return;
-      const first = buttons[0], last = buttons[buttons.length - 1];
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-    };
-    document.addEventListener("keydown", trap);
-    return () => { cancelAnimationFrame(frame); document.removeEventListener("keydown", trap); if (previous instanceof HTMLElement) previous.focus(); };
+    return () => cancelAnimationFrame(frame);
   }, [open]);
-  return <Dialog open={open} onOpenChange={onOpenChange}><div ref={panel} role="dialog" aria-modal="true" aria-labelledby="appearance-title"><DialogClose onClick={() => onOpenChange(false)} /><DialogHeader><DialogTitle id="appearance-title">Appearance</DialogTitle></DialogHeader><ThemeSelector hideLabel /><p className="mt-3 text-xs text-muted-foreground">System follows your device appearance.</p></div></Dialog>;
+  return <Dialog open={open} onOpenChange={onOpenChange}><div ref={panel}><DialogClose onClick={() => onOpenChange(false)} /><DialogHeader><DialogTitle>Appearance</DialogTitle></DialogHeader><ThemeSelector hideLabel /><p className="mt-3 text-xs text-muted-foreground">System follows your device appearance.</p></div></Dialog>;
 }

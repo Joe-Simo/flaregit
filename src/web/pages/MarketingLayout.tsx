@@ -1,0 +1,11 @@
+import { CloudflareBadgeFooter } from "../components/CloudflareBadge";
+import { PublicSearchButton } from "../components/SearchDialog";
+import type { ReactNode } from 'react';
+import { ArrowRight, GitBranch } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { ThemeSelector } from '../ThemeProvider';
+import './marketing.css';
+
+export function MarketingLayout({ children, onSignIn, active }: { children: ReactNode; onSignIn: () => void; active: 'pricing' | 'about' }) {
+  return <div className="marketing-page"><header className="marketing-header"><div className="marketing-header-inner"><a href="/" className="marketing-brand"><GitBranch size={20} aria-hidden />FlareGit</a><nav aria-label="Primary"><a href="/docs">Docs</a><a href="/community">Community</a><a href="/pricing" aria-current={active === 'pricing' ? 'page' : undefined}>Pricing</a><a href="/about" aria-current={active === 'about' ? 'page' : undefined}>About</a></nav><div className="marketing-header-actions"><PublicSearchButton /><ThemeSelector compact /><Button size="sm" variant="outline" onClick={onSignIn}>Sign in</Button></div></div></header><main>{children}<section className="marketing-closing"><div><p className="marketing-eyebrow">A shared foundation for independent work</p><h2>Make room for your next contribution.</h2><p>Bring your tools. Keep the conversation. Choose what lands.</p><Button onClick={onSignIn} variant="secondary" className="marketing-closing-button">Start collaborating <ArrowRight size={14} aria-hidden /></Button></div></section></main><footer className="marketing-footer"><div className="marketing-footer-brand"><a href="/" className="marketing-brand"><GitBranch size={17} aria-hidden />FlareGit</a></div><div><span>Explore</span><a href="/docs">Documentation</a><a href="/community">Community</a><a href="/pricing">Pricing</a><a href="/about">About</a></div><div><span>Project</span><a href="https://github.com/Joe-Simo/flaregit">Source code</a><a href="https://github.com/Joe-Simo/flaregit/blob/main/LICENSE">Apache 2.0 license</a><a href="/status">System status</a></div><div><span>Help</span><a href="mailto:support@flaregit.com">Support</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></div><p>FlareGit is an independent open-source project built on Cloudflare.</p><CloudflareBadgeFooter /></footer></div>;
+}

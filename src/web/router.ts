@@ -5,20 +5,28 @@ export type Route =
   | { name: "new" }
   | { name: "account" }
   | { name: "inbox" }
-  | { name: "report" }
+  | { name: "report"; params: URLSearchParams }
   | { name: "operator" }
   | { name: "join"; projectId: string; token: string }
+  | { name: "participate"; projectId: string }
+  | { name: "profile"; handle: string }
+  | { name: "community"; params: URLSearchParams }
+  | { name: "community-post"; params: URLSearchParams }
   | { name: "public"; projectId: string; params: URLSearchParams }
   | { name: "repo"; projectId: string; tab: string; params: URLSearchParams };
 
 export function parseHash(hash: string): Route {
   const [pathPart, query = ""] = hash.replace(/^#/, "").split("?");
   const parts = (pathPart ?? "").split("/").filter(Boolean);
+  if (parts[0] === "community") return { name: "community", params: new URLSearchParams(query) };
+  if (parts[0] === "community-post") return { name: "community-post", params: new URLSearchParams(query) };
+  if (parts[0] === "profile" && parts[1] && /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(parts[1])) return { name: "profile", handle: parts[1] };
+  if (parts[0] === "participate" && parts[1] && /^p?[0-9a-f]{12}$/.test(parts[1])) return { name: "participate", projectId: parts[1] };
   if (parts[0] === "public" && parts[1] && /^[a-z0-9]{12,16}$/.test(parts[1])) return { name: "public", projectId: parts[1], params: new URLSearchParams(query) };
   if (parts[0] === "new") return { name: "new" };
   if (parts[0] === "account") return { name: "account" };
   if (parts[0] === "inbox") return { name: "inbox" };
-  if (parts[0] === "report") return { name: "report" };
+  if (parts[0] === "report") return { name: "report", params: new URLSearchParams(query) };
   if (parts[0] === "operator") return { name: "operator" };
   if (parts[0] === "join" && parts[1] && parts[2]) return { name: "join", projectId: parts[1], token: parts[2] };
   if (parts[0] === "p" && parts[1]) return { name: "repo", projectId: parts[1], tab: parts[2] ?? "code", params: new URLSearchParams(query) };

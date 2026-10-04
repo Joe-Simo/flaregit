@@ -1,17 +1,46 @@
+import {PrivateRecoveryOperations} from "../../src/server/private-recovery";
+import {RetainedInputs} from "../../src/server/retained-inputs";
+import { recoveryScopeId } from "../../src/server/private-recovery.js";
+import { accountKeyFor } from "../../src/server/projects.js";
 import { RepositoryController } from "../../src/server/durable-object.js";
 import { RepositoryConnections } from "../../src/server/connections";
+import type { PublicCommunityActor,PublicCommunityPolicy } from "../../src/server/public-community";
+import type {AcceptedDeploymentTarget} from "../../src/server/deployments";
 import type { AgentRunInput } from "../../src/server/agent-run-ledger";
 import type { ExternalCheckState, ExternalCheckPolicy } from "../../src/core/external-checks";
 import type { FlareGitProjectState } from "../../src/core/types.js";
 
 /** Test-only fixture injection; all acceptance/abort transitions execute production methods. */
 export class PublicationFixture extends RepositoryController {
-  seed(state: FlareGitProjectState, holder: string) {
+  async seed(state: FlareGitProjectState, holder: string) {
+    const incarnation=new PrivateRecoveryOperations(this.ctx.storage).incarnation();
+    // Synthetic remote read-back proofs only; production authority and publication methods remain intact.
+    for(const candidate of Object.values(state.candidates)){
+      if(candidate.preservationProtocolVersion!==1)continue;
+      if(!candidate.workflowInstanceId)throw Error("Synthetic preserved scope needs workflow identity");
+      if(!candidate.frozenContributorProofs)throw Error("Synthetic preserved scope needs frozen proofs");
+      for(const taskId of candidate.participatingTaskIds){const task=state.tasks[taskId],commit=candidate.participatingCommits[taskId];if(!task||!commit||!/^[a-f0-9]{40}$/.test(commit))continue;const base=candidate.frozenContributorProofs.find(proof=>proof.id===taskId)?.baseCommit??task.baseCommit??candidate.expectedAcceptedBase??"a".repeat(40);if(!/^[a-f0-9]{40}$/.test(base))continue;if(!task.workspace)throw Error("Synthetic preserved input needs workspace identity");const owner=candidate.review?.actor?.userId??"test-reviewer";new RetainedInputs(this.ctx.storage).record({id:crypto.randomUUID(),version:1,projectId:state.projectId,incarnation,taskId,commit,base,canonicalRepoName:state.canonicalRepoName,workspaceRepoName:task.workspace.repoName,branch:task.workspace.branch,protectedRef:`refs/flaregit/inputs/${incarnation}/${taskId}/${commit}`,protectedBaseRef:`refs/flaregit/inputs/${incarnation}/${taskId}/${base}`,workflowId:candidate.workflowInstanceId,candidateId:candidate.id,actorId:task.contributor.id,ownerId:owner,accountKey:await accountKeyFor(owner)},{commit,base});}
+    }
     this.ctx.storage.sql.exec("INSERT INTO project (id, doc) VALUES (1, ?)", JSON.stringify(state));
+    for (const candidate of Object.values(state.candidates)) if (candidate.review?.actor) this.ctx.storage.sql.exec("INSERT OR IGNORE INTO members(user_id,role,added_at,label) VALUES (?,'owner','synthetic-review-time',?)",candidate.review.actor.userId,candidate.review.actor.displayName);
     this.ctx.storage.sql.exec("INSERT INTO lease (id, holder, expires_at) VALUES (1, ?, ?)", holder, Date.now() + 60_000);
     this.ctx.storage.sql.exec("INSERT INTO webhooks (id,url,secret,events,active,created_at) VALUES ('hook','https://example.com/hook','test-secret','change.accepted,change.ready,change.blocked,decision.needed',1,'now')");
   }
+  async fixtureAgentNativeAuthority(runId:string,taskId:string){
+    await this.registerWorkflow(runId,"agent",taskId,"test-reviewer");
+    return this.beginAgentNativeAttempt({workflowId:runId,runId,taskId,phase:"apply",attemptId:crypto.randomUUID(),nativeId:crypto.randomUUID()});
+  }
+  async fixtureRecoveryHead(commit:string) {
+    const state=await this.getState();
+    state.acceptedState.currentCommit=commit;
+    this.ctx.storage.sql.exec("UPDATE project SET doc=? WHERE id=1",JSON.stringify(state));
+  }
+  failMembership(enabled:boolean) { if(enabled)this.ctx.storage.sql.exec("CREATE TRIGGER fail_member BEFORE INSERT ON members BEGIN SELECT RAISE(ABORT,'synthetic membership failure'); END"); else this.ctx.storage.sql.exec("DROP TRIGGER fail_member"); }
+  failRegistry(enabled:boolean) {if(enabled)this.ctx.storage.sql.exec("CREATE TRIGGER fail_registry BEFORE INSERT ON projects BEGIN SELECT RAISE(ABORT,'synthetic registry failure'); END");else this.ctx.storage.sql.exec("DROP TRIGGER fail_registry");}
+  fixtureRecoverySlotCount() { return this.ctx.storage.sql.exec<{n: number}>("SELECT COUNT(*) AS n FROM private_recovery_slots").one().n; }
+  async fixtureAlarm(){await this.alarm();}
   async visibilitySnapshot() { return { visibility: await this.repositoryVisibility(), grant: await this.publicGrant(), rows: this.ctx.storage.sql.exec("SELECT version FROM repository_visibility WHERE id=1").toArray() }; }
+  fixtureDeploymentService(){return new RepositoryConnections(this.ctx.storage,"test").create("Deployment provider",["report-deployment"]);}
   fixtureConnection() { return new RepositoryConnections(this.ctx.storage, "test").create("External test provider", ["report-check"]); }
   fixturePolicy(policy: ExternalCheckPolicy) { new RepositoryConnections(this.ctx.storage, "test").setPolicy(policy); }
   injectExternal(state: ExternalCheckState) {
@@ -36,7 +65,7 @@ export class PublicationFixture extends RepositoryController {
 }
 
 export default {
-  async fetch(request: Request, env: { TEST: DurableObjectNamespace<PublicationFixture> }) {
+  async fetch(request: Request, env: { TEST: DurableObjectNamespace<PublicationFixture>;REPOSITORY_CONTROLLER:DurableObjectNamespace<PublicationFixture> }) {
     const url = new URL(request.url);
     const stub = env.TEST.get(env.TEST.idFromName(url.searchParams.get("name") ?? "test"));
     try {
@@ -47,10 +76,51 @@ export default {
       if (url.pathname === "/checkpoint") await stub.ingestCheckpoint({ eventId: "checkpoint-event", taskId: "task", commit: "checkpoint-tip", ready: true });
       if (url.pathname === "/subscribe") await stub.addWebhook("https://example.com/hook", await request.json() as string[]);
       if (url.pathname === "/expire") await stub.expireLease();
-      if (url.pathname === "/claim") await stub.claimLanding({ holder: "claim-holder", taskIds: (url.searchParams.get("tasks") ?? "task").split(",") });
+      if (url.pathname === "/claim") await stub.claimLanding({ holder: "claim-holder",preservationProtocolVersion:1, taskIds: (url.searchParams.get("tasks") ?? "task").split(",") });
+      const communityActors:Record<string,PublicCommunityActor>={owner:{userId:"community-owner",accountKey:"owner-key",displayName:"Maintainer"},author:{userId:"community-author",accountKey:"author-key",displayName:"Public author"},other:{userId:"community-other",accountKey:"other-key",displayName:"Other author"}};
+      const actor=communityActors[url.searchParams.get("actor")??"author"]!;
+      if(url.pathname==="/community-configure"){const value=await request.json() as {policy:PublicCommunityPolicy;confirmed:boolean};return Response.json(await stub.configurePublicCommunity(value.policy,value.confirmed,actor));}
+      if(url.pathname==="/community-post")return Response.json(await stub.createPublicPost(actor,await request.json() as Parameters<typeof stub.createPublicPost>[1]));
+      if(url.pathname==="/community-signed-posts")return Response.json(await stub.signedPublicPosts(actor));
+      if(url.pathname==="/community-edit"){const value=await request.json() as {id:string;title:string;body:string;expectedVersion:number};return Response.json(await stub.editPublicPost(actor,value.id,{title:value.title,body:value.body,expectedVersion:value.expectedVersion}));}
+      if(url.pathname==="/community-remove"){const value=await request.json() as {id:string;expectedVersion:number};await stub.removePublicPost(actor,value.id,value.expectedVersion);return Response.json({removed:true});}
+      if(url.pathname==="/community-request")return Response.json(await stub.requestPublicContribution(actor,await request.json() as Parameters<typeof stub.requestPublicContribution>[1]));
+      if(url.pathname==="/community-requests")return Response.json(await stub.publicContributionRequests(actor));
+      if(url.pathname==="/community-public")return Response.json(await stub.publicCommunity());
+      if(url.pathname==="/community-decide"){const value=await request.json() as {id:string;decision:"approved"|"rejected";confirmed:boolean};return Response.json(await stub.decidePublicContribution(actor,value.id,value.decision,value.confirmed));}
+      if(url.pathname==="/registration-reconcile"){await stub.reconcileContributorRegistrations();return Response.json(await stub.publicContributionRequests(actor));}
+      if(url.pathname==="/registration-alarm"){await stub.fixtureAlarm();return Response.json(await stub.publicContributionRequests(actor));}
+      if(url.pathname==="/registration-fail"){await env.REPOSITORY_CONTROLLER.getByName("account:author-key").failRegistry(url.searchParams.get("enabled")==="true");return Response.json({ok:true});}
+      if(url.pathname==="/registry")return Response.json(await env.REPOSITORY_CONTROLLER.getByName("account:author-key").listProjects());
+      if(url.pathname==="/account-delete-start"){await env.REPOSITORY_CONTROLLER.getByName("account:author-key").beginAccountDeletion();return Response.json({ok:true});}
+      if(url.pathname==="/account-delete-finish"){await env.REPOSITORY_CONTROLLER.getByName("account:author-key").finishAccountDeletion();return Response.json(await env.REPOSITORY_CONTROLLER.getByName("account:author-key").accountLifecycle());}
+      if(url.pathname==="/remove-member")await stub.removeMember(url.searchParams.get("user")!);
+      if(url.pathname==="/member-role")return Response.json(await stub.roleOf(url.searchParams.get("user")!));
+      if(url.pathname==="/fail-membership")await stub.failMembership(url.searchParams.get("enabled")==="true");
+      if(url.pathname==="/deployment-service")return Response.json(await stub.fixtureDeploymentService());
+      if(url.pathname==="/fixture-recovery-head"){const input=await request.json() as {commit:string};await stub.fixtureRecoveryHead(input.commit);}
+      if(url.pathname==="/fixture-repository-deletion")await stub.beginRepositoryDeletion();
+      if(url.pathname==="/recovery-targets")return Response.json(await stub.privateRecoveryTargets());
+      if(url.pathname==="/recovery-prepare"){const input=await request.json() as {id:string;commit:string;tree:string|null;ownerId:string;accountKey?:string};return Response.json(await stub.privateRecoveryPrepare(input.id,input.commit,input.tree,input.ownerId,input.accountKey??await accountKeyFor(input.ownerId)));}
+      if(url.pathname==="/recovery-storage"){const input=await request.json() as {id:string;accountKey:string;action:"reserve"|"release"};if(input.action==="reserve")await stub.reservePrivateRecoveryStorage(input.id,input.accountKey);else await stub.releasePrivateRecoveryStorage(input.id,input.accountKey);return Response.json(await stub.fixtureRecoverySlotCount());}
+      if(url.pathname==="/recovery-slot-count")return Response.json(await stub.fixtureRecoverySlotCount());
+      if(url.pathname==="/recovery-fail"){const input=await request.json() as {id:string};const operation=await stub.privateRecoveryOperation(input.id);if(!operation)throw new Error("Missing fixture operation");await stub.privateRecoveryFail(input.id,"fixture failure",recoveryScopeId(operation));return Response.json(await stub.privateRecoveryOperation(input.id));}
+      if(url.pathname==="/recovery-cache-finish"){const input=await request.json() as {id:string};await stub.privateRecoveryFinishDeletion(input.id);return Response.json(await stub.privateRecoveryOperation(input.id));}
+      if(url.pathname==="/recovery-list")return Response.json(await stub.privateRecoveryList());
+      if(url.pathname==="/recovery-operation")return Response.json(await stub.privateRecoveryOperation(url.searchParams.get("id")!));
+      if(url.pathname==="/recovery-cleanup-list")return Response.json(await stub.privateRecoveryCleanupList());
+      if(url.pathname==="/recovery-upload"){const input=await request.json() as {id:string;action:"begin"|"save"|"close";uploadId?:string};const operation=await stub.privateRecoveryOperation(input.id);if(!operation)throw new Error("Missing fixture operation");const scope=recoveryScopeId(operation);if(input.action==="begin")await stub.privateRecoveryBeginUpload(input.id,scope);else if(input.action==="save")await stub.privateRecoverySaveUpload(input.id,input.uploadId!,scope);else await stub.privateRecoveryCloseUpload(input.id,input.uploadId!,scope);return Response.json(await stub.privateRecoveryOperation(input.id));}
+      if(url.pathname==="/recovery-cache-delete"){const input=await request.json() as {id:string;ownerId:string};await stub.privateRecoveryBeginDeletion(input.id,input.ownerId);return Response.json(await stub.privateRecoveryOperation(input.id));}
+      if(url.pathname==="/recovery-complete"){const input=await request.json() as {id:string};const op=await stub.privateRecoveryOperation(input.id);if(!op?.tree)throw new Error("Missing recovery tree");await stub.privateRecoveryComplete(input.id,{projectId:op.projectId,incarnation:op.incarnation,commit:op.commit,tree:op.tree,journalId:op.journalId,size:1,sha256:"a".repeat(64),objectCount:1,objectScope:"exact-accepted-reachable-closure",createdAt:new Date().toISOString()});return Response.json(await stub.privateRecoveryOperation(input.id));}
+      if(url.pathname==="/recovery-record-tree"){const input=await request.json() as {id:string;tree:string};const operation=await stub.privateRecoveryOperation(input.id);if(!operation)throw new Error("Missing fixture operation");return Response.json(await stub.privateRecoveryRecordTree(input.id,input.tree,recoveryScopeId(operation)));}
+      if(url.pathname==="/recovery-authorize")return Response.json(await stub.privateRecoveryAuthorize(url.searchParams.get("id")!,url.searchParams.get("owner")!));
+      if(url.pathname==="/deployment-target")return Response.json(await stub.acceptedDeploymentTarget(url.searchParams.get("journal")??"accepted-journal"));
+      if(url.pathname==="/deployment-request"){const input=await request.json() as {target:AcceptedDeploymentTarget;serviceId:string;environment:string;key:string;actorId:string};return Response.json(await stub.requestDeployment(input.target,input.serviceId,input.environment,input.key,input.actorId));}
+      if(url.pathname==="/deployment-list")return Response.json(await stub.listDeployments());
       if (url.pathname === "/agent-resume") { const input = await request.json() as { runId:string;taskId:string;previousRunId:string }; return Response.json(await stub.resumeAgentRun(input.runId,input.taskId,input.previousRunId)); }
       if (url.pathname === "/verification-policy") await stub.setVerificationPolicy(await request.json() as Record<string,unknown>);
       if (url.pathname === "/agent-claim") return Response.json(await stub.claimAgentRun(await request.json() as AgentRunInput));
+      if (url.pathname === "/agent-native-authority") {const input=await request.json() as {runId:string;taskId:string};return Response.json(await stub.fixtureAgentNativeAuthority(input.runId,input.taskId));}
       if (url.pathname === "/agent-proposal") { const input = await request.json() as { runId: string; taskId: string; files: Record<string,string> }; return Response.json(await stub.saveAgentProposal(input.runId,input.taskId,input.files)); }
       if (url.pathname === "/agent-push") { const input = await request.json() as { runId: string; taskId: string; commit: string }; return Response.json(await stub.markAgentPushed(input.runId,input.taskId,input.commit)); }
       if (url.pathname === "/agent-checkpoint") { const input = await request.json() as { runId: string; taskId: string; commit: string; eventId: string }; await stub.ingestCheckpoint({ ...input, ready: true }); return Response.json(await stub.checkpointAgentRun(input.runId,input.taskId,input.eventId,input.commit)); }
@@ -62,10 +132,10 @@ export default {
       if (url.pathname === "/visibility-status") return Response.json(await stub.visibilitySnapshot());
       if (url.pathname === "/connection") return Response.json(await stub.fixtureConnection());
       if (url.pathname === "/external-policy") await stub.fixturePolicy(await request.json() as ExternalCheckPolicy);
-      if (url.pathname === "/await-review") await stub.awaitReview("candidate", url.searchParams.get("commit") ?? "landed", "old-holder");
+      if (url.pathname === "/await-review") await stub.awaitReview("candidate", url.searchParams.get("commit") ?? "b".repeat(40), "old-holder");
       if (url.pathname === "/checks") return Response.json(await stub.externalChecks("candidate"));
       if (url.pathname === "/external") await stub.injectExternal(await request.json() as ExternalCheckState);
-      if (url.pathname === "/review") return Response.json(await stub.recordReview("candidate", { approved: true, by: "test-reviewer" }));
+      if (url.pathname === "/review") { await stub.addMember("test-reviewer", "owner"); return Response.json(await stub.recordReview("candidate", { approved: true, actor: { userId: "test-reviewer", displayName: "test-reviewer", viaToken: false } }, url.searchParams.get("expected") ?? "b".repeat(40))); }
       if (url.pathname === "/prepare") return Response.json(await stub.preparePublish("candidate"));
       return Response.json(await stub.snapshot());
     } catch (error) { return Response.json({ error: String(error) }, { status: 500 }); }

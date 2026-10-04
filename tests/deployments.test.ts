@@ -1,0 +1,29 @@
+import {expect,test} from "bun:test";
+import {Miniflare,convertV4MiniflareOptions} from "miniflare";
+import {workerdChild} from "./support/workerd-child";
+import type {DeploymentRecord,DeploymentRequestedEvent} from "../src/server/deployments";
+test("deployment SQL binds accepted state and atomically stages stable events without executing a provider",async()=>{
+  if(await workerdChild("tests/deployments.test.ts"))return;
+  const bundle=`/tmp/flaregit-deployment-${crypto.randomUUID()}.js`,build=Bun.spawn([process.execPath,"build","tests/support/deployments-worker.ts","--target=browser","--external=cloudflare:workers",`--outfile=${bundle}`],{stdout:"ignore",stderr:"pipe"});const[error,code]=await Promise.all([new Response(build.stderr).text(),build.exited]);if(code!==0)throw new Error(error);const script=await Bun.file(bundle).text();await Bun.file(bundle).delete();
+  const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:"deployment",modules:true,script,compatibilityDate:"2026-10-02",durableObjects:{TEST:{className:"DeploymentFixture",useSQLite:true}}}]}));
+  const call=async(path:string,body?:unknown)=>(await mf.getWorker("deployment")).fetch(`http://test${path}`,body?{method:"POST",body:JSON.stringify(body)}:undefined);
+  const target={journalId:"accepted-journal",candidateId:"accepted-candidate",commit:"a".repeat(40),tree:"b".repeat(40),acceptedAt:"2026-10-02T00:00:00.000Z",recoverableRef:"refs/flaregit/deployments/accepted-journal"};
+  const input={target,service:"registered-company",environment:"production",key:"owner-request-123",actor:"verified-owner"};
+  try{
+    await call("/fail");expect((await call("/request",input)).status).toBe(409);
+    const failed=await(await call("/snapshot")).json() as{deployments:unknown[];events:unknown[]};expect(failed.deployments).toEqual([]);expect(failed.events).toEqual([]);await call("/recover");
+    const created=await(await call("/request",input)).json() as{kind:string;deployment:DeploymentRecord};expect(created.kind).toBe("created");expect(created.deployment.status).toBe("requested");
+    const duplicate=await(await call("/request",input)).json() as typeof created;expect(duplicate.kind).toBe("duplicate");expect(duplicate.deployment.requestEventId).toBe(created.deployment.requestEventId);
+    expect((await call("/request",{...input,target:{...target,commit:"c".repeat(40)}})).status).toBe(409);
+    const snapshot=await(await call("/snapshot")).json() as{events:Array<{payload:string}>};expect(snapshot.events.length).toBe(1);const event=JSON.parse(snapshot.events[0]!.payload) as DeploymentRequestedEvent;expect(event.data.commit).toBe(target.commit);expect(event.data.tree).toBe(target.tree);expect(event.data.recoverableRef).toBe(target.recoverableRef);
+    const report={type:"deployment",deploymentId:created.deployment.id,commit:target.commit,tree:target.tree,sequence:0,status:"running",summary:"Synthetic provider fixture",eventId:"provider-event-123"};
+    expect((await(await call("/report",{report,service:"another-company"})).json() as{kind:string}).kind).toBe("rejected");
+    expect((await(await call("/report",{report:{...report,tree:"c".repeat(40)},service:input.service})).json() as{kind:string}).kind).toBe("rejected");
+    expect((await(await call("/report",{report,service:input.service})).json() as{kind:string}).kind).toBe("applied");
+    expect((await(await call("/report",{report,service:input.service})).json() as{kind:string}).kind).toBe("duplicate");
+    expect((await(await call("/report",{report:{...report,summary:"Changed event"},service:input.service})).json() as{kind:string}).kind).toBe("rejected");
+    const success={...report,eventId:"provider-success",sequence:1,status:"succeeded"};expect((await(await call("/report",{report:success,service:input.service})).json() as{kind:string}).kind).toBe("applied");
+    expect((await(await call("/report",{report:{...success,eventId:"late-failure",sequence:2,status:"failed"},service:input.service})).json() as{kind:string}).kind).toBe("rejected");
+    expect((await(await call("/report?namespace=other",{report:success,service:input.service})).json() as{kind:string}).kind).toBe("rejected");
+  }finally{await mf.dispose();}
+},30000);

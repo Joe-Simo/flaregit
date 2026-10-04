@@ -1,0 +1,32 @@
+// Operator template: copy to a repository-specific config in this directory.
+// Replace name and BOTH REPOSITORY_ID values before provisioning.
+// ASSET_BROKER targets the production flaregit Worker named entrypoint only.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "replace-with-repository-preview-worker-name",
+  "main": "src/server/preview-worker.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "vars": {
+    "REPOSITORY_ID": "replace-with-repository-id"
+  },
+  "services": [
+    {
+      "binding": "ASSET_BROKER",
+      "service": "flaregit",
+      "entrypoint": "PreviewAssetBroker"
+    }
+  ],
+  "previews": {
+    "vars": {
+      "REPOSITORY_ID": "replace-with-repository-id"
+    },
+    "services": [
+      {
+        "binding": "ASSET_BROKER",
+        "service": "flaregit",
+        "entrypoint": "PreviewAssetBroker"
+      }
+    ]
+  }
+}

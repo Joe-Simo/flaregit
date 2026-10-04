@@ -1,4 +1,10 @@
-import React, { useState } from "react";
+import {hasOlderAcceptedBase} from "../change-base-state";
+import {GitCredential} from "../components/GitCredential";
+import {separateGitCommands} from "../git-command-display";
+import React, { useEffect, useRef, useState } from "react";
+import { useAuth } from "@clerk/clerk-react";
+import { Input } from "@/components/ui/input";
+import { changeCreationFollowup, type ChangeCreationResponse } from "../change-creation-followup";
 import { Bot, Check, Copy, GitPullRequestArrow, Layers, Plus, User, X, GitBranch, AlertTriangle, ShieldCheck, Pause, Play, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -70,14 +76,41 @@ function AgentRunControls({ projectId, instanceId, canRetry, retrying, onRetry, 
   </div>;
 }
 
-export function ChangesTab({ projectId, state, reload }: { projectId: string; state: FlareGitProjectState; reload: () => void }) {
+type ChangesProps = { projectId: string; state: FlareGitProjectState; reload: () => void };
+export function ChangesTab(props: ChangesProps) {
+  const { userId } = useAuth();
+  return <ChangesPanel key={`${props.projectId}:${userId ?? "signed-out"}`} {...props} />;
+}
+function ChangesPanel({ projectId, state, reload }: ChangesProps) {
   const [goal, setGoal] = useState("");
+  const creationIntent = useRef<{ signature: string; taskId: string } | null>(null);
+  const [relationships, setRelationships] = useState(false);
+  const [dependsOn, setDependsOn] = useState<string | null>(null);
+  const [issue, setIssue] = useState<{ number: number; title: string } | null>(null);
+  const [picker, setPicker] = useState<"change" | "issue" | null>(null);
+  const [search, setSearch] = useState("");
+  const [issues, setIssues] = useState<Array<{ number: number; title: string }> | null>(null);
+  const [issuesError, setIssuesError] = useState<string | null>(null);
+  const [issuesLoading, setIssuesLoading] = useState(false);
+  const lifetime = useRef(0);
+  const issueRequest = useRef(0);
+  useEffect(() => () => { lifetime.current++; issueRequest.current++; }, []);
+  const loadIssues = async () => {
+    const request = ++issueRequest.current;
+    setIssuesLoading(true); setIssuesError(null);
+    try {
+      const result = await apiJson<Array<{ number: number; title: string }>>(`/p/${projectId}/issues?state=open`);
+      if (request === issueRequest.current) setIssues(result);
+    } catch (cause) {
+      if (request === issueRequest.current) setIssuesError(cause instanceof Error ? cause.message : "Could not load issues");
+    } finally { if (request === issueRequest.current) setIssuesLoading(false); }
+  };
   const [useAgent, setUseAgent] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
-  const [instructions, setInstructions] = useState<{ commands: string[]; task: string } | null>(null);
+  const [instructions, setInstructions] = useState<{ commands: string[]; task: string; token:string|null } | null>(null);
   const [copied, setCopied] = useState(false);
 
   const tasks = Object.values(state.tasks).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -90,39 +123,53 @@ export function ChangesTab({ projectId, state, reload }: { projectId: string; st
     }
   }
   const overlaps = [...paths.entries()].filter(([, contributors]) => contributors.length > 1);
-  const stale = active.filter((task) => task.baseCommit !== state.acceptedState.currentCommit && !task.dependsOn);
+  const stale = active.filter((task) => hasOlderAcceptedBase(task,state.acceptedState.currentCommit,state.tasks));
 
 
   const run = async (label: string, fn: () => Promise<void>) => {
+    const generation = lifetime.current;
     setBusy(label);
     setError(null);
     setNotice(null);
     try {
       await fn();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Something went wrong");
+      if (generation === lifetime.current) setError(e instanceof Error ? e.message : "Something went wrong");
     } finally {
-      setBusy(null);
-      reload();
+      if (generation === lifetime.current) { setBusy(null); reload(); }
     }
   };
 
   const create = () =>
     run("create", async () => {
-      const taskId = `${slug(goal)}-${Math.random().toString(36).slice(2, 6)}`;
-      const created = await apiJson<{ commands: string[] }>(`/p/${projectId}/tasks`, { method: "POST", json: { taskId, goal } });
-      if (useAgent) {
+      const generation = lifetime.current;
+      if (dependsOn && (!state.tasks[dependsOn] || state.tasks[dependsOn]?.status === "cancelled")) throw new Error("The selected base change is no longer available. Choose another change or clear it.");
+      const signature = JSON.stringify({ goal, dependsOn, issue: issue?.number ?? null });
+      if (creationIntent.current?.signature !== signature) creationIntent.current = { signature, taskId: `${slug(goal)}-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}` };
+      const taskId = creationIntent.current.taskId;
+      const created = await apiJson<ChangeCreationResponse>(`/p/${projectId}/tasks`, { method: "POST", json: { taskId, goal, ...(dependsOn ? { dependsOn } : {}), ...(issue ? { issue: issue.number } : {}) } });
+      if (generation !== lifetime.current) return;
+      const followup = changeCreationFollowup(created, useAgent);
+      creationIntent.current = null;
+      setInstructions(null);
+      if (followup === "terminal") {
+        setNotice(`Change already ${created.status === "accepted" ? "accepted" : "cancelled"}. Its saved history is preserved; no new agent run was started.`);
+      } else if (followup === "existing-agent") {
+        setNotice("Change saved. Its existing agent run and checkpoints are available below; no new run was started.");
+      } else if (followup === "start-agent") {
         try {
           await apiJson(`/p/${projectId}/tasks/${taskId}/agent`, { method: "POST" });
+          if (generation !== lifetime.current) return;
           setNotice("Agent run started. Its checkpoints and progress will appear on the change.");
         } catch (cause) {
-          setInstructions({ commands: created.commands, task: taskId });
+          if (generation !== lifetime.current) return;
+          setInstructions({ ...separateGitCommands(created.commands,created.token), task: taskId });
           setError(`Change saved, but the agent could not start: ${cause instanceof Error ? cause.message : "Unknown error"}. Resume from the change below or use its Git commands.`);
         }
       } else {
-        setInstructions({ commands: created.commands, task: taskId });
+        setInstructions({ ...separateGitCommands(created.commands,created.token), task: taskId });
       }
-      setGoal("");
+      setGoal(""); setDependsOn(null); setIssue(null); setRelationships(false);
     });
 
   const act = (task: Task, action: "ready" | "cancel" | "agent") =>
@@ -166,16 +213,23 @@ export function ChangesTab({ projectId, state, reload }: { projectId: string; st
           <h2 className="text-sm font-semibold"><label htmlFor="new-change-goal">Start a change</label></h2>
           <textarea
             id="new-change-goal"
+            disabled={busy !== null}
             value={goal}
-            onChange={(e) => setGoal(e.target.value)}
+            onChange={(e) => { creationIntent.current = null; setGoal(e.target.value); }}
             rows={2}
             maxLength={300}
             placeholder="Describe what should change, e.g. “Add input validation to the signup form”"
             className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
+          <Button size="sm" variant="ghost" aria-expanded={relationships} aria-controls="change-relationships" disabled={busy !== null} onClick={() => setRelationships(value => !value)}>{relationships ? "Hide relationships" : dependsOn || issue ? "Edit relationships" : "Add relationships"}</Button>
+          {relationships && <div id="change-relationships" className="space-y-3 border-t border-border pt-3">
+            <p className="text-xs text-muted-foreground">Build on an existing change or link an issue this change will resolve.</p>
+            <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busy !== null} onClick={() => { setSearch(""); setPicker("change"); }}>{dependsOn ? `Builds on: ${state.tasks[dependsOn]?.goal ?? dependsOn}` : "Choose base change"}</Button>{dependsOn && <Button variant="ghost" size="sm" disabled={busy !== null} onClick={() => { creationIntent.current = null; setDependsOn(null); }}>Clear base</Button>}</div>
+            <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busy !== null} onClick={() => { setSearch(""); setPicker("issue"); void loadIssues(); }}>{issue ? `Resolves #${issue.number}: ${issue.title}` : "Choose issue"}</Button>{issue && <Button variant="ghost" size="sm" disabled={busy !== null} onClick={() => { creationIntent.current = null; setIssue(null); }}>Clear issue</Button>}</div>
+          </div>}
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <label className="flex items-center gap-2 text-sm">
-              <input type="checkbox" checked={useAgent} onChange={(e) => setUseAgent(e.target.checked)} />
+              <input type="checkbox" disabled={busy !== null} checked={useAgent} onChange={(e) => setUseAgent(e.target.checked)} />
               <Bot className="h-4 w-4" aria-hidden="true" /> Let an AI agent do the work
             </label>
             <Button variant="orange" disabled={!goal.trim() || busy !== null} onClick={create}>
@@ -269,12 +323,26 @@ export function ChangesTab({ projectId, state, reload }: { projectId: string; st
         </CardContent>
       </Card>
 
+      <Dialog open={picker !== null} onOpenChange={open => { if (!open) setPicker(null); }}>
+        <DialogHeader><DialogTitle>{picker === "change" ? "Build on a change" : "Link an issue"}</DialogTitle><DialogDescription>{picker === "change" ? "The new workspace starts from this change’s saved Git state." : "The issue closes when this change is accepted."}</DialogDescription></DialogHeader>
+        <Input aria-label={picker === "change" ? "Find a base change" : "Find an issue"} placeholder="Search" value={search} onChange={event => setSearch(event.target.value)} />
+        <div className="mt-3 max-h-72 overflow-auto space-y-1">
+          {picker === "change" && tasks.filter(task => task.status !== "cancelled" && `${task.goal} ${task.id}`.toLowerCase().includes(search.toLowerCase())).map(task => <Button key={task.id} variant="ghost" className="w-full h-auto justify-start whitespace-normal text-left" onClick={() => { if (dependsOn !== task.id) creationIntent.current = null; setDependsOn(task.id); setPicker(null); }}>{task.goal} · {STATUS[task.status].label}</Button>)}
+          {picker === "change" && !tasks.some(task => task.status !== "cancelled" && `${task.goal} ${task.id}`.toLowerCase().includes(search.toLowerCase())) && <p className="text-sm text-muted-foreground">No matching changes.</p>}
+          {picker === "issue" && issuesLoading && <p role="status" className="text-sm text-muted-foreground">Loading open issues…</p>}
+          {picker === "issue" && issuesError && <div role="alert" className="text-sm text-destructive"><p>{issuesError}</p><Button variant="outline" size="sm" onClick={() => void loadIssues()}>Retry</Button></div>}
+          {picker === "issue" && issues?.filter(item => `${item.number} ${item.title}`.toLowerCase().includes(search.toLowerCase())).map(item => <Button key={item.number} variant="ghost" className="w-full h-auto justify-start whitespace-normal text-left" onClick={() => { if (issue?.number !== item.number) creationIntent.current = null; setIssue(item); setPicker(null); }}>#{item.number} {item.title}</Button>)}
+          {picker === "issue" && !issuesLoading && !issuesError && issues && !issues.some(item => `${item.number} ${item.title}`.toLowerCase().includes(search.toLowerCase())) && <p className="text-sm text-muted-foreground">No matching open issues.</p>}
+        </div>
+      </Dialog>
+
       <Dialog open={instructions !== null} onOpenChange={() => setInstructions(null)}>
         <DialogHeader>
           <DialogTitle>Work on it with Git</DialogTitle>
           <DialogDescription>Your credential works only for this change and expires in one hour. Push your commits, then press “Ready”.</DialogDescription>
         </DialogHeader>
         <pre aria-label="Git commands" className="text-xs bg-muted/40 rounded-md p-3 overflow-auto whitespace-pre-wrap break-all">{instructions?.commands.join("\n")}</pre>
+        {instructions?.token&&<GitCredential key={instructions.token} token={instructions.token}/>}
         <div className="flex justify-end gap-2 mt-3">
           <Button
             variant="outline"

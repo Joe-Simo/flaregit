@@ -1,0 +1,13 @@
+import {test,expect} from "bun:test";
+import {Miniflare,convertV4MiniflareOptions} from "miniflare";
+import {workerdChild} from "./support/workerd-child";
+test("native legacy publication fence preserves reviews and accepted journal reconciliation",async()=>{
+ if(await workerdChild("tests/candidate-preservation.test.ts"))return;
+ const file=`/tmp/flaregit-preservation-${crypto.randomUUID()}.js`,p=Bun.spawn([process.execPath,"build","tests/support/candidate-preservation-worker.ts","--target=browser","--external=cloudflare:workers","--external=node:*",`--outfile=${file}`],{stdout:"ignore",stderr:"pipe"});const [stderr,code]=await Promise.all([new Response(p.stderr).text(),p.exited]);if(code)throw new Error(stderr);
+ const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:"preservation",modules:true,script:await Bun.file(file).text(),compatibilityDate:"2026-10-02",compatibilityFlags:["nodejs_compat"],durableObjects:{REPOSITORY_CONTROLLER:{className:"CandidatePreservationFixture",useSQLite:true}}}]}));
+ try{const worker=await mf.getWorker("preservation");for(const mode of ["legacy","missing","wrong-scope","current"]){const response=await worker.fetch(`https://fixture/?mode=${mode}`);expect(response.status).toBe(200);const b=await response.json() as {before:unknown;after:unknown;review:{ok:boolean};prepared:{ok:boolean};authorized:boolean};expect(b.review.ok).toBe(mode==="current");expect(b.prepared.ok).toBe(mode==="current");expect(b.authorized).toBe(mode==="current");if(mode!=="current")expect(b.after).toEqual(b.before);}
+ const uncertain=await(await worker.fetch("https://fixture/?mode=uncertain")).json() as {prepared:{ok:boolean;recoveryRequired:boolean};before:unknown;after:unknown;outcomeBefore:unknown;outcomeAfter:unknown};expect(uncertain.prepared).toMatchObject({ok:false,recoveryRequired:true});expect(uncertain.after).toEqual(uncertain.before);expect(uncertain.outcomeAfter).toEqual(uncertain.outcomeBefore);
+ const accepted=await(await worker.fetch("https://fixture/?mode=accepted")).json() as {acceptedState:{currentCommit:string;history:unknown[]};candidates:{candidate:{status:string}}};expect(accepted.acceptedState.currentCommit).toBe("c".repeat(40));expect(accepted.acceptedState.history).toHaveLength(1);expect(accepted.candidates.candidate.status).toBe("accepted");
+ const claims=await(await worker.fetch("https://fixture/?mode=claims")).json() as {legacy:{candidate?:unknown;reason:string};current:{candidate:{preservationProtocolVersion:number}}};expect(claims.legacy.candidate).toBeUndefined();expect(claims.legacy.reason).toContain("upgrade");expect(claims.current.candidate.preservationProtocolVersion).toBe(1);
+ }finally{await mf.dispose();await Bun.file(file).delete();}
+},30000);

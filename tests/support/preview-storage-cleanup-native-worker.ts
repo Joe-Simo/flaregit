@@ -1,0 +1,35 @@
+import {RepositoryController} from "../../src/server/durable-object";
+import {createPreviewStorageManifest} from "../../src/server/preview-storage-upload";
+import type {FlareGitProjectState} from "../../src/core/types";
+import type {Env} from "../../src/server/env";
+const identity={projectId:"p123456789abc",incarnation:"12345678-1234-1234-1234-123456789abc",commit:"a".repeat(40),accountKey:"abcdef123456"};
+const evidenceIdentity={...identity,projectId:"p555555555abc",incarnation:"55555555-1234-1234-1234-123456789abc"},evidenceId="ev_55555555-abc",evidenceKey=`evidence/${evidenceIdentity.projectId}/${evidenceIdentity.incarnation}/${evidenceId}.json`;
+const key=`builds/${identity.projectId}/${identity.commit}`,writer="abcdef12-1234-1234-1234-123456789abc",asset="index.html",bytes=new TextEncoder().encode("retained preview");
+async function manifest(){const hash=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",bytes)),value=>value.toString(16).padStart(2,"0")).join("");return createPreviewStorageManifest(identity,[{path:asset,size:bytes.length,sha256:hash},{path:"assets/foo..js",size:bytes.length,sha256:hash}]);}
+export class CleanupNativeFixture extends RepositoryController {
+ fixtureSeedEvidence(){const state={projectId:"p987654321abc",projectName:"Legacy evidence",canonicalRepoName:"legacy-repo",acceptedState:{currentCommit:identity.commit,history:[],activeRequirements:[]},journal:[],tasks:{},candidates:{},evidence:{"ev_12345678-abc":{id:"ev_12345678-abc",status:"passed"}},decisions:{}} as unknown as FlareGitProjectState;this.ctx.storage.sql.exec("INSERT INTO project(id,doc) VALUES(1,?)",JSON.stringify(state));}
+ fixtureSnapshot(){return {evidenceReservations:this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE name='evidence_storage_reservations'").toArray().length?this.ctx.storage.sql.exec<{physical_key:string;bytes:number}>("SELECT physical_key,bytes FROM evidence_storage_reservations").toArray():[],reservations:this.ctx.storage.sql.exec<{physical_key:string;bytes:number}>("SELECT physical_key,bytes FROM preview_storage_reservations").toArray(),writers:this.ctx.storage.sql.exec<{closed:number;pending:string}>("SELECT closed,pending FROM preview_copy_writers").toArray(),retirements:this.ctx.storage.sql.exec<{physical_key:string}>("SELECT physical_key FROM preview_copy_retirements").toArray(),receipts:this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE name='preview_copy_cleanup_receipts'").toArray().length?this.ctx.storage.sql.exec<{physical_key:string;keys_json:string}>("SELECT physical_key,keys_json FROM preview_copy_cleanup_receipts").toArray():[]};}
+}
+export default {async fetch(request:Request,env:Env){const path=new URL(request.url).pathname,global=env.REPOSITORY_CONTROLLER.getByName("global") as unknown as CleanupNativeFixture;
+ try{
+ if(path==="/fresh-era"){const project=env.REPOSITORY_CONTROLLER.getByName("project:p666666666abc") as unknown as CleanupNativeFixture;await project.initialize({projectId:"p666666666abc",projectName:"Fresh",canonicalRepoName:"fresh-repo",head:identity.commit,verificationPolicy:{}});await project.beginRepositoryDeletion();return Response.json(await project.previewCleanupScope());}
+ if(path==="/hold-preview"){const original=await manifest();return Response.json(await global.reservePreviewStorage(await createPreviewStorageManifest({...identity,projectId:"p888888888abc",incarnation:"88888888-1234-1234-1234-123456789abc",commit:"e".repeat(40)},original.assets)));}
+ if(path==="/evidence-start"){const hash=(await manifest()).assets[0]!.sha256;const admission=await global.reserveEvidenceStorage(evidenceIdentity,evidenceId,bytes.length,hash);if(!admission.allowed)throw new Error(admission.reason);await global.registerPreviewEvidenceCopy(evidenceIdentity,evidenceId,bytes.length,hash,writer);await global.beginPreviewPut(evidenceKey,writer,"");await env.EVIDENCE_BUCKET.put(evidenceKey,bytes);await global.fencePreviewCleanup(evidenceIdentity.projectId,evidenceIdentity.incarnation);return Response.json(admission);}
+ if(path==="/evidence-ready")return Response.json(await global.previewCopyCleanupReady(evidenceKey));
+ if(path==="/evidence-finish"){await global.finishPreviewCopyCleanup(evidenceKey);return new Response("ok");}
+ if(path==="/evidence-settle"){await global.finishPreviewPut(evidenceKey,writer,"");await global.finishPreviewWriter(evidenceKey,writer);return new Response("ok");}
+ if(path==="/evidence-delete"){await env.EVIDENCE_BUCKET.delete(evidenceKey);return new Response("ok");}
+ if(path==="/legacy-evidence"){const project=env.REPOSITORY_CONTROLLER.getByName("project:p987654321abc") as unknown as CleanupNativeFixture;await project.fixtureSeedEvidence();await project.initialize({projectId:"p987654321abc",projectName:"Legacy evidence",canonicalRepoName:"legacy-repo",head:identity.commit,verificationPolicy:{}});await project.addMember("legacy-owner","owner");const scope=await project.previewStorageScope(identity.commit,"legacy-repo"),id="ev_12345678-abc",flat=`evidence/${id}.json`,scoped=`evidence/${scope.projectId}/${scope.incarnation}/${id}.json`;await env.EVIDENCE_BUCKET.put(flat,"legacy evidence");await env.EVIDENCE_BUCKET.put(scoped,"scoped evidence");await project.recordScopedEvidenceCopy(id,scoped,scope.incarnation);await project.beginRepositoryDeletion();return Response.json({cleanup:await project.previewCleanupScope(),flatPresent:!!await env.EVIDENCE_BUCKET.head(flat),flatBody:await(await env.EVIDENCE_BUCKET.get(flat))?.text(),scopedPresent:!!await env.EVIDENCE_BUCKET.head(scoped)});}
+ if(path==="/writer-state")return Response.json(await global.previewStorageWriterState(key));
+ if(path==="/start"){const admission=await global.reservePreviewStorage(await manifest());if(!admission.allowed)throw new Error(admission.reason);await global.reservePreviewWriter(key,writer);await global.beginPreviewPut(key,writer,asset);await env.EVIDENCE_BUCKET.put(`${key}/${asset}`,bytes);await env.EVIDENCE_BUCKET.put(`${key}/assets/foo..js`,bytes);await global.fencePreviewCleanup(identity.projectId,identity.incarnation);return Response.json(admission);}
+ if(path==="/ready")return Response.json(await global.previewCopyCleanupReady(key));
+ if(path==="/finish") {await global.finishPreviewCopyCleanup(key);return new Response("ok");}
+ if(path==="/settle"){await global.finishPreviewPut(key,writer,asset);await global.finishPreviewWriter(key,writer);return new Response("ok");}
+ if(path==="/delete"){await env.EVIDENCE_BUCKET.delete([`${key}/${asset}`,`${key}/assets/foo..js`]);return new Response("ok");}
+ if(path==="/object")return Response.json(!!await env.EVIDENCE_BUCKET.head(`${key}/${asset}`));
+ if(path==="/snapshot")return Response.json(await global.fixtureSnapshot());
+ if(path==="/retry-writer"){await global.reservePreviewWriter(key,crypto.randomUUID());return new Response("ok");}
+ if(path==="/retry-reserve")return Response.json(await global.reservePreviewStorage(await manifest()));
+ return new Response("missing",{status:404});
+ }catch(error){return new Response(error instanceof Error?error.message:"failure",{status:409});}
+}};

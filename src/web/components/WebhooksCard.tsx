@@ -1,23 +1,31 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { RotateCw, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiJson } from "../api";
 import { timeAgo } from "../router";
+import { readWebhookView } from "../webhook-view-read";
+import { useVisiblePolling } from "../use-visible-polling";
 
 interface Hook { id: string; url: string; events: string; active: number }
-interface Delivery { id: string; seq: number; queue_ms: number | null; webhook_id: string; event: string; status: "pending" | "success" | "failed"; attempts: number; last_status: number | null; last_error: string | null; latency_ms: number | null; updated_at: string }
+interface Delivery { dispatch_state?: "unknown"|"sending"|"queued"|"failed"|"consumed"; dispatch_attempts?:number; dispatch_error?:string|null; id: string; seq: number; queue_ms: number | null; webhook_id: string; event: string; status: "pending" | "waiting" | "success" | "failed"; attempts: number; last_status: number | null; last_error: string | null; latency_ms: number | null; updated_at: string }
+
+type WebhookLoad = { hooks: Hook[] | null; deliveries: Delivery[] };
+class WebhookLoadError extends Error {
+  constructor(message: string, readonly hooks: Hook[] | null, readonly deliveries: Delivery[] | null) { super(message); }
+}
 
 const EVENTS: Array<[string, string]> = [
   ["change.ready", "A change is ready"],
+  ["deployment.requested", "An accepted deployment was requested"],
   ["change.accepted", "Work was accepted"],
   ["change.blocked", "Integration was blocked"],
   ["decision.needed", "A decision is needed"],
 ];
 const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive";
-const okCls = "rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200";
+const okCls = "rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-200";
 const errText = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback);
 
 export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwner: boolean }) {
@@ -31,39 +39,42 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      const [h, d] = await Promise.allSettled([
-        apiJson<Hook[]>(`/p/${projectId}/webhooks`),
-        apiJson<Delivery[]>(`/p/${projectId}/deliveries`),
-      ]);
-      if (h.status === "fulfilled") setHooks(h.value);
-      if (d.status === "fulfilled") setDeliveries(d.value);
-      const failures = [h.status === "rejected" ? `Webhook settings: ${errText(h.reason, "Unavailable")}` : null, d.status === "rejected" ? `Delivery log: ${errText(d.reason, "Unavailable")}` : null].filter(Boolean);
-      setLoadError(failures.length > 0 ? `${failures.join(". ")}. Previously loaded rows may be outdated.` : null);
-    } catch (e) {
-      setLoadError(errText(e, "Could not load webhooks"));
-    }
-  }, [projectId]);
+  const generation = useRef(0);
+  const mutationInFlight = useRef(false);
+  const [lastLoadedAt, setLastLoadedAt] = useState<string | null>(null);
+  const read = useCallback(async (signal: AbortSignal): Promise<WebhookLoad> => {
+    const value = await readWebhookView(isOwner,
+      () => apiJson<Hook[]>(`/p/${projectId}/webhooks`, { signal }),
+      () => apiJson<Delivery[]>(`/p/${projectId}/deliveries`, { signal }));
+    if (value.failures.length === 0 && value.deliveries !== null) return { hooks: value.hooks, deliveries: value.deliveries };
+    throw new WebhookLoadError(`${value.failures.join(". ")}. Previously loaded rows may be outdated.`, value.hooks, value.deliveries);
+  }, [projectId, isOwner]);
   useEffect(() => {
-    void load();
-    const t = setInterval(() => void load(), 8000);
-    return () => clearInterval(t);
-  }, [load]);
+    ++generation.current;
+    mutationInFlight.current = false;
+    setHooks(null); setDeliveries(null); setSecret(null); setUrl(""); setEvents(["change.accepted", "change.blocked"]); setError(null); setNotice(null); setLoadError(null); setBusy(null); setLastLoadedAt(null);
+    return () => { generation.current++; };
+  }, [projectId, isOwner]);
+  const refresh = useVisiblePolling({
+    scope: `${projectId}:${isOwner}`, intervalMs: 8000, read,
+    onValue: (value) => { setHooks(value.hooks); setDeliveries(value.deliveries); setLoadError(null); setLastLoadedAt(new Date().toISOString()); },
+    onError: (e) => {
+      if (e instanceof WebhookLoadError) {
+        if (e.hooks !== null) setHooks(e.hooks);
+        if (e.deliveries !== null) setDeliveries(e.deliveries);
+      }
+      setLoadError(errText(e, "Could not load webhooks"));
+    },
+  });
 
-  const guard = async (label: string, done: string, fn: () => Promise<void>) => {
-    setBusy(label);
-    setError(null);
-    setNotice(null);
-    try {
-      await fn();
-      setNotice(done);
-      await load();
-    } catch (e) {
-      setError(errText(e, "Something went wrong"));
-    } finally {
-      setBusy(null);
-    }
+  const guard = async (label: string, done: string, fn: (current: number) => Promise<void>) => {
+    if (mutationInFlight.current) return;
+    mutationInFlight.current = true;
+    const current = generation.current;
+    setBusy(label); setError(null); setNotice(null);
+    try { await fn(current); if (current !== generation.current) return; setNotice(done); await refresh(); }
+    catch (e) { if (current === generation.current) setError(errText(e, "Something went wrong")); }
+    finally { if (current === generation.current) { mutationInFlight.current = false; setBusy(null); } }
   };
 
   const failing = deliveries?.filter((d) => d.status !== "success").length ?? 0;
@@ -82,19 +93,20 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
         {loadError && (
           <div role="alert" className={`${alertCls} flex flex-wrap items-center justify-between gap-2`}>
             <span>{loadError}</span>
-            <Button size="sm" variant="outline" onClick={() => void load()}>Retry</Button>
           </div>
         )}
+        {lastLoadedAt && <p className="text-xs text-muted-foreground">{isOwner ? "Settings and deliveries" : "Deliveries"} last loaded {timeAgo(lastLoadedAt)}</p>}
+        <Button size="sm" variant="ghost" onClick={() => void refresh()}>{loadError ? "Retry refresh" : "Refresh status"}</Button>
         {error && <div role="alert" className={alertCls}>{error}</div>}
         {notice && <div role="status" className={okCls}>{notice}</div>}
-        {secret && (
+        {isOwner && secret && (
           <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs">
             Signing secret (shown once): <code className="break-all">{secret}</code>
             <Button size="sm" variant="ghost" className="mt-2" onClick={() => setSecret(null)}>Hide secret</Button>
           </div>
         )}
-        {hooks === null && !loadError && <p role="status" className="text-sm text-muted-foreground">Loading webhooks…</p>}
-        {hooks && (
+        {(isOwner ? hooks === null : deliveries === null) && !loadError && <p role="status" className="text-sm text-muted-foreground">{isOwner ? "Loading webhooks…" : "Loading deliveries…"}</p>}
+        {isOwner && hooks && (
           <div className="divide-y divide-border rounded-md border border-border">
             {hooks.length === 0 && <p className="px-3 py-2 text-sm text-muted-foreground">No webhooks yet</p>}
             {hooks.map((h) => (
@@ -116,8 +128,9 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
         {isOwner && (
           <form className="space-y-2" onSubmit={(e) => {
             e.preventDefault();
-            void guard("add", "Webhook added.", async () => {
+            void guard("add", "Webhook added.", async (current) => {
               const r = await apiJson<{ secret: string }>(`/p/${projectId}/webhooks`, { method: "POST", json: { url, events } });
+              if (current !== generation.current) return;
               setSecret(r.secret);
               setUrl("");
             });
@@ -137,6 +150,7 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
             <Button type="submit" variant="outline" disabled={busy !== null || !url || events.length === 0}>{busy === "add" ? "Adding…" : "Add webhook"}</Button>
           </form>
         )}
+        {!isOwner && deliveries?.length === 0 && <p className="text-sm text-muted-foreground">No saved deliveries yet</p>}
         {deliveries && deliveries.length > 0 && (
           <div>
             <h4 className="text-xs font-semibold mb-1">Delivery log · latest 50 events</h4>
@@ -147,12 +161,15 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
                     <span className="font-medium break-all">{d.event}</span>
                     <span className="text-muted-foreground"> · #{d.seq} · {timeAgo(d.updated_at)} · {d.attempts} attempt{d.attempts === 1 ? "" : "s"}{d.queue_ms !== null ? ` · queued ${d.queue_ms} ms` : ""}{d.latency_ms !== null ? ` · ${d.latency_ms} ms` : ""}{d.last_status ? ` · last HTTP ${d.last_status}` : ""}</span>
                     <div className="mt-1 text-muted-foreground break-all">Delivery <code>{d.id}</code> · webhook <code>{d.webhook_id}</code></div>
+                    {d.status === "pending" && d.dispatch_state === "failed" && <div className="text-destructive">{d.dispatch_error ?? "Queue dispatch failed. The saved event will be retried."}</div>}
+                    {d.status === "pending" && d.attempts === 0 && d.dispatch_state === "queued" && <div className="text-muted-foreground">Queue accepted · receiver response not recorded</div>}
+                    {d.status === "pending" && d.attempts === 0 && (!d.dispatch_state || d.dispatch_state === "unknown" || d.dispatch_state === "sending") && <div className="text-muted-foreground">Event saved · queue dispatch unconfirmed</div>}
                     {d.last_error && d.status !== "success" && <div className="text-destructive break-all">{d.last_error}</div>}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    <Badge variant={d.status === "success" ? "success" : d.status === "failed" ? "destructive" : "warning"}>{d.status === "pending" ? "Pending" : d.status === "success" ? "Delivered" : "Failed"}</Badge>
+                    <Badge variant={d.status === "success" ? "success" : d.status === "failed" ? "destructive" : "warning"}>{d.status === "pending" ? "Pending" : d.status === "waiting" ? "Waiting" : d.status === "success" ? "Delivered" : "Failed"}</Badge>
                     {isOwner && (
-                      <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => guard(`re:${d.id}`, "Replay queued with the same delivery ID. Check the log for receiver confirmation.", async () => { await apiJson(`/p/${projectId}/deliveries/${d.id}/redeliver`, { method: "POST" }); })}>
+                      <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => guard(`re:${d.id}`, "Replay recorded with the same delivery ID. Check the log for its delivery outcome.", async () => { await apiJson(`/p/${projectId}/deliveries/${d.id}/redeliver`, { method: "POST" }); })}>
                         <RotateCw className="h-3 w-3 mr-1" aria-hidden="true" /> {busy === `re:${d.id}` ? "Queuing…" : "Replay"}
                       </Button>
                     )}

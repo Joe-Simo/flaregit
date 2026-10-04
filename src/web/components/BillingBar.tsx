@@ -10,6 +10,7 @@ interface Billing {
   runsToday: number;
   runsPerDay: number;
   checkoutConfigured: boolean;
+  managed?: { status: string };
 }
 
 /** Shows the project's plan and today's usage; upgrades through Polar checkout. */
@@ -29,7 +30,7 @@ export function BillingBar({ refreshKey }: { refreshKey: number }) {
 
   useEffect(() => {
     let active = true;
-    fetch("/pricing", { cache: "no-store" }).then((response) => response.ok ? response.json() as Promise<PublicPlanPrice> : null).then((value) => { if (active) setPrice(value); }).catch(() => { if (active) setPrice(null); });
+    fetch("/plan-price", { cache: "no-store" }).then((response) => response.ok ? response.json() as Promise<{ price: PublicPlanPrice }> : null).then((value) => { if (active) setPrice(value?.price ?? null); }).catch(() => { if (active) setPrice(null); });
     return () => { active = false; };
   }, []);
 
@@ -45,8 +46,8 @@ export function BillingBar({ refreshKey }: { refreshKey: number }) {
   const retryPrice = async () => {
     setCheckingPrice(true);
     try {
-      const response = await fetch("/pricing", { cache: "no-store" });
-      setPrice(response.ok ? await response.json() as PublicPlanPrice : null);
+      const response = await fetch("/plan-price", { cache: "no-store" });
+      setPrice(response.ok ? (await response.json() as { price: PublicPlanPrice }).price : null);
     } catch { setPrice(null); }
     finally { setCheckingPrice(false); }
   };
@@ -69,8 +70,9 @@ export function BillingBar({ refreshKey }: { refreshKey: number }) {
     <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-6 py-2 text-xs border-b border-border bg-card/40">
       <Badge variant={billing.plan === "pro" ? "success" : "secondary"}>{billing.plan === "pro" ? "Pro" : "Free"}</Badge>
       <span className="text-muted-foreground">
-        {billing.runsToday} / {billing.runsPerDay} agent and integration runs today
+        {billing.runsToday} / {billing.runsPerDay} managed starts today
       </span>
+      {billing.managed?.status && billing.managed.status !== "configured" && <span role="status" className="text-muted-foreground">Managed execution capacity is {billing.managed.status === "paused" ? "paused" : "unavailable"}. Saved work and independent tools remain available.</span>}
       {billing.plan === "free" && billing.checkoutConfigured && (
         <Button size="sm" variant="orange" disabled={busy || checkingPrice} onClick={priceLabel ? upgrade : retryPrice}>
           {checkingPrice ? "Checking price…" : priceLabel ? `Pro · ${priceLabel}` : "Check Pro price"}

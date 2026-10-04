@@ -101,6 +101,11 @@ export interface RepairAttempt {
 }
 
 export interface CandidateGeneration {
+  /** Explicit fresh-review successor of a preserved legacy candidate. */
+  predecessorCandidateId?: string;
+  legacyRerunId?: string;
+  /** New orchestration preserves original Git inputs before publication. Absent on legacy runs. */
+  preservationProtocolVersion?: 1;
   id: string;
   attemptNumber: number;
   participatingTaskIds: string[];
@@ -129,7 +134,8 @@ export interface CandidateGeneration {
   /** The integration run waiting for a human decision on this exact candidate commit. */
   workflowInstanceId?: string;
   /** A human's decision. It is bound to the commit they saw; any other commit needs a new review. */
-  review?: { approved: boolean; by: string; note?: string; at: string; commit: string };
+  frozenReviewPolicy?: {version:number;policy:{requiredApprovals:number;allowAuthorApproval:boolean};authorIds:string[]};
+  review?: { approved: boolean; by: string; note?: string; at: string; commit: string; actor?: HumanDecisionActor };
   createdAt: string;
   updatedAt: string;
 }
@@ -178,6 +184,7 @@ export interface PublicationJournalEntry {
   state: JournalState;
   timestamp: string;
   error?: string;
+  publicationAuthority?: { actor: HumanDecisionActor; reviewedAt: string; commit: string; tree: string; policyVersion: number; authorizedAt: string };
 }
 
 export interface DecisionOption {
@@ -187,7 +194,12 @@ export interface DecisionOption {
   concreteExample: string;
 }
 
+/** Server-derived identity for consequential human choices. Missing on legacy records. */
+export interface HumanDecisionActor { userId: string; displayName: string; viaToken: boolean }
+
 export interface ProductDecision {
+  /** Durable legacy rerun lineage; resolution always creates a fresh candidate. */
+  legacyRerunId?: string;
   id: string;
   question: string;
   explanation: string;
@@ -197,6 +209,8 @@ export interface ProductDecision {
   status: "pending" | "resolved" | "dismissed";
   createdAt: string;
   resolvedAt?: string;
+  resolvedBy?: HumanDecisionActor;
+  resolvedTaskIds?: string[];
 }
 
 export interface AcceptanceRecord {
@@ -221,6 +235,8 @@ export interface FlareGitProjectState {
   projectName: string;
   canonicalRepoName: string;
   acceptedState: AcceptedState;
+  /** Immutable initial accepted snapshot; never inferred from a candidate or a later head. */
+  acceptedBaseline?: { commit: string; tree?: string; acceptedAt: string };
   tasks: Record<string, Task>;
   candidates: Record<string, CandidateGeneration>;
   evidence: Record<string, VerificationEvidence>;

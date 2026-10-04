@@ -1,3 +1,4 @@
+import {preservedCandidateSuccessors} from "../candidate-lineage";
 import React from "react";
 import { GitMerge, Cpu, ShieldCheck } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
@@ -17,6 +18,7 @@ export function CandidateJournal({
   onSelectCandidate,
   selectedCandidateId,
 }: CandidateJournalProps) {
+  const preserved=preservedCandidateSuccessors(candidates);
   const candidateList = Object.values(candidates).reverse(); // newest first
 
   return (
@@ -40,7 +42,7 @@ export function CandidateJournal({
           <div className="py-12 text-center text-muted-foreground text-xs">
             <GitMerge className="h-8 w-8 mx-auto mb-2 opacity-30" aria-hidden />
             <p>No candidate compositions yet.</p>
-            <p className="mt-1">Candidates are generated automatically when contributors checkpoint work.</p>
+            <p className="mt-1">No candidate has been prepared yet.</p>
           </div>
         ) : (
           <ul className="space-y-3">
@@ -56,7 +58,7 @@ export function CandidateJournal({
                 <>
                   <span className="flex flex-wrap items-center justify-between gap-2 mb-2">
                     <span className="flex items-center gap-2 min-w-0">
-                      <span className="text-xs font-bold text-foreground">Gen #{cand.attemptNumber}</span>
+                      <span className="text-xs font-bold text-foreground">{preserved.has(cand.id)?'Preserved attempt':cand.predecessorCandidateId?'Successor attempt':'Attempt'} #{cand.attemptNumber}</span>
                       <span className="text-[10px] font-mono text-muted-foreground break-all">{cand.id.slice(0, 14)}…</span>
                     </span>
                     {cand.status === "accepted" ? (
@@ -72,6 +74,8 @@ export function CandidateJournal({
                     )}
                   </span>
 
+                  {preserved.has(cand.id)&&<span className="block mb-2 text-xs text-muted-foreground">Successor {preserved.get(cand.id)!.id}. Original status and evidence retained.</span>}
+                  {cand.predecessorCandidateId&&<span className="block mb-2 text-xs text-muted-foreground break-all">Original attempt {cand.predecessorCandidateId}</span>}
                   <span className="flex flex-wrap items-center gap-x-2 text-xs mb-2">
                     <span className="text-muted-foreground">Method:</span>
                     <span className="font-semibold text-foreground">

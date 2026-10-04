@@ -1,23 +1,33 @@
-import React, { useCallback, useEffect, useState } from "react";
+import {GitCredentialRevocation} from "../components/GitCredentialRevocation";
+import { StorageReconciliation } from "../components/StorageReconciliation";
+import {PrivateGitRecovery} from "../components/PrivateGitRecovery";
+import React, { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { Copy, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { WebhooksCard } from "../components/WebhooksCard";
+import { DeploymentCard } from "../components/DeploymentCard";
 import { DomainsCard } from "../components/DomainsCard";
 import { isCommandPolicy } from "@/core/command-policy";
+import { PublicCommunityCard } from "../components/PublicCommunityCard";
 import { VisibilityCard } from "../components/VisibilityCard";
 import { ConnectionsCard } from "../components/ConnectionsCard";
+import { ImportHistoryCard } from "../components/ImportHistoryCard";
 import { MirrorCard } from "../components/MirrorCard";
 import { apiJson } from "../api";
 import { navigate } from "../router";
+
+const ConversationMigrationCard=lazy(async()=>({default:(await import("../components/ConversationMigrationCard")).ConversationMigrationCard}));
+const ReviewPolicySettings=lazy(async()=>({default:(await import("../components/ReviewPolicySettings")).ReviewPolicySettings}));
+const AgentCleanupRecovery=lazy(async()=>({default:(await import("../components/AgentCleanupRecovery")).AgentCleanupRecovery}));
 
 const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm";
 const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive";
 const okCls = "rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200";
 const errText = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback);
 
-interface Meta { id: string; role: "owner" | "member"; kind: string; name: string; source: string | null; verification: Record<string, unknown>; protectedPaths: string[]; visibility?: "private" | "public" }
+interface Meta { id: string; role: "owner" | "member"; kind: string; name: string; source: string | null; verification: Record<string, unknown>; protectedPaths: string[]; visibility?: "private" | "public"; moderation?: { suppressed: boolean; reason: string; reportId: string; version: number } }
 interface Member { user_id: string; role: string; label: string | null; added_at: string }
 type Busy = null | "save" | "invite" | "delete" | `remove:${string}`;
 
@@ -67,6 +77,9 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
   return (
     <div className="space-y-4 max-w-3xl min-w-0">
       <h2 className="sr-only">Repository settings</h2>
+      <GitCredentialRevocation key={`git-credentials:${meta.id}`} projectId={meta.id}/>
+      {isOwner&&<Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Loading review settings…</p>}><ReviewPolicySettings key={`review-policy:${meta.id}`} projectId={meta.id}/></Suspense>}
+      {isOwner&&<Suspense fallback={null}><AgentCleanupRecovery key={`agent-cleanup:${meta.id}`} projectId={meta.id}/></Suspense>}
       {error && <div role="alert" className={alertCls}>{error}</div>}
       {message && <div role="status" className={okCls}>{message}</div>}
 
@@ -154,10 +167,17 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
         </CardContent>
       </Card>
 
-      {isOwner && <VisibilityCard key={meta.id} projectId={meta.id} visibility={meta.visibility ?? "private"} reload={reload} />}
-      {isOwner && <ConnectionsCard key={meta.id} projectId={meta.id} isOwner={isOwner} isCustom={meta.kind === "import" && isCommandPolicy(meta.verification)} />}
-      <WebhooksCard projectId={meta.id} isOwner={isOwner} />
+      {isOwner && meta.moderation?.suppressed && <Card><CardHeader className="pb-2"><CardTitle className="text-sm">Public repository unavailable</CardTitle></CardHeader><CardContent className="space-y-2 text-sm"><p className="whitespace-pre-wrap break-words">{meta.moderation.reason}</p><p className="text-xs text-muted-foreground break-all">Report {meta.moderation.reportId}</p><p className="text-xs text-muted-foreground">Private Git, reviews, and collaborator access remain available.</p><a className="inline-block underline underline-offset-4" href={`/#/report?signin=1&target=${encodeURIComponent(`/#/public/${meta.id}`)}`}>Appeal this decision</a></CardContent></Card>}
+      {isOwner && <VisibilityCard key={`visibility:${meta.id}`} projectId={meta.id} visibility={meta.visibility ?? "private"} publicationBlocked={meta.moderation?.suppressed} reload={reload} />}
+      {isOwner && <PublicCommunityCard key={`community:${meta.id}`} projectId={meta.id} isPublic={meta.visibility === "public"} publicationBlocked={meta.moderation?.suppressed} />}
+      {isOwner && <ConnectionsCard key={`connections:${meta.id}`} projectId={meta.id} isOwner={isOwner} isCustom={meta.kind === "import" && isCommandPolicy(meta.verification)} />}
+      {isOwner && <DeploymentCard key={`deployments:${meta.id}`} projectId={meta.id} />}
+      <div id="deployment-deliveries"><WebhooksCard projectId={meta.id} isOwner={isOwner} /></div>
+      <PrivateGitRecovery projectId={meta.id} isOwner={isOwner} />
+      {isOwner && <StorageReconciliation projectId={meta.id} />}
       <DomainsCard projectId={meta.id} isOwner={isOwner} />
+      {isOwner&&meta.kind==="import"&&meta.source?.startsWith("https://github.com/")&&<Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Loading saved conversation migration…</p>}><ConversationMigrationCard key={`conversation-migration:${meta.id}`} projectId={meta.id}/></Suspense>}
+      {isOwner && meta.kind === "import" && <ImportHistoryCard key={`import-history:${meta.id}`} projectId={meta.id} />}
       {isOwner && <MirrorCard projectId={meta.id} isOwner={isOwner} />}
 
       {isOwner && (
@@ -166,7 +186,7 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
           <CardContent className="space-y-3">
             <p className="text-xs text-muted-foreground break-words">Permanently deletes the repository, all changes, history and settings. This cannot be undone. Type <strong>{meta.name}</strong> to confirm.</p>
             <input className={field} value={confirmName} onChange={(e) => setConfirmName(e.target.value)} aria-label="Type the repository name to confirm" />
-            <Button variant="destructive" disabled={busy !== null || confirmName !== meta.name} onClick={() => guard("delete", async () => { await apiJson(`/p/${meta.id}`, { method: "DELETE" }); navigate("/"); })}>
+            <Button variant="destructive" disabled={busy !== null || confirmName !== meta.name} onClick={() => guard("delete", async () => { const result = await apiJson<{ deleted: string | false; status?: string; detail?: string }>(`/p/${meta.id}`, { method: "DELETE" }); if (result.deleted === false) throw new Error(result.detail ?? "Repository cleanup is pending. Retry deletion."); navigate("/"); })}>
               {busy === "delete" ? "Deleting…" : "Delete this repository"}
             </Button>
           </CardContent>

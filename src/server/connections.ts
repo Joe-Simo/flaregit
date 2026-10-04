@@ -1,4 +1,5 @@
 import { applyExternalCheckReport, freezeExternalChecks, registerExternalCheckRun, type ExternalCheckPolicy, type ExternalCheckState, type FrozenExternalChecks } from "../core/external-checks.js";
+import { RepositoryDeployments } from "./deployments.js";
 import { integrationCapabilities, type IntegrationCallback, type IntegrationCapability } from "./integration-auth.js";
 
 export interface ConnectionMetadata { id: string; name: string; capabilities: IntegrationCapability[]; active: boolean; createdAt: string }
@@ -96,19 +97,28 @@ export class RepositoryConnections {
       return next;
     });
   }
-  async accept(callback: IntegrationCallback): Promise<CallbackReceipt> {
+  async accept(callback: IntegrationCallback, authorize?: () => Promise<boolean>): Promise<CallbackReceipt> {
     // Freshly signed retries can change timestamp; dedup binds the stable event's contents.
     const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify({ repositoryId: callback.repositoryId, serviceId: callback.serviceId, eventId: callback.eventId, report: callback.report })));
     const digest = [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
     const eventHash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([callback.serviceId, callback.eventId])));
     const scopedEventId = [...new Uint8Array(eventHash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    // Perform the repository/account fence after asynchronous hashing, directly
+    // before committing a receipt or report. Denial consumes no event identity.
+    if (authorize && !await authorize()) return { kind: "rejected", reason: "Repository service authority unavailable" };
     return this.storage.transactionSync((): CallbackReceipt => {
       if (callback.repositoryId !== this.repositoryId) return { kind: "rejected", reason: "Repository mismatch" };
       const connection = this.list().find((item) => item.id === callback.serviceId && item.active);
-      const capability = callback.report.type === "check" ? "report-check" : "comment";
+      const capability = callback.report.type === "check" ? "report-check" : callback.report.type === "deployment" ? "report-deployment" : "comment";
       if (!connection?.capabilities.includes(capability)) return { kind: "rejected", reason: "Connection unavailable or capability denied" };
       const previous = this.storage.sql.exec<{ digest: string; comment_id: number | null }>("SELECT digest,comment_id FROM connection_receipts WHERE service_id=? AND event_id=?", callback.serviceId, callback.eventId).toArray()[0];
       if (previous) return previous.digest === digest ? { kind: "duplicate", ...(previous.comment_id === null ? {} : { commentId: previous.comment_id }) } : { kind: "rejected", reason: "Event identity reused with different contents" };
+      if (callback.report.type === "deployment") {
+        const result = new RepositoryDeployments(this.storage,this.repositoryId).apply({...callback.report,eventId:callback.eventId},connection.id);
+        if(result.kind==="rejected")return result;
+        this.storage.sql.exec("INSERT INTO connection_receipts VALUES (?,?,?,NULL)", callback.serviceId,callback.eventId,digest);
+        return {kind:result.kind};
+      }
       const state = this.candidateState(callback.report.candidateId);
       if (!state || state.frozen.commit !== callback.report.commit) return { kind: "rejected", reason: "Report does not match frozen candidate" };
       let commentId: number | undefined;

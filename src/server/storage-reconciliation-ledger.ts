@@ -1,0 +1,45 @@
+import {createHash} from "node:crypto";
+import type {StorageReconciliationPlan} from "./storage-reconciliation-report.js";
+import type {PrivateRecoveryOperation} from "./private-recovery.js";
+import {recoveryBundleKey} from "./private-recovery.js";
+import type {PreviewCopyPlan} from "./preview-storage-writers.js";
+const MAX_METADATA_BYTES=4*1024*1024;
+const hash=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const exists=(storage:DurableObjectStorage,name:string)=>storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name=?",name).toArray().length>0;
+export interface OwnerStorageContext{projectId:string;canonicalRepoName:string;incarnation:string|null;epoch:string;legacyInventory:boolean;legacyEvidence:boolean;deletionPending:boolean;metadataComplete:boolean;privateOperations:number;workflows:{registered:number;providerVerified:false;complete:boolean}}
+/** Direct SELECTs deliberately avoid constructors which allocate an incarnation or initialize a ledger. */
+export function ownerStorageContext(storage:DurableObjectStorage,ownerId:string):OwnerStorageContext|null{
+ const owner=storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",ownerId).toArray()[0];
+ const dimensions=storage.sql.exec<{bytes:number}>("SELECT length(CAST(doc AS BLOB)) AS bytes FROM project WHERE id=1").toArray()[0];if(owner?.role!=="owner"||!dimensions)return null;
+ const row=storage.sql.exec<{doc:string}>(dimensions.bytes<=MAX_METADATA_BYTES?"SELECT doc FROM project WHERE id=1":"SELECT json_object('projectId',json_extract(doc,'$.projectId'),'canonicalRepoName',json_extract(doc,'$.canonicalRepoName')) AS doc FROM project WHERE id=1").toArray()[0];if(!row)return null;
+ const state=JSON.parse(row.doc) as {projectId:string;canonicalRepoName:string;evidence?:Record<string,unknown>};
+ const incarnation=exists(storage,"private_recovery_incarnation")?storage.sql.exec<{value:string}>("SELECT value FROM private_recovery_incarnation WHERE id=1").toArray()[0]?.value??null:null;
+ const era=exists(storage,"preview_copy_tracking_era")&&storage.sql.exec("SELECT id FROM preview_copy_tracking_era WHERE id=1 AND version=1").toArray().length>0;
+ const trackedDimensions=exists(storage,"scoped_evidence_copies")?storage.sql.exec<{n:number;bytes:number}>("SELECT COUNT(*) AS n,COALESCE(SUM(length(CAST(id AS BLOB))+length(CAST(object_key AS BLOB))),0) AS bytes FROM scoped_evidence_copies").one():{n:0,bytes:0};
+ const recoveryDimensions=exists(storage,"private_recovery_operations")?storage.sql.exec<{n:number;bytes:number}>("SELECT COUNT(*) AS n,COALESCE(SUM(length(CAST(doc AS BLOB))),0) AS bytes FROM private_recovery_operations").one():{n:0,bytes:0};
+ const withinBounds=dimensions.bytes<=MAX_METADATA_BYTES&&trackedDimensions.n<=4096&&trackedDimensions.bytes<=MAX_METADATA_BYTES&&recoveryDimensions.n<=4096&&recoveryDimensions.bytes<=MAX_METADATA_BYTES;
+ const tracked=withinBounds&&exists(storage,"scoped_evidence_copies")?storage.sql.exec<{id:string;legacy_pending:number}>("SELECT id,legacy_pending FROM scoped_evidence_copies ORDER BY id LIMIT 4097").toArray():[];
+ const known=new Set(tracked.filter(item=>item.legacy_pending===0).map(item=>item.id));
+ const recovery=withinBounds&&exists(storage,"private_recovery_operations")?storage.sql.exec<{doc:string}>("SELECT doc FROM private_recovery_operations ORDER BY rowid LIMIT 4097").toArray():[];
+ const workflows=storage.sql.exec<{kind:string}>("SELECT instance_id,kind,actor_id FROM project_workflows ORDER BY instance_id LIMIT 257").toArray();
+ return{projectId:state.projectId,canonicalRepoName:state.canonicalRepoName,incarnation,epoch:hash({dimensions,trackedDimensions,recoveryDimensions,state:row.doc,owner:owner.role,incarnation,era,tracked,recovery,workflows,deleting:exists(storage,"repository_deletion")&&storage.sql.exec("SELECT id FROM repository_deletion WHERE id=1").toArray().length>0}),legacyInventory:!era,legacyEvidence:Object.keys(state.evidence??{}).some(id=>!known.has(id)),deletionPending:exists(storage,"repository_deletion")&&storage.sql.exec("SELECT id FROM repository_deletion WHERE id=1").toArray().length>0,metadataComplete:withinBounds&&tracked.length<=4096&&recovery.length<=4096&&workflows.length<=256,privateOperations:recoveryDimensions.n,workflows:{registered:workflows.length,providerVerified:false,complete:workflows.length<=256}};
+}
+export interface CopyReportPage{plans:StorageReconciliationPlan[];nextCursor:string|null;epoch:string;complete:boolean;native:{storedActive:number;providerVerified:false}}
+export function copyReportPage(storage:DurableObjectStorage,projectId:string,incarnation:string,after=0):CopyReportPage{
+ if(!/^[a-z0-9]{12,16}$/.test(projectId)||!/^[a-f0-9-]{36}$/.test(incarnation)||!Number.isSafeInteger(after)||after<0)throw new Error("Invalid report scope");
+const totals=exists(storage,"preview_copy_plans")?storage.sql.exec<{n:number;last:number;bytes:number}>("SELECT COUNT(*) AS n,COALESCE(MAX(rowid),0) AS last,COALESCE(SUM(length(CAST(doc AS BLOB))),0) AS bytes FROM preview_copy_plans WHERE project_id=? AND incarnation=?",projectId,incarnation).one():{n:0,last:0,bytes:0};
+ const writerDimensions=exists(storage,"preview_copy_writers")?storage.sql.exec<{n:number;bytes:number}>("SELECT COUNT(*) AS n,COALESCE(SUM(length(CAST(w.physical_key AS BLOB))+length(CAST(w.writer_id AS BLOB))+length(CAST(w.pending AS BLOB))),0) AS bytes FROM preview_copy_writers w JOIN preview_copy_plans p ON p.physical_key=w.physical_key WHERE p.project_id=? AND p.incarnation=?",projectId,incarnation).one():{n:0,bytes:0};
+ const withinBounds=totals.n<=4096&&totals.bytes<=MAX_METADATA_BYTES&&writerDimensions.n<=4096&&writerDimensions.bytes<=MAX_METADATA_BYTES;
+ const rows=withinBounds&&exists(storage,"preview_copy_plans")?storage.sql.exec<{rowid:number;doc:string}>("SELECT rowid,doc FROM preview_copy_plans WHERE project_id=? AND incarnation=? AND rowid>? ORDER BY rowid LIMIT 9",projectId,incarnation,after).toArray():[];
+ const writers=withinBounds&&exists(storage,"preview_copy_writers")?storage.sql.exec<{physical_key:string;closed:number;pending:string}>("SELECT w.physical_key,w.closed,w.pending FROM preview_copy_writers w JOIN preview_copy_plans p ON p.physical_key=w.physical_key WHERE p.project_id=? AND p.incarnation=? ORDER BY w.physical_key,w.writer_id LIMIT 4097",projectId,incarnation).toArray():[];
+ const generationPredicate=exists(storage,"preview_copy_plans")?" OR EXISTS(SELECT 1 FROM preview_copy_plans p WHERE p.project_id=? AND p.incarnation=? AND 'build-generation-'||json_extract(p.doc,'$.identity.generation')=native_compute.key)":"";
+ const nativeBindings=[`build-${projectId}-%`,`recovery-${projectId}-${incarnation}-%`,...(generationPredicate?[projectId,incarnation]:[])];
+ const native=exists(storage,"native_compute")?storage.sql.exec<{key:string;active:number}>(`SELECT key,active FROM native_compute WHERE key LIKE ? OR key LIKE ?${generationPredicate} ORDER BY key LIMIT 257`,...nativeBindings).toArray():[];
+ const plans=rows.slice(0,8).map(row=>{const plan=JSON.parse(row.doc) as PreviewCopyPlan;if(plan.identity.projectId!==projectId||plan.identity.incarnation!==incarnation)throw new Error("Stored report scope changed");const own=writers.filter(writer=>writer.physical_key===plan.physicalKey);return{identity:{projectId,incarnation},kind:plan.kind,physicalKey:plan.physicalKey,keys:plan.keys,bytes:plan.bytes,currentWriter:own.some(writer=>!writer.closed),unfinishedCount:own.reduce((count,writer)=>count+(JSON.parse(writer.pending) as unknown[]).length,0)};});
+ return{plans,nextCursor:rows.length>8?`copy:${rows[7]!.rowid}`:null,epoch:hash({totals,writers,native,writerDimensions,allPlans:withinBounds&&exists(storage,"preview_copy_plans")?storage.sql.exec("SELECT rowid,doc FROM preview_copy_plans WHERE project_id=? AND incarnation=? ORDER BY rowid",projectId,incarnation).toArray():[]}),complete:withinBounds&&totals.n<=4096&&writers.length<=4096&&native.length<=256,native:{storedActive:native.filter(item=>item.active).length,providerVerified:false}};
+}
+export function privateRecoveryReportPage(storage:DurableObjectStorage,projectId:string,incarnation:string,after=0):{plans:StorageReconciliationPlan[];nextCursor:string|null;complete:boolean}{
+ const rows=exists(storage,"private_recovery_operations")?storage.sql.exec<{rowid:number;doc:string}>("SELECT rowid,doc FROM private_recovery_operations WHERE rowid>? ORDER BY rowid LIMIT 9",after).toArray():[];
+ const plans=rows.slice(0,8).map(row=>{const op=JSON.parse(row.doc) as PrivateRecoveryOperation;if(op.projectId!==projectId||op.incarnation!==incarnation)throw new Error("Stored recovery scope changed");const key=recoveryBundleKey(op);return{identity:{projectId,incarnation},kind:"private-recovery" as const,physicalKey:key,keys:[key,`${key}.json`],bytes:op.receipt?.size??0,currentWriter:op.status==="pending",unfinishedCount:op.uploadState==="allocating"||op.uploadState==="active"?1:0};});
+ return{plans,nextCursor:rows.length>8?`private:${rows[7]!.rowid}`:null,complete:true};
+}

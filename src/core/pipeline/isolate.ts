@@ -1,7 +1,6 @@
-import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { authArgs } from "./git.js";
+import { authArgs, gitOrThrow } from "./git.js";
 import type { ArtifactsClient } from "../../artifacts/types.js";
 import type { Task, TaskWorkspace } from "../types.js";
 
@@ -38,42 +37,11 @@ export async function isolateTaskWorkspace(
   });
 
   // 2. Clone the task repository into the isolated local workspace path
-  const cloneRes = spawnSync("git", [...authArgs(forkMeta.remote, forkMeta.token), "clone", "--quiet", forkMeta.remote, workspacesDir], {
-    encoding: "utf-8",
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-  });
-  if (cloneRes.status !== 0) {
-    throw new Error(`Failed to clone task workspace: ${cloneRes.stderr.toString()}`);
-  }
-
-  // 3. Check out the specific baseCommit
-  const checkoutRes = spawnSync("git", [
-    "-C",
-    workspacesDir,
-    "checkout",
-    "-B",
-    `task/${opts.taskId}`,
-    opts.baseCommit,
-  ]);
-  if (checkoutRes.status !== 0) {
-    throw new Error(`Failed to checkout base commit ${opts.baseCommit}: ${checkoutRes.stderr.toString()}`);
-  }
-
-  // Configure author for this isolated workspace
-  spawnSync("git", [
-    "-C",
-    workspacesDir,
-    "config",
-    "user.name",
-    opts.contributorName,
-  ]);
-  spawnSync("git", [
-    "-C",
-    workspacesDir,
-    "config",
-    "user.email",
-    `${opts.taskId}@flaregit.local`,
-  ]);
+  try { gitOrThrow(path.dirname(workspacesDir), [...authArgs(forkMeta.remote, forkMeta.token), "clone", "--quiet", forkMeta.remote, workspacesDir]); }
+  catch(error){throw new Error(`Failed to clone task workspace: ${error instanceof Error?error.message:"Git clone failed"}`);}
+  gitOrThrow(workspacesDir,["checkout","-B",`task/${opts.taskId}`,opts.baseCommit]);
+  gitOrThrow(workspacesDir,["config","user.name",opts.contributorName]);
+  gitOrThrow(workspacesDir,["config","user.email",`${opts.taskId}@flaregit.local`]);
 
   const workspace: TaskWorkspace = {
     repoName: taskRepoName,

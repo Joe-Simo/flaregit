@@ -29,7 +29,7 @@ import type { ExternalCheckPolicy } from "@/core/external-checks";
 
 interface Connection { id: string; name: string; capabilities: IntegrationCapability[]; active: boolean; createdAt: string }
 interface ConnectionSettings { connections: Connection[]; policy: ExternalCheckPolicy }
-const capabilities: Array<{ id: IntegrationCapability; label: string }> = [{ id: "read-candidate", label: "Read candidates" }, { id: "report-check", label: "Publish checks" }, { id: "comment", label: "Post review comments" }];
+const capabilities: Array<{ id: IntegrationCapability; label: string }> = [{ id: "read-candidate", label: "Read candidates" }, { id: "report-check", label: "Publish checks" }, { id: "comment", label: "Post review comments" }, { id: "report-deployment", label: "Report deployment status" }];
 const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive";
 
 export function ConnectionsCard({ projectId, isOwner, isCustom = false }: { projectId: string; isOwner: boolean; isCustom?: boolean }) {

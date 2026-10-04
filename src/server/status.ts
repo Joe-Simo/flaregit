@@ -1,3 +1,4 @@
+import { HEALTH_EMBEDDING_MODEL } from "./health-probe-budget.js";
 import type { ComponentStatus, WorkflowCount } from "./durable-object.js";
 import type { Env } from "./env.js";
 import { globalOf } from "./projects.js";
@@ -65,9 +66,9 @@ export async function runProbes(env: Env): Promise<void> {
         if (!/not.?found|unknown|does not exist/i.test(String(e))) throw e; // "no such instance" proves the service answered
       }
     },
-    // One tiny embedding (a few tokens, a fraction of a neuron): proves the model service answers without spending real budget.
+    // Fixed operator-funded embedding probe; response availability is not workflow health.
     ai: async () => {
-      const out = (await env.AI.run("@cf/baai/bge-small-en-v1.5", { text: ["ok"] })) as { data?: unknown[] };
+      const out = (await env.AI.run(HEALTH_EMBEDDING_MODEL, { text: ["ok"] })) as { data?: unknown[] };
       if (!out?.data?.length) throw new Error("model returned no embedding");
     },
     auth: async () => {
@@ -77,6 +78,13 @@ export async function runProbes(env: Env): Promise<void> {
     },
   };
   for (const [component, fn] of Object.entries(checks)) {
+    if (component === "ai") {
+      let admission;
+      try { admission = await g.reserveHealthProbe(); }
+      catch { await g.recordProbe("ai",false,0,"AI probe admission unavailable; response unverified"); continue; }
+      if (admission.kind === "duplicate") continue; // Original attempt owns its eventual observation.
+      if (admission.kind === "exhausted") { await g.recordProbe("ai",false,0,"AI availability probe budget exhausted; response unverified"); continue; }
+    }
     const r = await timed(fn);
     await g.recordProbe(component, r.ok, r.ms, r.detail);
   }
@@ -167,13 +175,13 @@ const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 const ago = (t: number | null) => (t === null ? "never" : `${Math.max(0, Math.round((Date.now() - t) / 60_000))} min ago`);
 
 const when = (t: number) => new Date(t).toISOString().replace("T", " ").slice(0, 16) + " UTC";
-export interface WorkflowHealth { verified: boolean; completedRuns24h: number; outstandingRuns: number; counts: WorkflowCount[] }
+export interface WorkflowHealth { verified: boolean; completedRuns24h: number; outstandingRuns: number; awaitingReviewRuns: number; counts: WorkflowCount[] }
 export function summarizeWorkflowCounts(counts: WorkflowCount[]): WorkflowHealth {
-  return { verified: counts.some((r) => r.status !== "started"), completedRuns24h: counts.filter((r) => r.status !== "started").reduce((sum, r) => sum + r.count, 0), outstandingRuns: counts.filter((r) => r.status === "started").reduce((sum, r) => sum + r.count, 0), counts };
+  return { verified: counts.some((r) => r.status !== "started" && r.status !== "awaiting_review"), completedRuns24h: counts.filter((r) => r.status !== "started" && r.status !== "awaiting_review").reduce((sum, r) => sum + r.count, 0), outstandingRuns: counts.filter((r) => r.status === "started" || r.status === "awaiting_review").reduce((sum, r) => sum + r.count, 0), awaitingReviewRuns: counts.filter((r) => r.status === "awaiting_review").reduce((sum, r) => sum + r.count, 0), counts };
 }
 export async function workflowHealth(env: Env): Promise<WorkflowHealth> {
   try { return summarizeWorkflowCounts(await globalOf(env).workflowCounts(Date.now() - 86_400_000)); }
-  catch { return { verified: false, completedRuns24h: 0, outstandingRuns: 0, counts: [] }; }
+  catch { return { verified: false, completedRuns24h: 0, outstandingRuns: 0, awaitingReviewRuns: 0, counts: [] }; }
 }
 
 export function statusPage(rows: Awaited<ReturnType<typeof currentStatus>>, incidents: readonly Incident[] = [], now = Date.now(), reports?: { open: number; oldestOpenHours: number | null }, workflows?: WorkflowHealth): string {
@@ -191,16 +199,16 @@ export function statusPage(rows: Awaited<ReturnType<typeof currentStatus>>, inci
     )
     .join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Status · FlareGit</title>
-<style>:root{color-scheme:light dark}body{font:15px/1.5 system-ui,sans-serif;max-width:60rem;margin:0 auto;padding:2rem 1rem}table{width:100%;border-collapse:collapse}td,th{padding:.5rem;border-bottom:1px solid #8884;text-align:left;vertical-align:top}.ok{color:#16a34a}.bad{color:#dc2626;font-weight:700}small{opacity:.7}.scroll{overflow-x:auto}caption{text-align:left;font-size:13px;opacity:.7}@media(max-width:40rem){td,th{padding:.35rem;font-size:14px}}</style></head><body>
+<style>:root{color-scheme:light dark}body{font:15px/1.5 system-ui,sans-serif;max-width:60rem;margin:0 auto;padding:2rem 1rem}table{width:100%;border-collapse:collapse}td,th{padding:.5rem;border-bottom:1px solid #8884;text-align:left;vertical-align:top}.ok{color:#16a34a}.bad{color:#dc2626;font-weight:700}small{opacity:.7}.scroll{overflow-x:auto}caption{text-align:left;font-size:13px;opacity:.7}@media(max-width:40rem){td,th{padding:.35rem;font-size:14px}}footer{display:flex;justify-content:flex-end;margin-top:3rem;padding-top:1rem;border-top:1px solid #8884}footer img{display:block;width:190px;max-width:100%;height:auto}</style></head><body>
 <p><a href="/">&larr; FlareGit</a></p><h1>${rows.length === 0 ? "Availability unverified" : degraded.length ? "Availability needs attention" : "Availability probes passing"}</h1>
 <p>${rows.length === 0 ? "No availability evidence has been recorded." : degraded.length ? `Failed, missing or stale checks: ${degraded.map((r) => esc(r.label)).join(", ")}.` : "The latest availability checks passed within their stated scope."}</p>
 <p><small>Scheduled availability probes report service responses, not successful customer workflows. They do not establish agent completion, accepted-history durability, CI success, or delivery to webhook receivers. Counts below cover recorded checks; silence beyond 15 minutes is degraded. These measurements are not an uptime percentage.</small></p>
 <h2>Subsystems now</h2><div class="scroll"><table><thead><tr><th scope="col">Subsystem</th><th scope="col">Now</th><th scope="col">Failed checks (24 h)</th><th scope="col">Degraded for (24 h)</th><th scope="col">Last failure</th></tr></thead><tbody>${body || "<tr><td colspan=5>No checks recorded yet</td></tr>"}</tbody></table></div>
-${workflows ? `<h2>Recorded workflow outcomes</h2><p>${workflows.verified ? `${workflows.completedRuns24h} terminal runs recorded in the last 24 hours; ${workflows.outstandingRuns} recorded starts without a terminal outcome.` : "Unverified: no terminal outcome evidence is available for the last 24 hours."}</p><p><small>The denominator is recorded terminal runs, including refusals, conflicts, stale reviews and failures. Agent completion means a saved branch checkpoint, not an accepted merge. Outstanding starts may be running, waiting for review, interrupted, or missing telemetry. These counts do not establish all launched runs were recorded.</small></p><table><thead><tr><th scope="col">Workflow</th><th scope="col">Outcome</th><th scope="col">Count</th></tr></thead><tbody>${workflows.counts.map((r) => `<tr><td>${esc(r.kind)}</td><td>${esc(r.status)}</td><td>${r.count}</td></tr>`).join("") || '<tr><td colspan="3">No recorded outcomes</td></tr>'}</tbody></table>` : ""}
+${workflows ? `<h2>Recorded workflow outcomes</h2><p>${workflows.verified ? `${workflows.completedRuns24h} terminal runs recorded in the last 24 hours; ${workflows.outstandingRuns} recorded starts without a terminal outcome.` : "Unverified: no terminal outcome evidence is available for the last 24 hours."}</p><p>${workflows.awaitingReviewRuns} recorded runs are awaiting human review. These remain outstanding and are not completed runs.</p><p><small>The denominator is recorded terminal runs, including refusals, conflicts, stale reviews and failures. Agent completion means a saved branch checkpoint, not an accepted merge. Outstanding starts may be running, waiting for review, interrupted, or missing telemetry. These counts do not establish all launched runs were recorded.</small></p><table><thead><tr><th scope="col">Workflow</th><th scope="col">Outcome</th><th scope="col">Count</th></tr></thead><tbody>${workflows.counts.map((r) => `<tr><td>${esc(r.kind)}</td><td>${esc(r.status)}</td><td>${r.count}</td></tr>`).join("") || '<tr><td colspan="3">No recorded outcomes</td></tr>'}</tbody></table>` : ""}
 ${reports ? `<h2>Abuse and impersonation reports</h2><p>${reports.open} open${reports.oldestOpenHours !== null ? `; the oldest has waited ${reports.oldestOpenHours} h` : ""}. Reports awaiting operator review remain visible in this count. Use "Report abuse" in the app footer.</p>` : ""}
 <h2>Incidents (last 7 days)</h2>${
     incBody
       ? `<p><small>An incident is a run of failed checks for one subsystem; it ends at the first successful check. A subsystem silent for 15 minutes counts as an ongoing incident.</small></p><div class="scroll"><table><caption>Incidents, newest first</caption><thead><tr><th scope="col">Subsystem</th><th scope="col">Started</th><th scope="col">Ended</th><th scope="col">Duration</th><th scope="col">Failed checks</th><th scope="col">Last error</th></tr></thead><tbody>${incBody}</tbody></table></div>`
       : "<p>No incidents derived from the available probe records. Missing evidence does not establish incident-free operation.</p>"
-  }</body></html>`;
+  }<footer><a href="https://www.cloudflare.com/" target="_blank" rel="noopener noreferrer"><img src="/cloudflare-protected-badge.png" alt="Protected by Cloudflare" width="190" height="66" loading="lazy"></a></footer></body></html>`;
 }

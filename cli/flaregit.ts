@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { structuredPatch } from "diff";
+import { downloadRecoveryBundle } from "../src/cli/recovery-download.js";
 import { readServiceCandidate, sendServiceReport } from "../src/cli/report.js";
 
 const CONFIG_DIR = path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"), "flaregit");
@@ -114,17 +115,30 @@ const HELP = `flaregit — JSON by default (--pretty for humans)
   workflow status|pause|resume <repo> <instance>  inspect or preserve/resume a running workflow
   log <repo> [--limit N] | tree <repo> [path] | cat <repo> <path>
   issues <repo> [--state closed] | issue new <repo> "<title>" [--body T] | issue view|close|reopen <repo> <n>
-  comment <repo> "<text>" (--issue N | --change ID | --candidate ID) [--path P --line N]
+  comment <repo> "<text>" (--issue N | --change ID | --candidate ID) [--path P --line N] [--request UUID]
   candidates <repo> [--all]                      verified candidates waiting for review
   accept|reject <repo> <candidate> [--note T]    decide what becomes history
   diff <repo> (--change ID | --commit SHA)
   review <repo> (--change ID | --commit SHA)   interactive terminal reviewer (j/k n/p c a q)
+  recovery download <repository-id> <snapshot-id> --output FILE   stream and verify a prepared private Git bundle
   clone <repo> [dir] | activity <repo> | status
 `;
 
 async function main() {
   const [cmd, sub, ...rest] = pos;
   if (!cmd || flags.has("help")) return console.log(HELP);
+
+  if (cmd === "recovery" && sub === "download") {
+    const repositoryId = rest[0] ?? fail("Specify the exact repository ID");
+    const snapshotId = rest[1] ?? fail("Specify the exact recovery snapshot ID");
+    const output = flag("output") ?? fail("--output requires a new bundle filename");
+    if (!TOKEN) fail("Sign in with a personal API token, or set FLAREGIT_TOKEN in your local environment");
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    process.once("SIGINT", abort); process.once("SIGTERM", abort);
+    try { return out(await downloadRecoveryBundle({ origin: API, repositoryId, snapshotId, token: TOKEN, output, signal: controller.signal })); }
+    finally { process.removeListener("SIGINT", abort); process.removeListener("SIGTERM", abort); }
+  }
 
   if (cmd === "service-candidate") {
     const secret = process.env.FLAREGIT_CONNECTION_SECRET;
@@ -249,7 +263,11 @@ async function main() {
   if (cmd === "comment") {
     const subject = flag("issue") ? `issue:${flag("issue")}` : flag("change") ? `change:${flag("change")}` : flag("candidate") ? `candidate:${flag("candidate")}` : fail("Pass --issue N, --change ID or --candidate ID");
     const line = flag("line");
-    return out(await api("POST", `/p/${await repo(sub)}/comments`, { subject, body: rest[0] ?? fail('Usage: flaregit comment <repo> "<text>" --change ID [--path P --line N]'), ...(flag("path") ? { path: flag("path") } : {}), ...(line ? { line: Number(line) } : {}) }));
+    const request = flag("request") ?? crypto.randomUUID();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(request)) fail("--request must be a UUID");
+    const repository = await repo(sub);
+    console.error(JSON.stringify({ requestId: request, retry: "Reuse --request with this ID and the same comment if the response is lost." }));
+    return out(await api("POST", `/p/${repository}/comments`, { subject, idempotencyKey: request, body: rest[0] ?? fail('Usage: flaregit comment <repo> "<text>" --change ID [--path P --line N]'), ...(flag("path") ? { path: flag("path") } : {}), ...(line ? { line: Number(line) } : {}) }));
   }
   if (cmd === "candidates") {
     const st = await api<{ candidates: Record<string, { id: string; status: string; candidateCommit?: string; participatingTaskIds: string[]; expectedAcceptedBase: string }> }>("GET", `/p/${await repo(sub)}/state`);

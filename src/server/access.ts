@@ -17,6 +17,8 @@ export interface Identity {
   /** Stable, unique subject (Clerk user id or Access subject); the tenant key is derived from it. */
   id: string;
   email?: string;
+  /** Verified session expiry in milliseconds; personal tokens are rechecked by their stored hash. */
+  expiresAt?: number;
   /** True when the request used a personal API token (such requests cannot create or manage tokens). */
   viaToken?: boolean;
   /** Set for API tokens: what the token may do and which repository it is pinned to. */
@@ -50,8 +52,8 @@ export async function authenticate(request: Request, env: Env): Promise<Identity
     if (!(typeof payload.azp === "string" && allowed.includes(payload.azp))) {
       return new Response("Unauthorized", { status: 401 });
     }
-    if (!payload.sub) return new Response("Unauthorized", { status: 401 });
-    return { id: payload.sub, email: typeof payload.email === "string" ? payload.email : undefined };
+    if (!payload.sub || typeof payload.exp !== "number" || !Number.isSafeInteger(payload.exp)) return new Response("Unauthorized", { status: 401 });
+    return { id: payload.sub, email: typeof payload.email === "string" ? payload.email : undefined, expiresAt: payload.exp * 1000 };
   } catch {
     return new Response("Unauthorized", { status: 401 });
   }

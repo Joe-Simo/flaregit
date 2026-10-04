@@ -3,7 +3,28 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 export function executionEnv(home: string): NodeJS.ProcessEnv {
-  return { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: home, TMPDIR: home, NODE_ENV: "test", CI: "1" };
+  if (!process.versions.bun) throw new Error("Contributor commands require the trusted Bun supervisor executable");
+  const executable = fs.realpathSync(process.execPath);
+  const metadata = fs.statSync(executable);
+  if (process.platform === "linux" && process.getuid?.() === 0 && (metadata.uid !== 0 || (metadata.mode & 0o022) !== 0)) throw new Error("Trusted Bun executable permissions are unsafe");
+  if (process.platform === "linux" && process.getuid?.() === 0) {
+    for (let directory = path.dirname(executable); ; directory = path.dirname(directory)) {
+      const parent = fs.statSync(directory);
+      if (parent.uid !== 0 || (parent.mode & 0o022) !== 0 || (parent.mode & 0o001) === 0) throw new Error("Trusted Bun executable location is unsafe or inaccessible to the isolated identity");
+      if (directory === path.dirname(directory)) break;
+    }
+  }
+  // Expose exactly the supervisor's Bun binary, not its toolcache/home directory
+  // or an inherited PATH. This directory is outside the child-writable home.
+  const tools = path.join(path.dirname(home), "supervisor-tools");
+  if (!fs.existsSync(tools)) fs.mkdirSync(tools, { mode: 0o755 });
+  const directory = fs.lstatSync(tools);
+  if (!directory.isDirectory() || directory.isSymbolicLink() || (directory.mode & 0o022) !== 0 || (process.platform === "linux" && process.getuid?.() === 0 && directory.uid !== 0)) throw new Error("Trusted tool directory permissions are unsafe");
+  const bun = path.join(tools, "bun");
+  if (fs.existsSync(bun)) {
+    if (!fs.lstatSync(bun).isSymbolicLink() || fs.realpathSync(bun) !== executable) throw new Error("Trusted Bun executable link differs from the supervisor");
+  } else fs.symlinkSync(executable, bun);
+  return { PATH: `${tools}:/usr/local/bin:/usr/bin:/bin`, HOME: home, TMPDIR: home, NODE_ENV: "test", CI: "1" };
 }
 
 function walk(root: string, action: (file: string, stat: fs.Stats) => void) {

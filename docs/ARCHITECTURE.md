@@ -10,7 +10,7 @@ Worker (`src/server/worker.ts`: API, auth, previews, status, Polar webhook) · `
 - **Contributors and agents** write only to their own change fork, using short-lived Artifacts tokens passed as an `Authorization` header, never in URLs. Protected paths are rejected in contributor commits and model repairs.
 - **Verifier** checks live in platform code, not in the candidate repo. Candidate code runs in a scrubbed child process with a timeout and output cap; results are tagged with a per-run nonce.
 - **Acceptance** is deterministic code in the Durable Object, after a human accepts the candidate.
-- **Previews** are served from `PREVIEW_ORIGIN`, a different origin from the app, so a build cannot read app cookies.
+- **Previews** are served by stateless repository Workers on unique, operator-registered origins outside the authentication site. Signed path capabilities authorize only one repository and commit without third-party cookies.
 - **Git inputs** (refs, refspecs, header values) pass a whitelist sanitizer before reaching a shell.
 
 ## Data model (Durable Object instances)
@@ -36,7 +36,34 @@ Webhook delivery rows are written in the same storage transaction as the state c
 
 ## Preview isolation
 
-Builds are stored in R2 under `builds/<projectId>/<commit>`. A preview link is `HMAC-SHA256(projectId.commit.exp)` with the `PREVIEW_SIGNING_KEY` secret; only members can mint it, it expires (default 1 h), and a commit hash alone opens nothing.
+Builds are stored in R2 under `builds/<projectId>/<commit>`. Only members can mint an expiring HMAC preview capability. The production Worker retains the signing secret, authorization and storage access; its `PreviewAssetBroker` service entrypoint validates each capability and serves only the requested repository's build assets. The stateless child Worker receives only `REPOSITORY_ID` and the `ASSET_BROKER` service binding. Candidate HTML never executes on the application origin or a shared repository preview origin. The old shared `/preview/*` route fails closed.
+
+Interrupted preview uploads can be replaced under `build-generations/<projectId>/<incarnation>/<commit>/<generation>`. An owner requests an exact accepted commit and expected generation with a stable request key. The replacement reserves its own allowance before compute and upload; old uncertain byte holds remain reserved. A known prior workspace must confirm shutdown before replacement dispatch. Each upload has durable receipts, and the active pointer changes only after the full manifest is confirmed and current authorization is rechecked. Generation-specific HMAC links never redirect an old capability to new content. Source browsing and human review remain available if preview preparation fails.
+
+Failed credential revocation is recorded server-side and retried by a bounded alarm. Client summaries contain only cleanup status and expiry; unverified expiry is not reported as confirmed revocation. The storage recovery report observes both legacy and replacement namespaces without releasing holds or treating missing objects as cancellation proof.
+
+When rolling out a new preview URL format, verify and update each already-registered child first using its existing origin and dedicated configuration. Keep support for existing signed paths during this additive child update, then deploy the main Worker that mints the new paths. Updating only the main Worker does not update separately deployed children.
+
+### Provision a repository origin
+
+Use the installed Wrangler dependency (4.135.0 or later) and a Cloudflare account with a workers.dev subdomain. This is an operator procedure; checking in the template does not provision a remote origin.
+
+1. Deploy the reviewed production Worker with the `PreviewAssetBroker` export before provisioning a child. Keep its signing secret and other production resources on that Worker. For an existing installation that must retain previews during migration, first deploy an additive broker-only release that keeps the existing link minting and serving handlers. Provision and verify the children, then deploy the complete isolation release with their registered mapping in one cutover. Deploying the complete release with an empty mapping immediately retires shared links and reports previews unavailable; it does not preserve existing preview availability. The old isolation weakness remains until cutover, and old shared links fail closed afterward.
+2. Copy `wrangler.preview.template.jsonc` to a repository-specific file **beside the template**, for example `wrangler.preview.p0123456789ab.jsonc`. Replace `name` with a unique Worker name reserved for that repository, and replace **both** `REPOSITORY_ID` values with its exact project ID. Keep `ASSET_BROKER.service` set to the actual production Worker name (`flaregit` here) and `entrypoint` set to `PreviewAssetBroker`.
+3. Run from the checkout root:
+
+   ```sh
+   bunx wrangler preview --config wrangler.preview.p0123456789ab.jsonc --name repository --ignore-base-config --json
+   ```
+
+   `--ignore-base-config` prevents Base configuration from being copied when **creating a new Preview**. Use a fresh, dedicated Worker name and Preview resource for each repository. The flag does not reset an existing Preview or prove that previous dashboard settings and secrets were removed. Retain only this template's variable and service binding; do not import production secrets, Durable Objects, Containers, R2, queues, workflows, AI, assets or application routes. Service bindings from native Previews call the target Worker's production deployment, which is intentional for the narrow broker.
+4. Capture the **actual URL returned by Cloudflare**. Before registering the origin, inspect the remote Preview's variables, bindings and secret names in the Cloudflare dashboard or documented read-only API. Confirm the exact repository ID, only the `ASSET_BROKER` binding targeting production `flaregit#PreviewAssetBroker`, and **no secrets or other bindings**. Reject registration if any extra binding or secret exists; resolve it through the operator before proceeding. A checked-in config or successful deployment alone is not proof of the remote resource's state. Use the returned Preview URL's HTTPS origin (without path, query or fragment), rather than constructing a hostname. Reserve each origin for exactly one repository; never repoint that origin to another repository. Native Previews also return a unique deployment URL, but link minting uses the one origin registered for the repository.
+5. Add that repository and returned origin to the trusted production `REPOSITORY_PREVIEW_ORIGINS` JSON object while preserving existing entries, then deploy the reviewed main config. Its shape is `{ "p0123456789ab": "https://<actual-returned-host>.workers.dev" }`. The bracketed host is illustrative and must never be deployed. Registration belongs to the operator; a repository member or candidate cannot choose it. Until registered, preview minting fails closed.
+6. Mint a fresh preview through the member API. Verify its host exactly matches the registered origin, its assets load, an unsigned request fails, and changing the commit or signature in the signed path fails. Repeat with a second repository and confirm the browser origins differ. A capability minted for the first repository must fail on the second child's origin. Confirm `/preview/*` on the application and old shared host cannot serve candidate HTML.
+
+To update a child, inspect its remote variables, bindings and secret names first and refuse the update if there are unexpected resources or secrets. Then repeat the native Preview command with its repository-specific config and Preview name and inspect the resulting remote configuration again before treating it as ready. Do not assume `--ignore-base-config` cleans an existing Preview. The Preview URL follows the latest deployment; preserve that repository's origin assignment. When retiring a child, remove its trusted origin mapping before deleting its native Preview with `bunx wrangler preview delete --config <repository-config> --name repository`; outstanding capabilities then fail closed. Never recycle a retired hostname for a different repository, because browser state may survive deployment deletion.
+
+The native [`wrangler preview` command](https://developers.cloudflare.com/workers/wrangler/commands/workers/#preview), [Preview configuration](https://developers.cloudflare.com/workers/previews/configuration/) and [resource isolation rules](https://developers.cloudflare.com/workers/previews/resources/#service-bindings) define this provisioning path. Native child configs are separate from the production `wrangler.jsonc` so provisioning cannot duplicate the application's stateful resources.
 
 ## Token scopes
 
@@ -47,12 +74,12 @@ Builds are stored in R2 under `builds/<projectId>/<commit>`. A preview link is `
 
 ## Container naming
 
-Containers are addressed by name, so state never crosses repositories: `bootstrap-<projectId>` for imports and seeding, `<projectId>-<id>` for integration runs, `agent-<projectId>-<taskId>` for agents.
+Current integration, import, preview and recovery allocations use `native-<UUID>` identities; managed agent attempts use `agent-<projectId>-<taskId>-<UUID>`. Durable scope records and command admission bind tracked integration allocations to their repository incarnation, workflow and candidate. Random names alone do not establish authorization or shutdown. Recovery uses retained Git refs and saved attempt identities; unknown legacy allocations are not treated as confirmed stopped. See `workflow.ts`, `agent-run.ts`, `native-compute.ts` and `import-history-workflow.ts`.
 
 ## Known limits
 
-- Verification runs candidate code and checks in one process inside the container; a hostile candidate can fail the run (fails closed). Containers have outbound internet for Git, so candidate code could exfiltrate candidate source.
-- Imports: public HTTPS URLs, depth 200, no ongoing mirror.
+- The trusted verifier supervisor owns platform files and the original Git workspace. Contributor compilation, protected-check execution and preview builds use disposable snapshots under a separate Linux UID with scrubbed environments, time/output bounds and descendant cleanup before output export. Production requires this boundary (`FLAREGIT_REQUIRE_ISOLATION=1`); the explicit local test harness can use a weaker same-user boundary. Candidate code and behavioral checks share the short-lived check child, so hostile code can cause verification to fail closed. UID isolation does not provide network isolation: container outbound access remains a source-exfiltration risk. These source mechanisms do not establish that every historical deployed image used the current boundary.
+- Imports accept validated public HTTPS Git sources without requesting a shallow depth. Optional durable history inspection currently supports public `github.com` sources without redirects and compares selected-branch reachable commit metadata at the pinned imported head. Its bounded chunks and storage limits can leave inspection incomplete; a readable head does not prove blobs, annotated tags or unselected refs were preserved. Imports do not enable continuous inbound synchronization. Optional one-way GitHub mirroring runs after acceptance, never force-pushes, and reports delivery failures independently of canonical browsing and review. Hosted migration and mirror recovery require separate receipts.
 - Landing lease 20 min; review wait 7 days; at most 8 changes per integration.
 - Contradiction detection needs structured assertions (`input` + `expectedOutput`).
 - Per-line syntax highlighting.

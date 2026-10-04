@@ -84,9 +84,12 @@ test("workflow outcomes include refusals in the denominator and retain missing o
     { kind: "integration", status: "accepted", count: 2 },
     { kind: "integration", status: "stale", count: 1 },
     { kind: "integration", status: "started", count: 4 },
+    { kind: "integration", status: "awaiting_review", count: 2 },
   ]);
   expect(summary.completedRuns24h).toBe(7);
-  expect(summary.outstandingRuns).toBe(4);
+  expect(summary.outstandingRuns).toBe(6);
+  expect(summary.awaitingReviewRuns).toBe(2);
+  expect(summarizeWorkflowCounts([{kind:"integration",status:"awaiting_review",count:1}]).verified).toBe(false);
   expect(summary.verified).toBe(true);
   expect(statusPage([], [], Date.now(), undefined, summary)).toContain("not establish all launched runs were recorded");
   expect(summarizeWorkflowCounts([]).verified).toBe(false);

@@ -1,45 +1,58 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { ChevronRight, File, Folder } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { apiJson } from "../api";
+import { apiJson, ApiError } from "../api";
 import { timeAgo } from "../router";
 
 interface Commit { hash: string; message: string; author: { name: string }; committedAt: number }
 interface Entry { name: string; type: "blob" | "tree" }
 
-export function CodeTab({ projectId }: { projectId: string }) {
+export function CodeTab({ projectId }: { projectId: string }) { return <CodeBrowser key={projectId} projectId={projectId} />; }
+function CodeBrowser({ projectId }: { projectId: string }) {
   const [path, setPath] = useState("");
   const [entries, setEntries] = useState<Entry[] | null>(null);
   const [file, setFile] = useState<{ path: string; content: string; binary: boolean; truncated: boolean; size: number } | null>(null);
   const [commit, setCommit] = useState<Commit | null>(null);
-  const [error, setError] = useState<{ message: string; target: string; isFile: boolean } | null>(null);
+  const [error, setError] = useState<{ message: string; target: string; isFile: boolean; ref?: string; status?: number; retryAt?: number } | null>(null);
   const [loading, setLoading] = useState<string | null>(null);
 
-  const open = async (target: string, isFile: boolean) => {
+  const requestSequence=useRef(0), requestController=useRef<AbortController | null>(null), loadedRevision=useRef<string | undefined>(undefined);
+  const [,refreshRetry]=useState(0);
+  useEffect(()=>{if(!error?.retryAt)return;const timer=setTimeout(()=>refreshRetry(value=>value+1),Math.min(2147483647,Math.max(0,error.retryAt-Date.now())));return()=>clearTimeout(timer);},[error]);
+  const open = async (target: string, isFile: boolean, ref: string | null | undefined=loadedRevision.current) => {
+    const sequence=++requestSequence.current;requestController.current?.abort();const controller=new AbortController();requestController.current=controller;
+    const suffix=ref ? `&ref=${encodeURIComponent(ref)}` : "";
     setError(null);
     setLoading(target || "root");
     try {
       if (isFile) {
-        const r = await apiJson<{ commit: Commit; path: string; content: string; binary: boolean; truncated: boolean; size: number }>(`/p/${projectId}/blob?path=${encodeURIComponent(target)}`);
+        const r = await apiJson<{ commit: Commit; path: string; content: string; binary: boolean; truncated: boolean; size: number }>(`/p/${projectId}/blob?path=${encodeURIComponent(target)}${suffix}`,{signal:controller.signal});
+        if(sequence!==requestSequence.current)return;
+        if(ref && r.commit.hash!==ref)throw new Error("The returned file does not match the requested revision. Refresh before continuing.");
+        loadedRevision.current=r.commit.hash;
         setCommit(r.commit);
         setFile(r);
       } else {
-        const r = await apiJson<{ commit: Commit; entries: Entry[] }>(`/p/${projectId}/tree?path=${encodeURIComponent(target)}`);
+        const r = await apiJson<{ commit: Commit; entries: Entry[] }>(`/p/${projectId}/tree?path=${encodeURIComponent(target)}${suffix}`,{signal:controller.signal});
+        if(sequence!==requestSequence.current)return;
+        if(ref && r.commit.hash!==ref)throw new Error("The returned folder does not match the requested revision. Refresh before continuing.");
+        loadedRevision.current=r.commit.hash;
         setCommit(r.commit);
         setEntries(r.entries);
         setFile(null);
         setPath(target);
       }
     } catch (e) {
-      setError({ message: e instanceof Error ? e.message : "Could not load", target, isFile });
+      if(sequence===requestSequence.current && !controller.signal.aborted)setError({message:e instanceof Error ? e.message : "Could not load",target,isFile,ref:ref ?? undefined,status:e instanceof ApiError ? e.status : undefined,retryAt:e instanceof ApiError && e.retryAfter !== null ? Date.now()+e.retryAfter*1000 : undefined});
     } finally {
-      setLoading(null);
+      if(sequence===requestSequence.current)setLoading(null);
     }
   };
 
   useEffect(() => {
     void open("", false);
+    return()=>{requestSequence.current++;requestController.current?.abort();};
   }, [projectId]);
 
   const crumbs = path.split("/").filter(Boolean);
@@ -63,14 +76,15 @@ export function CodeTab({ projectId }: { projectId: string }) {
       </nav>
       {commit && (
         <div className="text-xs text-muted-foreground break-words">
-          Latest commit <code className="text-foreground">{commit.hash.slice(0, 7)}</code> · {commit.author.name} · {timeAgo(commit.committedAt)} · {commit.message.split("\n")[0]}
+          Viewing commit <code className="text-foreground">{commit.hash.slice(0, 7)}</code> · {commit.author.name} · {timeAgo(commit.committedAt)} · {commit.message.split("\n")[0]}
         </div>
       )}
+      <Button size="sm" variant="ghost" disabled={loading !== null} onClick={()=>void open(file?.path ?? path, file !== null, null)}>Refresh latest accepted revision</Button>
       {loading && entries !== null && <p role="status" className="text-xs text-muted-foreground break-all">Loading {loading}…</p>}
       {error && (
         <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex flex-wrap items-center justify-between gap-2">
-          <span className="break-words min-w-0">{error.message}</span>
-          <Button size="sm" variant="outline" disabled={loading !== null} onClick={() => void open(error.target, error.isFile)}>Retry</Button>
+          <span className="break-words min-w-0">Could not open {error.isFile ? "file" : "folder"} <code>{error.target || "root"}</code>{error.ref && <> at <code>{error.ref.slice(0,7)}</code></>}. {error.message}{(file || entries) && <span className="block mt-1 text-xs">Showing the last loaded {file ? `file ${file.path}` : `folder ${path || "root"}`} at {commit?.hash.slice(0,7)}.</span>}{error.status===413 && <span className="block mt-1 text-xs">This request exceeds inline browsing limits. Use Git to inspect the complete repository.</span>}{error.retryAt && error.retryAt>Date.now() && <span className="block mt-1 text-xs">Retry is available after {new Date(error.retryAt).toLocaleTimeString()}.</span>}</span>
+          {error.status!==413 && <Button size="sm" variant="outline" disabled={loading !== null || Boolean(error.retryAt && error.retryAt>Date.now())} onClick={() => void open(error.target, error.isFile, error.ref ?? null)}>Retry this request</Button>}
         </div>
       )}
       {file ? (
