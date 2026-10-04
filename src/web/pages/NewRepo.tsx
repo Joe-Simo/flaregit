@@ -9,7 +9,7 @@ import { navigate, timeAgo } from "../router";
 const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 interface ImportJob {
-  id: string; name: string; source: string; branch: string; canonicalRepoName: string;
+  id: string; name: string; source: string; branch: string; importedBranch?: string; canonicalRepoName: string;
   status: "requested" | "pending" | "ready" | "failed"; createdAt: string; updatedAt: string; detail: string;
   verificationPolicy: { install?: string; build?: string; test?: string };
 }
@@ -160,7 +160,7 @@ export function NewRepo() {
         {importsError && <p role="alert" className="py-3 text-sm text-destructive">{importsError}{imports ? " · showing previously loaded imports" : ""}</p>}
         {!imports && !importsError && <p role="status" className="py-3 text-sm text-muted-foreground">Loading saved imports…</p>}
         {imports?.length === 0 && !importsError && <p className="py-3 text-sm text-muted-foreground">No saved imports.</p>}
-        <ul className="divide-y divide-border">{imports?.map((job) => <li key={job.id} className="py-4 flex flex-wrap items-start gap-3"><div className="min-w-0 flex-1"><h3 className="text-sm font-medium break-words">{job.name}</h3><p className="mt-1 text-xs text-muted-foreground break-all">{job.source}</p><p className="mt-1 text-xs text-muted-foreground">{job.status === "ready" ? "Ready" : job.status === "failed" ? "Provider refused import" : job.status === "requested" ? "Request saved · readiness unconfirmed" : "Waiting for provider"} · updated {timeAgo(job.updatedAt)}</p></div><Button size="sm" variant="outline" disabled={busy} onClick={() => job.status === "ready" ? navigate(`/p/${job.id}`) : restore(job)}>{job.status === "ready" ? "Open repository" : job.status === "failed" ? "Read failure" : "Continue import"}</Button></li>)}</ul>
+        <ul className="divide-y divide-border">{imports?.map((job) => <li key={job.id} className="py-4 flex flex-wrap items-start gap-3"><div className="min-w-0 flex-1"><h3 className="text-sm font-medium break-words">{job.name}</h3><p className="mt-1 text-xs text-muted-foreground break-all">{job.source}</p><p className="mt-1 text-xs text-muted-foreground">{job.status === "ready" ? "Ready" : job.status === "failed" ? "Provider refused import" : job.status === "requested" ? "Request saved · readiness unconfirmed" : "Waiting for provider"} · updated {timeAgo(job.updatedAt)}</p></div>{job.status === "ready" && Boolean(job.branch) && Boolean(job.importedBranch) && job.branch !== job.importedBranch && <Button size="sm" variant="outline" disabled={busy} onClick={() => void resume(job)}>{checkingId === job.id ? "Checking branch…" : "Check imported branch"}</Button>}<Button size="sm" variant="outline" disabled={busy} onClick={() => job.status === "ready" ? navigate(`/p/${job.id}`) : restore(job)}>{job.status === "ready" ? "Open repository" : job.status === "failed" ? "Read failure" : "Continue import"}</Button></li>)}</ul>
       </section>
     </div>
   );
