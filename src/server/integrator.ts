@@ -24,11 +24,13 @@ export class IntegratorSandbox extends DurableObject<Env> {
   protected maximumLifetimeMs=MANAGED_CONTAINER_LIFETIME_MS;
   private lifetime(){return new ContainerLifetime(this.ctx.storage,()=>this.ctx.container,this.maximumLifetimeMs);}
   async lifetimeStatus(){return this.lifetime().status();}
+  async seal():Promise<void>{this.lifetime().seal();}
   override async alarm():Promise<void>{await this.lifetime().alarm();}
   private async container() {
     const container = this.ctx.container;
     if (!container) throw new Error("Container binding is not configured");
     await this.lifetime().beforeWork();
+    this.lifetime().assertWorkAllowed();
     if (!container.running) {
       // The image comes from the container application bound to this class in wrangler.jsonc.
       container.start({
@@ -44,7 +46,9 @@ export class IntegratorSandbox extends DurableObject<Env> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 40; attempt++) {
       try {
-        return await (await this.container()).exec(argv, options);
+        const container=await this.container();
+        this.lifetime().assertWorkAllowed();
+        return await container.exec(argv, options);
       } catch (err) {
         lastError = err;
         if (!/not (been )?started|not running|starting/i.test(String(err))) throw err;

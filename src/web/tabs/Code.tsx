@@ -1,15 +1,19 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { ChevronRight, File, Folder } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { apiJson, ApiError } from "../api";
 import { timeAgo } from "../router";
 
+import type {BranchSelection} from "../branch-browser";
+const BranchControls=lazy(async()=>({default:(await import("../components/BranchControls")).BranchControls}));
+
 interface Commit { hash: string; message: string; author: { name: string }; committedAt: number }
 interface Entry { name: string; type: "blob" | "tree" }
 
-export function CodeTab({ projectId }: { projectId: string }) { return <CodeBrowser key={projectId} projectId={projectId} />; }
-function CodeBrowser({ projectId }: { projectId: string }) {
+export function CodeTab({ projectId,isOwner=false }: { projectId: string;isOwner?:boolean }) { return <CodeBrowser key={projectId} projectId={projectId} isOwner={isOwner}/>; }
+function CodeBrowser({ projectId,isOwner }: { projectId: string;isOwner:boolean }) {
+  const [selection,setSelection]=useState<BranchSelection|null>(null);
   const [path, setPath] = useState("");
   const [entries, setEntries] = useState<Entry[] | null>(null);
   const [file, setFile] = useState<{ path: string; content: string; binary: boolean; truncated: boolean; size: number } | null>(null);
@@ -27,15 +31,15 @@ function CodeBrowser({ projectId }: { projectId: string }) {
     setLoading(target || "root");
     try {
       if (isFile) {
-        const r = await apiJson<{ commit: Commit; path: string; content: string; binary: boolean; truncated: boolean; size: number }>(`/p/${projectId}/blob?path=${encodeURIComponent(target)}${suffix}`,{signal:controller.signal});
-        if(sequence!==requestSequence.current)return;
+        const r = await apiJson<{ commit: Commit; path: string; content: string; binary: boolean; truncated: boolean; size: number }>(`/p/${projectId}/blob?path=${encodeURIComponent(target)}${suffix}`,{signal:AbortSignal.any([controller.signal,AbortSignal.timeout(15000)])});
+        if(sequence!==requestSequence.current)return false;
         if(ref && r.commit.hash!==ref)throw new Error("The returned file does not match the requested revision. Refresh before continuing.");
         loadedRevision.current=r.commit.hash;
         setCommit(r.commit);
         setFile(r);
       } else {
-        const r = await apiJson<{ commit: Commit; entries: Entry[] }>(`/p/${projectId}/tree?path=${encodeURIComponent(target)}${suffix}`,{signal:controller.signal});
-        if(sequence!==requestSequence.current)return;
+        const r = await apiJson<{ commit: Commit; entries: Entry[] }>(`/p/${projectId}/tree?path=${encodeURIComponent(target)}${suffix}`,{signal:AbortSignal.any([controller.signal,AbortSignal.timeout(15000)])});
+        if(sequence!==requestSequence.current)return false;
         if(ref && r.commit.hash!==ref)throw new Error("The returned folder does not match the requested revision. Refresh before continuing.");
         loadedRevision.current=r.commit.hash;
         setCommit(r.commit);
@@ -43,8 +47,10 @@ function CodeBrowser({ projectId }: { projectId: string }) {
         setFile(null);
         setPath(target);
       }
+      return true;
     } catch (e) {
       if(sequence===requestSequence.current && !controller.signal.aborted)setError({message:e instanceof Error ? e.message : "Could not load",target,isFile,ref:ref ?? undefined,status:e instanceof ApiError ? e.status : undefined,retryAt:e instanceof ApiError && e.retryAfter !== null ? Date.now()+e.retryAfter*1000 : undefined});
+      return false;
     } finally {
       if(sequence===requestSequence.current)setLoading(null);
     }
@@ -61,6 +67,7 @@ function CodeBrowser({ projectId }: { projectId: string }) {
   return (
     <div className="space-y-3 min-w-0">
       <h2 className="sr-only">Code</h2>
+      <Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Loading branch controls…</p>}><BranchControls projectId={projectId} isOwner={isOwner} selection={selection} viewedCommit={commit?.hash??null} onSelect={async next=>{const opened=await open("",false,next.commit);if(opened)setSelection(next);return opened;}}/></Suspense>
       <nav aria-label="Path" className="flex items-center gap-1 text-sm flex-wrap min-w-0">
         <button className="font-semibold hover:underline" onClick={() => void open("", false)}>root</button>
         {(file ? file.path.split("/") : crumbs).map((c, i, all) => {
@@ -79,7 +86,7 @@ function CodeBrowser({ projectId }: { projectId: string }) {
           Viewing commit <code className="text-foreground">{commit.hash.slice(0, 7)}</code> · {commit.author.name} · {timeAgo(commit.committedAt)} · {commit.message.split("\n")[0]}
         </div>
       )}
-      <Button size="sm" variant="ghost" disabled={loading !== null} onClick={()=>void open(file?.path ?? path, file !== null, null)}>Refresh latest accepted revision</Button>
+      <Button size="sm" variant="ghost" disabled={loading !== null} onClick={()=>void open(file?.path ?? path, file !== null, selection&&!selection.accepted?selection.commit:null)}>Refresh {selection&&!selection.accepted?"pinned branch snapshot":"latest accepted revision"}</Button>
       {loading && entries !== null && <p role="status" className="text-xs text-muted-foreground break-all">Loading {loading}…</p>}
       {error && (
         <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex flex-wrap items-center justify-between gap-2">

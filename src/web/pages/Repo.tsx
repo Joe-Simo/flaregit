@@ -149,7 +149,7 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
       {current && <p className="text-xs text-muted-foreground mb-5">{current[2]}</p>}
 
       <div id="repo-tabpanel" aria-labelledby={current ? `tab-${current[0]}` : undefined} className="min-w-0">
-      {tab === "code" && <CodeTab projectId={projectId} />}
+      {tab === "code" && <CodeTab projectId={projectId} isOwner={ownerActionsAvailable} />}
       {tab === "commits" && <CommitsTab projectId={projectId} />}
       {tab === "changes" && <ChangesTab projectId={projectId} state={state} reload={reload} />}
       {tab === "integration" && <IntegrationTab isOwner={ownerActionsAvailable} projectId={projectId} state={state} reload={reload} kind={meta.kind} />}

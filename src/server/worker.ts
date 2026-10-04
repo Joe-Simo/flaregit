@@ -201,6 +201,19 @@ export default {
       const project=projectOf(env,discussionRoute[1]!);const grant=await project.publicGrant().catch(()=>null);if(!grant)return respond({error:"Not found"},404);
       try{const value=discussionRoute[2]?await project.discussionTopic(discussionRoute[2],true):await project.discussionList(true);const current=await project.publicGrant();if(!current||current.version!==grant.version||current.acceptedCommit!==grant.acceptedCommit)return respond({error:"Published repository changed; reload"},409);return value?respond(value):respond({error:"Discussion unavailable"},404);}catch{return respond({error:"Repository discussions unavailable"},404);}
     }
+    const publicBranchesRoute=/^\/api\/public\/(p?[0-9a-f]{12})\/branches$/.exec(url.pathname);
+    if(publicBranchesRoute){
+      if(request.method!=="GET")return repositoryReadJson({error:"Read-only published branch inventory"},405);
+      if([...url.searchParams.keys()].length)return repositoryReadJson({error:"Invalid published branch query"},400);
+      const projectId=publicBranchesRoute[1]!,ip=request.headers.get("CF-Connecting-IP");if(!ip)return repositoryReadJson({error:"Public browsing unavailable"},503);
+      if(!(await env.API_LIMITER.limit({key:`public:${projectId}:${ip}`})).success)return repositoryReadJson({error:"Too many requests"},429);
+      const project=projectOf(env,projectId);
+      try{const grant=await project.publicGrant();if(!grant)return repositoryReadJson({error:"Repository not found"},404);
+        const context=await project.repositoryReadContext(null,null),state=await project.getState(),name=state.defaultBranch??"main";
+        if(context.publicationVersion!==grant.version||context.acceptedCommit!==grant.acceptedCommit||context.canonicalRepoName!==grant.canonicalRepoName||!isSafeRef(name)||!await project.assertRepositoryReadContext(context,null,null))return repositoryReadJson({error:"Published repository scope changed; reload"},409);
+        return repositoryReadJson({branches:[{name,ref:`refs/heads/${name}`,commit:grant.acceptedCommit}],truncated:false,defaultBranch:name,acceptedCommit:grant.acceptedCommit,providerVerified:false,source:"published-accepted-state"});
+      }catch{return repositoryReadJson({error:"Published branch state is unavailable; retry"},503);}
+    }
     const publicRoute = /^\/api\/public\/(p?[0-9a-f]{12})\/(meta|history|tree|file|diff|community)$/.exec(url.pathname);
     const publicParticipationRoute = /^\/api\/public\/(p?[0-9a-f]{12})\/community\/(posts|requests)(?:\/(post_[a-f0-9-]{36}))?$/.exec(url.pathname);
     if (url.pathname.startsWith("/api/public/") && !publicParticipationRoute && !discussionRoute) {
@@ -1162,6 +1175,43 @@ export default {
           if (!isOwner) return text("Only the owner can retry checks", 403);
           const value = await body<{ checkId: string }>();
           try { return json({ checks: await project.registerExternalRun(checksRoute[1]!, value.checkId, `run_${crypto.randomUUID()}`) }, 201); } catch { return text("Unknown candidate or check", 404); }
+        }
+
+        if(sub==="/branch-runtime/recovery"&&(method==="GET"||method==="POST")){
+          if(!isOwner)return repositoryReadJson({error:"Only the repository owner can reconcile saved branch runtime cleanup"},403);
+          if([...url.searchParams.keys()].length)return repositoryReadJson({error:"Invalid branch recovery query"},400);
+          const currentOwner=async()=>{const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||(current.viaToken&&(current.tokenScope!=="full"||(current.tokenRepo&&current.tokenRepo!==projectId))))return repositoryReadJson({error:"Branch recovery authentication changed"},403);return current;};
+          const current=await currentOwner();if(current instanceof Response)return current;const actor={userId,displayName:"Repository owner",viaToken:current.viaToken===true},credentialHash=current.viaToken?await gitParentTokenHash(request):undefined;
+          try{
+            if(method==="GET"){await project.branchNativeRecovery(actor,credentialHash,current.expiresAt);const finalAuth=await currentOwner();if(finalAuth instanceof Response)return finalAuth;return repositoryReadJson(await project.branchNativeRecovery(actor,credentialHash,finalAuth.expiresAt));}
+            const input=await body<{attemptId?:unknown;operationId?:unknown;confirmStop?:unknown}>(),uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+            if(Object.keys(input).some(key=>!["attemptId","operationId","confirmStop"].includes(key))||typeof input.attemptId!=="string"||!uuid.test(input.attemptId)||typeof input.operationId!=="string"||!uuid.test(input.operationId)||input.confirmStop!==true)return repositoryReadJson({error:"Confirm stopping the exact saved branch attempt and operation"},400);
+            const result=await project.cleanupBranchAttempt(input.attemptId,input.operationId,actor,credentialHash,current.expiresAt),finalAuth=await currentOwner();if(finalAuth instanceof Response)return finalAuth;await project.branchNativeRecovery(actor,credentialHash,finalAuth.expiresAt);return repositoryReadJson(result,result.nativeStopped&&result.credentialsComplete?200:202);
+          }catch(error){if(error instanceof RequestBodyError)throw error;return repositoryReadJson({error:"Branch runtime cleanup was not confirmed. Saved attempts, credentials, and repository history remain preserved; refresh status before retrying."},409);}
+        }
+
+        const branchOperationRoute=/^\/branch-operations\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})(?:\/(reconcile|abandon))?$/.exec(sub);
+        if(sub==="/branches"||sub==="/branch-operations"||branchOperationRoute){
+          if([...url.searchParams.keys()].length||!(sub==="/branches"?(method==="GET"||method==="POST"):branchOperationRoute?.[2]?method==="POST":method==="GET"))return repositoryReadJson({error:"Invalid branch request"},400);
+          if((method==="POST"||sub!=="/branches")&&!isOwner)return repositoryReadJson({error:"Only the repository owner can create or reconcile branch operations"},403);
+          const currentBranchAuth=async()=>{const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||(current.viaToken&&((current.tokenRepo&&current.tokenRepo!==projectId)||((method==="POST"||sub!=="/branches")&&current.tokenScope!=="full"))))return repositoryReadJson({error:"Branch access changed"},403);return current;};
+          const current=await currentBranchAuth();if(current instanceof Response)return current;
+          const actor={userId,displayName:"Repository contributor",viaToken:current.viaToken===true},credentialHash=current.viaToken?await gitParentTokenHash(request):undefined;
+          try{let result:unknown;const readContext=sub==="/branches"&&method==="GET"?await project.repositoryReadContext(userId,null):null;
+            if(branchOperationRoute?.[2]){
+              const input=await body<{expectedPhase?:unknown}>(),expectedPhase=branchOperationRoute[2]==="abandon"?"prepared":"unknown";
+              if(Object.keys(input).some(key=>key!=="expectedPhase")||input.expectedPhase!==expectedPhase)return repositoryReadJson({error:branchOperationRoute[2]==="abandon"?"Only an exact prepared branch request can be abandoned":"Confirm the exact saved uncertain branch operation before read-only reconciliation"},400);
+              result=branchOperationRoute[2]==="abandon"?await project.abandonBranchOperation(branchOperationRoute[1]!,"prepared",actor,credentialHash,current.expiresAt):await project.reconcileBranchOperation(branchOperationRoute[1]!,"unknown",actor,credentialHash,current.expiresAt);
+            }else if(method==="POST"){
+              const input=await body<{operationId?:unknown;name?:unknown;sourceCommit?:unknown}>();
+              if(Object.keys(input).some(key=>!["operationId","name","sourceCommit"].includes(key))||typeof input.operationId!=="string"||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(input.operationId)||typeof input.name!=="string"||!isSafeRef(input.name)||input.name.startsWith("refs/")||input.name==="HEAD"||input.name===(state.defaultBranch??"main")||input.name.length>200||typeof input.sourceCommit!=="string"||(!/^[a-f0-9]{40}$/.test(input.sourceCommit)||/^0{40}$/.test(input.sourceCommit)))return repositoryReadJson({error:"Exact new branch name, source commit, and stable operation ID are required"},400);
+              result=await project.createBranch({operationId:input.operationId,name:input.name,sourceCommit:input.sourceCommit},actor,credentialHash,current.expiresAt);
+            }else result=branchOperationRoute?await project.branchOperation(branchOperationRoute[1]!,actor,credentialHash,current.expiresAt):sub==="/branch-operations"?await project.branchOperations(actor,credentialHash,current.expiresAt):await project.branchInventory(actor,credentialHash,current.expiresAt);
+            const finalAuth=await currentBranchAuth();if(finalAuth instanceof Response)return finalAuth;
+            if(sub!=="/branches"||method==="POST")await project.branchOperations(actor,credentialHash,finalAuth.expiresAt);
+            else {if(!readContext||!await project.assertRepositoryReadContext(readContext,userId,null,credentialHash))return repositoryReadJson({error:"Branch read authority changed"},403);}
+            return repositoryReadJson(result);
+          }catch(error){if(error instanceof RequestBodyError)throw error;return repositoryReadJson({error:"Branch state or creation was not confirmed. Accepted history and the saved operation remain preserved; refresh before retrying the same operation ID."},409);}
         }
 
         // Repository reads validate the entire request before acquiring storage.

@@ -16,6 +16,17 @@ test("durable container lifetime prearms before start, survives reconstruction a
   await call("/configure?name=prearm-fault",{now,alarmFails:true});expect((await call("/start?name=prearm-fault")).status).toBe(409);expect((await(await call("/snapshot?name=prearm-fault")).json() as Snapshot).provider.starts).toBe(0);
   await call("/configure?name=prearm-fault",{now:now+10000,alarmFails:false});const retried=await(await call("/start?name=prearm-fault")).json() as Snapshot;expect(retried.state?.deadline).toBe(now+20*60_000);
   await call("/stop?name=prearm-fault");const restarted=await(await call("/start?name=prearm-fault")).json() as Snapshot;expect(restarted.state?.deadline).toBe(retried.state?.deadline);expect(restarted.provider.starts).toBe(2);
+  await call("/configure?name=sealed-race",{now});
+  const dispatched=call("/hold-start?name=sealed-race");let held=false;
+  for(let poll=0;poll<100;poll++){const snapshot=await(await call("/snapshot?name=sealed-race")).json() as Snapshot&{held:boolean};if(snapshot.held){held=true;break;}await new Promise(resolve=>setTimeout(resolve,10));}
+  expect(held).toBe(true);
+  const sealed=await(await call("/seal-stop?name=sealed-race")).json() as Snapshot;
+  expect(sealed.state).toMatchObject({state:"stopped",sealed:true});expect(sealed.provider.running).toBe(0);expect(sealed.provider.starts).toBe(0);
+  await call("/release?name=sealed-race");expect((await dispatched).status).toBe(409);
+  expect((await call("/start?name=sealed-race")).status).toBe(409);expect((await call("/work?name=sealed-race")).status).toBe(409);
+  const afterLate=await(await call("/snapshot?name=sealed-race")).json() as Snapshot;
+  expect(afterLate.state).toMatchObject({state:"stopped",sealed:true});expect(afterLate.provider.starts).toBe(0);expect(afterLate.alarm).toBeNull();
+  await call("/configure?name=never-started-seal",{now});await call("/seal-stop?name=never-started-seal");expect((await call("/start?name=never-started-seal")).status).toBe(409);
   await call("/configure?name=legacy",{now,running:true});expect((await call("/work?name=legacy")).status).toBe(409);expect((await(await call("/snapshot?name=legacy")).json() as Snapshot).provider.running).toBe(0);
  }finally{await mf.dispose();}
 },30000);
