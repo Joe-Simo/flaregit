@@ -1,0 +1,19 @@
+import {expect,test} from 'bun:test';
+import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
+import {workerdChild} from './support/workerd-child';
+import type {FlareGitProjectState,ProductDecision} from '../src/core/types';
+test('native scoped product choices preserve another branch wait, reject changed inputs, and apply a policy choice once',async()=>{
+ if(await workerdChild('tests/product-decision-native.test.ts'))return;
+ const output=`/tmp/flaregit-decision-native-${crypto.randomUUID()}.js`,build=Bun.spawn([process.execPath,'build','tests/support/product-decision-native-worker.ts','--target=browser','--external=cloudflare:workers','--external=node:*',`--outfile=${output}`],{stdout:'ignore',stderr:'pipe'});let script:string;
+ try{if(await build.exited!==0)throw Error(await new Response(build.stderr).text());script=await Bun.file(output).text();}finally{if(await Bun.file(output).exists())await Bun.file(output).delete();}
+ const bindings={MANAGED_ACCOUNT_MONTHLY_USD_MICROS:'100000000',MANAGED_GLOBAL_MONTHLY_USD_MICROS:'100000000',CORE_GIT_ACCOUNT_MONTHLY_USD_MICROS:'100000000',CORE_GIT_GLOBAL_MONTHLY_USD_MICROS:'100000000',REPOSITORY_READ_ACCOUNT_MONTHLY_USD_MICROS:'1000000',REPOSITORY_READ_GLOBAL_MONTHLY_USD_MICROS:'1000000'};
+ const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:'decision',modules:true,script,bindings,compatibilityDate:'2026-10-02',compatibilityFlags:['nodejs_compat'],durableObjects:{REPOSITORY_CONTROLLER:{className:'ProductDecisionFixture',useSQLite:true}}}]}));
+ try{const api=await mf.getWorker('decision'),call=(path:string,body?:unknown)=>api.fetch(`http://test${path}`,{method:'POST',...(body?{body:JSON.stringify(body)}:{})}),json=async<T>(path:string,body?:unknown):Promise<T>=>{const response=await call(path,body),value=await response.json();if(!response.ok)throw Error(JSON.stringify(value));return value as T;};
+ await json('/seed');for(const name of ['release','staging'])await json('/create',{operationId:crypto.randomUUID(),name,sourceCommit:'a'.repeat(40)});
+ for(const [id,branch] of [['a','release'],['b','release'],['c','staging'],['d','staging']] as const){await json('/target-task',{id,ref:`refs/heads/${branch}`});await json('/requirements',{taskId:id,choice:`choice-${id}`,output:id==='a'||id==='c',...(id==='a'?{patch:{refunds:true}}:{})});}
+ const first=(await json<{decision:ProductDecision}>('/landing',{tasks:['a','b'],holder:'decision-release'})).decision,second=(await json<{decision:ProductDecision}>('/landing',{tasks:['c','d'],holder:'decision-staging'})).decision;
+ expect(first.scope?.participants.map(row=>row.taskId)).toEqual(['a','b']);expect(first.scope?.acceptedTarget?.ref).toBe('refs/heads/release');
+ const before=await json<FlareGitProjectState>('/state-full');expect(await json<unknown>('/resolve',{decisionId:first.id,optionId:'choice-a'})).toMatchObject({taskIds:['a','b']});const resolved=await json<FlareGitProjectState>('/state-full');expect(resolved.tasks.c?.status).toBe('needs_decision');expect(resolved.tasks.d?.status).toBe('needs_decision');expect(resolved.decisions[second.id]?.status).toBe('pending');expect(resolved.policyVersion).toBe(before.policyVersion+1);expect(resolved.tasks.a?.acceptedTarget).toEqual(before.tasks.a?.acceptedTarget);await json('/resolve',{decisionId:first.id,optionId:'choice-a'});expect((await json<FlareGitProjectState>('/state-full')).policyVersion).toBe(resolved.policyVersion);
+ await json('/change-input?id=c');const changed=await json<FlareGitProjectState>('/state-full');expect((await call('/resolve',{decisionId:second.id,optionId:'choice-c'})).ok).toBe(false);expect(await json<FlareGitProjectState>('/state-full')).toEqual(changed);
+ }finally{await mf.dispose();}
+},30000);

@@ -1,3 +1,4 @@
+import {freezeProductDecisionScope,planProductDecisionResolution} from "./product-decision-scope";
 import { WebhookBlockedDeferrals, MAX_WEBHOOK_BLOCKED_DEFERRALS } from "./webhook-blocked-deferrals.js";
 import type {ImportReadScope} from "./import-read-lifecycle.js";
 import type {ImportNativeSnapshot} from "./import-native-readiness.js";
@@ -3436,11 +3437,12 @@ export class RepositoryController extends DurableObject<Env> {
         for (const ra of approved(a)) {
           for (const rb of approved(b)) {
             if (!detectContradiction(ra, rb)) continue;
-            const decision = createProductDecision(ra, rb);
+            let decision = createProductDecision(ra, rb);
             let deliveries: string[] = [];
             try {
                 this.ctx.storage.transactionSync(() => {
-                    if(rerun){this.assertLegacyRerunScope(rerun);decision.legacyRerunId=rerun.id;for(const task of tasks)task.status="needs_decision";reruns.awaitDecision(rerun.id,decision.id);}else a.status = b.status = "needs_decision";
+                    this.gitTables();decision={...decision,scope:freezeProductDecisionScope({projectId:s.projectId,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation(),tasks:s.tasks,writerOf:id=>this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",id).toArray()[0]?.user_id??null},tasks.map(task=>task.id),[ra,rb],acceptedTarget)};
+                    if(rerun){this.assertLegacyRerunScope(rerun);decision.legacyRerunId=rerun.id;reruns.awaitDecision(rerun.id,decision.id);}for(const task of tasks)task.status="needs_decision";
                     s.decisions[decision.id] = decision;
                     deliveries = this.stageEvent("decision.needed", { decision: decision.id, question: decision.question });
                     this.save();
@@ -3958,8 +3960,8 @@ export class RepositoryController extends DurableObject<Env> {
   async resolveDecision(decisionId: string, selectedOptionId: string, actor: HumanDecisionActor, credentialHash?: string, sessionExpiresAt?:number): Promise<{ taskIds: string[];legacyRerunId?:string;continuationWorkflowId?:string }> {
     let assertCurrent = await this.authorizeHumanDecision(actor, credentialHash, true);
     assertCurrent();
-    const s = this.load();
-    const d = s.decisions[decisionId];
+    let s = this.load();
+    let d = s.decisions[decisionId];
     if (!d) throw new Error("Unknown decision");
     const reruns=new LegacyCandidateReruns(this.ctx.storage),rerun=d.legacyRerunId?reruns.get(d.legacyRerunId):null;
     if(d.legacyRerunId&&(!rerun||(rerun.successorDecisionId!==decisionId&&(d.status!=="resolved"||!rerun.decisionIds?.includes(decisionId)))))throw new LegacyRerunError("Saved rerun decision scope changed.");
@@ -3979,30 +3981,19 @@ export class RepositoryController extends DurableObject<Env> {
       await authorize();
     }
 
-    const [idA, idB] = d.conflictingRequirementIds;
-    if (selectedOptionId !== idA && selectedOptionId !== idB) throw new Error("Unknown option");
+    if (!d.conflictingRequirementIds.includes(selectedOptionId)) throw new Error("Unknown option");
     const taskIds: string[] = [];
     try {
       this.ctx.storage.transactionSync(() => {
-        assertCurrent();
+        assertCurrent();s=this.load();d=s.decisions[decisionId];if(!d)throw Error("Product decision disappeared");if(d.status==="resolved"){if(d.selectedOptionId!==selectedOptionId)throw Error("This decision was already resolved with a different option");taskIds.push(...(d.resolvedTaskIds??[]));return;}
+        this.gitTables();const plan=planProductDecisionResolution(d,selectedOptionId,{projectId:s.projectId,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation(),tasks:s.tasks,writerOf:id=>this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",id).toArray()[0]?.user_id??null});
         if(rerun){this.assertLegacyRerunScope(rerun);if(rerun.phase!=="awaiting_decision")throw new LegacyRerunError("This decision no longer owns the rerun inputs.");}
         d.selectedOptionId = selectedOptionId;
         d.status = "resolved";
         d.resolvedAt = new Date().toISOString();
         d.resolvedBy = { ...actor };
-        for (const t of rerun?rerun.taskIds.map(id=>s.tasks[id]!):Object.values(s.tasks)) {
-          for (const r of t.requirements) {
-            if (r.id === (selectedOptionId === idA ? idB : idA)) r.status = "superseded";
-            if (r.id === selectedOptionId && r.policyPatch) {
-              s.verificationPolicy = { ...s.verificationPolicy, ...r.policyPatch };
-              s.policyVersion += 1;
-            }
-          }
-          if (t.status === "needs_decision") {
-            t.status = "ready";
-            taskIds.push(t.id);
-          }
-        }
+        for(const id of plan.taskIds){const t=s.tasks[id]!;for(const requirement of t.requirements)if(requirement.id===plan.losingRequirementId)requirement.status="superseded";if(t.status==="needs_decision")t.status="ready";taskIds.push(id);}
+        if(plan.policyPatch){s.verificationPolicy={...s.verificationPolicy,...plan.policyPatch};s.policyVersion+=1;}
         d.resolvedTaskIds = [...taskIds];
         if(rerun){if(JSON.stringify(taskIds)!==JSON.stringify(rerun.taskIds))throw new LegacyRerunError("The decision task set changed; recovery is required.");reruns.continueDecision(rerun.id,decisionId,continuationWorkflowId!,actor,credentialHash);}
         this.save();
