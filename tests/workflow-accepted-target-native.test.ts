@@ -4,12 +4,14 @@ import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {workerdChild} from './support/workerd-child';
+import {publicationInHistory} from '../src/server/publication';
 import {confirmCompositionBranch} from '../src/server/composition-branch';
 import {q} from '../src/server/shell';
 import type {CandidateGeneration} from '../src/core/types';
 import type {FrozenAcceptedTarget} from '../src/core/accepted-target';
-test('workflow frozen release target composes from its exact native base while primary advances and unsupported publication stays closed',async()=>{
- if(await workerdChild('tests/workflow-accepted-target-native.test.ts'))return;
+const workflowTargetTestName='workflow frozen release target composes from its exact native base while primary advances and admitted publication remains on the frozen ref';
+test(workflowTargetTestName,async()=>{
+ if(await workerdChild('tests/workflow-accepted-target-native.test.ts',workflowTargetTestName))return;
  const directory=await mkdtemp(join(tmpdir(),'flaregit-workflow-target-'));let mf:Miniflare|undefined;
  const git=async(...args:string[])=>{const process=Bun.spawn(['git',...args],{cwd:directory,stdout:'pipe',stderr:'pipe'});const result=await new Response(process.stdout).text();if(await process.exited!==0)throw Error('Native Git fixture failed');return result.trim();};
  try{
@@ -24,10 +26,25 @@ test('workflow frozen release target composes from its exact native base while p
   for(const patch of [{expectedAcceptedBase:advanced},{frozenPolicyVersion:3},{frozenVerificationPolicy:{test:'different'}}])expect((await call('/branch',{candidate:{...candidate,...patch},state})).status).toBe(409);expect((await call('/branch',{candidate,state:{...state,canonicalRepoName:'foreign'}})).status).toBe(409);
   const evidence={id:'evidence',candidateCommit:input,candidateTree:await git('rev-parse',input+'^{tree}'),expectedAcceptedBase:base,requirementsVersion:2,policy:{test:'bun test'},testBundleDigest:'fixture',toolchainDigest:'fixture',builtOutputDigest:'fixture',verifierIdentity:'synthetic-native',testResults:[],timestamp:'now',status:'passed'};
   const boundEvidence=await call('/evidence',{candidate,evidence});expect(boundEvidence.status).toBe(200);const proof=await boundEvidence.json() as {acceptedTarget:FrozenAcceptedTarget};expect(proof.acceptedTarget.ref).toBe('refs/heads/release');expect(proof.acceptedTarget.policy).not.toHaveProperty('changed');for(const patch of [{expectedAcceptedBase:advanced},{requirementsVersion:3},{policy:{test:'different'}}])expect((await call('/evidence',{candidate,evidence:{...evidence,...patch}})).status).toBe(409);
-  const journal={id:'journal',candidateId:candidate.id,candidateCommit:input,newHead:input,expectedHead:base,acceptedTarget:target,publicationAuthority:{acceptedTarget:target}};
-  expect((await call('/publication',{candidate,state,journal,commit:input,branch:'release'})).status).toBe(409);
-  const primaryTarget={...target,ref:'refs/heads/main',branch:'main'},primaryCandidate={...candidate,acceptedTarget:primaryTarget},primaryState={...state,acceptedState:{currentCommit:base}},primaryJournal={...journal,acceptedTarget:primaryTarget,publicationAuthority:{acceptedTarget:primaryTarget}};
+  const journal={id:'journal',candidateId:candidate.id,candidateCommit:input,candidateTree:evidence.candidateTree,newHead:input,expectedHead:base,acceptedTarget:target,publicationAuthority:{acceptedTarget:target,commit:input,tree:evidence.candidateTree,policyVersion:2}};
+  expect((await call('/publication',{candidate,state,journal,commit:input,branch:'release'})).status).toBe(200);expect((await call('/publication',{candidate,state:{projectId:'project',canonicalRepoName:'canonical'},journal,commit:input,branch:'release'})).status).toBe(200);expect((await call('/publication',{candidate,state,journal,commit:input,branch:'main'})).status).toBe(409);
+  const primaryTarget={...target,ref:'refs/heads/main',branch:'main'},primaryCandidate={...candidate,acceptedTarget:primaryTarget},primaryState={...state,acceptedState:{currentCommit:base}},primaryJournal={...journal,acceptedTarget:primaryTarget,publicationAuthority:{...journal.publicationAuthority,acceptedTarget:primaryTarget}};
   expect((await call('/publication',{candidate:primaryCandidate,state:primaryState,journal:primaryJournal,commit:input,branch:'main'})).status).toBe(200);expect((await call('/publication',{candidate:primaryCandidate,state:primaryState,journal:{...primaryJournal,publicationAuthority:{}},commit:input,branch:'main'})).status).toBe(409);expect((await call('/publication',{candidate:primaryCandidate,state:primaryState,journal:{...primaryJournal,expectedHead:advanced},commit:input,branch:'main'})).status).toBe(409);
   const legacy={...candidate};delete legacy.acceptedTarget;expect(await(await call('/branch',{candidate:legacy,state})).json() as unknown).toEqual({branch:'main'});
  }finally{await mf?.dispose();await rm(directory,{recursive:true,force:true});}
 },30000);
+
+test('native release publication CAS and lost acknowledgement recovery stay on the original ref independently of primary history',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'flaregit-target-publish-'));
+ const git=async(...args:string[])=>{const process=Bun.spawn(['git',...args],{cwd:directory,stdout:'pipe',stderr:'pipe'});const stdout=await new Response(process.stdout).text();if(await process.exited!==0)throw Error('Native publication fixture failed');return stdout.trim();};
+ const commit=async(file:string)=>{await Bun.write(join(directory,file),file);await git('add',file);await git('commit','-m',file);return git('rev-parse','HEAD');};
+ try{await git('init','-b','main');await git('config','user.name','Synthetic fixture');await git('config','user.email','fixture@example.test');const base=await commit('base.txt');await git('branch','release');const primary=await commit('primary.txt');await git('checkout','release');const contribution=await commit('release.txt');const remote=join(directory,'canonical.git');await git('init','--bare',remote);await git('push',remote,'main:refs/heads/main',base+':refs/heads/release');
+  const ref='refs/heads/release';await git('push','--force-with-lease='+ref+':'+base,remote,contribution+':'+ref);expect(await git('--git-dir='+remote,'rev-parse','refs/heads/main')).toBe(primary);
+  // The accepted ref update really occurred; model its lost acknowledgement by
+  // settling from native remote ancestry rather than repeating a push.
+  const commands:string[]=[],execute=async(command:string)=>{commands.push(command);const process=Bun.spawn(['sh','-c',command],{cwd:directory,stdout:'ignore',stderr:'ignore'});const exitCode=await process.exited;return{success:exitCode===0,exitCode};};
+  expect(await publicationInHistory(execute,directory,remote,'synthetic','release',contribution)).toBe(true);expect(commands[0]).toContain('refs/heads/release:refs/flaregit/recovery-head');
+  const next=await commit('next-release.txt');await git('push',remote,next+':'+ref);await git('checkout','--detach',contribution);const stale=await commit('stale-release.txt');const refused=Bun.spawn(['git','push','--force-with-lease='+ref+':'+contribution,remote,stale+':'+ref],{cwd:directory,stdout:'ignore',stderr:'ignore'});expect(await refused.exited).not.toBe(0);expect(await git('--git-dir='+remote,'rev-parse',ref)).toBe(next);expect(await git('--git-dir='+remote,'rev-parse','refs/heads/main')).toBe(primary);expect(await publicationInHistory(execute,directory,remote,'synthetic','release',contribution)).toBe(true);
+  await git('checkout','main');const primaryOnly=await commit('primary-only.txt');await git('push',remote,primaryOnly+':refs/heads/main');expect(await publicationInHistory(execute,directory,remote,'synthetic','release',primaryOnly)).toBe(false);expect(await publicationInHistory(execute,directory,remote,'synthetic','main',primaryOnly)).toBe(true);expect(await git('--git-dir='+remote,'rev-parse',ref)).toBe(next);
+ }finally{await rm(directory,{recursive:true,force:true});}
+});

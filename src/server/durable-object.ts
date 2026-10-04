@@ -14,7 +14,7 @@ import {openRepositoryRead,RepositoryReadError} from "./repository-read-budget.j
 import {SavedRebaseResumeCredentials,type SavedRebaseResumeCredentialPurpose} from "./saved-rebase-resume-credentials.js";
 import {RebaseResumeAttempts,assertRebaseResumeSessionDelegation,type RebaseResumeAttempt} from "./rebase-resume-attempts.js";
 import {RebaseRecoveryLedger,RebaseRecoveryError,verifyRebaseRecovery,type RebaseRecoverySnapshot,type RebaseRecoveryReport,type RebaseRecoveryReceipt,type RebaseRecoveryProof} from "./rebase-recovery.js";
-import { AcceptedBranchRoots, type AcceptedBranchScope } from "./accepted-branch-roots.js";
+import { AcceptedBranchRoots, type AcceptedBranchScope, type AdmittedBranchPublication } from "./accepted-branch-roots.js";
 import { BranchCreationOperations, BranchNativeAttempts, type BranchNativeAttemptIdentity, type BranchCreationIdentity, type BranchCreationOperation } from "./branch-creation-operations.js";
 import { BranchCredentialIncidents } from "./branch-credential-incidents.js";
 import { inspectNativeBranches, createNativeBranch } from "./branch-git.js";
@@ -630,7 +630,9 @@ export interface Ledger {
   recordReview(candidateId: string, review: { approved: boolean; actor: HumanDecisionActor; note?: string }, expectedCommit: string, credentialHash?: string,expectedTarget?:{ref:string;acceptedCommit:string;acceptedVersion:number}): Promise<{ ok: boolean; instanceId?: string; error?: string; review?: CandidateGeneration["review"] }>;
   preparePublish(candidateId: string): Promise<PrepareResult>;
   authorizeCandidatePublication(candidateId: string, commit: string): Promise<boolean>;
-  completePublish(journalId: string): Promise<void>;
+  authorizeCandidatePublicationReadback(candidateId:string,journalId:string,commit:string):Promise<boolean>;
+  observeCandidatePublicationReadback(candidateId:string,journalId:string,commit:string):Promise<{status:"landed"|"not_landed"|"unavailable";ref:string;commit:string;readbackScope?:string}>;
+  completePublish(journalId: string,readbackScope?:string): Promise<void>;
   abortPublish(candidateId: string, journalId: string | undefined, reason: string, outcome: "failed" | "stale"): Promise<void>;
   cancelTask(taskId: string): Promise<void>;
   failAgentTask(taskId: string, runId?: string): Promise<void>;
@@ -1049,7 +1051,7 @@ export class RepositoryController extends DurableObject<Env> {
   }
   private legacyRecoveryTarget(): PrivateRecoveryTarget | null {
     const state = this.load();
-    if (state.acceptedBaseline || state.journal.some(entry => entry.state === "ACCEPTED") || !/^[a-f0-9]{40}$/.test(state.acceptedState.currentCommit) || typeof state.canonicalRepoName !== "string" || !state.canonicalRepoName || !Number.isFinite(Date.parse(state.acceptedState.acceptedAt))) return null;
+    if (state.acceptedBaseline || state.journal.some(entry => {if(entry.state!=="ACCEPTED")return false;const target=entry.acceptedTarget??state.candidates[entry.candidateId]?.acceptedTarget;if(!target)return true;const root=new AcceptedBranchRoots(this.ctx.storage).get({projectId:target.projectId,incarnation:target.incarnation,canonicalRepoName:target.canonicalRepoName,ref:target.ref});return root?.kind==="primary"||!root;}) || !/^[a-f0-9]{40}$/.test(state.acceptedState.currentCommit) || typeof state.canonicalRepoName !== "string" || !state.canonicalRepoName || !Number.isFinite(Date.parse(state.acceptedState.acceptedAt))) return null;
     const history = state.acceptedState.history;
     if (!Array.isArray(history) || (history.length && history.at(-1)?.commit !== state.acceptedState.currentCommit)) return null;
     return { journalId: "baseline", commit: state.acceptedState.currentCommit, tree: null, acceptedAt: state.acceptedState.acceptedAt };
@@ -3518,7 +3520,7 @@ export class RepositoryController extends DurableObject<Env> {
   private publicationReadbackScope(journal:PublicationJournalEntry):string {
     const state=this.load(),candidate=state.candidates[journal.candidateId];
     if(!candidate)throw new Error("Publication candidate unavailable");
-    return JSON.stringify({projectId:state.projectId,incarnation:this.readRepositoryIncarnation(),canonicalRepoName:state.canonicalRepoName,journal:{id:journal.id,candidateId:journal.candidateId,candidateCommit:journal.candidateCommit,candidateTree:journal.candidateTree,expectedHead:journal.expectedHead,newHead:journal.newHead,outputDigest:journal.outputDigest,publicationAuthority:journal.publicationAuthority},candidateCommit:candidate.candidateCommit,evidenceId:candidate.evidenceId,policyVersion:candidate.frozenPolicyVersion,branch:state.defaultBranch??"main"});
+    return JSON.stringify({projectId:state.projectId,incarnation:this.readRepositoryIncarnation(),canonicalRepoName:state.canonicalRepoName,journal:{id:journal.id,candidateId:journal.candidateId,candidateCommit:journal.candidateCommit,candidateTree:journal.candidateTree,expectedHead:journal.expectedHead,newHead:journal.newHead,outputDigest:journal.outputDigest,publicationAuthority:journal.publicationAuthority},candidateCommit:candidate.candidateCommit,evidenceId:candidate.evidenceId,policyVersion:candidate.frozenPolicyVersion,branch:journal.acceptedTarget?.branch??candidate.acceptedTarget?.branch??state.defaultBranch??"main"});
   }
   async ownerPublicationReadbacks(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<PublicationReadbackReport[]> {
     const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();const ledger=new PublicationReadbacks(this.ctx.storage);
@@ -3543,7 +3545,7 @@ export class RepositoryController extends DurableObject<Env> {
       const context=await this.repositoryReadContext(ownerId);if(!context.incarnation)throw new RepositoryReadError(503,"authorization");
       const authorize=async()=>{await ownerAuthorize?.();if(!await this.assertRepositoryReadContext(context,ownerId)||this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",ownerId).toArray()[0]?.role!=="owner"||this.publicationReadbackScope(journal)!==scope||this.load().journal.find(item=>item.id===journalId)?.state!=="PREPARED")throw new RepositoryReadError(503,"authorization");};
       using repository=await openRepositoryRead(this.publicationRecoveryProvider(),{repoName:context.canonicalRepoName,authorize,reserveGroup:id=>globalOf(this.env).reserveRepositoryReadOperation(id,context.accountKey),limits:{maxProviderCalls:16,deadlineMs:10000}});
-      const branch=this.load().defaultBranch??"main",head=await this.publicationNativeHead(context,scope,journalId,`refs/heads/${branch}`,authorize);
+      const branch=journal.acceptedTarget?.branch??candidate.acceptedTarget?.branch??this.load().defaultBranch??"main",head=await this.publicationNativeHead(context,scope,journalId,`refs/heads/${branch}`,authorize);
       result=await inspectPublicationReadback(repository,branch,journal.newHead,journal.candidateTree??"",head);await authorize();
       if(result.reason==="confirmed"){
         // No await between the final scope fence and entering completePublish.
@@ -3584,18 +3586,19 @@ export class RepositoryController extends DurableObject<Env> {
     return null;
   }
 
-  private assertPrimaryAcceptedCandidate(candidate:CandidateGeneration,evidence?:VerificationEvidence,requireCurrent=true):void {
+  private assertAcceptedCandidateTarget(candidate:CandidateGeneration,evidence?:VerificationEvidence,requireCurrent=true):void {
     const target=candidate.acceptedTarget;if(!target){if(evidence?.acceptedTarget)throw Error("Unbound candidate cannot consume bound verification evidence");return;}
-    const state=this.load();if(!state.defaultBranch||target.ref!==`refs/heads/${state.defaultBranch}`)throw Error("Nonprimary target publication is not enabled");
+    const state=this.load();if(!target.ref.startsWith("refs/heads/")||!isSafeRef(target.ref))throw Error("Frozen accepted target ref is unavailable");
     if(!evidence?.acceptedTarget)throw Error("Verification evidence omitted the frozen accepted target");
-    assertCompatibleAcceptedTargetBatch([target,evidence.acceptedTarget,{...target,projectId:state.projectId,incarnation:this.readRepositoryIncarnation()??"",canonicalRepoName:state.canonicalRepoName,ref:`refs/heads/${state.defaultBranch}`,branch:state.defaultBranch,acceptedCommit:candidate.expectedAcceptedBase,policyVersion:candidate.frozenPolicyVersion,policy:candidate.frozenVerificationPolicy}]);
+    assertCompatibleAcceptedTargetBatch([target,evidence.acceptedTarget,{...target,projectId:state.projectId,incarnation:this.readRepositoryIncarnation()??"",canonicalRepoName:state.canonicalRepoName,ref:target.ref,branch:target.branch,acceptedCommit:candidate.expectedAcceptedBase,policyVersion:candidate.frozenPolicyVersion,policy:candidate.frozenVerificationPolicy}]);
     if(requireCurrent){this.synchronizePrimaryAcceptedRegistry(state);const current=freezeAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),state,target.incarnation,target.ref);assertCompatibleAcceptedTargetBatch([target,current]);}
   }
   private assertOwnerAcceptedTargetReview(candidate:CandidateGeneration):void{if(!candidate.acceptedTarget)return;this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS owner_review_accepted_targets(candidate_id TEXT PRIMARY KEY,actor_id TEXT NOT NULL,commit_id TEXT NOT NULL,target TEXT NOT NULL)");const receipt=this.ctx.storage.sql.exec<{actor_id:string;commit_id:string;target:string}>("SELECT actor_id,commit_id,target FROM owner_review_accepted_targets WHERE candidate_id=?",candidate.id).toArray()[0];if(!receipt||receipt.actor_id!==candidate.review?.actor?.userId||receipt.commit_id!==candidate.candidateCommit)throw Error("The approving owner has no exact accepted target review receipt");assertCompatibleAcceptedTargetBatch([candidate.acceptedTarget,JSON.parse(receipt.target) as FrozenAcceptedTarget]);}
   private assertBoundPublicationJournal(candidate:CandidateGeneration,journal:PublicationJournalEntry):void {if(!candidate.acceptedTarget){if(journal.acceptedTarget||journal.publicationAuthority?.acceptedTarget)throw Error("Unbound publication cannot consume a bound journal");return;}if(!journal.acceptedTarget||!journal.publicationAuthority?.acceptedTarget)throw Error("Publication journal omitted its frozen accepted target");assertCompatibleAcceptedTargetBatch([candidate.acceptedTarget,journal.acceptedTarget,journal.publicationAuthority.acceptedTarget]);if(journal.expectedHead!==candidate.acceptedTarget.acceptedCommit)throw Error("Publication journal changed its frozen accepted base");}
+  private isNonprimaryCandidate(candidate:CandidateGeneration):boolean{const target=candidate.acceptedTarget;if(!target)return false;const root=new AcceptedBranchRoots(this.ctx.storage).get({projectId:target.projectId,incarnation:target.incarnation,canonicalRepoName:target.canonicalRepoName,ref:target.ref});if(!root)throw Error("Recorded accepted target identity is unavailable");return root.kind==="branch";}
+  private admittedTargetPublication(candidate:CandidateGeneration,journal:PublicationJournalEntry):AdmittedBranchPublication{const target=candidate.acceptedTarget,evidence=candidate.evidenceId?this.load().evidence[candidate.evidenceId]:undefined;if(!target||!evidence||!journal.publicationAuthority||journal.newHead!==candidate.candidateCommit||journal.candidateTree!==evidence.candidateTree)throw Error("Exact admitted branch publication evidence unavailable");this.assertBoundPublicationJournal(candidate,journal);const requirements=[...target.requirements];for(const requirement of candidate.frozenRequirements)if(requirement.status==="approved"&&!requirements.some(existing=>existing.id===requirement.id))requirements.push(requirement);return{projectId:target.projectId,incarnation:target.incarnation,canonicalRepoName:target.canonicalRepoName,ref:target.ref,operationId:journal.id,expectedHead:target.acceptedCommit,expectedVersion:target.acceptedVersion,commit:journal.newHead,requirementsSnapshot:{commit:journal.newHead,requirements},acceptance:{journalId:journal.id,candidateId:candidate.id,evidenceId:evidence.id,tree:evidence.candidateTree,outputDigest:journal.outputDigest,participatingTaskIds:[...candidate.participatingTaskIds],preparedAt:journal.publicationAuthority.authorizedAt}};}
   /** Ledger step 1: validate every invariant, then journal PREPARED. The workflow then pushes with a lease. */
   async preparePublish(candidateId: string): Promise<PrepareResult> {
-    const bound=this.load().candidates[candidateId]?.acceptedTarget;if(bound&&bound.ref!==`refs/heads/${this.load().defaultBranch??""}`)return{ok:false,error:"Nonprimary target publication is not enabled; the frozen target was preserved and primary history was not changed"};
     if(this.legacyCandidateRerunFrozen(candidateId))return {ok:false,error:"This preserved predecessor has a saved owner rerun. Review the linked fresh candidate before publication."};
     if(this.legacyPreparedPublication(candidateId)){await this.ensureRecoveryAlarm();return {ok:false,recoveryRequired:true,error:"A previously prepared publication needs Git readback before recovery. Its journal, review and saved changes remain pending."};}
     const recorded = this.load().candidates[candidateId]?.review;
@@ -3608,7 +3611,7 @@ export class RepositoryController extends DurableObject<Env> {
     const c = s.candidates[candidateId];
     const ev = c?.evidenceId ? s.evidence[c.evidenceId] : undefined;
     if (!c || !ev || !c.candidateCommit) return { ok: false, error: "No verified candidate" };
-    try{this.assertPrimaryAcceptedCandidate(c,ev);this.assertOwnerAcceptedTargetReview(c);}catch{return{ok:false,error:"Frozen accepted target or verification evidence changed; publication was not prepared"};}
+    try{this.assertAcceptedCandidateTarget(c,ev);this.assertOwnerAcceptedTargetReview(c);}catch{return{ok:false,error:"Frozen accepted target or verification evidence changed; publication was not prepared"};}
     if(this.legacyCandidateRerunFrozen(candidateId))return {ok:false,error:"This predecessor is preserved by an owner rerun."};
     const preservationFailure=this.candidatePreservationFailure(c);
     if(preservationFailure)return {ok:false,error:preservationFailure};
@@ -3624,13 +3627,14 @@ export class RepositoryController extends DurableObject<Env> {
     if (ev.expectedAcceptedBase !== c.expectedAcceptedBase || ev.requirementsVersion !== c.frozenPolicyVersion) return { ok: false, error: "Evidence was produced for different inputs" };
     const cancelled = c.participatingTaskIds.filter((id) => s.tasks[id]?.status === "cancelled");
     if (cancelled.length > 0) return { ok: false, error: `Task ${cancelled[0]} was cancelled before publication` };
-    if (s.acceptedState.currentCommit !== c.expectedAcceptedBase) {
+    const acceptedHead=c.acceptedTarget?new AcceptedBranchRoots(this.ctx.storage).get({projectId:c.acceptedTarget.projectId,incarnation:c.acceptedTarget.incarnation,canonicalRepoName:c.acceptedTarget.canonicalRepoName,ref:c.acceptedTarget.ref})?.head:s.acceptedState.currentCommit;
+    if (acceptedHead !== c.expectedAcceptedBase) {
       c.status = "stale";
       this.save();
       return { ok: false, stale: true, error: "Accepted head moved" };
     }
     const prepared = s.journal.find(item => item.candidateId === candidateId && item.state === "PREPARED" && item.newHead === c.candidateCommit && item.expectedHead === c.expectedAcceptedBase && item.candidateTree === ev.candidateTree && item.publicationAuthority?.actor.userId === recorded.actor!.userId && item.publicationAuthority.policyVersion === c.frozenPolicyVersion);
-    if (prepared) return { ok: true, journal: prepared };
+    if (prepared){if(this.isNonprimaryCandidate(c))try{new AcceptedBranchRoots(this.ctx.storage).assertPublicationAdmission(this.admittedTargetPublication(c,prepared),assertCurrent);}catch{return{ok:false,error:"Exact branch publication admission is unavailable; saved review and journal were preserved"};}return { ok: true, journal: prepared };}
     const journal: PublicationJournalEntry = {
       id: `jrnl_${crypto.randomUUID()}`,
       candidateId,
@@ -3645,14 +3649,13 @@ export class RepositoryController extends DurableObject<Env> {
       timestamp: new Date().toISOString(),
     };
     try {
-      this.ctx.storage.transactionSync(() => { assertCurrent(); this.assertCandidateNotRerunFrozen(candidateId); s.journal.push(journal); this.save(); });
+      this.ctx.storage.transactionSync(() => { assertCurrent(); this.assertCandidateNotRerunFrozen(candidateId);if(this.isNonprimaryCandidate(c))new AcceptedBranchRoots(this.ctx.storage).reservePublication(this.admittedTargetPublication(c,journal),()=>{assertCurrent();this.assertAcceptedCandidateTarget(c,ev);this.assertOwnerAcceptedTargetReview(c);}); s.journal.push(journal); this.save(); });
     } catch (cause) { this.state = null; throw cause; }
     return { ok: true, journal };
   }
 
   /** Fresh authorization for a new Git dispatch; confirmed ref updates reconcile independently. */
   async authorizeCandidatePublication(candidateId: string, commit: string): Promise<boolean> {
-    const bound=this.load().candidates[candidateId]?.acceptedTarget;if(bound&&bound.ref!==`refs/heads/${this.load().defaultBranch??""}`)return false;
     if(this.legacyCandidateRerunFrozen(candidateId))return false;
     const recorded = this.load().candidates[candidateId]?.review;
     if (!recorded?.approved || recorded.commit !== commit || !recorded.actor) return false;
@@ -3662,11 +3665,53 @@ export class RepositoryController extends DurableObject<Env> {
     try{if(!(await this.delegatedReviewGate(candidateId)).passed)return false;assertCurrent();}catch{return false;}
     const state = this.load(), candidate = state.candidates[candidateId];
     if(!candidate||this.legacyCandidateRerunFrozen(candidateId)||this.candidatePreservationFailure(candidate))return false;
+    if(candidate.participatingTaskIds.some(id=>!state.tasks[id]||state.tasks[id]!.status==="cancelled"))return false;
     const evidence = candidate?.evidenceId ? state.evidence[candidate.evidenceId] : undefined;
     const journal = state.journal.find(item => item.candidateId === candidateId && item.state === "PREPARED" && item.newHead === commit);
     const authority = journal?.publicationAuthority;
-    try{this.assertPrimaryAcceptedCandidate(candidate,evidence);this.assertOwnerAcceptedTargetReview(candidate);if(journal)this.assertBoundPublicationJournal(candidate,journal);else if(candidate.acceptedTarget)return false;}catch{return false;}
+    try{this.assertAcceptedCandidateTarget(candidate,evidence);this.assertOwnerAcceptedTargetReview(candidate);if(journal){this.assertBoundPublicationJournal(candidate,journal);if(this.isNonprimaryCandidate(candidate))new AcceptedBranchRoots(this.ctx.storage).assertPublicationAdmission(this.admittedTargetPublication(candidate,journal),assertCurrent);}else if(candidate.acceptedTarget)return false;}catch{return false;}
     return !!candidate && candidate.candidateCommit === commit && candidate.review?.approved === true && candidate.review.commit === commit && candidate.review.actor?.userId === recorded.actor.userId && !!authority && authority.actor.userId === recorded.actor.userId && authority.commit === commit && authority.tree === evidence?.candidateTree && authority.policyVersion === candidate.frozenPolicyVersion;
+  }
+
+  /** Read-only reconciliation uses original admission, never current permission for another write. */
+  async authorizeCandidatePublicationReadback(candidateId:string,journalId:string,commit:string):Promise<boolean>{
+    try{
+      const state=this.load(),candidate=state.candidates[candidateId],journal=state.journal.find(item=>item.id===journalId&&item.candidateId===candidateId);
+      if(!candidate||!journal||journal.state!=="PREPARED"||journal.newHead!==commit||candidate.candidateCommit!==commit)return false;
+      const scope=this.publicationReadbackScope(journal),ownerId=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id;
+      if(!ownerId)return false;
+      const context=await this.repositoryReadContext(ownerId);
+      if(!await this.assertRepositoryReadContext(context,ownerId))return false;
+      const fresh=this.load(),current=fresh.candidates[candidateId],saved=fresh.journal.find(item=>item.id===journalId);
+      if(!current||!saved||saved.state!=="PREPARED"||this.publicationReadbackScope(saved)!==scope)return false;
+      const evidence=current.evidenceId?fresh.evidence[current.evidenceId]:undefined;
+      this.assertAcceptedCandidateTarget(current,evidence,false);this.assertBoundPublicationJournal(current,saved);this.assertOwnerAcceptedTargetReview(current);
+      if(this.isNonprimaryCandidate(current))new AcceptedBranchRoots(this.ctx.storage).assertPublicationReadbackAdmission(this.admittedTargetPublication(current,saved),()=>{if(this.repositoryDeleting()||this.publicationReadbackScope(saved)!==scope)throw new Error("Publication readback scope changed");});
+      return !!evidence&&evidence.status==="passed"&&evidence.candidateCommit===commit&&saved.candidateCommit===commit&&saved.candidateTree===evidence.candidateTree&&saved.outputDigest===evidence.builtOutputDigest&&saved.publicationAuthority?.commit===commit&&saved.publicationAuthority.tree===evidence.candidateTree&&saved.publicationAuthority.policyVersion===current.frozenPolicyVersion;
+    }catch{return false;}
+  }
+
+  async observeCandidatePublicationReadback(candidateId:string,journalId:string,commit:string):Promise<{status:"landed"|"not_landed"|"unavailable";ref:string;commit:string;readbackScope?:string}>{
+    const journal=this.load().journal.find(item=>item.id===journalId&&item.candidateId===candidateId),target=journal?.acceptedTarget;
+    const ref=target?.ref??"";
+    const unavailable={status:"unavailable" as const,ref,commit};
+    if(!journal||!target||journal.state!=="PREPARED"||journal.newHead!==commit)return unavailable;
+    try{
+      if(!await this.authorizeCandidatePublicationReadback(candidateId,journalId,commit))return unavailable;
+      const scope=this.publicationReadbackScope(journal),ownerId=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id;
+      if(!ownerId)return unavailable;
+      const context=await this.repositoryReadContext(ownerId);
+      const authorize=async()=>{if(!await this.assertRepositoryReadContext(context,ownerId)||!await this.authorizeCandidatePublicationReadback(candidateId,journalId,commit)||this.publicationReadbackScope(journal)!==scope)throw new RepositoryReadError(503,"authorization");};
+      await authorize();
+      using repository=await openRepositoryRead(this.publicationRecoveryProvider(),{repoName:context.canonicalRepoName,authorize,reserveGroup:id=>globalOf(this.env).reserveRepositoryReadOperation(id,context.accountKey),limits:{maxProviderCalls:16,deadlineMs:10000}});
+      const head=await this.publicationNativeHead(context,scope,journalId,ref,authorize);
+      const result=await inspectPublicationReadback(repository,target.branch,commit,journal.candidateTree??"",head);
+      await authorize();
+      if(result.reason==="confirmed")return{status:"landed",ref,commit,readbackScope:scope};
+      // Missing refs and incomplete inspections never authorize another dispatch.
+      if(result.reason==="not_observed"&&head!==null)return{status:"not_landed",ref,commit,readbackScope:scope};
+      return unavailable;
+    }catch{return unavailable;}
   }
 
   /** Ledger step 2: the Artifacts ref update succeeded (or was found already applied). */
@@ -3678,46 +3723,48 @@ export class RepositoryController extends DurableObject<Env> {
     const j = s.journal.find((e) => e.id === journalId);
     if(readbackScope&&j?.state!=="ACCEPTED"&&(!j||this.publicationReadbackScope(j)!==readbackScope))throw new Error("Publication proof scope changed before reconciliation");
     if (!j) throw new Error("Unknown journal entry");
-    const bound=j.acceptedTarget??s.candidates[j.candidateId]?.acceptedTarget;if(bound&&bound.ref!==`refs/heads/${s.defaultBranch??""}`)throw Error("Nonprimary target publication is not enabled; exact branch journal remains preserved");
     if (j.state === "ABORTED") throw new Error("Aborted publication cannot be accepted");
     const alreadyAccepted = j.state === "ACCEPTED";
     const c = s.candidates[j.candidateId]!;
-    if(c.acceptedTarget||j.acceptedTarget){this.assertPrimaryAcceptedCandidate(c,c.evidenceId?s.evidence[c.evidenceId]:undefined,false);this.assertBoundPublicationJournal(c,j);this.assertOwnerAcceptedTargetReview(c);}
+    if(c.acceptedTarget||j.acceptedTarget){this.assertAcceptedCandidateTarget(c,c.evidenceId?s.evidence[c.evidenceId]:undefined,false);this.assertBoundPublicationJournal(c,j);this.assertOwnerAcceptedTargetReview(c);}
+    const nonprimary=this.isNonprimaryCandidate(c);
     const advanceHead = s.acceptedState.currentCommit === j.expectedHead || s.acceptedState.currentCommit === j.newHead;
     let deliveries: string[] = [];
     try {
       if (!alreadyAccepted) this.ctx.storage.transactionSync(() => {
-        this.synchronizePrimaryAcceptedRegistry(s);
+        if(!nonprimary)this.synchronizePrimaryAcceptedRegistry(s);
+        const confirmedAt=new Date().toISOString();if(nonprimary)new AcceptedBranchRoots(this.ctx.storage).publishAdmitted(this.admittedTargetPublication(c,j),()=>{this.assertAcceptedCandidateTarget(c,c.evidenceId?s.evidence[c.evidenceId]:undefined,false);this.assertBoundPublicationJournal(c,j);this.assertOwnerAcceptedTargetReview(c);},confirmedAt);
         j.state = "ACCEPTED";
-        j.timestamp = new Date().toISOString();
+        j.timestamp = confirmedAt;
         c.status = "accepted";
-        if (advanceHead) {
+        if (!nonprimary&&advanceHead) {
           s.acceptedState.currentCommit = j.newHead;
           s.acceptedState.buildDigest = j.outputDigest;
           s.acceptedState.acceptedAt = j.timestamp;
         }
-        s.acceptedState.history.push({ commit: j.newHead, candidateId: c.id, acceptedAt: j.timestamp, participatingTasks: c.participatingTaskIds, evidenceId: c.evidenceId!, outputDigest: j.outputDigest });
+        if(!nonprimary)s.acceptedState.history.push({ commit: j.newHead, candidateId: c.id, acceptedAt: j.timestamp, participatingTasks: c.participatingTaskIds, evidenceId: c.evidenceId!, outputDigest: j.outputDigest });
         for (const id of c.participatingTaskIds) {
           const t = s.tasks[id]!;
           if (!t.activeCandidateId || t.activeCandidateId === c.id) t.status = t.currentCommit === c.participatingCommits[id] ? "accepted" : "ready";
         }
-        if (advanceHead && s.policyVersion === c.frozenPolicyVersion) {
+        if (!nonprimary&&advanceHead && s.policyVersion === c.frozenPolicyVersion) {
           for (const requirement of c.frozenRequirements) {
             if (requirement.status === "approved" && !s.acceptedState.activeRequirements.some((active) => active.id === requirement.id)) s.acceptedState.activeRequirements.push(requirement);
           }
         }
         if (c.workflowInstanceId) this.ctx.storage.sql.exec("DELETE FROM lease WHERE id = 1 AND holder = ?", c.workflowInstanceId);
-        deliveries = this.stageEvent("change.accepted", { commit: j.newHead, changes: c.participatingTaskIds, tree: j.candidateTree ?? null });
-        this.synchronizePrimaryAcceptedRegistry(s);
+        deliveries = this.stageEvent("change.accepted", { commit: j.newHead, changes: c.participatingTaskIds, tree: j.candidateTree ?? null,...(nonprimary?{targetRef:c.acceptedTarget!.ref,journalId:j.id,acceptedRootVersion:new AcceptedBranchRoots(this.ctx.storage).get({projectId:c.acceptedTarget!.projectId,incarnation:c.acceptedTarget!.incarnation,canonicalRepoName:c.acceptedTarget!.canonicalRepoName,ref:c.acceptedTarget!.ref})!.version}:{}) });
+        if(!nonprimary)this.synchronizePrimaryAcceptedRegistry(s);
         this.save();
         });
-      else this.ctx.storage.transactionSync(()=>{this.synchronizePrimaryAcceptedRegistry(s);});
+      else this.ctx.storage.transactionSync(()=>{if(nonprimary)new AcceptedBranchRoots(this.ctx.storage).publishAdmitted(this.admittedTargetPublication(c,j),()=>this.assertBoundPublicationJournal(c,j),j.timestamp);else this.synchronizePrimaryAcceptedRegistry(s);});
     } catch (error) {
       // SQL rolled back, so discard the mutated cache before the next RPC retries.
       this.state = null;
       throw error;
     }
     for (const deliveryId of deliveries) await this.enqueueWebhookDelivery(deliveryId);
+    if(nonprimary){await this.logActivity("FlareGit","integration.branch_accepted",`Accepted ${j.newHead.slice(0,7)} on ${c.acceptedTarget!.ref}`);return;}
     // Issues resolved by accepted changes close with a pointer to the commit that is now in history.
     for (const id of c.participatingTaskIds) {
       const t = s.tasks[id]!;
@@ -3778,7 +3825,7 @@ export class RepositoryController extends DurableObject<Env> {
     if(this.legacyCandidateRerunFrozen(candidateId))return {ok:false,error:"This preserved predecessor has a saved owner rerun. Review its linked fresh candidate."};
     if (!c || !c.candidateCommit || !c.workflowInstanceId) return { ok: false, error: "This candidate is not waiting for review" };
     const targetEcho=()=>{if(c.acceptedTarget){if(!expectedTarget||expectedTarget.ref!==c.acceptedTarget.ref||expectedTarget.acceptedCommit!==c.acceptedTarget.acceptedCommit||expectedTarget.acceptedVersion!==c.acceptedTarget.acceptedVersion)throw Error("The exact branch, accepted base and root version reviewed are required");}else if(expectedTarget)throw Error("An unbound review cannot acquire a target through its decision");};
-    try{targetEcho();if(review.approved)this.assertPrimaryAcceptedCandidate(c,c.evidenceId?s.evidence[c.evidenceId]:undefined);}catch{return{ok:false,error:"Reviewed accepted target or bound verification evidence was not confirmed"};}
+    try{targetEcho();if(review.approved)this.assertAcceptedCandidateTarget(c,c.evidenceId?s.evidence[c.evidenceId]:undefined);}catch{return{ok:false,error:"Reviewed accepted target or bound verification evidence was not confirmed"};}
     if (!/^[a-f0-9]{40}$/.test(expectedCommit ?? "") || expectedCommit !== c.candidateCommit) return { ok: false, error: "The candidate changed from the commit you reviewed. Refresh and inspect its diff before deciding." };
     if(review.approved){const preservationFailure=this.candidatePreservationFailure(c);if(preservationFailure)return {ok:false,error:preservationFailure};}
     // Idempotent: the same decision can be re-sent if notifying the integration run failed the first time.
@@ -3793,7 +3840,7 @@ export class RepositoryController extends DurableObject<Env> {
     try {
       this.ctx.storage.transactionSync(() => {
         assertCurrent();
-        this.assertCandidateNotRerunFrozen(candidateId);targetEcho();if(review.approved)this.assertPrimaryAcceptedCandidate(c,c.evidenceId?s.evidence[c.evidenceId]:undefined);
+        this.assertCandidateNotRerunFrozen(candidateId);targetEcho();if(review.approved)this.assertAcceptedCandidateTarget(c,c.evidenceId?s.evidence[c.evidenceId]:undefined);
         if(c.acceptedTarget){this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS owner_review_accepted_targets(candidate_id TEXT PRIMARY KEY,actor_id TEXT NOT NULL,commit_id TEXT NOT NULL,target TEXT NOT NULL)");this.ctx.storage.sql.exec("INSERT INTO owner_review_accepted_targets VALUES(?,?,?,?) ON CONFLICT(candidate_id) DO UPDATE SET actor_id=excluded.actor_id,commit_id=excluded.commit_id,target=excluded.target",c.id,review.actor.userId,c.candidateCommit!,JSON.stringify(c.acceptedTarget));}
         c.review = { ...review, actor: { ...review.actor }, by: review.actor.displayName, at: new Date().toISOString(), commit: c.candidateCommit! };
         c.status = review.approved ? "verified" : "failed";
@@ -3814,6 +3861,9 @@ export class RepositoryController extends DurableObject<Env> {
     if (!c) return;
     const j = journalId ? s.journal.find((e) => e.id === journalId) : undefined;
     if(this.legacyPreparedPublication(candidateId))return;
+    // A bound admitted journal may have reached Git despite a lost acknowledgement.
+    // Keep its original ref and admission until positive readback resolves the outcome.
+    if(j?.state==="PREPARED"&&(c.acceptedTarget||j.acceptedTarget))return;
     if (c.status === "accepted" || j?.state === "ACCEPTED") return;
     if (c.status === outcome && (!j || j.state === "ABORTED")) return;
     let deliveries: string[] = [];

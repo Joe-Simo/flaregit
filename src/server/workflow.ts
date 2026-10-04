@@ -38,12 +38,12 @@ export function integrationVerificationEvidence(candidate:CandidateGeneration,ev
   assertCompatibleAcceptedTargetBatch([candidate.acceptedTarget,{...candidate.acceptedTarget,acceptedCommit:evidence.expectedAcceptedBase,policyVersion:evidence.requirementsVersion,policy:evidence.policy}]);
   return{...evidence,acceptedTarget:structuredClone(candidate.acceptedTarget)};
 }
-/** Target publication is currently supported only by the recorded primary ledger. */
-export function assertIntegrationPublicationTarget(candidate:CandidateGeneration,journal:PublicationJournalEntry,state:Pick<FlareGitProjectState,"projectId"|"canonicalRepoName"|"defaultBranch"|"acceptedState">,commit:string,branch:string):void{
-  if(!candidate.acceptedTarget){if(journal.acceptedTarget)throw Error("Publication target binding is missing from the candidate");return;}
+/** A bound target requires an exact admitted journal, never the live primary alias. */
+export function assertIntegrationPublicationTarget(candidate:CandidateGeneration,journal:PublicationJournalEntry,state:Pick<FlareGitProjectState,"projectId"|"canonicalRepoName"|"defaultBranch">,commit:string,branch:string):void{
+  if(!candidate.acceptedTarget){if(journal.acceptedTarget||journal.publicationAuthority?.acceptedTarget)throw Error("Publication target binding is missing from the candidate");return;}
   const target=candidate.acceptedTarget;
-  if(integrationTargetBranch(candidate,state)!==branch||target.ref!==`refs/heads/${state.defaultBranch??"main"}`)throw Error("Nonprimary target publication is not enabled; saved review and contributions remain preserved");
-  if(!journal.acceptedTarget||!journal.publicationAuthority?.acceptedTarget||journal.candidateId!==candidate.id||journal.candidateCommit!==commit||journal.newHead!==commit||journal.expectedHead!==target.acceptedCommit||state.acceptedState.currentCommit!==target.acceptedCommit)throw Error("Exact frozen target publication authority is unavailable");
+  if(integrationTargetBranch(candidate,state)!==branch)throw Error("Publication branch differs from the immutable target");
+  if(!journal.acceptedTarget||!journal.publicationAuthority?.acceptedTarget||journal.candidateId!==candidate.id||journal.candidateCommit!==commit||journal.newHead!==commit||journal.expectedHead!==target.acceptedCommit||!journal.candidateTree||!/^[a-f0-9]{40}$/.test(journal.candidateTree)||journal.publicationAuthority.commit!==commit||journal.publicationAuthority.tree!==journal.candidateTree||journal.publicationAuthority.policyVersion!==candidate.frozenPolicyVersion)throw Error("Exact frozen target publication authority is unavailable");
   assertCompatibleAcceptedTargetBatch([target,journal.acceptedTarget,journal.publicationAuthority.acceptedTarget]);
 }
 
@@ -80,6 +80,10 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
           const state = await repository.getState();
           for (const candidate of Object.values(state.candidates)) {
             if (candidate.workflowInstanceId !== event.instanceId || !["composing", "repairing", "verifying", "verified", "awaiting_review"].includes(candidate.status)) continue;
+            if(candidate.acceptedTarget&&state.journal.some(journal=>journal.candidateId===candidate.id&&journal.state==="PREPARED")){
+              await repository.logActivity("FlareGit","integration.publication_pending","Bound target publication outcome is unresolved. Its prepared journal and original review remain preserved for read-only reconciliation.").catch(()=>console.warn("Publication recovery activity delivery was not confirmed"));
+              continue;
+            }
             // abortPublish preserves uncertain publication, accepted history, newer
             // task ownership and native recovery holds. Never persist raw errors.
             await repository.abortPublish(candidate.id, undefined, "Integration stopped before completion. Saved contributions remain available for recovery.", "failed");
@@ -150,19 +154,35 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     }
 
     const pushed = await step.do("cas-push-to-artifacts", { retries: { limit: 2, delay: "5 seconds", backoff: "exponential" } }, async () => this.casPush(candidate, integrated.commit, stub, integrated.branch, prepared.journal!));
+    if (!pushed.ok && candidate.acceptedTarget) {
+      await step.do("record-target-publication-pending",async()=>{await stub.logActivity("FlareGit","integration.publication_pending",`Publication of ${integrated.commit} on ${candidate.acceptedTarget!.ref} is unresolved. The prepared journal, review, and committed Git state remain preserved for read-only reconciliation.`).catch(()=>console.warn("Publication recovery activity delivery was not confirmed"));return{journalId:prepared.journal!.id,targetRef:candidate.acceptedTarget!.ref};});
+      return{status:"blocked" as const,publicationPending:true as const,journalId:prepared.journal.id,error:pushed.error};
+    }
     if (!pushed.ok) {
       await step.do("abort-push", async () => stub.abortPublish(candidate.id, prepared.journal!.id, pushed.error, pushed.stale ? "stale" : "failed"));
       return { status: pushed.stale ? "stale" as const : "blocked" as const, error: pushed.error };
     }
-    await step.do("complete-publish", async () => stub.completePublish(prepared.journal!.id));
+    await step.do("complete-publish", async () => stub.completePublish(prepared.journal!.id,pushed.readbackScope));
     // Core publication is durable before optional follow-ups consume resources.
     await recordAccepted();
     // Stacked changes: re-base every dependent change onto what just landed, so the stack keeps tracking upstream.
     await step.do("rebase-dependents", { retries: { limit: 1, delay: "5 seconds" } }, async () => candidate.acceptedTarget ? this.rebaseDependents(candidate,integrated.commit,integrated.branch,stub) : rebaseAcceptedFollowup(stub,integrated.commit,()=>this.rebaseDependents(candidate,integrated.commit,integrated.branch,stub)));
     // Composition already required remote-verified original/base pins and durable receipts.
     // Accepted history never depends on the optional stack/mirror follow-ups below.
+    const targetDeploymentFollowup=candidate.acceptedTarget?await step.do("record-target-deployment-boundary",async()=>{
+      await stub.logActivity("FlareGit","deployment.target_mapping_required",`Accepted commit ${integrated.commit} on ${candidate.acceptedTarget!.ref} is durable. No deployment was requested; an owner-approved target mapping is required.`).catch(()=>console.warn("Target deployment boundary activity delivery was not confirmed"));
+      return{status:"not_requested" as const,reason:"target_mapping_required" as const,targetRef:candidate.acceptedTarget!.ref};
+    }):undefined;
     // Mirror delivery is optional and has an existing owner-controlled retry route.
-    await step.do("mirror-to-github", {retries:{limit:1,delay:"5 seconds"}}, async () => mirrorAcceptedFollowup(stub,integrated.commit,async()=>{
+    const mirrorFollowup=await step.do("mirror-to-github", {retries:{limit:1,delay:"5 seconds"}}, async () => {
+      if(candidate.acceptedTarget){
+        let configuration:Awaited<ReturnType<Stub["getMirror"]>>;
+        try{configuration=await stub.getMirror();}catch{return{status:"deferred" as const,reason:"target_mapping_unconfirmed" as const,targetRef:candidate.acceptedTarget.ref};}
+        if(!configuration?.target||!configuration.enabled)return{skipped:true as const};
+        await stub.logActivity("FlareGit","mirror.target_mapping_required",`Accepted commit ${integrated.commit} on ${candidate.acceptedTarget.ref} is durable. GitHub delivery was deferred until the owner configures an explicit target mapping.`).catch(()=>console.warn("Target mirror boundary activity delivery was not confirmed"));
+        return{status:"deferred" as const,reason:"target_mapping_required" as const,targetRef:candidate.acceptedTarget.ref};
+      }
+      return mirrorAcceptedFollowup(stub,integrated.commit,async()=>{
       let mirror:Awaited<ReturnType<FlareGitIntegrationWorkflow["sandbox"]>>|undefined;
       try {
         const cfg=await stub.mirrorSecret();
@@ -173,8 +193,9 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
         try { await this.fundedRetainedCommand(input,stub);return await pushMirror({exec:mirror.exec},{target:cfg.target,githubToken:cfg.token,canonicalRemote:canonical.remote,canonicalToken:canonical.token,branch:integrated.branch,commit:integrated.commit}); }
         finally { await canonical.close(); }
       } finally {if(mirror)await mirror.destroy();}
-    }));
-    return { status: "accepted" as const, commit: integrated.commit, evidenceId: integrated.evidenceId };
+      });
+    });
+    return { status: "accepted" as const, commit: integrated.commit, evidenceId: integrated.evidenceId,...(candidate.acceptedTarget?{targetRef:candidate.acceptedTarget.ref,followups:{mirror:mirrorFollowup,deployment:targetDeploymentFollowup}}:{}) };
   }
 
   /**
@@ -579,8 +600,16 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
    * Compare-and-swap publication. It depends on nothing that lived through review: a fresh workspace fetches the
    * stored candidate ref, proves it is the reviewed commit, and only moves the branch if it still equals the base.
    */
-  private async casPush(candidate: CandidateGeneration, commit: string, stub: Stub, branch: string, journal:PublicationJournalEntry): Promise<{ ok: true } | { ok: false; error: string; stale?: boolean }> {
-    if(candidate.acceptedTarget){const state=await stub.getState();try{integrationTargetBranch(candidate,state);}catch{return{ok:false,error:"Frozen accepted target publication scope is unavailable; no Git push was started"};}if(candidate.acceptedTarget.ref===`refs/heads/${state.defaultBranch??"main"}`&&state.acceptedState.currentCommit!==candidate.acceptedTarget.acceptedCommit)return{ok:false,error:"Frozen accepted target base advanced before publication; saved contributions remain preserved",stale:true};try{assertIntegrationPublicationTarget(candidate,journal,state,commit,branch);}catch{return{ok:false,error:"Frozen accepted target publication is unsupported or changed; no Git push was started"};}}
+  private async casPush(candidate: CandidateGeneration, commit: string, stub: Stub, branch: string, journal:PublicationJournalEntry): Promise<{ ok: true;readbackScope?:string } | { ok: false; error: string; stale?: boolean }> {
+    if(candidate.acceptedTarget){
+      try{assertIntegrationPublicationTarget(candidate,journal,await stub.getState(),commit,branch);}catch{return{ok:false,error:"Frozen accepted target publication scope or journal is unavailable; no Git push was started"};}
+      const observed=await stub.observeCandidatePublicationReadback(candidate.id,journal.id,commit);
+      if(observed.ref!==candidate.acceptedTarget.ref||observed.commit!==commit)return{ok:false,error:"Publication readback belongs to another target or commit; the original prepared journal remains preserved"};
+      if(observed.status==="landed"&&observed.readbackScope)return{ok:true,readbackScope:observed.readbackScope};
+      if(observed.status!=="not_landed")return{ok:false,error:"Original target publication could not be confirmed; read-only reconciliation remains pending"};
+      if(!await stub.authorizeCandidatePublication(candidate.id,commit))return{ok:false,error:"Original target readback did not find the commit and new write authority is unavailable; the prepared journal remains preserved"};
+    }
+    const targetRef=candidate.acceptedTarget?.ref??`refs/heads/${branch}`,publicationBranch=candidate.acceptedTarget?.branch??branch;
     const input = await stub.prepareRetainedInput(candidate.participatingTaskIds[0]!,this.computeWorkflowId!,candidate.id,crypto.randomUUID());
     const sb = await this.sandbox(`publish-${candidate.id}`);
     let credential: Awaited<ReturnType<FlareGitIntegrationWorkflow["canonicalRemote"]>> | undefined;
@@ -597,12 +626,12 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     if (head !== commit) return { ok: false, error: "Stored candidate differs from the reviewed commit; nothing was published" };
     // A response can be lost after Git accepted the push. Prove ancestry from the real
     // canonical branch before retrying, including when another contributor advanced it.
-    const alreadyLanded = () => publicationInHistory((command, env) => sb.exec(command, env), dir, canonical.remote, canonical.token, branch, commit);
+    const alreadyLanded = () => publicationInHistory((command, env) => sb.exec(command, env), dir, canonical.remote, canonical.token, publicationBranch, commit);
     if (await alreadyLanded()) return { ok: true };
     await this.fundedRetainedCommand(input,stub);
     if (!await stub.authorizeCandidatePublication(candidate.id, commit)) return { ok: false, error: "The approving owner no longer authorizes this exact publication; nothing was pushed" };
     const res = await sb.exec(
-      `git -C ${dir} push --quiet --force-with-lease=${q(`refs/heads/${branch}:${candidate.expectedAcceptedBase}`)} ${q(canonical.remote)} ${q(`${commit}:refs/heads/${branch}`)}`,
+      `git -C ${dir} push --quiet --force-with-lease=${q(`${targetRef}:${candidate.expectedAcceptedBase}`)} ${q(canonical.remote)} ${q(`${commit}:${targetRef}`)}`,
       gitAuthEnv(canonical.token),
       async()=>{if(!await stub.authorizeCandidatePublication(candidate.id,commit))throw new Error("Exact publication authority changed before dispatch; nothing was pushed");}
     );
