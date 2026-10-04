@@ -1,3 +1,4 @@
+import {acceptedTargetSchema,assertCompatibleAcceptedTargetBatch} from "../core/accepted-target.js";
 import { globalOf, reserveManagedAgent, assertManagedInitiator } from "./projects.js";
 import { DEFAULT_CODE_MODEL } from "../ai/workers-ai.js";
 import { WorkersAIClient } from "../ai/workers-ai.js";
@@ -26,13 +27,26 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
   let durable = await ledger.getAgentRun(runId);
   if (durable && options?.resumeFrom && durable.resumedFrom !== options.resumeFrom) throw new Error("Resume selection differs from the durable run identity");
   if (durable && (durable.taskId !== task.id || durable.branch !== task.workspace.branch)) throw new Error("Durable agent run belongs to a different change");
+  const state = await ledger.getState();
+  const selectedTarget=task.acceptedTarget?structuredClone(task.acceptedTarget):undefined;
+  const assertTarget=(currentState=state)=>{
+    const currentTask=currentState.tasks[task.id];
+    if(Boolean(selectedTarget)!==Boolean(currentTask?.acceptedTarget))throw new Error("Agent task accepted target binding changed");
+    if(!selectedTarget){if(durable?.acceptedTarget)throw new Error("Saved agent accepted target binding changed");return;}
+    const target=acceptedTargetSchema.parse(selectedTarget);
+    if(currentState.policyVersion!==state.policyVersion)throw new Error("Repository policy changed during bound agent execution");
+    if(!currentTask?.acceptedTarget||target.projectId!==currentState.projectId||target.canonicalRepoName!==currentState.canonicalRepoName||!SHA.test(task.baseCommit)||!task.dependsOn&&task.baseCommit!==target.acceptedCommit)throw new Error("Agent accepted target scope or recorded base changed");
+    assertCompatibleAcceptedTargetBatch([target,currentTask.acceptedTarget]);
+    if(task.dependsOn){const parent=currentState.tasks[task.dependsOn];if(!parent?.acceptedTarget)throw new Error("Agent stack target is unavailable");const parentTarget=acceptedTargetSchema.parse(parent.acceptedTarget);if(parent.status==="accepted"){if((["projectId","incarnation","canonicalRepoName","ref","branch"] as const).some(key=>target[key]!==parentTarget[key]))throw new Error("Accepted parent target identity differs");}else assertCompatibleAcceptedTargetBatch([target,parentTarget]);}
+    if(durable){if(!durable.acceptedTarget)throw new Error("Saved agent run has no frozen accepted target");assertCompatibleAcceptedTargetBatch([target,durable.acceptedTarget]);}
+  };
+  assertTarget();
   if (durable?.phase === "checkpointed" && durable.pushedCommit) {
     await assertManagedInitiator(env,ledger,options?.parentWorkflowId,options?.accountKey,task.id);
     return {commit:durable.pushedCommit};
   }
-  const state = await ledger.getState();
   if (stopped(state.tasks[task.id])) throw new Error("Change is no longer available for agent work");
-  const settings = settingsFor(state.verificationPolicy);
+  const settings = settingsFor(selectedTarget?acceptedTargetSchema.parse(selectedTarget).policy:state.verificationPolicy);
   await assertManagedInitiator(env, ledger, options?.parentWorkflowId, options?.accountKey, task.id);
   const spending = await reserveManagedAgent(env, options?.accountKey, runId);
   await globalOf(env).consumeManagedSpend(runId, 0, 0, 300);
@@ -40,7 +54,7 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
   const attempt=await ledger.beginAgentNativeAttempt({workflowId:options?.parentWorkflowId??runId,runId,taskId:task.id,phase:options?.stopAfterProposal?"proposal":"apply",attemptId:crypto.randomUUID(),nativeId:crypto.randomUUID()});
   const sb = env.AGENT.getByName(`agent-${attempt.nativeId}`);
   let repo: ArtifactsRepoCapability | undefined, token: string | undefined,credentialId:string|undefined;
-  const authorize=()=>assertManagedInitiator(env,ledger,options?.parentWorkflowId,options?.accountKey,task.id);
+  const authorize=async()=>{await assertManagedInitiator(env,ledger,options?.parentWorkflowId,options?.accountKey,task.id);if(selectedTarget)assertTarget(await ledger.getState());};
   const run = async (cmd: string, e?: Record<string, string>) => {
     await authorize();
     const remaining = deadline - Date.now();
@@ -88,16 +102,17 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
       }
       const issue = task.issue ? await ledger.getIssue(task.issue) : null;
       const comments = await ledger.listComments(`change:${task.id}`);
-      const claim = await ledger.claimAgentRun({ runId, taskId: task.id, startingCommit: observedHead || task.currentCommit || task.baseCommit, branch: task.workspace.branch, startingBranchHead: observedHead || null,
+      const claim = await ledger.claimAgentRun({ ...(selectedTarget?{acceptedTarget:structuredClone(selectedTarget)}:{}), runId, taskId: task.id, startingCommit: observedHead || task.currentCommit || task.baseCommit, branch: task.workspace.branch, startingBranchHead: observedHead || null,
         goal: task.goal, allowedScope: [...task.allowedScope], protectedPaths: [...settings.protectedPaths],
         context: { ...(issue ? { issue: { number: issue.number, title: issue.title.slice(0, 1000), summary: issue.body.slice(0, 6000) } } : {}), comments: comments.slice(-20).map((comment) => ({ id: comment.id, summary: `${comment.author}${comment.path ? ` on ${comment.path}${comment.line ? `:${comment.line}` : ""}` : ""}: ${comment.body}`.slice(0, 1500) })) },
       });
       if (claim.kind === "busy") throw new Error("Another durable agent generation owns this change");
       durable = claim.run;
     }
-    const ownership = await ledger.claimAgentRun({ runId: durable.runId, taskId: durable.taskId, branch: durable.branch, startingBranchHead: durable.startingBranchHead, startingCommit: durable.startingCommit, goal: durable.goal, context: durable.context, allowedScope: durable.allowedScope, protectedPaths: durable.protectedPaths });
+    const ownership = await ledger.claimAgentRun({ ...(durable.acceptedTarget?{acceptedTarget:durable.acceptedTarget}:{}), runId: durable.runId, taskId: durable.taskId, branch: durable.branch, startingBranchHead: durable.startingBranchHead, startingCommit: durable.startingCommit, goal: durable.goal, context: durable.context, allowedScope: durable.allowedScope, protectedPaths: durable.protectedPaths });
     if (ownership.kind === "busy" || ownership.run.runId !== runId) throw new Error("Another durable agent generation owns this change");
     durable = ownership.run;
+    assertTarget();
     if (durable.taskId !== task.id || durable.branch !== task.workspace.branch || durable.phase === "failed") throw new Error("Agent generation is unavailable; inspect its saved proposal and branch");
     r = await run(`git -C ${WORK} checkout --quiet -B ${q(task.workspace.branch)} ${q(durable.startingCommit)}`);
     if (!r.success) throw new Error("Agent could not restore its branch; no changes were made");
@@ -116,10 +131,11 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
         if (content.length > MAX_FILE_BYTES || total + content.length > MAX_CONTEXT_BYTES) continue;
         total += content.length; files[file] = content;
       }
-      const context = [durable.context.issue ? `Issue #${durable.context.issue.number}: ${durable.context.issue.title}\n${durable.context.issue.summary}` : "", ...durable.context.comments.map((comment) => comment.summary), `Continue from saved Git commit ${durable.startingCommit}.`].filter(Boolean).join("\n\n");
+      const acceptedContext=durable.acceptedTarget?`Existing accepted behavior on ${durable.acceptedTarget.ref} at ${durable.acceptedTarget.acceptedCommit} (preserve unless this task explicitly proposes a change):\n${durable.acceptedTarget.requirements.filter(requirement=>requirement.status==="approved").map(requirement=>`- ${requirement.title}: ${requirement.description}`).join("\n")}`:"";
+      const context = [acceptedContext,durable.context.issue ? `Issue #${durable.context.issue.number}: ${durable.context.issue.title}\n${durable.context.issue.summary}` : "", ...durable.context.comments.map((comment) => comment.summary), `Continue from saved Git commit ${durable.startingCommit}.`].filter(Boolean).join("\n\n");
       const ai = new WorkersAIClient({ binding: env.AI, gatewayId: env.AI_GATEWAY_ID, model: DEFAULT_CODE_MODEL, maxCalls: spending.maxCalls, maxOutputTokens: spending.maxOutputTokens, beforeDispatch: async ({ model, inputBytes, maxOutputTokens }) => {
         if (model !== DEFAULT_CODE_MODEL || Date.now() >= deadline) throw new Error("Managed execution model or deadline unavailable");
-        await assertManagedInitiator(env, ledger, options?.parentWorkflowId, options?.accountKey, task.id);
+        await authorize();
         await globalOf(env).consumeManagedSpend(runId, inputBytes, maxOutputTokens, 0);
       } });
       const response=await ai.complete(buildAgentPrompt(frozenTask,task.contributor.name,files,settings.checkCommand,context));
