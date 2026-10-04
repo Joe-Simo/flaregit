@@ -2,9 +2,17 @@ import worker, { RepositoryController } from "../../src/server/worker";
 import { accountKeyFor } from "../../src/server/projects";
 import { TICKET_BOOKING_POLICY } from "../../src/fixtures/ticket-booking/policy";
 import { createPreviewStorageManifest } from "../../src/server/preview-storage-upload";
+import { RepositoryPreviewGenerations } from "../../src/server/preview-generations";
 import type { Env } from "../../src/server/env";
 const projectId="abcdef123456",commit="a".repeat(40),prefix=`builds/${projectId}/${commit}`;
 export class GenerationApiFixture extends RepositoryController {
+  async pendingReplacement(){
+    const identity=await this.previewStorageScope(commit,"fixture-repo"),ledger=new RepositoryPreviewGenerations(this.ctx.storage);
+    const first=ledger.begin(identity,"owner",null,crypto.randomUUID(),prefix).record;
+    ledger.markBuilding(first.generation);ledger.promote(first.generation,identity,"c".repeat(64));
+    const next=ledger.begin(identity,"owner",first.generation,crypto.randomUUID(),prefix).record;
+    return{active:first.generation,latest:next.generation};
+  }
   snapshot(){return {holds:this.ctx.storage.sql.exec("SELECT physical_key,bytes FROM preview_storage_reservations").toArray(),writers:this.ctx.storage.sql.exec("SELECT physical_key,closed,pending FROM preview_copy_writers").toArray()};}
 }
 interface FixtureEnv extends Omit<Env,"REPOSITORY_CONTROLLER"> { REPOSITORY_CONTROLLER:DurableObjectNamespace<GenerationApiFixture> }
@@ -25,6 +33,13 @@ export default {async fetch(request:Request,env:FixtureEnv,ctx:ExecutionContext)
     return Response.json(tokens); }catch(error){return new Response(String(error),{status:500});}
   }
   if(path==="/fixture/snapshot")return Response.json({...await global.snapshot(),computeCalls});
+  if(path==="/fixture/ready"){
+    await env.EVIDENCE_BUCKET.put(`${prefix}/index.html`,"private html");
+    return new Response("Ready");
+  }
+  if(path==="/fixture/pending-replacement"){
+    return Response.json(await project.pendingReplacement());
+  }
   const production={...env,REPOSITORY_CONTROLLER:env.REPOSITORY_CONTROLLER,API_LIMITER:{limit:async()=>({success:true})},INTEGRATOR:{getByName:()=>{computeCalls++;throw new Error("Compute should not dispatch in storage denial fixture");}}} as unknown as Env;
   return worker.fetch(request,production,ctx);
 }};

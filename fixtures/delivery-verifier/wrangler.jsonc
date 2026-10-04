@@ -1,0 +1,10 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "flaregit-owned-delivery-verifier",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-02",
+  "workers_dev": true,
+  "observability": { "enabled": false },
+  "durable_objects": { "bindings": [{ "name": "RECEIPTS", "class_name": "DeliveryReceipts" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DeliveryReceipts"] }]
+}

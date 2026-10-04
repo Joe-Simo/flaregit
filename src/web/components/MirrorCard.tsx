@@ -6,9 +6,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiJson } from "../api";
 import { timeAgo } from "../router";
 import { useVisiblePolling } from "../use-visible-polling";
+import { mirrorStatus } from "../mirror-status";
 
-type RunStatus = "ok" | "diverged" | "auth_failed" | "error" | "pending";
-interface MirrorRun { id: string; commit: string; status: RunStatus; detail: string; at: string }
+interface MirrorRun { id: string; commit: string; status: string; detail: string; at: string }
 interface MirrorInfo { target: string | null; enabled: boolean; hasToken: boolean; runs: MirrorRun[] }
 type Busy = null | "save" | "toggle" | "remove" | "retry";
 
@@ -16,8 +16,6 @@ const field = "w-full rounded-md border border-border bg-background px-3 py-2 te
 const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive";
 const okCls = "rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-200";
 const errText = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback);
-const LABEL: Record<RunStatus, string> = { ok: "Mirrored", diverged: "GitHub diverged", auth_failed: "Token rejected", error: "Failed", pending: "Queued" };
-const VARIANT: Record<RunStatus, "success" | "warning" | "destructive" | "secondary"> = { ok: "success", diverged: "warning", auth_failed: "destructive", error: "destructive", pending: "secondary" };
 
 export function MirrorCard({ projectId, isOwner }: { projectId: string; isOwner: boolean }) {
   const [info, setInfo] = useState<MirrorInfo | null>(null);
@@ -81,7 +79,7 @@ export function MirrorCard({ projectId, isOwner }: { projectId: string; isOwner:
         <CardTitle className="text-sm flex flex-wrap items-center gap-2">
           Mirror to GitHub
           {info?.target && <Badge variant={info.enabled ? "secondary" : "outline"}>{info.enabled ? "On" : "Paused"}</Badge>}
-          {last && last.status !== "ok" && <Badge variant={VARIANT[last.status]}>{LABEL[last.status]}</Badge>}
+          {last && last.status !== "ok" && <Badge variant={mirrorStatus(last.status).variant}>{mirrorStatus(last.status).label}</Badge>}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 text-sm min-w-0">
@@ -129,7 +127,7 @@ export function MirrorCard({ projectId, isOwner }: { projectId: string; isOwner:
             {info.runs.slice(0, 10).map((r) => (
               <li key={r.id} className="py-2 flex flex-col gap-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant={VARIANT[r.status]}>{LABEL[r.status]}</Badge>
+                  <Badge variant={mirrorStatus(r.status).variant}>{mirrorStatus(r.status).label}</Badge>
                   <code className="text-xs break-all" title={r.commit}>{r.commit.slice(0, 12)}</code>
                   <span className="text-xs text-muted-foreground ml-auto">{timeAgo(r.at)}</span>
                 </div>

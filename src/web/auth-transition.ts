@@ -6,6 +6,8 @@ export function authTransition(snapshot:AuthTransitionSnapshot):'pending'|'signe
  if(snapshot.signedIn===true&&snapshot.userId&&snapshot.sessionId&&snapshot.sessionUserId===snapshot.userId&&snapshot.sessionStatus==='active')return 'signed-in';
  return 'pending';
 }
+/** One continuous pending attempt keeps its deadline while SDK identity fields settle. */
+export function authRecoveryPending(snapshot:AuthTransitionSnapshot,signingIn:boolean):boolean{return authTransition(snapshot)==="pending"&&(signingIn||snapshot.signedIn===true||Boolean(snapshot.userId)||Boolean(snapshot.sessionId));}
 export function signInRecoveryUrl(destination:string):string{const safe=safeSignInReturn(destination)??'/';return `/#${safe}${safe.includes('?')?'&':'?'}signin=1`;}
 
 export function recoverSignIn(destination:string,browser:{replace:(url:string)=>void;reload:()=>void}):void{browser.replace(signInRecoveryUrl(destination));browser.reload();}

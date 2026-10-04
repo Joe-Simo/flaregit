@@ -773,7 +773,13 @@ export class RepositoryController extends DurableObject<Env> {
     if(!record||record.state!=="ready"||record.identity.commit!==commit||record.identity.incarnation!==inc||!record.manifestHash)return false;
     try{const scope=await this.previewStorageScope(commit,this.load().canonicalRepoName);return JSON.stringify(scope)===JSON.stringify(record.identity);}catch{return false;}
   }
-  async previewLegacyGenerationAllowed(commit:string){return !new RepositoryPreviewGenerations(this.ctx.storage).latest(commit);}
+  async previewLegacyGenerationAllowed(commit:string){
+    const generations=new RepositoryPreviewGenerations(this.ctx.storage);
+    if(!generations.latest(commit))return true;
+    // A requested or failed replacement does not revoke the prior immutable build.
+    // Promotion retires the legacy route; owner/incarnation checks still precede reads.
+    try{const scope=await this.previewStorageScope(commit,this.load().canonicalRepoName),latest=generations.latest(commit);return !!latest&&!generations.active(commit)&&JSON.stringify(scope)===JSON.stringify(latest.identity);}catch{return false;}
+  }
   private savedPreviewManifest(key:string,identity:PreviewStorageIdentity){
     new PreviewStorageLedger(this.ctx.storage);
     const row=this.ctx.storage.sql.exec<{payload:string}>("SELECT payload FROM preview_storage_reservations WHERE physical_key=?",key).toArray()[0];

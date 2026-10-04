@@ -1578,12 +1578,23 @@ export default {
           const previewOrigin = registration.status === "active" ? registration.origin : null;
           if (!previewOrigin || !env.PREVIEW_SIGNING_KEY) return json({ ready: false, status: "unavailable", canRetry: false, reason: "An isolated preview origin has not been configured for this repository. The platform operator must provision its preview Worker before a link can be opened." });
           const latestGeneration=await project.previewGenerationLatest(commit);
+          const replacementPending=latestGeneration?.state==="requested"||latestGeneration?.state==="building";
+          const readyRecovery=async()=>{
+            if(!isOwner||commit!==state.acceptedState.currentCommit||settings.fixture!=="ticket-booking")return undefined;
+            let canRecover=false;
+            if(!replacementPending)try{const scope=await project.previewStorageScope(commit,state.canonicalRepoName);canRecover=(await fundedPreviewSource(env,scope,latestGeneration)).capacity.allowed;}catch{/* Unknown storage funding never enables a rebuild. */}
+            return{canRecover,expectedGeneration:latestGeneration?.generation??null,detail:"Rebuild this accepted commit using a separate storage allowance; existing assets and Git history remain preserved."};
+          };
           if(latestGeneration){
             const active=await project.previewGenerationActive(commit);
             if(active&&await project.previewGenerationForRead(commit,active.identity.incarnation,active.generation)){
               const origin=previewOrigin;
               const {exp,sig}=await signPreviewGeneration(env,projectId,commit,active.identity.incarnation,active.generation,origin);
-              return Response.json({ready:true,status:"available",generationId:active.generation,credentialCleanup:await project.previewGenerationCredentialSummary(active.generation),url:`${origin}/preview-v3/${commit}/${active.identity.incarnation}/${active.generation}/${exp}/${sig}/`,expiresAt:new Date(exp*1000).toISOString()},{headers:{"Cache-Control":"no-store"}});
+              return Response.json({ready:true,status:"available",generationId:active.generation,generationRecovery:await readyRecovery(),...(latestGeneration.generation!==active.generation?{replacement:{generationId:latestGeneration.generation,status:latestGeneration.state}}:{}),credentialCleanup:await project.previewGenerationCredentialSummary(active.generation),url:`${origin}/preview-v3/${commit}/${active.identity.incarnation}/${active.generation}/${exp}/${sig}/`,expiresAt:new Date(exp*1000).toISOString()},{headers:{"Cache-Control":"no-store"}});
+            }
+            if(await project.previewLegacyGenerationAllowed(commit)&&await env.EVIDENCE_BUCKET.head(`${buildPrefix(projectId,commit)}/index.html`)){
+              const {exp,sig}=await signPreview(env,projectId,commit,previewOrigin);
+              return Response.json({ready:true,status:"available",generationRecovery:await readyRecovery(),replacement:{generationId:latestGeneration.generation,status:latestGeneration.state},url:`${previewOrigin}/preview/${commit}/${exp}/${sig}/`,expiresAt:new Date(exp*1000).toISOString()},{headers:{"Cache-Control":"no-store"}});
             }
             let canRecover=false;
             if(isOwner&&commit===state.acceptedState.currentCommit){try{const scope=await project.previewStorageScope(commit,state.canonicalRepoName);canRecover=(await fundedPreviewSource(env,scope,latestGeneration)).capacity.allowed;}catch{/* Unknown storage funding never enables recovery. */}}
@@ -1609,7 +1620,7 @@ export default {
             return json({ready:false,status,generationRecovery,canRetry:!unfinishedWriter&&(!storageUnavailable||fundingRetryEligible)&&isOwner&&commit===state.acceptedState.currentCommit&&settings.fixture==="ticket-booking",reason:(unfinishedWriter&&failed)?"Preview publication has unfinished upload receipts; storage reconciliation is required":storageUnavailable?(fundingRetryEligible?"Preview storage allowance is available again; the owner can retry":"Preview storage allowance requires operator attention; retry cannot restore capacity"):failed?"Build failed; retry requires owner action":status==="unavailable"?"Compute budget unavailable":undefined});
           }
           const { exp, sig } = await signPreview(env, projectId, commit, previewOrigin);
-          return Response.json({ ready: true, status:"available", url: `${previewOrigin}/preview/${commit}/${exp}/${sig}/`, expiresAt: new Date(exp * 1000).toISOString() }, { headers: { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff" } });
+          return Response.json({ ready: true, status:"available", generationRecovery:await readyRecovery(), url: `${previewOrigin}/preview/${commit}/${exp}/${sig}/`, expiresAt: new Date(exp * 1000).toISOString() }, { headers: { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff" } });
         }
 
         // ----- issues -----

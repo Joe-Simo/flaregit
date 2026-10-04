@@ -11,14 +11,16 @@ export function PublicProfile({ handle }: { handle: string }) {
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
+    const deadline = AbortSignal.timeout(15_000);
+    const signal = AbortSignal.any([controller.signal, deadline]);
     setData(null); setError(null);
     void (async () => {
       try {
-        const response = await fetch(`/api/profiles/${encodeURIComponent(handle)}`, { credentials: "omit", cache: "no-store", signal: controller.signal });
+        const response = await fetch(`/api/profiles/${encodeURIComponent(handle)}`, { credentials: "omit", cache: "no-store", signal });
         if (!response.ok) throw new Error(response.status === 404 ? "This profile is private or unavailable." : response.status === 409 ? "Public profile state changed while loading. Retry to read its current state." : response.status === 429 ? "Too many profile requests. Please wait before retrying." : "Public profile could not be loaded.");
         const result = await response.json() as PublishedProfile;
         if (!controller.signal.aborted) setData(result);
-      } catch (failure) { if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Profile could not be loaded."); }
+      } catch (failure) { if (!controller.signal.aborted) setError(deadline.aborted ? "The profile request timed out. Retry to load its current public state." : failure instanceof Error ? failure.message : "Profile could not be loaded."); }
     })();
     return () => controller.abort();
   }, [handle, attempt]);

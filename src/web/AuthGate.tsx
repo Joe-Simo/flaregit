@@ -13,7 +13,7 @@ import { About } from "./pages/About";
 import { Community } from "./pages/Community";
 import { CloudflareBadgeFooter } from "./components/CloudflareBadge";
 import { safeSignInReturn, explicitSignInReturn, initialSignInReturn, isSignInCallback, callbackSignInReturn, initialSignInActive } from "./sign-in-return";
-import { authTransition, recoverSignIn } from "./auth-transition";
+import { authTransition, authRecoveryPending, recoverSignIn } from "./auth-transition";
 import { loadAuthConfiguration } from "./auth-configuration";
 import { navigate, useRoute } from "./router";
 
@@ -25,9 +25,9 @@ function SignInReturn({ destination }: { destination: string | null }) {
   return null;
 }
 export function AuthTransitionSurface({snapshot,signingIn,onRetry,signedOut,signedIn,landing}:{snapshot:Parameters<typeof authTransition>[0];signingIn:boolean;onRetry:()=>void;signedOut:React.ReactNode;signedIn:React.ReactNode;landing:React.ReactNode}){
-  const phase=authTransition(snapshot),securePending=phase==="pending"&&(signingIn||snapshot.signedIn===true||Boolean(snapshot.userId)||Boolean(snapshot.sessionId));
+  const phase=authTransition(snapshot),securePending=authRecoveryPending(snapshot,signingIn);
   const [expired,setExpired]=useState(false);
-  useEffect(()=>{setExpired(false);if(!securePending)return;const timer=setTimeout(()=>setExpired(true),15_000);return()=>clearTimeout(timer);},[securePending,snapshot.userId,snapshot.sessionId]);
+  useEffect(()=>{setExpired(false);if(!securePending)return;const timer=setTimeout(()=>setExpired(true),15_000);return()=>clearTimeout(timer);},[securePending]);
   if(phase==="signed-out")return signedOut;
   if(phase==="signed-in")return signedIn;
   if(!securePending)return landing;

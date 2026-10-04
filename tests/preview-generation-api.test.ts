@@ -32,5 +32,13 @@ test("production recovery HTTP gates owner access and preserves unknown holds at
     expect((await call(route,tokens.owner,body)).status).toBe(409);
     const duplicate=await call(route,tokens.owner,body);expect(duplicate.status).toBe(202);expect(await duplicate.json()).toMatchObject({status:"failed"});
     const after=await snapshot();expect(after.holds).toEqual(before.holds);expect(after.writers).toEqual(before.writers);expect(after.computeCalls).toBe(0);
+    const fundedCall=(path:string,token?:string)=>fetch(new URL(path,fundedUrl),{headers:{"CF-Connecting-IP":"198.51.100.21",...(token?{Authorization:`Bearer ${token}`}:{})}});
+    await fundedCall("/fixture/ready");
+    const readyPath=`/api/p/abcdef123456/preview?commit=${"a".repeat(40)}`;
+    expect(await(await fundedCall(readyPath,fundedTokens.owner)).json()).toMatchObject({ready:true,generationRecovery:{canRecover:true,expectedGeneration:null}});
+    expect(await(await fundedCall(readyPath,fundedTokens.member)).json()).not.toHaveProperty("generationRecovery");
+    const pending=await(await fundedCall("/fixture/pending-replacement")).json() as {active:string;latest:string};
+    expect(await(await fundedCall(readyPath,fundedTokens.owner)).json()).toMatchObject({ready:true,generationId:pending.active,replacement:{generationId:pending.latest,status:"requested"},generationRecovery:{canRecover:false,expectedGeneration:pending.latest}});
+    expect((await snapshot()).computeCalls).toBe(0);
   }finally{await mf.dispose();}
 },30_000);

@@ -33,6 +33,11 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const draftId = useId();
+  const anchorId = useId();
+  const draftInput = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    if (anchor) draftInput.current?.focus({ preventScroll: true });
+  }, [anchor?.path, anchor?.line, anchor?.commit]);
   const lifetime = useRef(0);
   const readSequence = useRef(0);
   useEffect(() => { lifetime.current++; return () => { lifetime.current++; readSequence.current++; }; }, [projectId, subject]);
@@ -122,10 +127,10 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
       )}
       <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); void send(); }}>
         {anchor && (
-          <p className="text-xs text-muted-foreground break-all">Commenting on <code>{anchor.path}:{anchor.line}</code> at <code title={anchor.commit}>{anchor.commit.slice(0, 7)}</code> <button type="button" className="underline" onClick={onAnchorUsed}>clear</button></p>
+          <p id={anchorId} className="text-xs text-muted-foreground break-all">Commenting on <code>{anchor.path}:{anchor.line}</code> at <code title={anchor.commit}>{anchor.commit.slice(0, 7)}</code> <button type="button" className="underline" onClick={onAnchorUsed}>clear</button></p>
         )}
         <label htmlFor={draftId} className="sr-only">Comment</label>
-        <textarea id={draftId} className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm" rows={3} maxLength={10000} value={draft} disabled={saving}
+        <textarea ref={draftInput} id={draftId} aria-describedby={anchor ? anchorId : undefined} className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm" rows={3} maxLength={10000} value={draft} disabled={saving}
           onChange={(e) => { setDraft(e.target.value); setSaved(false); }}
           onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void send(); } }}
           placeholder="Write a comment (⌘/Ctrl+Enter to send)" />
