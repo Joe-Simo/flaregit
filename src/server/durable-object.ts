@@ -14,6 +14,9 @@ import {openRepositoryRead,RepositoryReadError} from "./repository-read-budget.j
 import {SavedRebaseResumeCredentials,type SavedRebaseResumeCredentialPurpose} from "./saved-rebase-resume-credentials.js";
 import {RebaseResumeAttempts,assertRebaseResumeSessionDelegation,type RebaseResumeAttempt} from "./rebase-resume-attempts.js";
 import {RebaseRecoveryLedger,RebaseRecoveryError,verifyRebaseRecovery,type RebaseRecoverySnapshot,type RebaseRecoveryReport,type RebaseRecoveryReceipt,type RebaseRecoveryProof} from "./rebase-recovery.js";
+import { MigrationIssuesLedger, type MigrationIssueScope, type MigrationIssueAuthority } from "./migration-issues-ledger.js";
+import { readGithubMigrationSlice, migrationPageFromGithubCapture, normalizeGithubMigrationSource } from "./github-migration-reader.js";
+import { MigrationConversationPublication, type ImportedConversationOrigin } from "./migration-conversation-publication.js";
 import { RepositoryReviewLedger, type RepositoryReviewPolicy, type CandidateReviewScope, type ReviewDecision } from "./repository-review-ledger.js";
 import { AgentRuntimeLedger, type AgentNativeAttemptIdentity } from "./agent-runtime-ledger.js";
 import { AgentCredentialIncidents, type AgentCredentialScope } from "./agent-credential-incidents.js";
@@ -144,6 +147,7 @@ export interface TokenScope {
 }
 
 export interface IssueRow {
+  importedOrigin?:ImportedConversationOrigin|null;
   number: number;
   title: string;
   body: string;
@@ -157,6 +161,7 @@ export interface IssueRow {
 
 /** One conversation model for issues, changes and candidates: subject is "issue:<n>", "change:<id>" or "candidate:<id>". */
 export interface CommentRow {
+  importedOrigin?:ImportedConversationOrigin|null;
   id: number;
   subject: string;
   author: string;
@@ -365,6 +370,13 @@ export interface Ledger {
   recordAgentCredential(attemptId:string,issuanceId:string,token:string,expiresAt:number):Promise<void>;
   revokeAgentCredential(issuanceId:string):Promise<boolean>;
   confirmAgentNativeStopped(attemptId:string,nativeId:string):Promise<boolean>;
+  conversationMigrationSource(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["conversationMigrationSource"]>;
+  beginConversationMigration(input:{operationId:string;repositoryId:string;repositoryNodeId:string},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["beginConversationMigration"]>;
+  conversationMigration(id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["conversationMigration"]>;
+  listConversationMigrations(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["listConversationMigrations"]>;
+  captureConversationMigration(id:string,expectedRevision:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["captureConversationMigration"]>;
+  conversationMigrationManifest(id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["conversationMigrationManifest"]>;
+  publishConversationMigration(id:string,input:{eventId:string;expectedRevision:number;manifestHash:string},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["publishConversationMigration"]>;
   repositoryReviewSettings(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["repositoryReviewSettings"]>;
   configureRepositoryReviewPolicy(input:{eventId:string;expectedVersion:number;policy:RepositoryReviewPolicy},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["configureRepositoryReviewPolicy"]>;
   setRepositoryReviewGrant(input:{eventId:string;userId:string;expectedVersion:number;enabled:boolean},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["setRepositoryReviewGrant"]>;
@@ -1246,6 +1258,15 @@ export class RepositoryController extends DurableObject<Env> {
   async accountArtifactDeleted(name:string):Promise<boolean> {this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS account_artifact_deletions(name TEXT PRIMARY KEY)");return this.ctx.storage.sql.exec("SELECT name FROM account_artifact_deletions WHERE name=?",name).toArray().length>0;}
   async recordAccountArtifactDeleted(name:string):Promise<void> {this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS account_artifact_deletions(name TEXT PRIMARY KEY)");this.ctx.storage.sql.exec("INSERT OR IGNORE INTO account_artifact_deletions VALUES(?)",name);}
 
+  protected async migrationProviderFetch(request:Request):Promise<Response>{return fetch(request);}
+  async conversationMigrationSource(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const initial=await this.authorizeHumanDecision(actor,credentialHash,true);initial();const state=this.load(),incarnation=new PrivateRecoveryOperations(this.ctx.storage).incarnation();const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);const accountKey=await accountKeyFor(actor.userId),job=await accountOf(this.env,accountKey).getImportJob(state.projectId);authorize();if(!job||job.ownerId!==actor.userId||job.status!=="ready"||job.canonicalRepoName!==state.canonicalRepoName)throw Error("A ready imported repository owned by this account is required");const sourceUrl=normalizeGithubMigrationSource(job.source);if(state.projectId!==this.load().projectId||incarnation!==this.readRepositoryIncarnation())throw Error("Import scope changed");return{projectId:state.projectId,incarnation,ownerId:actor.userId,accountKey,sourceUrl};}
+  private async conversationAuthority(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<MigrationIssueAuthority>{const context=await this.conversationMigrationSource(actor,credentialHash,sessionExpiresAt),authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);const assertCurrent=(scope:MigrationIssueScope)=>{authorize();if(scope.projectId!==context.projectId||scope.incarnation!==context.incarnation||scope.ownerId!==actor.userId||scope.sourceUrl!==context.sourceUrl||this.readRepositoryIncarnation()!==context.incarnation)throw Error("Conversation migration authority changed");};return{assertCurrent,authorize:async scope=>{assertCurrent(scope);const fresh=await this.conversationMigrationSource(actor,credentialHash,sessionExpiresAt);if(JSON.stringify(fresh)!==JSON.stringify(context))throw Error("Saved import source changed");assertCurrent(scope);}};}
+  async beginConversationMigration(input:{operationId:string;repositoryId:string;repositoryNodeId:string},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const context=await this.conversationMigrationSource(actor,credentialHash,sessionExpiresAt),authority=await this.conversationAuthority(actor,credentialHash,sessionExpiresAt);return new MigrationIssuesLedger(this.ctx.storage).begin({...input,projectId:context.projectId,incarnation:context.incarnation,ownerId:context.ownerId,sourceUrl:context.sourceUrl,provider:"github"},authority);}
+  async conversationMigration(id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const ledger=new MigrationIssuesLedger(this.ctx.storage),snapshot=ledger.get(id);if(!snapshot)throw Error("Saved conversation migration unavailable");const authority=await this.conversationAuthority(actor,credentialHash,sessionExpiresAt);await authority.authorize(snapshot.scope);authority.assertCurrent(snapshot.scope);return{snapshot:ledger.get(id)!,publication:new MigrationConversationPublication(this.ctx.storage).get(id)};}
+  async listConversationMigrations(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const context=await this.conversationMigrationSource(actor,credentialHash,sessionExpiresAt),ledger=new MigrationIssuesLedger(this.ctx.storage),publication=new MigrationConversationPublication(this.ctx.storage),rows=this.ctx.storage.sql.exec<{id:string}>("SELECT id FROM migration_issue_operations WHERE json_extract(scope,'$.incarnation')=? AND json_extract(scope,'$.ownerId')=? ORDER BY rowid DESC LIMIT 21",context.incarnation,actor.userId).toArray();return{operations:rows.slice(0,20).map(row=>({snapshot:ledger.get(row.id)!,publication:publication.get(row.id)})),truncated:rows.length>20};}
+  async captureConversationMigration(id:string,expectedRevision:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){if(!Number.isSafeInteger(expectedRevision)||expectedRevision<0)throw Error("Exact saved revision required");const ledger=new MigrationIssuesLedger(this.ctx.storage),snapshot=ledger.get(id);if(!snapshot)throw Error("Saved conversation migration unavailable");const authority=await this.conversationAuthority(actor,credentialHash,sessionExpiresAt);await authority.authorize(snapshot.scope);if(expectedRevision<snapshot.revision||snapshot.status!=="pending")return this.conversationMigration(id,actor,credentialHash,sessionExpiresAt);if(expectedRevision!==snapshot.revision)throw Error("Migration revision changed; refresh");const accountKey=await accountKeyFor(actor.userId);await readGithubMigrationSlice(snapshot.scope,snapshot.cursor,{authorize:authority.authorize,beforeCall:async scope=>{await authority.authorize(scope);if(!(await globalOf(this.env).reserveCoreGitOperation(`conversation-read-${crypto.randomUUID()}`,accountKey,this.currentGitBudget())).allowed)throw Error("Conversation read allowance unavailable; saved cursor retained");await authority.authorize(scope);},fetch:request=>this.migrationProviderFetch(request),capture:async(_scope,page)=>{await ledger.capture(id,migrationPageFromGithubCapture(page,expectedRevision),authority);}});return this.conversationMigration(id,actor,credentialHash,sessionExpiresAt);}
+  async conversationMigrationManifest(id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authority=await this.conversationAuthority(actor,credentialHash,sessionExpiresAt),ledger=new MigrationIssuesLedger(this.ctx.storage),manifest=await ledger.manifest(id,authority);return{manifest,missing:this.ctx.storage.sql.exec<{kind:string;sourceId:string;reason:string}>("SELECT kind,source_id AS sourceId,reason FROM migration_issue_missing WHERE op=? ORDER BY kind,source_id LIMIT 20",id).toArray(),issuePreview:ledger.origins(id,"0",10).map(row=>({...row,body:row.body.slice(0,2000)})),commentPreview:ledger.comments(id,"0",10).map(row=>({...row,body:row.body.slice(0,2000)}))};}
+  async publishConversationMigration(id:string,input:{eventId:string;expectedRevision:number;manifestHash:string},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authority=await this.conversationAuthority(actor,credentialHash,sessionExpiresAt),manifest=await new MigrationIssuesLedger(this.ctx.storage).manifest(id,authority);await authority.authorize(manifest.scope);return new MigrationConversationPublication(this.ctx.storage).publish(manifest,input,()=>authority.assertCurrent(manifest.scope));}
   private delegatedReviews(){return new RepositoryReviewLedger(this.ctx.storage);}
   private reviewAuthors(tasks:Task[]):string[]{this.gitTables();const members=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members").toArray();return [...new Set(tasks.flatMap(task=>{const ids=[task.contributor,...(task.initiatedBy?[task.initiatedBy]:[])].filter(value=>value.type==="human").map(value=>value.id);const writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",task.id).toArray()[0]?.user_id;return [...(writer?[writer]:[]),...members.filter(member=>ids.some(id=>member.user_id===id||member.user_id.slice(-12)===id)).map(member=>member.user_id)];}))].sort();}
   private delegatedReviewScope(candidateId:string):CandidateReviewScope {
@@ -2670,12 +2691,12 @@ export class RepositoryController extends DurableObject<Env> {
     const row = this.ctx.storage.sql
       .exec("SELECT i.*, (SELECT COUNT(*) FROM comments c WHERE c.subject = 'issue:' || i.number) AS comments FROM issues i WHERE number = ?", n)
       .toArray()[0];
-    return (row as unknown as IssueRow) ?? null;
+    if(!row)return null;const origin=new MigrationConversationPublication(this.ctx.storage).issueOrigin(n);return origin?{...(row as unknown as IssueRow),importedOrigin:origin}:row as unknown as IssueRow;
   }
   async listIssues(state: "open" | "closed"): Promise<IssueRow[]> {
     return this.ctx.storage.sql
       .exec("SELECT i.*, (SELECT COUNT(*) FROM comments c WHERE c.subject = 'issue:' || i.number) AS comments FROM issues i WHERE state = ? ORDER BY number DESC LIMIT 200", state)
-      .toArray() as unknown as IssueRow[];
+      .toArray().map(row=>{const issue=row as unknown as IssueRow;const origin=new MigrationConversationPublication(this.ctx.storage).issueOrigin(issue.number);return origin?{...issue,importedOrigin:origin}:issue;});
   }
   async getIssue(n: number): Promise<IssueRow | null> {
     return this.issueRow(n);
@@ -2726,7 +2747,7 @@ export class RepositoryController extends DurableObject<Env> {
       } catch { throw new Error("Invalid comment cursor"); }
     }
     const rows = this.ctx.storage.sql.exec('SELECT id,subject,author,body,path,line,"commit",created_at FROM comments WHERE subject=? AND id<? ORDER BY id DESC LIMIT 101', subject, before).toArray() as unknown as CommentRow[];
-    const page = rows.slice(0,100);
+    const publication=new MigrationConversationPublication(this.ctx.storage);const page = rows.slice(0,100).map(row=>{const origin=publication.commentOrigin(row.id);return origin?{...row,importedOrigin:origin}:row;});
     const nextCursor = rows.length > 100 ? btoa(JSON.stringify([subject,page.at(-1)!.id])).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "") : null;
     return { comments: page.reverse(), nextCursor, hasMore: nextCursor !== null };
   }

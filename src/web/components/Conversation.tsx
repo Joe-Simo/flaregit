@@ -1,3 +1,5 @@
+import {ImportedOrigin} from "./ImportedOrigin";
+import type {ImportedConversationOrigin} from "../../server/migration-conversation-publication";
 import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -5,7 +7,7 @@ import { apiJson, apiSessionIdentity } from "../api";
 import { clearConversationDraft, commentContent, readConversationDraft, saveConversationDraft, type CommentAnchor } from "../conversation-recovery";
 import { timeAgo } from "../router";
 
-export interface Comment { id: number; author: string; body: string; path: string | null; line: number | null; commit: string | null; created_at: string }
+export interface Comment { id: number; author: string; body: string; path: string | null; line: number | null; commit: string | null; created_at: string; importedOrigin?:ImportedConversationOrigin|null }
 
 interface CommentPage { comments: Comment[]; nextCursor: string | null; hasMore: boolean }
 
@@ -139,7 +141,7 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
           {comments.map((c) => (
             <li key={c.id} className="rounded-md border border-border p-3 text-sm">
               <div className="text-xs text-muted-foreground mb-1 break-words">
-                <span className="font-medium text-foreground">{c.author}</span> · {timeAgo(c.created_at)}
+                {c.importedOrigin?<ImportedOrigin sourceUrl={c.importedOrigin.sourceUrl} login={c.importedOrigin.login} createdAt={c.importedOrigin.createdAt}/>:<><span className="font-medium text-foreground">{c.author}</span> · {timeAgo(c.created_at)}</>}
                 {c.path && <> · <code className="break-all">{c.path}{c.line ? `:${c.line}` : ""}</code></>}
                 {c.commit && <> · <code title={c.commit}>{c.commit.slice(0, 7)}</code></>}
               </div>

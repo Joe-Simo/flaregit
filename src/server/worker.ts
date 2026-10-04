@@ -1,3 +1,4 @@
+import {readPublicGithubRepositoryIdentity} from "./github-migration-reader.js";
 import {repositoryReviewPolicySchema} from "./repository-review-ledger.js";
 import {importedAllocationReady} from "./import-allocation-readiness.js";
 import {inspectSavedImport} from "./import-read-lifecycle.js";
@@ -862,6 +863,37 @@ export default {
           }});
         }
         if (sub === "" && method === "GET") return json({ id: projectId, role, kind: state.kind ?? "demo", name: state.projectName, source: state.source ?? null, verification: state.verificationPolicy, protectedPaths: settings.protectedPaths, visibility: await project.repositoryVisibility(), ...(role === "owner" ? {moderation:ownerModerationNotice(await project.repositoryModerationState())} : {}) });
+        const conversationMigrationRoute=/^\/conversation-migrations\/([A-Za-z0-9_-]{1,200})(?:\/(capture|manifest|publish))?$/.exec(sub);
+        if(sub==="/conversation-migrations"||conversationMigrationRoute){
+          if(!isOwner)return text("Only the repository owner can migrate conversations",403);
+          const action=conversationMigrationRoute?.[2];
+          if([...url.searchParams.keys()].length||!(conversationMigrationRoute?(action==="capture"||action==="publish"?method==="POST":method==="GET"):method==="GET"||method==="POST"))return text("Invalid conversation migration request",400);
+          const freshOwner=async()=>{const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||(current.viaToken&&(current.tokenScope!=="full"||(current.tokenRepo&&current.tokenRepo!==projectId))))return text("Conversation migration owner authentication changed",403);return current;};
+          const current=await freshOwner();if(current instanceof Response)return current;
+          const actor={userId,displayName:"Repository owner",viaToken:current.viaToken===true},credentialHash=current.viaToken?await gitParentTokenHash(request):undefined;
+          try{
+            let result:unknown;
+            if(!conversationMigrationRoute&&method==="GET")result=await project.listConversationMigrations(actor,credentialHash,current.expiresAt);
+            else if(!conversationMigrationRoute){
+              const input=await body<{operationId?:unknown}>();if(input===null||typeof input!=="object"||Array.isArray(input)||Object.keys(input).some(key=>key!=="operationId")||typeof input.operationId!=="string"||!/^[A-Za-z0-9_-]{1,200}$/.test(input.operationId))return text("A stable conversation migration operation ID is required",400);
+              const source=await project.conversationMigrationSource(actor,credentialHash,current.expiresAt);
+              const authorize=async()=>{const fresh=await freshOwner();if(fresh instanceof Response)throw Error("Owner authentication changed");const now=await project.conversationMigrationSource(actor,credentialHash,fresh.expiresAt);if(JSON.stringify(now)!==JSON.stringify(source))throw Error("Conversation source changed");};
+              const identity=await readPublicGithubRepositoryIdentity(source.sourceUrl,authorize,async()=>{await authorize();const funding=await globalOf(env).reserveRepositoryReadOperation(`conversation-source-${crypto.randomUUID()}`,accountKey);if(!funding.allowed)throw Error("Conversation capture capacity unavailable");await authorize();});
+              const finalAuth=await freshOwner();if(finalAuth instanceof Response)return finalAuth;
+              result=await project.beginConversationMigration({operationId:input.operationId,repositoryId:identity.repositoryId,repositoryNodeId:identity.repositoryNodeId},actor,credentialHash,finalAuth.expiresAt);
+            }else if(action==="capture"){
+              const input=await body<{expectedRevision?:unknown}>();if(input===null||typeof input!=="object"||Array.isArray(input)||Object.keys(input).some(key=>key!=="expectedRevision")||typeof input.expectedRevision!=="number"||!Number.isSafeInteger(input.expectedRevision)||input.expectedRevision<0)return text("The exact staged capture revision is required",400);
+              result=await project.captureConversationMigration(conversationMigrationRoute[1]!,input.expectedRevision,actor,credentialHash,current.expiresAt);
+            }else if(action==="publish"){
+              const input=await body<{eventId?:unknown;expectedRevision?:unknown;manifestHash?:unknown}>();if(input===null||typeof input!=="object"||Array.isArray(input)||Object.keys(input).some(key=>!["eventId","expectedRevision","manifestHash"].includes(key))||typeof input.eventId!=="string"||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(input.eventId)||typeof input.expectedRevision!=="number"||!Number.isSafeInteger(input.expectedRevision)||input.expectedRevision<0||typeof input.manifestHash!=="string"||!/^[a-f0-9]{64}$/.test(input.manifestHash))return text("Exact staged manifest hash, revision, and stable publication event ID are required",400);
+              result=await project.publishConversationMigration(conversationMigrationRoute[1]!,{eventId:input.eventId,expectedRevision:input.expectedRevision,manifestHash:input.manifestHash},actor,credentialHash,current.expiresAt);
+            }else result=action==="manifest"?await project.conversationMigrationManifest(conversationMigrationRoute[1]!,actor,credentialHash,current.expiresAt):await project.conversationMigration(conversationMigrationRoute[1]!,actor,credentialHash,current.expiresAt);
+            const finalAuth=await freshOwner();if(finalAuth instanceof Response)return finalAuth;
+            await project.conversationMigrationSource(actor,credentialHash,finalAuth.expiresAt);
+            return repositoryReadJson(result);
+          }catch(error){if(error instanceof RequestBodyError)throw error;return repositoryReadJson({error:"Conversation migration was not confirmed. Saved pages and imported repository history remain preserved; refresh the staged operation before retrying."},409);}
+        }
+
         const historyOperationRoute = /^\/import-history\/(import-history-[a-f0-9-]{36})$/.exec(sub);
         if((sub==="/import-history"&&method==="POST")||(historyOperationRoute&&method==="GET")){
           if(!isOwner)return text("Only the owner can inspect import history",403);

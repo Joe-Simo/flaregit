@@ -18,6 +18,7 @@ import { MirrorCard } from "../components/MirrorCard";
 import { apiJson } from "../api";
 import { navigate } from "../router";
 
+const ConversationMigrationCard=lazy(async()=>({default:(await import("../components/ConversationMigrationCard")).ConversationMigrationCard}));
 const ReviewPolicySettings=lazy(async()=>({default:(await import("../components/ReviewPolicySettings")).ReviewPolicySettings}));
 const AgentCleanupRecovery=lazy(async()=>({default:(await import("../components/AgentCleanupRecovery")).AgentCleanupRecovery}));
 
@@ -175,6 +176,7 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
       <PrivateGitRecovery projectId={meta.id} isOwner={isOwner} />
       {isOwner && <StorageReconciliation projectId={meta.id} />}
       <DomainsCard projectId={meta.id} isOwner={isOwner} />
+      {isOwner&&meta.kind==="import"&&meta.source?.startsWith("https://github.com/")&&<Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Loading saved conversation migration…</p>}><ConversationMigrationCard key={`conversation-migration:${meta.id}`} projectId={meta.id}/></Suspense>}
       {isOwner && meta.kind === "import" && <ImportHistoryCard key={`import-history:${meta.id}`} projectId={meta.id} />}
       {isOwner && <MirrorCard projectId={meta.id} isOwner={isOwner} />}
 

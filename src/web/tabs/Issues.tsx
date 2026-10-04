@@ -1,3 +1,5 @@
+import {ImportedOrigin} from "../components/ImportedOrigin";
+import type {ImportedConversationOrigin} from "../../server/migration-conversation-publication";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { CircleCheck, CircleDot, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -8,7 +10,7 @@ import { navigate, timeAgo } from "../router";
 import { changeCreationFollowup, type ChangeCreationResponse } from "../change-creation-followup";
 import { Conversation } from "../components/Conversation";
 
-interface Issue { number: number; title: string; body: string; state: "open" | "closed"; author: string; created_at: string; updated_at: string; closed_by: string | null; comments: number }
+interface Issue { number: number; title: string; body: string; state: "open" | "closed"; author: string; created_at: string; updated_at: string; closed_by: string | null; comments: number; importedOrigin?:ImportedConversationOrigin|null }
 interface IssueDetail extends Omit<Issue, "comments"> { linked: Array<{ id: string; goal: string; status: string }> }
 const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm";
 const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive";
@@ -108,9 +110,10 @@ function IssueList({ projectId }: { projectId: string }) {
                 {i.state === "open" ? <CircleDot className="h-4 w-4 mt-0.5 text-emerald-400 shrink-0" aria-label="open" /> : <CircleCheck className="h-4 w-4 mt-0.5 text-purple-400 shrink-0" aria-label="closed" />}
                 <span className="min-w-0">
                   <span className="block text-sm font-medium break-words">{i.title}</span>
-                  <span className="block text-xs text-muted-foreground">#{i.number} by {i.author} · updated {timeAgo(i.updated_at)}{i.comments ? ` · ${i.comments} comment${i.comments === 1 ? "" : "s"}` : ""}</span>
+                  <span className="block text-xs text-muted-foreground">#{i.number}{!i.importedOrigin&&<> by {i.author}</>} · updated {timeAgo(i.updated_at)}{i.comments ? ` · ${i.comments} comment${i.comments === 1 ? "" : "s"}` : ""}</span>
                 </span>
               </button>
+              {i.importedOrigin&&<div className="px-3 pb-2"><ImportedOrigin sourceUrl={i.importedOrigin.sourceUrl} login={i.importedOrigin.login} createdAt={i.importedOrigin.createdAt}/></div>}
             </li>
           ))}
         </ul>
@@ -194,7 +197,7 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
       <div>
         <h2 className="text-lg font-semibold break-words">{issue.title} <span className="text-muted-foreground font-normal">#{issue.number}</span></h2>
         <p className="text-xs text-muted-foreground">
-          <Badge variant={issue.state === "open" ? "success" : "purple"}>{issue.state}</Badge> opened by {issue.author} {timeAgo(issue.created_at)}
+          <Badge variant={issue.state === "open" ? "success" : "purple"}>{issue.state}</Badge> {issue.importedOrigin?<ImportedOrigin sourceUrl={issue.importedOrigin.sourceUrl} login={issue.importedOrigin.login} createdAt={issue.importedOrigin.createdAt}/>:<>opened by {issue.author} {timeAgo(issue.created_at)}</>}
           {issue.closed_by && issue.state === "closed" ? ` · closed by ${issue.closed_by}` : ""}
         </p>
       </div>
