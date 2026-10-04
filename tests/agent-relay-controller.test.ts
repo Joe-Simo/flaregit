@@ -1,0 +1,21 @@
+import {expect,test} from "bun:test";
+import {Miniflare,convertV4MiniflareOptions} from "miniflare";
+import {workerdChild} from "./support/workerd-child";
+
+test("actual controller relay binds readonly ownership, proves same-run write claim, and keeps credentials server-side",async()=>{
+ if(await workerdChild("tests/agent-relay-controller.test.ts"))return;
+ const output=`/tmp/flaregit-agent-relay-controller-${crypto.randomUUID()}.js`,build=Bun.spawn([process.execPath,"build","tests/support/agent-relay-controller-worker.ts","--target=browser","--external=cloudflare:workers","--external=node:*",`--outfile=${output}`],{stdout:"ignore",stderr:"pipe"});let script:string;
+ try{if(await build.exited!==0)throw new Error(await new Response(build.stderr).text());script=await Bun.file(output).text();}finally{if(await Bun.file(output).exists())await Bun.file(output).delete();}
+ const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:"relay-controller",modules:true,script,compatibilityDate:"2026-10-03",compatibilityFlags:["nodejs_compat"],bindings:{ARTIFACT_STORAGE_NAMESPACE:"namespace"},durableObjects:{REPOSITORY_CONTROLLER:{className:"AgentRelayControllerFixture",useSQLite:true}}}]}));
+ try{const api=await mf.getWorker("relay-controller"),call=(path:string)=>api.fetch(`http://test${path}`,{method:"POST"});
+  const seed=await call("/seed");if(seed.status!==200)throw new Error(await seed.text());expect(seed.status).toBe(200);expect(await seed.json()).toMatchObject({access:"read",actorActive:true,accountActive:true});
+  expect((await call("/bad-read")).status).toBe(409);expect((await call("/claim")).status).toBe(200);const id=crypto.randomUUID();const credential=await call(`/credential?id=${id}`);expect(credential.status).toBe(200);expect(await credential.json()).toMatchObject({scope:"write",hasServerToken:true,minted:1});
+  expect((await call(`/transfer?id=${id}`)).status).toBe(200);await call("/move");expect((await call("/current")).status).toBe(200);expect((await call(`/transfer?id=${id}`)).status).toBe(409);
+  expect((await call(`/credential?id=${id}`)).status).toBe(409);expect(await(await call(`/revoke?id=${id}`)).json()).toMatchObject({revoked:true,count:1});
+  await call("/withdraw");expect((await call("/current")).status).toBe(409);expect(await(await call("/cleanup")).json()).toEqual({credentialsComplete:true});
+  // Independent fixture instances preserve unknown issuance and late known facts.
+  const callInstance=(name:string,path:string)=>api.fetch(`http://test${path}`,{method:"POST",headers:{"x-fixture-instance":name}});
+  expect((await callInstance("unknown","/seed")).status).toBe(200);expect((await callInstance("unknown","/claim")).status).toBe(200);await callInstance("unknown","/issuance-fault");const unknownId=crypto.randomUUID();expect((await callInstance("unknown",`/credential?id=${unknownId}`)).status).toBe(409);expect(await(await callInstance("unknown",`/revoke?id=${unknownId}`)).json()).toMatchObject({revoked:false});expect(await(await callInstance("unknown","/cleanup")).json()).toEqual({credentialsComplete:false});
+  expect((await callInstance("late","/seed")).status).toBe(200);expect((await callInstance("late","/claim")).status).toBe(200);await callInstance("late","/withdraw-on-issue");const lateId=crypto.randomUUID();expect((await callInstance("late",`/credential?id=${lateId}`)).status).toBe(409);expect(await(await callInstance("late",`/revoke?id=${lateId}`)).json()).toMatchObject({revoked:true,count:1});expect(await(await callInstance("late","/cleanup")).json()).toEqual({credentialsComplete:true});
+ }finally{await mf.dispose();}
+},30000);

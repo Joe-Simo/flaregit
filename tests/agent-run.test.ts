@@ -7,7 +7,8 @@ import { expect, test } from "bun:test";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runAgentTask, type AgentExecutionLedger } from "../src/server/agent-run.js";
+import type { AgentExecutionEgressScope } from "../src/server/agent-execution-egress";
+import { runAgentTask, type RestrictedAgentRuntime, type AgentExecutionLedger } from "../src/server/agent-run.js";
 import type {CommittedAcceptedTarget} from "../src/core/accepted-target";
 import type { Task } from "../src/core/types.js";
 import { AgentRunLedger, type AgentRunInput, type AgentRunRecord } from "../src/server/agent-run-ledger.js";
@@ -37,7 +38,7 @@ async function fixture(options: { unborn?:boolean; lostPush?: boolean; lostCheck
   const spend = new ManagedSpendLedger(storage as unknown as DurableObjectStorage),native=new AgentRuntimeLedger(storage as unknown as DurableObjectStorage),credentials=new AgentCredentialIncidents(storage as unknown as DurableObjectStorage),credentialScopes=new Map<string,AgentCredentialScope>();
   const runs = new Map<string, AgentRunRecord>(); let active: string | undefined;
   let modelCalls = 0, destroyed = 0, revoked = 0, checkpoints = 0, lostPush = options.lostPush, lostCheckpoint = options.lostCheckpoint;
-  const order: string[] = [],prompts:string[]=[];
+  const order: string[] = [],prompts:string[]=[],commands:string[]=[],vmEnvironments:Array<Record<string,string>>=[],configuredScopes:AgentExecutionEgressScope[]=[];let credentialIssues=0;
   const ledger = {
     beginAgentNativeAttempt:async(input:{workflowId:string;runId:string;taskId:string;phase:"proposal"|"apply";attemptId:string;nativeId:string})=>{if(db.query("SELECT id FROM agent_credential_incidents WHERE status!='revoked' LIMIT 1").get())throw Error("credential cleanup unconfirmed");const identity:AgentNativeAttemptIdentity={...input,projectId:"project1",incarnation:"11111111-1111-4111-8111-111111111111",actorId,accountKey,generation:runs.get(input.runId)?.generation??0,snapshotDigest:"a".repeat(64)};native.begin(identity,()=>{if(!membership||lifecycle!=="active")throw Error("revoked");});return identity;},
     beginAgentCredential:async(attemptId:string,id:string,scope:"read"|"write",expiresAt:number)=>{const attempt=native.get(attemptId)!;const {state:_state,createdAt:_created,stoppedAt:_stopped,...identity}=attempt,context={...identity,repoName:task.workspace.repoName,scope};if(!credentials.begin(id,context,expiresAt,()=>{if(!membership||lifecycle!=="active")throw Error("revoked");}))return null;credentialScopes.set(id,context);return context;},
@@ -79,7 +80,7 @@ async function fixture(options: { unborn?:boolean; lostPush?: boolean; lostCheck
       const work = join(root, `work-${crypto.randomUUID()}`);
       return {
         exec: async (argv: string[], opts?: { env?: Record<string, string> }) => {
-          const command = argv[2]!.replaceAll("/workspace/task", work);
+          const command = argv[2]!.replaceAll("/workspace/task", work);commands.push(command);vmEnvironments.push({...opts?.env});
           const child = Bun.spawn(["sh", "-c", command], { stdout: "pipe", stderr: "pipe", env: { ...process.env, ...opts?.env } });
           const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
           if (command.includes(" push ") && exitCode === 0 && lostPush) { lostPush = false; throw new Error("Push response lost after real ref update"); }
@@ -94,10 +95,17 @@ async function fixture(options: { unborn?:boolean; lostPush?: boolean; lostCheck
         destroy: async () => { destroyed++; await rm(work, { recursive: true, force: true }); },
       };
     } },
-    ARTIFACTS: { get: async () => ({ info: async () => { if (options.infoFails) throw new Error("Info unavailable"); return { remote: canonical }; }, createToken: async (scope:"read"|"write",ttl:number) => ({ plaintext: "fixture-token",scope:options.badTokenScope?"admin":scope,expiresAt:new Date(Date.now()+ttl*1000).toISOString() }), revokeToken: async () => { revoked++; return true; }, [Symbol.dispose]: () => {} }) },
+    ARTIFACTS: { get: async () => ({ info: async () => { if (options.infoFails) throw new Error("Info unavailable"); return { remote: canonical }; }, createToken: async (scope:"read"|"write",ttl:number) => {credentialIssues++;return ({ plaintext: "fixture-token",scope:options.badTokenScope?"admin":scope,expiresAt:new Date(Date.now()+ttl*1000).toISOString() });}, revokeToken: async () => { revoked++; return true; }, [Symbol.dispose]: () => {} }) },
     AI: { run: async (_model:string,input:{messages?:Array<{content:string}>}) => { prompts.push(...(input.messages??[]).map(message=>message.content));if(options.changePolicyDuringModel)policyVersion++;if(options.changeGenerationDuringModel&&task.targetGeneration)Object.assign(task,{targetGeneration:{...task.targetGeneration,eventId:crypto.randomUUID(),generation:task.targetGeneration.generation+1}});if(options.changeTargetDuringModel&&task.acceptedTarget)Object.assign(task,{acceptedTarget:{...task.acceptedTarget,acceptedCommit:"f".repeat(40)}});modelCalls++;if(options.revokeDuringModel==="account")lifecycle="deleted";if(options.revokeDuringModel==="membership")membership=false; return { response: '<file path="src/app.ts">\nexport const value = 2;\n</file>' }; } },
   } as unknown as Env;
-  return { env, ledger, task, runs, order, prompts,git, canonical, root, funding: { accountKey, parentWorkflowId: "registered-parent" }, deleteAccount: () => { lifecycle = "deleted"; }, revokeMembership: () => { membership = false; }, native,credentials, counts: () => ({ modelCalls, destroyed, revoked, checkpoints }), cleanup: () => rm(root, { recursive: true, force: true }) };
+  // Synthetic policy port proves orchestration and credential omission only;
+  // hosted Internet/HTTP/TLS isolation requires the genuine container canary.
+  const restrictedRuntime:RestrictedAgentRuntime={
+    configure:async(_attempt,scope)=>{if(lifecycle!=="active"||!membership)throw new Error("Restricted owner authority unavailable");configuredScopes.push(structuredClone(scope));order.push(`restricted-configure:${scope.access}`);return{configured:true,internet:false,httpIntercept:true,httpsIntercept:true,caTrusted:true};},
+    assertConfigured:async(_attempt,scope)=>{if(lifecycle!=="active"||!membership||JSON.stringify(configuredScopes.at(-1))!==JSON.stringify(scope))throw new Error("Restricted scope changed");},
+    cleanup:async()=>{order.push("restricted-cleanup");return{credentialsRevoked:true};},
+  };
+  return { env, ledger, task, runs, order, prompts,git,commands,vmEnvironments,configuredScopes,restrictedRuntime,credentialIssues:()=>credentialIssues, canonical, root, funding: { accountKey, parentWorkflowId: "registered-parent" }, deleteAccount: () => { lifecycle = "deleted"; }, revokeMembership: () => { membership = false; }, native,credentials, counts: () => ({ modelCalls, destroyed, revoked, checkpoints }), cleanup: () => rm(root, { recursive: true, force: true }) };
 }
 
 test.each(["lostPush", "lostCheckpoint"] as const)("%s retry recovers the same pushed commit and persisted context without regenerating", async (failure) => {
@@ -297,3 +305,32 @@ test("durable null agent baseline requires explicit unborn scope and survives SQ
  expect(()=>ledger.claim({...scoped,runId:"other",startingBranchHead:"a".repeat(40)})).toThrow();
  }finally{db.close();}
 });
+
+
+test("restricted native agent reconstructs and checkpoints with no VM Git credential issuance",async()=>{
+ const f=await fixture();try{
+  const result=await runAgentTask(f.env,f.ledger,f.task,"restricted-run",{...f.funding,restrictedEgress:true,restrictedRuntime:f.restrictedRuntime});
+  expect(result.commit).toMatch(/^[a-f0-9]{40}$/);expect(await f.git(["--git-dir",f.canonical,"rev-parse","task/change1"])).toBe(result.commit);
+  expect(f.credentialIssues()).toBe(0);expect(f.counts().revoked).toBe(0);
+  expect(f.configuredScopes.map(scope=>scope.access)).toEqual(["read","write"]);expect(f.configuredScopes[1]?.expectedTip).toBeNull();
+  expect(f.order.indexOf("restricted-configure:read")).toBeLessThan(f.order.indexOf("proposal-saved"));expect(f.order).toContain("restricted-cleanup");
+  expect(f.vmEnvironments.every(env=>Object.keys(env).every(key=>key==="GIT_AUTHOR_DATE"||key==="GIT_COMMITTER_DATE"))).toBe(true);expect(JSON.stringify(f.vmEnvironments)).not.toContain("fixture-token");
+ }finally{await f.cleanup();}
+},20000);
+
+test("restricted mode missing capability or unconfirmed CA refuses before VM commands and credential issuance",async()=>{
+ const missing=await fixture();try{await expect(runAgentTask(missing.env,missing.ledger,missing.task,"restricted-missing",{...missing.funding,restrictedEgress:true})).rejects.toThrow("no Internet or VM credential fallback");expect(missing.commands).toEqual([]);expect(missing.credentialIssues()).toBe(0);expect(missing.counts().modelCalls).toBe(0);}finally{await missing.cleanup();}
+ const untrusted=await fixture();try{const port:RestrictedAgentRuntime={...untrusted.restrictedRuntime,configure:async()=>({configured:true,internet:false,httpIntercept:true,httpsIntercept:true,caTrusted:false})};await expect(runAgentTask(untrusted.env,untrusted.ledger,untrusted.task,"restricted-ca",{...untrusted.funding,restrictedEgress:true,restrictedRuntime:port})).rejects.toThrow("CA trust was not confirmed");expect(untrusted.commands).toEqual([]);expect(untrusted.credentialIssues()).toBe(0);expect(untrusted.counts().modelCalls).toBe(0);expect(untrusted.counts().destroyed).toBe(1);}finally{await untrusted.cleanup();}
+},20000);
+
+test("restricted saved proposal and lost push recovery preserve exact commit without another model call",async()=>{
+ const f=await fixture({lostPush:true});try{const options={...f.funding,restrictedEgress:true,restrictedRuntime:f.restrictedRuntime};await expect(runAgentTask(f.env,f.ledger,f.task,"restricted-recovery",options)).rejects.toThrow("lost");const pushed=await f.git(["--git-dir",f.canonical,"rev-parse","task/change1"]);const recovered=await runAgentTask(f.env,f.ledger,f.task,"restricted-recovery",options);expect(recovered.commit).toBe(pushed);expect(f.counts().modelCalls).toBe(1);expect(f.credentialIssues()).toBe(0);expect(JSON.stringify(f.vmEnvironments)).not.toContain("fixture-token");}finally{await f.cleanup();}
+},20000);
+
+test("restricted policy withdrawal refuses candidate commands without an unrestricted retry",async()=>{
+ const f=await fixture();try{let assertions=0;const port:RestrictedAgentRuntime={...f.restrictedRuntime,assertConfigured:async()=>{if(++assertions>=2)throw new Error("Restricted policy was withdrawn");}};await expect(runAgentTask(f.env,f.ledger,f.task,"restricted-revoked",{...f.funding,restrictedEgress:true,restrictedRuntime:port})).rejects.toThrow("policy was withdrawn");expect(f.commands).toEqual([]);expect(f.credentialIssues()).toBe(0);expect(f.counts().modelCalls).toBe(0);expect(f.order).toContain("restricted-cleanup");}finally{await f.cleanup();}
+},20000);
+
+test("refused restricted write transition preserves the saved proposal and leaves the fork branch untouched",async()=>{
+ const f=await fixture();try{const port:RestrictedAgentRuntime={...f.restrictedRuntime,configure:async(attempt,scope)=>{if(scope.access==="write")throw new Error("Restricted write scope is unavailable");return f.restrictedRuntime.configure(attempt,scope);}};await expect(runAgentTask(f.env,f.ledger,f.task,"restricted-write-refused",{...f.funding,restrictedEgress:true,restrictedRuntime:port})).rejects.toThrow("write scope is unavailable");expect(f.runs.get("restricted-write-refused")?.proposal).toBeDefined();expect(f.counts().modelCalls).toBe(1);expect(f.counts().checkpoints).toBe(0);expect(f.credentialIssues()).toBe(0);expect(f.commands.some(command=>command.includes(" push "))).toBe(false);}finally{await f.cleanup();}
+},20000);

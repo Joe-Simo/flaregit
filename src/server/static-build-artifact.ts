@@ -1,0 +1,16 @@
+import{z}from'zod';
+const scopeSchema=z.object({attemptId:z.uuid(),projectId:z.string().regex(/^[a-z0-9]{12,16}$/),incarnation:z.uuid(),commit:z.string().regex(/^[a-f0-9]{40}$/).refine(value=>value!=='0'.repeat(40)),tree:z.string().regex(/^[a-f0-9]{40}$/).refine(value=>value!=='0'.repeat(40)),policyDigest:z.string().regex(/^[a-f0-9]{64}$/)}).strict();
+export type StaticBuildScope=z.infer<typeof scopeSchema>;
+export interface BuildFile{path:string;kind:'file';bytes:Uint8Array}
+export interface BuildManifest{version:1;kind:'source'|'static';scope:StaticBuildScope;files:Array<{path:string;size:number;digest:string}>;totalBytes:number;sourceDigest?:string;digest:string}
+const MAX_FILES=512,MAX_FILE_BYTES=4194304,MAX_TOTAL_BYTES=16777216;
+const staticExtension=/\.(?:html|css|js|mjs|json|svg|png|jpe?g|webp|gif|ico|woff2?|ttf)$/i;
+function pathAllowed(path:string){return path.length>0&&path.length<=256&&!/[\x00-\x20\x7f\\?#%]/.test(path)&&!path.startsWith('/')&&path.split('/').every(part=>part!==''&&part!=='.'&&part!=='..'&&part!=='.git'&&part!=='node_modules'&&!/^\.env(?:\.|$)/i.test(part));}
+async function digest(bytes:Uint8Array){return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new Uint8Array(bytes))),byte=>byte.toString(16).padStart(2,'0')).join('');}
+/** Bytes come from an untrusted job. Worker recomputes all identities; stdout is never a manifest. */
+export async function bindBuildManifest(kind:BuildManifest['kind'],scope:StaticBuildScope,input:readonly BuildFile[],sourceDigest?:string):Promise<BuildManifest>{
+ const frozen=scopeSchema.parse(scope);if(kind!=='source'&&kind!=='static')throw Error('Unsupported manifest kind');if(kind==='static'&&!/^[a-f0-9]{64}$/.test(sourceDigest??''))throw Error('Static source digest required');if(kind==='source'&&sourceDigest!==undefined)throw Error('Source cannot bind another source');if(input.length===0||input.length>MAX_FILES)throw Error('Build file bound exceeded');
+ const seen=new Set<string>();let totalBytes=0;const snapshots=input.map(entry=>{if(entry.kind!=='file'||!pathAllowed(entry.path)||seen.has(entry.path)||!(entry.bytes instanceof Uint8Array)||(kind==='static'&&!staticExtension.test(entry.path)))throw Error('Unsupported build asset');seen.add(entry.path);if(entry.bytes.byteLength>MAX_FILE_BYTES||(totalBytes+=entry.bytes.byteLength)>MAX_TOTAL_BYTES)throw Error('Build byte bound exceeded');return {path:entry.path,bytes:entry.bytes.slice()};});if(kind==='static'&&!seen.has('index.html'))throw Error('Static index is required');
+ const files:BuildManifest['files']=[];for(const entry of snapshots)files.push({path:entry.path,size:entry.bytes.byteLength,digest:await digest(entry.bytes)});files.sort((a,b)=>a.path.localeCompare(b.path));const value={version:1 as const,kind,scope:frozen,files,totalBytes,...(sourceDigest?{sourceDigest}:{})};return {...value,digest:await digest(new TextEncoder().encode(JSON.stringify(value)))};
+}
+export async function verifyBuildManifest(manifest:BuildManifest,scope:StaticBuildScope,input:readonly BuildFile[],expectedSourceDigest?:string){const rebuilt=await bindBuildManifest(manifest.kind,scope,input,expectedSourceDigest);if(JSON.stringify(rebuilt)!==JSON.stringify(manifest))throw Error('Build identity differs');return rebuilt;}

@@ -8,6 +8,7 @@ export type Route =
   | { name: "report"; params: URLSearchParams }
   | { name: "operator" }
   | { name: "join"; projectId: string; token: string }
+  | { name: "join-resume"; nonce: string }
   | { name: "participate"; projectId: string }
   | { name: "profile"; handle: string }
   | { name: "community"; params: URLSearchParams }
@@ -29,6 +30,7 @@ export function parseHash(hash: string): Route {
   if (parts[0] === "report") return { name: "report", params: new URLSearchParams(query) };
   if (parts[0] === "operator") return { name: "operator" };
   if (parts[0] === "join" && parts[1] && parts[2]) return { name: "join", projectId: parts[1], token: parts[2] };
+  if (parts[0] === "join-resume") return { name: "join-resume", nonce: new URLSearchParams(query).get("context") ?? "" };
   if (parts[0] === "p" && parts[1]) return { name: "repo", projectId: parts[1], tab: parts[2] ?? "code", params: new URLSearchParams(query) };
   return { name: "home" };
 }

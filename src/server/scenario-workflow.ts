@@ -5,6 +5,7 @@ import type { Task } from "../core/types.js";
 import type { Env } from "./env.js";
 import type { Ledger } from "./durable-object.js";
 import { runAgentTask } from "./agent-run.js";
+import {restrictedAgentRuntimeOptions} from './restricted-agent-runtime';
 
 export interface ScenarioParams {
   projectId: string;
@@ -40,7 +41,7 @@ export class FlareGitScenarioWorkflow extends WorkflowEntrypoint<Env, ScenarioPa
     const stage = async (taskId: string, plan: boolean) => {
       const agentRunId = `${event.instanceId}-${taskId}`;
       try {
-        return await step.do(`${plan ? "plan-agent" : "apply-agent"}-${taskId}`, { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "10 minutes" }, async () => runAgentTask(this.env, ledger, (await ledger.getState()).tasks[taskId]!, agentRunId, { stopAfterProposal: plan, accountKey: event.payload.accountKey, parentWorkflowId: event.instanceId }));
+        return await step.do(`${plan ? "plan-agent" : "apply-agent"}-${taskId}`, { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "10 minutes" }, async () => runAgentTask(this.env, ledger, (await ledger.getState()).tasks[taskId]!, agentRunId, { stopAfterProposal: plan, accountKey: event.payload.accountKey, parentWorkflowId: event.instanceId, ...restrictedAgentRuntimeOptions(this.env) }));
       } catch (error) {
         await step.do(`agent-failed-${taskId}`, async () => { await ledger.failAgentRun(agentRunId, taskId); await ledger.failAgentTask(taskId, agentRunId); });
         throw error;

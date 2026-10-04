@@ -1,0 +1,12 @@
+# C02: dependency acquisition is separate from candidate execution.
+# Candidate source and platform checks are never copied into this image.
+FROM oven/bun:1.3.4 AS dependencies
+WORKDIR /opt/execution-deps
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile --production --ignore-scripts
+
+FROM oven/bun:1.3.4
+COPY --from=dependencies /opt/execution-deps/node_modules /opt/execution-deps/node_modules
+WORKDIR /job
+ENV HOME=/job/home TMPDIR=/job/tmp NODE_ENV=production
+ENTRYPOINT ["sleep", "infinity"]

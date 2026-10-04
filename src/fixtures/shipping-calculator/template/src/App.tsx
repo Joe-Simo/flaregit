@@ -63,6 +63,17 @@ export function App() {
         <p>Speed Surcharge: ${quote.speedSurcharge.toFixed(2)}</p>
         <p>Hazardous Fee: ${quote.hazardousFee.toFixed(2)}</p>
         <p>Bulk Discount: -${quote.weightDiscount.toFixed(2)}</p>
+        {quote.receiptItems && (
+          <div id="shipping-receipt" style={{ marginTop: "12px", paddingTop: "8px", borderTop: "1px dashed #cbd5e1", fontSize: "13px" }}>
+            <p style={{ fontWeight: 600, margin: "0 0 6px" }}>Itemized Receipt</p>
+            {quote.receiptItems.map((item, index) => (
+              <div key={index} data-receipt-item style={{ display: "flex", justifyContent: "space-between", gap: "12px", marginBottom: "4px" }}>
+                <span>{item.description}</span>
+                <span data-receipt-amount>{item.amount < 0 ? "-" : ""}${Math.abs(item.amount).toFixed(2)}</span>
+              </div>
+            ))}
+          </div>
+        )}
         <hr />
         <h2 id="shipping-total-price">Total: ${quote.total.toFixed(2)}</h2>
       </div>

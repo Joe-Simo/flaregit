@@ -31,7 +31,7 @@ export function App() {
       </header>
 
       <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px", padding: "16px", marginBottom: "20px" }}>
-        <h2 style={{ fontSize: "18px", margin: "0 0 4px 0" }}>{event.name}</h2>
+        <h2 id="ticket-event-title" data-event-id={event.id} style={{ fontSize: "18px", margin: "0 0 4px 0" }}>{event.name}</h2>
         <div style={{ fontSize: "14px", color: "#475569" }}>
           <span>📍 {event.venue}</span> • <span>🗓️ {event.date}</span>
         </div>
@@ -115,13 +115,13 @@ export function App() {
         )}
 
         {/* Detailed Receipt Line Items (if present) */}
-        {quote.receiptItems && quote.receiptItems.length > 0 && (
-          <div style={{ marginTop: "12px", paddingTop: "8px", borderTop: "1px dashed #cbd5e1" }}>
+        {quote.receiptItems && (
+          <div id="ticket-receipt" style={{ marginTop: "12px", paddingTop: "8px", borderTop: "1px dashed #cbd5e1" }}>
             <div style={{ fontSize: "12px", fontWeight: 600, color: "#64748b", marginBottom: "6px" }}>Itemized Receipt:</div>
             {quote.receiptItems.map((item, idx) => (
-              <div key={idx} style={{ display: "flex", justifyContent: "space-between", fontSize: "13px", color: item.isDiscount ? "#16a34a" : "#334155" }}>
+              <div key={idx} data-receipt-item style={{ display: "flex", justifyContent: "space-between", fontSize: "13px", color: item.isDiscount ? "#16a34a" : "#334155" }}>
                 <span>• {item.description}</span>
-                <span>{item.isDiscount ? `-$${Math.abs(item.amount).toFixed(2)}` : `$${item.amount.toFixed(2)}`}</span>
+                <span data-receipt-amount>{item.amount < 0 ? "-" : ""}${Math.abs(item.amount).toFixed(2)}</span>
               </div>
             ))}
           </div>

@@ -1,0 +1,37 @@
+import {expect,test} from "bun:test";
+import {Database} from "bun:sqlite";
+import {bindBuildManifest,type BuildFile} from "../src/server/static-build-artifact";
+import {IsolatedExecutionGrants,type IsolatedExecutionContext} from "../src/server/isolated-execution-grants";
+import {ManagedSpendLedger} from "../src/server/managed-spend-ledger";
+import {runIsolatedBuildJob,type IsolatedBuildJobDependencies} from "../src/server/isolated-build-job";
+import type {TrustedGitSource} from "../src/server/trusted-git-source";
+
+async function fixture(mode:"ok"|"tamper"|"withdraw"|"stop-unknown"|"quota"|"stop-timeout"|"run-timeout"|"prepare-timeout"="ok"){
+ const db=new Database(":memory:");const storage={sql:{exec(query:string,...bindings:Array<string|number|null>){if(query.includes(";")){db.exec(query);return{toArray:()=>[]};}const rows=db.query(query).all(...bindings);return{toArray:()=>rows};}},transactionSync<T>(callback:()=>T){return db.transaction(callback)();}} as unknown as DurableObjectStorage;
+ const scope={attemptId:crypto.randomUUID(),projectId:"p123456789abc",incarnation:crypto.randomUUID(),commit:"a".repeat(40),tree:"b".repeat(40),policyDigest:"c".repeat(64)},files:BuildFile[]=[{path:"index.html",kind:"file",bytes:new TextEncoder().encode("<h1>Actual source bytes</h1>")}];
+ const sourceManifest=await bindBuildManifest("source",scope,files),file=files[0]!,header=new TextEncoder().encode(`blob ${file.bytes.length}\0`),content=new Uint8Array(header.length+file.bytes.length);content.set(header);content.set(file.bytes,header.length);
+ const oid=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-1",content)),byte=>byte.toString(16).padStart(2,"0")).join("");
+ const source:TrustedGitSource={sourceManifest,files,proof:{providerRepoId:"synthetic-provider",canonicalRepoName:"synthetic-canonical",commit:scope.commit,tree:scope.tree,sourceDigest:sourceManifest.digest,blobs:[{path:file.path,hash:oid,mode:"100644"}]}};
+ const context:IsolatedExecutionContext={scope,workflowId:"workflow",candidateId:"candidate",actorId:"actor",accountKey:"a".repeat(12),sourceDigest:sourceManifest.digest,image:`registry.cloudflare.com/${"a".repeat(32)}/execution@sha256:${"d".repeat(64)}`,policyVersion:1,expectedBase:null,candidateSnapshotDigest:"e".repeat(64)};
+ const recordedContext=structuredClone(context);let active=true,runs=0,prepares=0,stops=0;const paid=new ManagedSpendLedger(storage),grants=new IsolatedExecutionGrants(storage,{current:async input=>{if(!active)throw new Error("Authority withdrawn");return structuredClone(recordedContext);},funding:{read:async id=>paid.get(id),reserve:async envelope=>paid.reserve(envelope,{accountUsdMicros:mode==="quota"?0:1000000,globalUsdMicros:1000000,essentialAccountUsdMicros:mode==="quota"?0:1000000,essentialGlobalUsdMicros:1000000}),consume:async id=>paid.consume(id,0,0,1200)}});
+ const deps:IsolatedBuildJobDependencies={cleanupTimeoutMs:mode==="stop-timeout"?5:1000,jobTimeoutMs:mode==="run-timeout"||mode==="prepare-timeout"?10:150000,assertSourceProvenance:async(_context,proof)=>{expect(proof.providerRepoId).toBe("synthetic-provider");},grants:{prepareIsolatedExecutionGrant:input=>grants.prepare(input),isolatedExecutionSnapshot:async input=>{if(!active)throw new Error("Authority withdrawn");return structuredClone(recordedContext);},authorizeIsolatedExecution:async()=>{try{await grants.allow(recordedContext);return true;}catch{return false;}},claimIsolatedExecutionDispatch:input=>grants.claimDispatch(input),sealIsolatedExecution:async input=>grants.seal(input.scope.attemptId)},namespace:{getByName:()=>({prepare:async(_scope,_manifest,snapshots)=>{prepares++;if(mode==="prepare-timeout")return new Promise(()=>{});expect(new TextDecoder().decode(snapshots[0]!.bytes)).toBe("<h1>Actual source bytes</h1>");},run:async(executionScope)=>{runs++;if(mode==="run-timeout")return new Promise(()=>{});expect(grants.get(scope.attemptId)?.phase).toBe("dispatched");const output:BuildFile[]=[{path:"index.html",kind:"file",bytes:new TextEncoder().encode("<h1>Static output</h1>")}];const manifest=await bindBuildManifest("static",executionScope,output,sourceManifest.digest);if(mode==="tamper")output[0]!.bytes[0]=0;if(mode==="withdraw")active=false;return{manifest,files:output,acceptanceEvidence:false};},stop:async()=>{stops++;if(mode==="stop-timeout")return new Promise(()=>{});return{stopped:mode!=="stop-unknown"};}})}};
+ return{source,context,deps,grants,counts:()=>({runs,prepares,stops}),close:()=>db.close()};
+}
+
+test("actual durable paid grant dispatches once and releases only a verified static artifact",async()=>{
+ const f=await fixture();try{const result=await runIsolatedBuildJob(f.context,f.source,f.deps);expect(result.acceptanceEvidence).toBe(false);expect(result.identity.sourceDigest).toBe(f.context.sourceDigest);expect(result.manifest.sourceDigest).toBe(f.source.sourceManifest.digest);expect(f.grants.get(f.context.scope.attemptId)?.phase).toBe("sealed");expect(f.counts()).toEqual({runs:1,prepares:1,stops:1});await expect(runIsolatedBuildJob(f.context,f.source,f.deps)).rejects.toThrow();expect(f.counts().runs).toBe(1);}finally{f.close();}
+});
+test("tampered output, withdrawn authority and unknown cleanup never release build bytes",async()=>{
+ for(const mode of ["tamper","withdraw","stop-unknown","stop-timeout"] as const){const f=await fixture(mode);try{await expect(runIsolatedBuildJob(f.context,f.source,f.deps)).rejects.toThrow();expect(f.counts().stops).toBe(1);expect(f.grants.get(f.context.scope.attemptId)?.phase).toBe("sealed");}finally{f.close();}}
+});
+test("funding denial and incomplete Git blob provenance never dispatch an execution",async()=>{
+ const quota=await fixture("quota");try{await expect(runIsolatedBuildJob(quota.context,quota.source,quota.deps)).rejects.toThrow("funding");expect(quota.counts().runs).toBe(0);expect(quota.counts().prepares).toBe(0);}finally{quota.close();}
+ const forged=await fixture();try{forged.source.proof.blobs[0]!.hash="f".repeat(40);await expect(runIsolatedBuildJob(forged.context,forged.source,forged.deps)).rejects.toThrow("captured Git blob");expect(forged.counts().runs).toBe(0);}finally{forged.close();}
+});
+test("caller mutations during authority awaits cannot alter frozen source bytes or identity",async()=>{
+ const f=await fixture();try{const original=f.deps.grants.isolatedExecutionSnapshot;let changed=false;f.deps.grants.isolatedExecutionSnapshot=async input=>{if(!changed){changed=true;f.source.files[0]!.bytes[0]=0;f.context.scope.commit="f".repeat(40);}return original(input);};const result=await runIsolatedBuildJob(f.context,f.source,f.deps);expect(result.identity.context.scope.commit).toBe("a".repeat(40));expect(f.counts().runs).toBe(1);}finally{f.close();}
+});
+
+test("lost prepare or run acknowledgments hit the job deadline and seal the original paid grant",async()=>{
+ for(const mode of ["prepare-timeout","run-timeout"] as const){const f=await fixture(mode);try{await expect(runIsolatedBuildJob(f.context,f.source,f.deps)).rejects.toThrow("deadline");expect(f.counts().stops).toBe(1);expect(f.grants.get(f.context.scope.attemptId)?.phase).toBe("sealed");expect(f.counts().runs).toBe(mode==="run-timeout"?1:0);}finally{f.close();}}
+});

@@ -1,3 +1,5 @@
+import { invitationReturnHttp } from "./invitation-return-http";
+export {AgentEgressWorker} from './agent-egress-worker';
 import {runMirrorExecution} from "./mirror-runner";
 import {createEmptyRepository} from "./empty-repository";
 import {createReadmeRepository} from "./readme-repository";
@@ -106,6 +108,7 @@ class RequestBodyError extends Error {}
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    if (/^\/api\/join-return\/(prepare|confirm|resume|clear)$/.test(url.pathname)) return invitationReturnHttp(request, { master: env.PREVIEW_SIGNING_KEY, allowedOrigins: env.CLERK_AUTHORIZED_PARTIES ?? "", limit: async ip => (await env.API_LIMITER.limit({ key: `invitation-return:${ip}` })).success, authenticate: () => authenticate(request, env), role: (projectId, actorId) => projectOf(env, projectId).roleOf(actorId) });
 
     if(url.pathname.startsWith("/api/")||url.pathname.startsWith("/git/")){const denied=await admitCredentialLookup(request,env);if(denied)return denied;}
 

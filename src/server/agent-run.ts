@@ -1,3 +1,5 @@
+import type { AgentExecutionEgressScope } from "./agent-execution-egress.js";
+import type { AgentNativeAttemptIdentity } from "./agent-runtime-ledger.js";
 import {acceptedTargetSchema,assertCompatibleAcceptedTargetBatch,effectiveTaskAcceptedTarget} from "../core/accepted-target.js";
 import { globalOf, reserveManagedAgent, assertManagedInitiator } from "./projects.js";
 import { DEFAULT_CODE_MODEL } from "../ai/workers-ai.js";
@@ -22,7 +24,17 @@ const stopped = (task: Task | undefined) => !task || ["accepted", "cancelled", "
  */
 export type AgentExecutionLedger = Ledger;
 
-export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task: Task, runId = task.agentWorkflowInstanceId, options?: { stopAfterProposal?: boolean; resumeFrom?: string; accountKey?: string; parentWorkflowId?: string }): Promise<{ commit: string; recovered?: boolean; proposalId?: string }> {
+/** Backend-only capability port around the actual AgentSandbox RPC. Positive
+ * receipts must follow installed HTTP/HTTPS interceptions, Internet denial and
+ * native CA trust. This interface never carries a Git token or VM environment. */
+export interface RestrictedAgentRuntime {
+  configure(attempt: AgentNativeAttemptIdentity, scope: AgentExecutionEgressScope): Promise<{ configured: boolean; internet: boolean; httpIntercept: boolean; httpsIntercept: boolean; caTrusted: boolean }>;
+  assertConfigured(attempt: AgentNativeAttemptIdentity, scope: AgentExecutionEgressScope): Promise<void>;
+  cleanup(attempt: AgentNativeAttemptIdentity): Promise<{ credentialsRevoked: boolean }>;
+}
+
+export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task: Task, runId = task.agentWorkflowInstanceId, options?: { stopAfterProposal?: boolean; resumeFrom?: string; accountKey?: string; parentWorkflowId?: string; restrictedEgress?: boolean; restrictedRuntime?: RestrictedAgentRuntime }): Promise<{ commit: string; recovered?: boolean; proposalId?: string }> {
+  const restricted = options?.restrictedEgress === true || options?.restrictedRuntime !== undefined;
   if (!runId || !/^[A-Za-z0-9_-]{1,200}$/.test(runId)) throw new Error("A durable agent workflow identity is required");
   let durable = await ledger.getAgentRun(runId);
   if (durable && options?.resumeFrom && durable.resumedFrom !== options.resumeFrom) throw new Error("Resume selection differs from the durable run identity");
@@ -49,6 +61,7 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
     await assertManagedInitiator(env,ledger,options?.parentWorkflowId,options?.accountKey,task.id);
     return {commit:durable.pushedCommit};
   }
+  if (restricted && !options?.restrictedRuntime) throw new Error("Restricted agent execution is unavailable; no Internet or VM credential fallback is permitted");
   if (stopped(state.tasks[task.id])) throw new Error("Change is no longer available for agent work");
   const settings = settingsFor(selectedTarget?acceptedTargetSchema.parse(selectedTarget).policy:state.verificationPolicy);
   await assertManagedInitiator(env, ledger, options?.parentWorkflowId, options?.accountKey, task.id);
@@ -57,25 +70,44 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
   const deadline = Date.now() + 300_000;
   const attempt=await ledger.beginAgentNativeAttempt({workflowId:options?.parentWorkflowId??runId,runId,taskId:task.id,phase:options?.stopAfterProposal?"proposal":"apply",attemptId:crypto.randomUUID(),nativeId:crypto.randomUUID()});
   const sb = env.AGENT.getByName(`agent-${attempt.nativeId}`);
+  let restrictedScope: AgentExecutionEgressScope | undefined;
   let repo: ArtifactsRepoCapability | undefined, token: string | undefined,credentialId:string|undefined;
   const authorize=async()=>{await assertManagedInitiator(env,ledger,options?.parentWorkflowId,options?.accountKey,task.id);if(selectedTarget)assertTarget(await ledger.getState());};
-  const run = async (cmd: string, e?: Record<string, string>) => {
+  const assertRestricted = async () => {
+    if (!restricted) return;
+    if (!restrictedScope || !options?.restrictedRuntime) throw new Error("Restricted agent policy has not been confirmed");
+    await options.restrictedRuntime.assertConfigured(attempt, restrictedScope);
+  };
+  const configureRestricted = async (remote: string, expectedTip: string | null, access: "read" | "write") => {
+    if (!restricted) return;
+    if (!options?.restrictedRuntime) throw new Error("Restricted agent runtime unavailable");
     await authorize();
+    const scope: AgentExecutionEgressScope = { projectId: attempt.projectId, incarnation: attempt.incarnation, actorId: attempt.actorId, accountKey: attempt.accountKey, taskId: task.id, runId, workflowId: attempt.workflowId, branchGeneration: selectedGeneration?.generation ?? 0, canonicalRepoName: state.canonicalRepoName, forkRepoName: task.workspace.repoName, remote, branch: task.workspace.branch, expectedTip, access };
+    const receipt = await options.restrictedRuntime.configure(attempt, scope);
+    if (receipt.configured !== true || receipt.internet !== false || receipt.httpIntercept !== true || receipt.httpsIntercept !== true || receipt.caTrusted !== true) throw new Error("Restricted agent interception, Internet denial or CA trust was not confirmed");
+    restrictedScope = scope; await assertRestricted(); await authorize();
+  };
+  const run = async (cmd: string, e?: Record<string, string>) => {
+    await authorize(); await assertRestricted();
+    if (restricted && Object.keys(e ?? {}).some(key => key !== "GIT_AUTHOR_DATE" && key !== "GIT_COMMITTER_DATE")) throw new Error("Restricted agent VM environment cannot carry Git credentials");
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error("Managed container deadline exhausted");
-    const result=await sb.exec(["sh","-c",cmd],{env:e,timeoutMs:remaining});await authorize();return result;
+    const result=await sb.exec(["sh","-c",cmd],{env:e,timeoutMs:remaining});await assertRestricted();await authorize();return result;
   };
   try {
     repo = await env.ARTIFACTS.get(task.workspace.repoName);
     const remote = String((await repo.info()).remote);
+    if (restricted) await configureRestricted(remote, task.currentCommit, "read");
+    else {
     const scope=options?.stopAfterProposal?"read":"write",issuanceId=crypto.randomUUID();
     if(!await ledger.beginAgentCredential(attempt.attemptId,issuanceId,scope,Date.now()+300000))throw new Error("Agent credential issuance is unconfirmed");
     credentialId=issuanceId;
     const issued=await repo.createToken(scope,300);token=issued.plaintext;const expiry=Date.parse(issued.expiresAt);
     try{await ledger.recordAgentCredential(attempt.attemptId,issuanceId,token,expiry);}catch{await ledger.recordAgentCredential(attempt.attemptId,issuanceId,token,expiry);}
     if(issued.scope!==scope||!Number.isSafeInteger(expiry)||expiry<=Date.now()||expiry>Date.now()+305000)throw new Error("Agent credential scope or expiry is unavailable");
+    }
     await assertManagedInitiator(env,ledger,options?.parentWorkflowId,options?.accountKey,task.id);
-    let r = await run(`rm -rf ${WORK} && git clone --quiet ${q(remote)} ${WORK}`, gitAuthEnv(token));
+    let r = await run(`rm -rf ${WORK} && git clone --quiet ${q(remote)} ${WORK}`, restricted ? undefined : gitAuthEnv(token!));
     if (!r.success) throw new Error("Agent could not clone its saved branch; retry the run");
     const branchRef = `refs/heads/${task.workspace.branch}`;
     const remoteRef = `refs/remotes/origin/${task.workspace.branch}`;
@@ -131,7 +163,7 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
         if (!inAgentScope(frozenTask, file) || isProtectedPath(file, durable.protectedPaths) || !/\.(ts|tsx|js|jsx|mjs|cjs|css|json|html|md|py|go|rs|rb|java|c|h|cpp|sh|yml|yaml|toml)$/.test(file)) continue;
         assertAgentWrites(frozenTask, [file], durable.protectedPaths);
         if (!(await run(`test -f ${q(`${WORK}/${file}`)} && test ! -L ${q(`${WORK}/${file}`)}`)).success) continue;
-        await authorize();const content = await sb.readFile(`${WORK}/${file}`);await authorize();
+        await authorize();await assertRestricted();const content = await sb.readFile(`${WORK}/${file}`);await assertRestricted();await authorize();
         if (redactSecrets(content) !== content) { secretFiles.add(file); continue; }
         if (content.length > MAX_FILE_BYTES || total + content.length > MAX_CONTEXT_BYTES) continue;
         total += content.length; files[file] = content;
@@ -162,12 +194,12 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
     assertAgentWrites({ allowedScope: durable.allowedScope }, Object.keys(durable.proposal.files), durable.protectedPaths);
     for (const [file, content] of Object.entries(durable.proposal.files)) {
       const original = await run(`test -f ${q(`${WORK}/${file}`)} && test ! -L ${q(`${WORK}/${file}`)}`);
-      if (original.success) { await authorize();const contentBefore = await sb.readFile(`${WORK}/${file}`);await authorize(); if (redactSecrets(contentBefore) !== contentBefore) throw new Error("Agent cannot replace a credential-bearing file"); }
+      if (original.success) { await authorize();await assertRestricted();const contentBefore = await sb.readFile(`${WORK}/${file}`);await assertRestricted();await authorize(); if (redactSecrets(contentBefore) !== contentBefore) throw new Error("Agent cannot replace a credential-bearing file"); }
       const dir = file.split("/").slice(0, -1).join("/");
       for (const prefix of file.split("/").slice(0, -1).map((_, i, parts) => parts.slice(0, i + 1).join("/"))) if ((await run(`test -L ${q(`${WORK}/${prefix}`)}`)).success) throw new Error("Agent write would traverse a repository symlink");
       if ((await run(`test -L ${q(`${WORK}/${file}`)}`)).success) throw new Error("Agent cannot replace a repository symlink");
       if (dir && !(await run(`mkdir -p ${q(`${WORK}/${dir}`)}`)).success) throw new Error("Agent directory could not be created");
-      await authorize();await sb.writeFile(`${WORK}/${file}`,content);await authorize();
+      await authorize();await assertRestricted();await sb.writeFile(`${WORK}/${file}`,content);await assertRestricted();await authorize();
     }
     const date = `${Math.floor(Date.parse(durable.proposal.commitDate ?? durable.createdAt) / 1000)} +0000`;
     r = await run(`git -C ${WORK} add -A && git -C ${WORK} -c user.name=${q(`FlareGit agent ${task.id}`)} -c user.email=${q(`${task.id}@agents.flaregit.com`)} commit --quiet -m ${q(durable.goal)}`, { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
@@ -181,12 +213,13 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
     if (stopped((await ledger.getState()).tasks[task.id])) throw new Error("Change was stopped before push; accepted history is unchanged");
     await authorize();
     if (!(await ledger.saveAgentProposal(runId, task.id, durable.proposal.files))) throw new Error("Agent generation changed before push");
-    const remoteHead = await run(`git ls-remote --heads ${q(remote)} ${q(branchRef)}`, gitAuthEnv(token));
+    if (restricted) await configureRestricted(remote, durable.startingBranchHead, "write");
+    const remoteHead = await run(`git ls-remote --heads ${q(remote)} ${q(branchRef)}`, restricted ? undefined : gitAuthEnv(token!));
     if (!remoteHead.success) throw new Error("Saved branch could not be inspected before publication");
     const tip = remoteHead.stdout.trim().split(/\s+/)[0] ?? "";
     if (tip !== commit) {
       if (tip !== (durable.startingBranchHead ?? "")) throw new Error("Another contributor advanced this branch; no work was overwritten");
-      r = await run(`git -C ${WORK} push --quiet --force-with-lease=${q(`${branchRef}:${tip}`)} ${q(remote)} ${q(`${commit}:${branchRef}`)}`, gitAuthEnv(token));
+      r = await run(`git -C ${WORK} push --quiet --force-with-lease=${q(`${branchRef}:${tip}`)} ${q(remote)} ${q(`${commit}:${branchRef}`)}`, restricted ? undefined : gitAuthEnv(token!));
       if (!r.success) throw new Error("Agent push outcome is unknown or refused; retry the saved proposal without regenerating it");
     }
     await authorize();
@@ -204,6 +237,9 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
       try { await ledger.logActivity("FlareGit", "agent.cleanup_failed", detail); }
       catch { console.warn("Agent cleanup could not be recorded"); }
     };
+    if (restricted && options?.restrictedRuntime) try {
+      if (!(await options.restrictedRuntime.cleanup(attempt)).credentialsRevoked) await cleanupFailure("Restricted agent relay credential cleanup remains unconfirmed; its durable recovery records are preserved.");
+    } catch { await cleanupFailure("Restricted agent relay credential cleanup remains unconfirmed; its durable recovery records are preserved."); }
     if(credentialId&&!await ledger.revokeAgentCredential(credentialId).catch(()=>false))await cleanupFailure("Agent credential cleanup remains unconfirmed; its durable recovery record is preserved.");
     try { repo?.[Symbol.dispose]?.(); } catch { console.warn("Agent repository capability disposal failed"); }
     try{await sb.destroy();if(!await ledger.confirmAgentNativeStopped(attempt.attemptId,attempt.nativeId))throw new Error("Native stop unavailable");}catch{await cleanupFailure("Agent container shutdown remains unconfirmed; saved identity, proposals and Git checkpoints remain available.");}

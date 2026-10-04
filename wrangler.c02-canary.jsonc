@@ -1,0 +1,40 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "flaregit-c02-private-canary",
+  "main": "src/server/c02-canary-worker.ts",
+  "compatibility_date": "2026-10-04",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [],
+  "vars": {
+    "C02_ENABLED": "false",
+    "C02_IMAGE": "",
+    "C02_SOURCE_VERSION": ""
+  },
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "CANARY", "class_name": "C02CanaryBatch" },
+      { "name": "UNTRUSTED_EXECUTION", "class_name": "UntrustedExecutionSandbox" }
+    ]
+  },
+  "exports": {
+    "C02CanaryBatch": { "type": "durable-object", "storage": "sqlite" },
+    "UntrustedExecutionSandbox": { "type": "durable-object", "storage": "sqlite", "container": "c02-canary" }
+  },
+  "containers": [{
+    "name": "c02-canary",
+    "class_name": "UntrustedExecutionSandbox",
+    "image": "./Dockerfile.untrusted",
+    "instance_type": "standard-1",
+    "max_instances": 1,
+    "observability": { "logs": { "enabled": false } }
+  }],
+  "browser": { "binding": "BROWSER", "remote": false },
+  "services": [
+    { "binding": "EXECUTION_AUTHORITY", "service": "flaregit-c02-private-canary", "entrypoint": "C02ExecutionAuthority" },
+    { "binding": "UNTRUSTED_EGRESS", "service": "flaregit-c02-private-canary", "entrypoint": "C02DenyEgress" }
+  ],
+  "observability": { "enabled": false }
+}

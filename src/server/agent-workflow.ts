@@ -2,6 +2,7 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloud
 import type { Env } from "./env.js";
 import { ledgerOf } from "./scenario-workflow.js";
 import { runAgentTask } from "./agent-run.js";
+import {restrictedAgentRuntimeOptions} from './restricted-agent-runtime';
 import { globalOf } from "./projects.js";
 
 export interface AgentParams {
@@ -35,13 +36,13 @@ export class FlareGitAgentWorkflow extends WorkflowEntrypoint<Env, AgentParams> 
       const proposal = await step.do("plan-agent-proposal", { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "10 minutes" }, async () => {
         const task = (await ledger.getState()).tasks[taskId];
         if (!task || ["accepted", "cancelled", "integrating", "verifying"].includes(task.status)) return { commit: "" };
-        return runAgentTask(this.env, ledger, task, event.instanceId, { stopAfterProposal: true, accountKey, parentWorkflowId: event.instanceId, ...(resumeFrom ? { resumeFrom } : {}) });
+        return runAgentTask(this.env, ledger, task, event.instanceId, { stopAfterProposal: true, accountKey, parentWorkflowId: event.instanceId, ...restrictedAgentRuntimeOptions(this.env), ...(resumeFrom ? { resumeFrom } : {}) });
       });
       if (proposal.commit || !("proposalId" in proposal)) return proposal;
       return await step.do("apply-saved-proposal", { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "10 minutes" }, async () => {
         const task = (await ledger.getState()).tasks[taskId];
         if (!task || ["accepted", "cancelled", "integrating", "verifying"].includes(task.status)) return { commit: "" };
-        return runAgentTask(this.env, ledger, task, event.instanceId, { accountKey, parentWorkflowId: event.instanceId, ...(resumeFrom ? { resumeFrom } : {}) });
+        return runAgentTask(this.env, ledger, task, event.instanceId, { accountKey, parentWorkflowId: event.instanceId, ...restrictedAgentRuntimeOptions(this.env), ...(resumeFrom ? { resumeFrom } : {}) });
       });
     } catch {
       await step.do("record-agent-failure", async () => { await ledger.failAgentRun(event.instanceId, taskId); await ledger.failAgentTask(taskId, event.instanceId); });

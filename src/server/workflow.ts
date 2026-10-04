@@ -1,4 +1,6 @@
 import {runWorkflowMirrorFollowup} from "./workflow-mirror";
+import {deriveTrustedBrowserPolicy} from './isolated-browser-policy';
+import {verifyIsolatedGitCandidate,IsolatedGitVerificationError} from './isolated-git-verification';
 import type { NativeComputeKind } from "./managed-spend-ledger.js";
 import {retainCandidateGitPin} from "./candidate-git-pin";
 import {confirmCompositionBranch} from "./composition-branch";
@@ -307,6 +309,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       exec: async(cmd:string,env?:Record<string,string>,beforeDispatch?:()=>Promise<void>)=>{if(!this.nativeRuntimeCandidateId){await beforeDispatch?.();return sb.exec(["sh","-c",cmd],{env});}const permit=await command();try{await beforeDispatch?.();}catch(error){await repository.finishIntegrationNativeCommand(permit.scope,nativeId,permit.commandId,"refused");throw error;}return sb.integrationExec(permit.scope,nativeId,permit.commandId,["sh","-c",cmd],{env});},
       readFile: async(p:string)=>{if(!this.nativeRuntimeCandidateId)return {content:await sb.readFile(p)};const permit=await command();return {content:await sb.integrationReadFile(permit.scope,nativeId,permit.commandId,p)};},
       readFileBytes: async(p:string)=>{if(!this.nativeRuntimeCandidateId)return sb.readFileBytes(p);const permit=await command();return sb.integrationReadFileBytes(permit.scope,nativeId,permit.commandId,p);},
+      readGitObject: async(kind:'commit'|'tree'|'blob',hash:string,maxBytes:number)=>{if(!this.nativeRuntimeCandidateId)throw Error('Scoped native Git reader required');const permit=await command();return sb.integrationReadGitObject(permit.scope,nativeId,permit.commandId,kind,hash,maxBytes);},
       writeFile: async(p:string,c:string)=>{if(!this.nativeRuntimeCandidateId)return sb.writeFile(p,c);const permit=await command();return sb.integrationWriteFile(permit.scope,nativeId,permit.commandId,p,c);},
       destroy: async () => {
         try { await sb.destroy();if(this.nativeRuntimeCandidateId)await repository.confirmIntegrationNativeRuntimeStopped(this.computeWorkflowId!,this.nativeRuntimeCandidateId,nativeId); }
@@ -397,6 +400,11 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     const settings = settingsFor(candidate.frozenVerificationPolicy);
     const externalOnly = candidate.frozenExternalChecksPolicy?.mode === "external";
     const nativeOnly=externalOnly||isGitIntegrityPolicy(candidate.frozenVerificationPolicy);
+    const isolatedBrowser='trustedBrowserFixture' in candidate.frozenVerificationPolicy||'trustedBrowserPolicyDigest' in candidate.frozenVerificationPolicy;
+    if(isolatedBrowser){
+      try{await deriveTrustedBrowserPolicy(candidate.frozenVerificationPolicy);}catch{return{ok:false,error:'Frozen isolated browser policy is invalid; saved contributions remain preserved'};}
+      if(!this.env.UNTRUSTED_EXECUTION||!this.env.ISOLATED_EXECUTION_IMAGE||!this.env.VERIFICATION_BROWSER)return{ok:false,error:'Isolated execution resources are not configured; no application code was executed'};
+    }
     if(candidate.expectedAcceptedBase===null && (!nativeOnly||candidate.acceptedTarget?.kind!=="unborn"||settings.landing!=="merge"))return{ok:false,error:"First publication requires an explicit unborn target and native merge verification preserving contributor roots"};
     if (externalOnly && ((settings.fixture !== "custom"&&settings.fixture!=="git-integrity") || !candidate.frozenExternalChecksPolicy?.checks.some((check) => check.required) || !candidate.frozenContributorProofs?.length)) return { ok: false, error: "External CI requires a custom repository, frozen contributor proofs and at least one required check" };
     const spendRunId = `repair-${candidate.id}`;
@@ -538,6 +546,20 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
         // Retain the verified Git candidate before optional R2 copies.
         const pin=await retainCandidateGitPin({candidateId:candidate.id,commit,directory:WORK,remote:activeCanonical.remote,token:activeCanonical.token,exec:(command,env)=>sb.exec(command,env,()=>this.retainedAuthority(inputs[0]!,stub)),beforeCommand:async phase=>{if(phase==="before")await this.fundedRetainedCommand(inputs[0]!,stub);else await this.retainedAuthority(inputs[0]!,stub);}});
         await stub.recordCandidateProtectedPin(candidate.id,commit,{...pin,workflowId:parentWorkflowId});
+        if(isolatedBrowser){
+          try{
+            if(!tree||!this.env.UNTRUSTED_EXECUTION||!this.env.ISOLATED_EXECUTION_IMAGE)throw Error('Exact isolated execution identity unavailable');
+            const policy=await deriveTrustedBrowserPolicy(candidate.frozenVerificationPolicy),input=inputs[0]!;
+            const receipt=await verifyIsolatedGitCandidate({scope:{attemptId:crypto.randomUUID(),projectId:params.projectId,incarnation:input.incarnation,commit,tree,policyDigest:policy.digest},workflowId:parentWorkflowId,candidateId:candidate.id,actorId:input.actorId,accountKey:input.accountKey,sourceDigest:'0'.repeat(64),image:this.env.ISOLATED_EXECUTION_IMAGE,policyVersion:candidate.frozenPolicyVersion,expectedBase:candidate.expectedAcceptedBase,candidateSnapshotDigest:'0'.repeat(64)},{ledger:stub,namespace:this.env.UNTRUSTED_EXECUTION,reader:{readObject:async(kind,hash,maxBytes,signal)=>{signal.throwIfAborted();return sb.readGitObject(kind,hash,maxBytes);}}});
+            // Optional durable copies must match the controller's final browser-bound digest.
+            evidence.builtOutputDigest=receipt.buildDigest;
+          }catch(error){
+            const verificationStage=error instanceof IsolatedGitVerificationError?error.stage:'source';
+            const reason=verificationStage==='source'?'Committed source or current authority could not be confirmed':verificationStage==='build'?'Isolated build or exact cleanup is unconfirmed':'Trusted browser checks or exact session cleanup did not pass';
+            await stub.logActivity('FlareGit',`verification.${verificationStage}_failed`,reason).catch(()=>console.warn('Verification failure activity unavailable'));
+            return {ok:false,error:`${reason}. The candidate Git pin and contributor checkpoints remain preserved; inspect the saved ${verificationStage} attempt before retrying`};
+          }
+        }
         const previewKey=`build-${params.projectId}-${commit}`;
         try {
           const hasPage = !nativeOnly && settings.fixture === "ticket-booking" && (await run(`test -f ${WORK}/index.html`)).success;

@@ -1,0 +1,3 @@
+import{AgentSandbox}from'../../src/server/integrator';import type{Env}from'../../src/server/env';
+export class AgentStartupOptionsFixture extends AgentSandbox{async probe(){let options:ContainerStartupOptions|undefined;let startupRefused=false,execRefused=false;try{options=await this.startupOptions();}catch{startupRefused=true;}try{await this.exec(['/usr/bin/true'],{timeoutMs:10});}catch{execRefused=true;}return{startupRefused,options:options??null,execRefused,containerBound:Boolean(this.ctx.container),actualVmStarted:false};}}
+export default{async fetch(_request:Request,env:Env&{PROBE:DurableObjectNamespace<AgentStartupOptionsFixture>}){return Response.json(await env.PROBE.getByName('one-owned-probe').probe());}};

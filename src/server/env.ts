@@ -2,6 +2,19 @@ import type { ArtifactsBinding } from "../artifacts/cloudflare.js";
 import type { AiBinding } from "../ai/workers-ai.js";
 
 export interface Env {
+  /** C02 stays unavailable until an operator approves the pinned image/policy. */
+  ISOLATED_EXECUTION_IMAGE?: string;
+  ISOLATED_BROWSER_POLICY_DIGEST?: string;
+  /** Separate C02 resources; absence refuses execution, never falls back to INTEGRATOR. */
+  UNTRUSTED_EXECUTION?: DurableObjectNamespace<import('./untrusted-execution-sandbox').UntrustedExecutionSandbox>;
+  UNTRUSTED_EGRESS?: Fetcher;
+  EXECUTION_AUTHORITY?: Fetcher;
+  VERIFICATION_BROWSER?: import('./cloudflare-browser-transport').VerificationBrowserBinding & Partial<import('./cloudflare-browser-transport').BrowserSessionControl>;
+  /** Explicit canary browser admission envelope; unset disables allocation. */
+  BROWSER_SESSION_RESERVATION_USD_MICROS?: string;
+  /** Restricted agent rollout requires installed relay and public CA trust. */
+  AGENT_RESTRICTED_EGRESS_ENABLED?: string;
+  ISOLATED_AGENT_IMAGE?: string;
   /** Retained optional preview assets only; unset disables new storage reservations. */
   EVIDENCE_STORAGE_GLOBAL_BYTES?: string;
   EVIDENCE_STORAGE_ACCOUNT_BYTES?: string;

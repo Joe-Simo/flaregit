@@ -10,6 +10,7 @@ import { Community, CommunityCompose } from "./pages/Community";
 import { NewRepo } from "./pages/NewRepo";
 import { Repo } from "./pages/Repo";
 import { Join } from "./pages/Join";
+import { JoinResume } from "./pages/JoinResume";
 import { Account } from "./pages/Account";
 import { Inbox } from "./pages/Inbox";
 import { OperatorPage, ReportPage } from "./pages/Reports";
@@ -78,6 +79,7 @@ export function App() {
         {route.name === "report" && <ReportPage key={route.params.get("target") ?? "report"} initialTarget={route.params.get("target")} initialKind={route.params.get("kind")} />}
         {route.name === "operator" && <OperatorPage />}
         {route.name === "join" && <Join projectId={route.projectId} token={route.token} />}
+        {route.name === "join-resume" && <JoinResume nonce={route.nonce} />}
         {route.name === "repo" && <Repo projectId={route.projectId} tab={route.tab} params={route.params} />}
       </main>
       <footer className="px-4 sm:px-6 py-3 text-xs text-muted-foreground flex flex-wrap items-center gap-x-4 gap-y-3 border-t border-border">

@@ -1,4 +1,15 @@
 import {TagCreationOperations,type TagCreationOperation} from "./tag-creation-operations";
+import {IsolatedExecutionGrants,isolatedExecutionContextSchema,type IsolatedExecutionContext} from "./isolated-execution-grants";
+import {verifyBuildManifest,type BuildManifest,type BuildFile} from './static-build-artifact';
+import {untrustedExecutionName} from './untrusted-execution';
+import {BrowserSessionBudget,browserSessionScopeSchema,type BrowserSessionScope} from './browser-session-budget';
+import {retireBrowserSession} from './cloudflare-browser-transport';
+import type {TrustedGitSource} from './trusted-git-source';
+import {deriveTrustedBrowserPolicy} from './isolated-browser-policy';
+import {TrustedBrowserReceipts,type TrustedBrowserReceiptGuards,type TrustedBrowserExpectation} from './trusted-browser-receipts';
+import {BudgetedBrowserTransportRouter} from './budgeted-browser-transport';
+import type {BrowserVerificationTransport} from './external-browser-verifier';
+import {CandidateBuildAttempts,type CandidateBuildSnapshot} from './candidate-build-attempts';
 import {createNativeTag,inspectNativeTags,type TagCreationIdentity,type TagNativeOwnership} from "./tag-git";
 import {ReleaseRecords,type ReleaseContent} from "./release-records";
 import {RepositoryInvitations,type InvitationGrant} from "./repository-invitations";
@@ -46,6 +57,9 @@ import { MigrationConversationPublication, type ImportedConversationOrigin } fro
 import { RepositoryReviewLedger,candidateReviewScopeSchema, type RepositoryReviewPolicy, type CandidateReviewScope, type ReviewDecision } from "./repository-review-ledger.js";
 import { AgentRuntimeLedger, type AgentNativeAttemptIdentity } from "./agent-runtime-ledger.js";
 import { AgentCredentialIncidents, type AgentCredentialScope } from "./agent-credential-incidents.js";
+import {RestrictedAgentAuthority,type RestrictedAgentCurrent} from "./restricted-agent-authority";
+import {agentExecutionEgressScopeSchema,type AgentExecutionEgressSnapshot,type AgentExecutionGitCredential} from "./agent-execution-egress";
+import type {AgentEgressWorkerProps} from "./agent-egress-worker";
 import {RetainedCredentialIncidents} from "./retained-credential-incidents.js";
 import {RetainedInputs,retainedInputSchema,type RetainedInput,type RetainedInputReceipt,type RebaseApplication} from "./retained-inputs.js";
 import {ImportHistoryInspection,type HistorySide,type HistoryInspectionActor,type HistoryChunk,type HistoryInspectionSnapshot,type HistoryInspectionBatch} from "./import-history-inspection.js";
@@ -366,6 +380,24 @@ export interface Ledger {
   managedReservationAttribution(input: {month:string;cursor?:string}): ReturnType<ManagedSpendLedger["attributionPage"]>;
   reserveManagedSpendBatch(inputs: ManagedEnvelope[], budget: ManagedBudget): Promise<ManagedAdmission[]>;
   reserveManagedSpend(input: ManagedEnvelope, budget: ManagedBudget): Promise<ManagedAdmission>;
+  managedSpendReservation(runId:string):Promise<ManagedReservation|null>;
+  prepareIsolatedExecutionGrant(context:IsolatedExecutionContext):ReturnType<RepositoryController["prepareIsolatedExecutionGrant"]>;
+  isolatedExecutionSnapshot(context:IsolatedExecutionContext):Promise<IsolatedExecutionContext>;
+  claimIsolatedExecutionDispatch(context:IsolatedExecutionContext):ReturnType<RepositoryController["claimIsolatedExecutionDispatch"]>;
+  sealIsolatedExecution(context:IsolatedExecutionContext):Promise<void>;
+  recordIsolatedBuildArtifact(context:IsolatedExecutionContext,manifest:BuildManifest,files:BuildFile[]):Promise<void>;
+  isolatedSourceProvider(context:IsolatedExecutionContext):Promise<{providerRepoId:string;canonicalRepoName:string}>;
+  assertIsolatedSourceProvenance(context:IsolatedExecutionContext,proof:TrustedGitSource['proof']):Promise<void>;
+  verifyIsolatedCandidateBrowser(context:IsolatedExecutionContext,source:TrustedGitSource,output:BuildManifest,files:BuildFile[]):ReturnType<RepositoryController['verifyIsolatedCandidateBrowser']>;
+  prepareCandidateIsolatedBuild(context:IsolatedExecutionContext):ReturnType<RepositoryController['prepareCandidateIsolatedBuild']>;
+  bindCandidateIsolatedSource(snapshot:CandidateBuildSnapshot,source:TrustedGitSource):Promise<IsolatedExecutionContext>;
+  authorizeIsolatedBrowserSession(scope:BrowserSessionScope):Promise<boolean>;
+  admitVerificationBrowser(scope:BrowserSessionScope):ReturnType<RepositoryController['admitVerificationBrowser']>;
+  beginVerificationBrowserAcquire(scope:BrowserSessionScope):Promise<boolean>;
+  recordVerificationBrowserAcquired(scope:BrowserSessionScope,sessionId:string):Promise<void>;
+  beforeVerificationBrowserWork(scope:BrowserSessionScope):Promise<void>;
+  closeVerificationBrowser(scope:BrowserSessionScope):ReturnType<RepositoryController['closeVerificationBrowser']>;
+  authorizeIsolatedExecution(context:{scope:IsolatedExecutionContext["scope"];sourceDigest:string;image:string}):Promise<boolean>;
   consumeManagedSpend(runId: string, inputBytes: number, outputTokens: number, containerSeconds: number): Promise<ManagedReservation>;
 
   acceptedDeploymentTarget(journalId:string):Promise<{canonicalRepoName:string;target:AcceptedDeploymentTarget;selection:AcceptedDeploymentSelection}|null>;
@@ -401,6 +433,13 @@ export interface Ledger {
   beginAgentCredential(attemptId:string,issuanceId:string,scope:"read"|"write",expiresAt:number):Promise<import("./agent-credential-incidents").AgentCredentialScope|null>;
   recordAgentCredential(attemptId:string,issuanceId:string,token:string,expiresAt:number):Promise<void>;
   revokeAgentCredential(issuanceId:string):Promise<boolean>;
+  agentRelayCurrent(props:AgentEgressWorkerProps):Promise<AgentExecutionEgressSnapshot>;
+  agentRelayBeforeCredential(props:AgentEgressWorkerProps,requestId:string,access:"read"|"write"):Promise<void>;
+  agentRelayCredential(props:AgentEgressWorkerProps,issuanceId:string,access:"read"|"write"):Promise<AgentExecutionGitCredential>;
+  agentRelayBeforeTransfer(props:AgentEgressWorkerProps,requestId:string):Promise<void>;
+  cleanupRelayAttempt(props:AgentEgressWorkerProps):Promise<{credentialsComplete:boolean}>;
+  sealAgentRelay(props:AgentEgressWorkerProps):Promise<void>;
+  agentRelayCleanupStatus(props:AgentEgressWorkerProps):Promise<{credentialsComplete:boolean}>;
   confirmAgentNativeStopped(attemptId:string,nativeId:string):Promise<boolean>;
   branchInventory(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["branchInventory"]>;
   createBranch(input:{operationId:string;name:string;sourceCommit:string},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["createBranch"]>;
@@ -1512,6 +1551,56 @@ export class RepositoryController extends DurableObject<Env> {
     const activeStamp=task?.targetGeneration?{eventId:task.targetGeneration.eventId,generation:task.targetGeneration.generation}:undefined;if(JSON.stringify(this.agentRuns().get(attempt.runId)?.targetGeneration)!==JSON.stringify(activeStamp))throw Error("Agent target generation changed");
     if((role!=="owner"&&writer!==attempt.actorId)||(selected&&selected.runId!==attempt.runId&&!["failed","checkpointed"].includes(selected.phase))||this.repositoryDeleting()||!task||["accepted","cancelled","integrating","verifying"].includes(task.status)||state.projectId!==attempt.projectId||this.readRepositoryIncarnation()!==attempt.incarnation||registered?.actor_id!==attempt.actorId||(registered?.kind==="agent"&&(task.agentWorkflowInstanceId!==attempt.workflowId||attempt.runId!==attempt.workflowId))||!this.ctx.storage.sql.exec("SELECT role FROM members WHERE user_id=?",attempt.actorId).toArray().length||(this.agentRuns().get(attempt.runId)?.generation??0)!==attempt.generation)throw Error("Agent runtime authority changed");
   }
+  private agentRelayProps(input:AgentEgressWorkerProps){return z.object({attemptId:z.uuid(),nativeId:z.uuid(),scope:agentExecutionEgressScopeSchema}).strict().parse(structuredClone(input));}
+  private agentRelayTables(){this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS agent_relay_requests(id TEXT PRIMARY KEY,attempt_id TEXT NOT NULL,scope TEXT NOT NULL,access TEXT NOT NULL,phase TEXT NOT NULL); CREATE TABLE IF NOT EXISTS agent_relay_closed(attempt_id TEXT PRIMARY KEY,native_id TEXT NOT NULL)");}
+  protected agentRelayRepository(name:string):Promise<Pick<ArtifactsRepo,"info"|"log"|"readCommit"|"createToken"|"revokeToken">&Disposable>{return this.env.ARTIFACTS.get(name);}
+  private agentRelayBasis(props:AgentEgressWorkerProps){
+    this.agentRelayTables();const runtime=new AgentRuntimeLedger(this.ctx.storage).get(props.attemptId),state=this.load();
+    if(!runtime||runtime.state!=="possible"||runtime.nativeId!==props.nativeId||state.projectId!==runtime.projectId||this.readRepositoryIncarnation()!==runtime.incarnation||this.repositoryDeleting()||this.ctx.storage.sql.exec("SELECT attempt_id FROM agent_relay_closed WHERE attempt_id=?",props.attemptId).toArray().length)throw Error("Original active restricted runtime required");
+    const {state:_state,createdAt:_created,stoppedAt:_stopped,...attempt}=runtime,raw=state.tasks[attempt.taskId];if(!raw)throw Error("Assigned agent task unavailable");const task=this.projectedTask(raw),scope=props.scope,registered=this.ctx.storage.sql.exec<{actor_id:string|null;kind:string}>("SELECT actor_id,kind FROM project_workflows WHERE instance_id=?",attempt.workflowId).toArray()[0];this.gitTables();
+    const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",attempt.actorId).toArray()[0]?.role,writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",attempt.taskId).toArray()[0]?.user_id;
+    const run=this.agentRuns().get(attempt.runId),head=this.ctx.storage.sql.exec<{run_id:string;generation:number}>("SELECT run_id,generation FROM agent_run_heads WHERE task_id=?",attempt.taskId).toArray()[0];
+    if(!role||(role!=="owner"&&writer!==attempt.actorId)||registered?.actor_id!==attempt.actorId||!["agent","scenario"].includes(registered.kind)||["accepted","cancelled","integrating","verifying"].includes(task.status)||run&&["failed","checkpointed"].includes(run.phase)||head&&head.run_id!==attempt.runId||registered.kind==="agent"&&(task.agentWorkflowInstanceId!==attempt.workflowId||attempt.runId!==attempt.workflowId))throw Error("Current agent writer or registered run unavailable");
+    const stamp=task.targetGeneration?{eventId:task.targetGeneration.eventId,generation:task.targetGeneration.generation}:undefined;
+    if(run&&JSON.stringify(run.targetGeneration)!==JSON.stringify(stamp))throw Error("Original agent target generation changed");
+    if(scope.projectId!==attempt.projectId||scope.incarnation!==attempt.incarnation||scope.actorId!==attempt.actorId||scope.accountKey!==attempt.accountKey||scope.taskId!==attempt.taskId||scope.runId!==attempt.runId||scope.workflowId!==attempt.workflowId||scope.branchGeneration!==(task.targetGeneration?.generation??0)||scope.canonicalRepoName!==state.canonicalRepoName||scope.forkRepoName!==task.workspace.repoName||scope.remote!==task.workspace.remote||scope.branch!==task.workspace.branch||scope.access==="write"&&attempt.phase!=="apply")throw Error("Exact assigned fork relay scope required");
+    const creation=new TaskCreationIntents(this.ctx.storage).forTask(task.id);if(!creation||creation.phase!=="committed"||!creation.providerRepoId||creation.workspaceRepoName!==task.workspace.repoName||creation.projectId!==attempt.projectId||creation.incarnation!==attempt.incarnation)throw Error("Original fork provider identity is unproven");
+    return{attempt,task,creation,run,head,snapshot:this.agentNativeSnapshot(task)};
+  }
+  private async agentRelayFund(props:AgentEgressWorkerProps,operation:string){const original=this.agentRelayBasis(props);if(await accountOf(this.env,original.attempt.accountKey).accountLifecycle()!=="active")throw Error("Agent account unavailable");this.agentRelayBasis(props);const grant=await globalOf(this.env).reserveCoreGitOperation(operation,original.attempt.accountKey,this.currentGitBudget());this.agentRelayBasis(props);if(!grant.allowed)throw Error("Agent relay Git funding unavailable");}
+  private agentRestrictedAuthority(props:AgentEgressWorkerProps,probe:boolean){
+    let checkedSnapshot:string|undefined;
+    return new RestrictedAgentAuthority(this.ctx.storage,{current:async(binding,proposed)=>{
+      const initial=this.agentRelayBasis(props),digest=await this.sha256(initial.snapshot);if(digest!==initial.attempt.snapshotDigest||this.agentRelayBasis(props).snapshot!==initial.snapshot)throw Error("Original agent task snapshot changed");
+      if(await accountOf(this.env,initial.attempt.accountKey).accountLifecycle()!=="active")throw Error("Agent account unavailable");this.agentRelayBasis(props);
+      await this.agentRelayFund(props,`agent-relay-meta-${crypto.randomUUID()}`);using repository=await this.agentRelayRepository(initial.task.workspace.repoName);this.agentRelayBasis(props);await this.agentRelayFund(props,`agent-relay-info-${crypto.randomUUID()}`);const info=await repository.info();this.agentRelayBasis(props);
+      const marker=`FlareGit creation ${initial.creation.eventId}/${initial.creation.allocationId}`,source=`artifacts:${this.env.ARTIFACT_STORAGE_NAMESPACE}/${initial.creation.selection.sourceRepoName}`;
+      if(info.id!==initial.creation.providerRepoId||info.name!==initial.task.workspace.repoName||info.remote!==initial.task.workspace.remote||info.source!==source||info.description!==marker||info.readOnly)throw Error("Original assigned fork metadata changed");
+      if(probe&&proposed.access==="read"&&initial.task.currentCommit!==null){await this.agentRelayFund(props,`agent-relay-checkpoint-${crypto.randomUUID()}`);const checkpoint=await repository.readCommit(initial.task.currentCommit);this.agentRelayBasis(props);if(checkpoint?.hash!==initial.task.currentCommit)throw Error("Recorded readonly checkpoint is absent from original fork");}
+      let observation:RestrictedAgentCurrent["remoteObservation"]=null;
+      if(probe&&proposed.access==="write"){await this.agentRelayFund(props,`agent-relay-tip-${crypto.randomUUID()}`);const entries=await repository.log({ref:`refs/heads/${initial.task.workspace.branch}`,limit:1});this.agentRelayBasis(props);if(entries.length>1||entries[0]&&!/^[a-f0-9]{40}$/.test(entries[0].hash))throw Error("Exact assigned branch lookup unavailable");observation={observationId:crypto.randomUUID(),projectId:initial.attempt.projectId,incarnation:initial.attempt.incarnation,forkRepoName:initial.task.workspace.repoName,ref:`refs/heads/${initial.task.workspace.branch}`,tip:entries[0]?.hash??null};}
+      const current=this.agentRelayBasis(props);if(current.snapshot!==initial.snapshot)throw Error("Agent source changed during provider await");checkedSnapshot=current.snapshot;const claim=current.run?{runId:current.run.runId,taskId:current.run.taskId,workflowId:current.attempt.workflowId,generation:current.run.generation,snapshotDigest:digest,branchGeneration:props.scope.branchGeneration,forkRepoName:current.task.workspace.repoName,branch:current.run.branch,startingBranchHead:current.run.startingBranchHead}:null;
+      return{attempt:current.attempt,scope:{...proposed,remote:info.remote,expectedTip:proposed.access==="write"?claim?.startingBranchHead??null:probe?current.task.currentCommit:binding.scope.expectedTip},taskSnapshotDigest:digest,runGeneration:current.run?.generation??0,claim,remoteObservation:observation,actorState:"active",accountState:"active",taskState:"active",runtimeState:"possible"};
+    },assertLocal:(_binding,current)=>{const actual=this.agentRelayBasis(props);if(checkedSnapshot===undefined||actual.snapshot!==checkedSnapshot||(actual.run?.generation??0)!==current.runGeneration||JSON.stringify(actual.attempt)!==JSON.stringify(current.attempt))throw Error("Restricted agent state changed during authority await");}});
+  }
+  private async agentRelayAuthorize(props:AgentEgressWorkerProps,transfer:boolean){const basis=this.agentRelayBasis(props),guard=this.agentRestrictedAuthority(props,transfer);const original=guard.originalOwnership(basis.attempt);if(!original){if(props.scope.access!=="read")throw Error("Initial readonly runtime must be bound first");return guard.bind(basis.attempt,props.scope);}return guard.authorize(basis.attempt,props.scope,transfer?"transfer":"identity");}
+  async agentRelayCurrent(input:AgentEgressWorkerProps):Promise<AgentExecutionEgressSnapshot>{const props=this.agentRelayProps(input),basis=this.agentRelayBasis(props),original=this.agentRestrictedAuthority(props,false).originalOwnership(basis.attempt);await this.agentRelayAuthorize(props,!original||props.scope.access==="write"&&!original.writeBinding);return{...props.scope,actorActive:true,accountActive:true,taskActive:true};}
+  async agentRelayBeforeCredential(input:AgentEgressWorkerProps,id:string,access:"read"|"write"):Promise<void>{const props=this.agentRelayProps(input);z.uuid().parse(id);if(access!=="read"&&access!=="write"||access==="write"&&props.scope.access!=="write")throw Error("Agent credential access differs");await this.agentRelayAuthorize(props,access==="write");await this.agentRelayFund(props,`agent-relay-credential-${id}`);this.ctx.storage.transactionSync(()=>{this.agentRelayBasis(props);const scope=JSON.stringify(props),old=this.ctx.storage.sql.exec<{scope:string;access:string;phase:string}>("SELECT scope,access,phase FROM agent_relay_requests WHERE id=?",id).toArray()[0];if(old){if(old.scope!==scope||old.access!==access||old.phase!=="funded")throw Error("Agent request grant consumed or changed");return;}this.ctx.storage.sql.exec("INSERT INTO agent_relay_requests VALUES(?,?,?,?,?)",id,props.attemptId,scope,access,"funded");});}
+  async agentRelayCredential(input:AgentEgressWorkerProps,id:string,access:"read"|"write"):Promise<AgentExecutionGitCredential>{
+    const props=this.agentRelayProps(input);z.uuid().parse(id);await this.agentRelayAuthorize(props,access==="write");const basis=this.agentRelayBasis(props);
+    const validate=()=>{this.agentRelayBasis(props);const row=this.ctx.storage.sql.exec<{scope:string;access:string;phase:string}>("SELECT scope,access,phase FROM agent_relay_requests WHERE id=?",id).toArray()[0];if(!row||row.scope!==JSON.stringify(props)||row.access!==access||row.phase!=="funded")throw Error("Original paid agent credential grant required");};validate();
+    await this.agentRelayFund(props,`agent-relay-get-${crypto.randomUUID()}`);using repository=await this.agentRelayRepository(props.scope.forkRepoName);validate();
+    const ledger=new AgentCredentialIncidents(this.ctx.storage),context:AgentCredentialScope={...basis.attempt,repoName:props.scope.forkRepoName,scope:access},expires=Date.now()+300000;
+    this.ctx.storage.transactionSync(()=>{validate();if(!ledger.begin(id,context,expires,validate))throw Error("Credential issuance is already consumed or unknown");this.ctx.storage.sql.exec("UPDATE agent_relay_requests SET phase='issuance_possible' WHERE id=?",id);});await this.ensureRecoveryAlarm();
+    let token:string|undefined;
+    try{await this.agentRelayFund(props,`agent-relay-issue-${crypto.randomUUID()}`);const issued=await repository.createToken(access,300);token=issued.plaintext;const expiry=Date.parse(issued.expiresAt);try{await ledger.record(id,context,token,expiry);}catch{await ledger.record(id,context,token,expiry);}if(issued.scope!==access||!Number.isSafeInteger(expiry)||expiry<=Date.now()||expiry>Date.now()+305000)throw Error("Scoped relay credential metadata unavailable");await this.agentRelayAuthorize(props,false);return{repositoryName:props.scope.forkRepoName,remote:props.scope.remote,scope:access,token,expiresAt:expiry};}
+    catch{if(token&&!await this.revokeAgentCredential(id).catch(()=>false)){const funding=await globalOf(this.env).reserveCoreGitOperation(`agent-known-cleanup-${crypto.randomUUID()}`,basis.attempt.accountKey,this.currentGitBudget()).catch(()=>null);if(funding?.allowed)try{await repository.revokeToken(token);}catch{/* Known native cleanup was attempted; an unrecorded receipt remains held. */}}throw Error("Agent credential issuance or current authority is unconfirmed");}
+  }
+  async agentRelayBeforeTransfer(input:AgentEgressWorkerProps,id:string):Promise<void>{const props=this.agentRelayProps(input);z.uuid().parse(id);const context=new AgentCredentialIncidents(this.ctx.storage).context(id),status=new AgentCredentialIncidents(this.ctx.storage).summary(id);if(!context||context.attemptId!==props.attemptId||context.repoName!==props.scope.forkRepoName||status?.status!=="pending")throw Error("Original active relay credential required");await this.agentRelayAuthorize(props,context.scope==="write");await this.agentRelayFund(props,`agent-relay-transfer-${id}`);await this.agentRelayAuthorize(props,false);}
+  private agentRelayCleanupOwnership(input:AgentEgressWorkerProps){const props=this.agentRelayProps(input),runtime=new AgentRuntimeLedger(this.ctx.storage).get(props.attemptId);if(!runtime||runtime.nativeId!==props.nativeId)throw Error("Original cleanup runtime required");const {state:_state,createdAt:_created,stoppedAt:_stopped,...attempt}=runtime;this.agentRestrictedAuthority(props,false).cleanup(attempt,props.scope);return props;}
+  async sealAgentRelay(input:AgentEgressWorkerProps):Promise<void>{const props=this.agentRelayCleanupOwnership(input);this.agentRelayTables();this.ctx.storage.sql.exec("INSERT OR IGNORE INTO agent_relay_closed VALUES(?,?)",props.attemptId,props.nativeId);}
+  async agentRelayCleanupStatus(input:AgentEgressWorkerProps):Promise<{credentialsComplete:boolean}>{const props=this.agentRelayCleanupOwnership(input);new AgentCredentialIncidents(this.ctx.storage);return{credentialsComplete:!this.ctx.storage.sql.exec("SELECT id FROM agent_credential_incidents WHERE json_extract(payload,'$.attemptId')=? AND status!='revoked' LIMIT 1",props.attemptId).toArray().length};}
+  async cleanupRelayAttempt(input:AgentEgressWorkerProps):Promise<{credentialsComplete:boolean}>{const props=this.agentRelayProps(input),runtime=new AgentRuntimeLedger(this.ctx.storage).get(props.attemptId);if(!runtime||runtime.nativeId!==props.nativeId)throw Error("Original cleanup runtime required");const {state:_state,createdAt:_created,stoppedAt:_stopped,...attempt}=runtime;this.agentRestrictedAuthority(props,false).cleanup(attempt,props.scope);this.agentRelayTables();this.ctx.storage.sql.exec("INSERT OR IGNORE INTO agent_relay_closed VALUES(?,?)",props.attemptId,props.nativeId);new AgentCredentialIncidents(this.ctx.storage);const rows=this.ctx.storage.sql.exec<{id:string}>("SELECT id FROM agent_credential_incidents WHERE json_extract(payload,'$.attemptId')=? AND status!='revoked' LIMIT 1001",props.attemptId).toArray();for(const row of rows.slice(0,1000))await this.revokeAgentCredential(row.id).catch(()=>false);return{credentialsComplete:!this.ctx.storage.sql.exec("SELECT id FROM agent_credential_incidents WHERE json_extract(payload,'$.attemptId')=? AND status!='revoked' LIMIT 1",props.attemptId).toArray().length};}
   async beginAgentNativeAttempt(input:{workflowId:string;runId:string;taskId:string;phase:"proposal"|"apply";attemptId:string;nativeId:string}):Promise<AgentNativeAttemptIdentity>{
     await this.ensureRecoveryAlarm();const run=await this.getWorkflowRun(input.workflowId),state=this.load(),task=state.tasks[input.taskId],incarnation=new PrivateRecoveryOperations(this.ctx.storage).incarnation();
     if(!run?.actorId||!task||!incarnation||(run.kind!=="agent"&&run.kind!=="scenario")||(run.kind==="agent"&&(task.agentWorkflowInstanceId!==input.workflowId||input.runId!==input.workflowId)))throw Error("Registered agent initiator required");
@@ -1529,7 +1618,7 @@ export class RepositoryController extends DurableObject<Env> {
     await this.ensureRecoveryAlarm();return new AgentCredentialIncidents(this.ctx.storage).begin(id,context,expiresAt,()=>{this.assertAgentNativeLocal(identity);if(this.agentNativeSnapshot(this.load().tasks[identity.taskId]!)!==snapshot)throw Error("Agent credential task changed");})?context:null;
   }
   async recordAgentCredential(attemptId:string,id:string,token:string,expiresAt:number):Promise<void>{const ledger=new AgentCredentialIncidents(this.ctx.storage),context=ledger.context(id);if(!context||context.attemptId!==attemptId)throw Error("Agent credential intent unavailable");await ledger.record(id,context,token,expiresAt);await this.ensureRecoveryAlarm();}
-  async revokeAgentCredential(id:string):Promise<boolean>{const ledger=new AgentCredentialIncidents(this.ctx.storage);if(ledger.summary(id)?.status==="revoked")return true;const pending=ledger.credentialForRevocation(id);if(!pending)return false;const funded=await globalOf(this.env).reserveCoreGitOperation(`agent-cleanup-${crypto.randomUUID()}`,pending.context.accountKey,this.currentGitBudget()).catch(()=>null);if(!funded?.allowed||!ledger.markAttempt(id))return false;try{using repo=await this.env.ARTIFACTS.get(pending.context.repoName);if(!await repo.revokeToken(pending.token))return false;await ledger.markRevoked(id,pending.token);return true;}catch{return false;}}
+  async revokeAgentCredential(id:string):Promise<boolean>{const ledger=new AgentCredentialIncidents(this.ctx.storage);const summary=ledger.summary(id);if(summary?.status==="revoked")return true;if(!summary&&this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_relay_requests'").toArray().length){const cancelled=this.ctx.storage.transactionSync(()=>{const row=this.ctx.storage.sql.exec<{phase:string}>("SELECT phase FROM agent_relay_requests WHERE id=?",id).toArray()[0];if(row?.phase==="cancelled")return true;if(row?.phase!=="funded")return false;this.ctx.storage.sql.exec("UPDATE agent_relay_requests SET phase='cancelled' WHERE id=?",id);return true;});if(cancelled)return true;}const pending=ledger.credentialForRevocation(id);if(!pending)return false;const funded=await globalOf(this.env).reserveCoreGitOperation(`agent-cleanup-${crypto.randomUUID()}`,pending.context.accountKey,this.currentGitBudget()).catch(()=>null);if(!funded?.allowed||!ledger.markAttempt(id))return false;try{using repo=await this.agentRelayRepository(pending.context.repoName);if(!await repo.revokeToken(pending.token))return false;await ledger.markRevoked(id,pending.token);return true;}catch{return false;}}
   async confirmAgentNativeStopped(attemptId:string,nativeId:string):Promise<boolean>{const ledger=new AgentRuntimeLedger(this.ctx.storage),attempt=ledger.get(attemptId);if(!attempt||attempt.nativeId!==nativeId)return false;if(attempt.state==="stopped")return true;try{const sandbox=this.env.AGENT.getByName(`agent-${nativeId}`);await sandbox.destroy();if((await sandbox.lifetimeStatus())?.state!=="stopped")return false;const {state:_state,createdAt:_created,stoppedAt:_stopped,...identity}=attempt;ledger.confirmStopped(identity,{nativeId,state:"stopped"});return true;}catch{return false;}}
   protected async agentWorkflowTerminalStatus(workflowId:string,kind:string):Promise<string>{if(kind!=="agent"&&kind!=="scenario")throw Error("Recorded agent workflow unavailable");const workflow=kind==="agent"?this.env.AGENT_WORKFLOW:this.env.SCENARIO_WORKFLOW;return(await(await workflow.get(workflowId)).status()).status;}
   protected async retryAgentNativeStops():Promise<void>{
@@ -2424,6 +2513,184 @@ export class RepositoryController extends DurableObject<Env> {
     return !page.truncated&&!runtime.hasUnconfirmed();
   }
   async declareIntegrationNativeRuntime(workflowId:string,candidateId:string):Promise<void>{const scope=await this.integrationRuntimeScope(workflowId,candidateId);this.assertIntegrationNativeLocal(scope);if(this.load().candidates[candidateId]?.preservationProtocolVersion!==1||await accountOf(this.env,scope.accountKey).accountLifecycle()!=="active")throw new LegacyRerunError("Native runtime authority changed.");this.assertIntegrationNativeLocal(scope);new IntegrationNativeRuntimeLedger(this.ctx.storage).declareCoverage(scope);}
+  private async currentIsolatedExecution(input:IsolatedExecutionContext):Promise<IsolatedExecutionContext>{
+    const context=isolatedExecutionContextSchema.parse(input),runtime=await this.integrationRuntimeScope(context.workflowId,context.candidateId);
+    this.assertIntegrationNativeLocal(runtime);
+    if(this.env.ISOLATED_EXECUTION_IMAGE!==context.image||this.env.ISOLATED_BROWSER_POLICY_DIGEST!==context.scope.policyDigest||runtime.actorId!==context.actorId||runtime.accountKey!==context.accountKey||runtime.projectId!==context.scope.projectId||runtime.incarnation!==context.scope.incarnation)throw Error("Approved isolated execution configuration differs");
+    if(await accountOf(this.env,runtime.accountKey).accountLifecycle()!=="active")throw Error("Execution account unavailable");
+    this.assertIntegrationNativeLocal(runtime);
+    const state=this.load(),candidate=state.candidates[context.candidateId];
+    if(!candidate||!["verifying","verified","awaiting_review"].includes(candidate.status)||candidate.candidateCommit!==context.scope.commit||candidate.frozenPolicyVersion!==context.policyVersion||state.policyVersion!==context.policyVersion||candidate.frozenVerificationPolicy.trustedBrowserPolicyDigest!==context.scope.policyDigest||this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",runtime.actorId).toArray()[0]?.role!=="owner")throw Error("Current candidate or owner authority differs");
+    const evidence=candidate.evidenceId?state.evidence[candidate.evidenceId]:undefined;
+    // Native Git integrity establishes identity only, never application success.
+    if(!evidence||evidence.verifierIdentity!==VERIFIER_IDENTITIES["git-integrity"]||evidence.candidateCommit!==context.scope.commit||evidence.candidateTree!==context.scope.tree||evidence.status!=="passed")throw Error("Independent candidate Git identity unavailable");
+    const root=candidate.acceptedTarget?new AcceptedBranchRoots(this.ctx.storage).get({projectId:state.projectId,incarnation:runtime.incarnation,canonicalRepoName:state.canonicalRepoName,ref:candidate.acceptedTarget.ref}):null;
+    const unborn=candidate.acceptedTarget&&!root?new AcceptedBranchRoots(this.ctx.storage).getUnborn({projectId:state.projectId,incarnation:runtime.incarnation,canonicalRepoName:state.canonicalRepoName,ref:candidate.acceptedTarget.ref}):null;
+    const currentBase=candidate.acceptedTarget?root?.head??null:state.acceptedState.currentCommit;
+    if(candidate.acceptedTarget&&!root&&(!unborn||candidate.acceptedTarget.kind!=="unborn")||currentBase!==context.expectedBase||candidate.expectedAcceptedBase!==context.expectedBase)throw Error("Execution accepted base changed");
+    const participants=candidate.participatingTaskIds.map(id=>{const raw=state.tasks[id],task=raw?this.projectedTask(raw):null;if(!task||task.status==="cancelled"||task.activeCandidateId!==candidate.id||task.currentCommit!==candidate.participatingCommits[id])throw Error("Frozen execution input changed");return{id,commit:task.currentCommit,base:task.baseCommit,target:effectiveTaskAcceptedTarget(task),generation:task.targetGeneration??null};});
+    const snapshot=JSON.stringify({workflowId:runtime.workflowId,candidateId:candidate.id,commit:candidate.candidateCommit,tree:evidence.candidateTree,base:currentBase,rootVersion:candidate.acceptedTarget?root?.version??0:state.acceptedState.history.length,policyVersion:state.policyVersion,policy:candidate.frozenVerificationPolicy,requirements:candidate.frozenRequirements,participants});
+    const stateSnapshot=JSON.stringify(state);
+    const candidateSnapshotDigest=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(snapshot))),byte=>byte.toString(16).padStart(2,"0")).join("");
+    if(await accountOf(this.env,runtime.accountKey).accountLifecycle()!=="active")throw Error("Execution account changed while hashing");
+    this.assertIntegrationNativeLocal(runtime);
+    const freshRoot=candidate.acceptedTarget?new AcceptedBranchRoots(this.ctx.storage).get({projectId:state.projectId,incarnation:runtime.incarnation,canonicalRepoName:state.canonicalRepoName,ref:candidate.acceptedTarget.ref}):null;
+    if(JSON.stringify(this.load())!==stateSnapshot||freshRoot?.head!==root?.head||freshRoot?.version!==root?.version||this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",runtime.actorId).toArray()[0]?.role!=="owner"||this.env.ISOLATED_EXECUTION_IMAGE!==context.image||this.env.ISOLATED_BROWSER_POLICY_DIGEST!==context.scope.policyDigest)throw Error("Execution snapshot changed while hashing");
+    return isolatedExecutionContextSchema.parse({...context,expectedBase:currentBase,candidateSnapshotDigest});
+  }
+  private isolatedExecutionGrants(){const global=globalOf(this.env);return new IsolatedExecutionGrants(this.ctx.storage,{current:context=>this.currentIsolatedExecution(context),funding:{read:id=>global.managedSpendReservation(id),reserve:envelope=>global.reserveManagedSpend(envelope,managedBudget(this.env)),consume:id=>global.consumeManagedSpend(id,0,0,1200)}});}
+  async prepareIsolatedExecutionGrant(context:IsolatedExecutionContext){return this.isolatedExecutionGrants().prepare(context);}
+  async isolatedExecutionSnapshot(context:IsolatedExecutionContext){return this.currentIsolatedExecution(context);}
+  async claimIsolatedExecutionDispatch(context:IsolatedExecutionContext){return this.isolatedExecutionGrants().claimDispatch(context);}
+  private buildSnapshot(context:IsolatedExecutionContext):CandidateBuildSnapshot{
+    const {scope,sourceDigest:_sourceDigest,...fields}=context;
+    const {attemptId:_attemptId,...identity}=scope;
+    return {...fields,scope:identity};
+  }
+  private candidateBuildAttempts(){
+    let local='';
+    return new CandidateBuildAttempts(this.ctx.storage,{
+      current:async snapshot=>{
+        const context=await this.currentIsolatedExecution({...snapshot,scope:{...snapshot.scope,attemptId:'00000000-0000-4000-8000-000000000000'},sourceDigest:'0'.repeat(64)});
+        local=JSON.stringify(this.load());return this.buildSnapshot(context);
+      },
+      assertLocal:snapshot=>{if(JSON.stringify(this.load())!==local||this.repositoryDeleting()||this.readRepositoryIncarnation()!==snapshot.scope.incarnation||this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',snapshot.actorId).toArray()[0]?.role!=='owner'||this.env.ISOLATED_EXECUTION_IMAGE!==snapshot.image||this.env.ISOLATED_BROWSER_POLICY_DIGEST!==snapshot.scope.policyDigest)throw Error('Build attempt local authority changed');},
+      assertSource:async(snapshot,source)=>{await this.assertIsolatedSourceProvenance({...snapshot,scope:source.sourceManifest.scope,sourceDigest:source.sourceManifest.digest},source.proof);},
+    });
+  }
+  async prepareCandidateIsolatedBuild(input:IsolatedExecutionContext){
+    const current=await this.currentIsolatedExecution(isolatedExecutionContextSchema.parse(input));
+    return this.candidateBuildAttempts().prepare(this.buildSnapshot(current));
+  }
+  async bindCandidateIsolatedSource(snapshot:CandidateBuildSnapshot,source:TrustedGitSource):Promise<IsolatedExecutionContext>{
+    const attempts=this.candidateBuildAttempts();await attempts.bindSource(snapshot,source);return attempts.executionContext(snapshot);
+  }
+  async isolatedSourceProvider(input:IsolatedExecutionContext){
+    const context=isolatedExecutionContextSchema.parse(input);
+    if(JSON.stringify(await this.currentIsolatedExecution(context))!==JSON.stringify(context))throw Error('Source authority changed');
+    const scope=this.candidateProtectedPinScope(context.candidateId,context.scope.commit,context.workflowId);
+    this.candidateProtectedPinTable();
+    const row=this.ctx.storage.sql.exec<{payload:string}>('SELECT payload FROM candidate_protected_pin_receipts WHERE candidate_id=?',context.candidateId).toArray()[0];
+    const recorded=row?z.object({providerRepoId:z.string().min(1).max(128),projectId:z.string(),incarnation:z.string(),canonicalRepoName:z.string(),commit:z.string(),tree:z.string(),workflowId:z.string(),evidenceId:z.string()}).passthrough().parse(JSON.parse(row.payload)):null;
+    if(!recorded||recorded.projectId!==scope.projectId||recorded.incarnation!==scope.incarnation||recorded.canonicalRepoName!==scope.canonicalRepoName||recorded.commit!==scope.commit||recorded.tree!==scope.tree||recorded.workflowId!==scope.workflowId||recorded.evidenceId!==scope.evidenceId||scope.tree!==context.scope.tree)throw Error('Recorded canonical candidate pin required');
+    return {providerRepoId:recorded.providerRepoId,canonicalRepoName:recorded.canonicalRepoName};
+  }
+  async assertIsolatedSourceProvenance(input:IsolatedExecutionContext,proposed:TrustedGitSource['proof']):Promise<void>{
+    const context=isolatedExecutionContextSchema.parse(input),proof=structuredClone(proposed);
+    const provider=await this.isolatedSourceProvider(context);
+    if(proof.providerRepoId!==provider.providerRepoId||proof.canonicalRepoName!==provider.canonicalRepoName||proof.commit!==context.scope.commit||proof.tree!==context.scope.tree||proof.sourceDigest!==context.sourceDigest)throw Error('Captured source provenance differs');
+  }
+  async sealIsolatedExecution(input:IsolatedExecutionContext):Promise<void>{
+    const context=isolatedExecutionContextSchema.parse(input),ledger=this.isolatedExecutionGrants(),grant=ledger.get(context.scope.attemptId);
+    if(!grant||JSON.stringify(grant.context)!==JSON.stringify(context))throw Error("Exact execution cleanup scope required");
+    // Withdrawal blocks further work, but must never block sealing an existing job.
+    ledger.seal(context.scope.attemptId);
+  }
+  async recordIsolatedBuildArtifact(input:IsolatedExecutionContext,proposed:BuildManifest,provided:BuildFile[]):Promise<void>{
+    const context=isolatedExecutionContextSchema.parse(input),manifest=structuredClone(proposed),files=provided.map(file=>({...file,bytes:file.bytes.slice()}));
+    if(manifest.kind!=='static')throw Error('Static build identity required');
+    await verifyBuildManifest(manifest,context.scope,files,context.sourceDigest);
+    const fresh=await this.currentIsolatedExecution(context);
+    if(JSON.stringify(fresh)!==JSON.stringify(context))throw Error('Build authority changed');
+    const grant=this.isolatedExecutionGrants().get(context.scope.attemptId);
+    if(!grant||grant.phase!=='sealed'||JSON.stringify(grant.context)!==JSON.stringify(context)||!this.env.UNTRUSTED_EXECUTION)throw Error('Completed scoped execution required');
+    const name=await untrustedExecutionName(context.scope,context.sourceDigest);
+    const receipt=await this.env.UNTRUSTED_EXECUTION.getByName(name).outputReceipt(context.scope,context.sourceDigest);
+    if(!receipt||receipt.cleanup!=='confirmed'||receipt.acceptanceEvidence!==false||receipt.image!==context.image||JSON.stringify(receipt.manifest)!==JSON.stringify(manifest))throw Error('Native completed build receipt differs');
+    if(JSON.stringify(await this.currentIsolatedExecution(context))!==JSON.stringify(context))throw Error('Build authority changed during readback');
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS isolated_build_artifacts(attempt_id TEXT PRIMARY KEY,context TEXT NOT NULL,manifest TEXT NOT NULL)');
+    this.ctx.storage.transactionSync(()=>{
+      const saved=this.ctx.storage.sql.exec<{context:string;manifest:string}>('SELECT context,manifest FROM isolated_build_artifacts WHERE attempt_id=?',context.scope.attemptId).toArray()[0];
+      const encoded=JSON.stringify(context),output=JSON.stringify(manifest);
+      if(saved&&(saved.context!==encoded||saved.manifest!==output))throw Error('Build artifact identity is immutable');
+      if(!saved)this.ctx.storage.sql.exec('INSERT INTO isolated_build_artifacts VALUES(?,?,?)',context.scope.attemptId,encoded,output);
+    });
+  }
+  async authorizeIsolatedBrowserSession(input:BrowserSessionScope):Promise<boolean>{
+    try{
+      const scope=browserSessionScopeSchema.parse(input);
+      if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='isolated_build_artifacts'").toArray().length)return false;
+      const row=this.ctx.storage.sql.exec<{context:string;manifest:string}>('SELECT context,manifest FROM isolated_build_artifacts WHERE attempt_id=?',scope.attemptId).toArray()[0];
+      if(!row)return false;
+      const context=isolatedExecutionContextSchema.parse(JSON.parse(row.context)),manifest=JSON.parse(row.manifest) as BuildManifest;
+      if(context.scope.projectId!==scope.projectId||context.scope.incarnation!==scope.incarnation||context.scope.commit!==scope.commit||context.scope.tree!==scope.tree||context.scope.policyDigest!==scope.policyDigest||context.sourceDigest!==scope.sourceDigest||context.accountKey!==scope.accountKey||context.actorId!==scope.actorId||context.candidateId!==scope.candidateId||context.policyVersion!==scope.policyVersion||context.expectedBase!==scope.expectedBase||manifest.digest!==scope.buildDigest)return false;
+      if(JSON.stringify(await this.currentIsolatedExecution(context))!==JSON.stringify(context))return false;
+      const state=this.load(),candidate=state.candidates[context.candidateId];
+      if(!candidate||state.canonicalRepoName!==scope.canonicalRepoName)return false;
+      const ref=candidate.acceptedTarget?.ref??`refs/heads/${state.defaultBranch}`;
+      if(ref!==scope.targetRef)return false;
+      const root=candidate.acceptedTarget?new AcceptedBranchRoots(this.ctx.storage).get({projectId:state.projectId,incarnation:scope.incarnation,canonicalRepoName:scope.canonicalRepoName,ref}):null;
+      if(scope.acceptedVersion!==(candidate.acceptedTarget?root?.version??0:state.acceptedState.history.length))return false;
+      return this.ctx.storage.sql.exec<{context:string;manifest:string}>('SELECT context,manifest FROM isolated_build_artifacts WHERE attempt_id=?',scope.attemptId).toArray().some(saved=>saved.context===row.context&&saved.manifest===row.manifest);
+    }catch{return false;}
+  }
+  private async isolatedBrowserExpectation(context:IsolatedExecutionContext):Promise<TrustedBrowserExpectation>{
+    if(JSON.stringify(await this.currentIsolatedExecution(context))!==JSON.stringify(context))throw Error('Browser candidate authority changed');
+    const row=this.ctx.storage.sql.exec<{context:string;manifest:string}>('SELECT context,manifest FROM isolated_build_artifacts WHERE attempt_id=?',context.scope.attemptId).toArray()[0];
+    if(!row||row.context!==JSON.stringify(context))throw Error('Recorded isolated build required');
+    const candidate=this.load().candidates[context.candidateId]!;
+    const required=await deriveTrustedBrowserPolicy(candidate.frozenVerificationPolicy);
+    for(const requirement of candidate.frozenRequirements)if(requirement.status==='approved'&&!required.coveredRequirements.includes(requirement.id))throw Error(`Trusted browser checks do not cover approved requirement ${requirement.id}`);
+    if(required.digest!==context.scope.policyDigest)throw Error('Frozen browser inventory changed');
+    const manifest=JSON.parse(row.manifest) as BuildManifest;
+    return {scope:structuredClone(context.scope),sourceDigest:context.sourceDigest,buildDigest:manifest.digest,policyDigest:required.digest,cases:required.policy.cases.map(test=>({id:test.id,assertions:test.assertions.length}))};
+  }
+  private isolatedBrowserGuards(context:IsolatedExecutionContext):TrustedBrowserReceiptGuards{
+    let snapshot='';
+    return {
+      authorize:async()=>{if(JSON.stringify(await this.currentIsolatedExecution(context))!==JSON.stringify(context))throw Error('Browser receipt authority changed');snapshot=JSON.stringify(this.load());},
+      expected:()=>this.isolatedBrowserExpectation(context),
+      assertCurrent:expected=>{if(JSON.stringify(this.load())!==snapshot||this.repositoryDeleting()||this.readRepositoryIncarnation()!==context.scope.incarnation||this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',context.actorId).toArray()[0]?.role!=='owner'||this.env.ISOLATED_EXECUTION_IMAGE!==context.image||this.env.ISOLATED_BROWSER_POLICY_DIGEST!==context.scope.policyDigest||expected.sourceDigest!==context.sourceDigest||JSON.stringify(expected.scope)!==JSON.stringify(context.scope))throw Error('Browser local publication fence changed');},
+    };
+  }
+  private async isolatedBrowserSessionScope(context:IsolatedExecutionContext,leaseId:string):Promise<BrowserSessionScope>{
+    const expected=await this.isolatedBrowserExpectation(context),state=this.load(),candidate=state.candidates[context.candidateId]!;
+    const ref=candidate.acceptedTarget?.ref??`refs/heads/${state.defaultBranch}`;
+    const root=candidate.acceptedTarget?new AcceptedBranchRoots(this.ctx.storage).get({projectId:state.projectId,incarnation:context.scope.incarnation,canonicalRepoName:state.canonicalRepoName,ref}):null;
+    return browserSessionScopeSchema.parse({leaseId,attemptId:context.scope.attemptId,projectId:context.scope.projectId,incarnation:context.scope.incarnation,accountKey:context.accountKey,actorId:context.actorId,candidateId:context.candidateId,canonicalRepoName:state.canonicalRepoName,targetRef:ref,expectedBase:context.expectedBase,acceptedVersion:candidate.acceptedTarget?root?.version??0:state.acceptedState.history.length,commit:context.scope.commit,tree:context.scope.tree,policyVersion:context.policyVersion,policyDigest:expected.policyDigest,buildDigest:expected.buildDigest,sourceDigest:expected.sourceDigest,maxSeconds:120});
+  }
+  protected isolatedBrowserTransport(context:IsolatedExecutionContext):BrowserVerificationTransport{
+    const binding=this.env.VERIFICATION_BROWSER;
+    if(!binding?.closeSession||!binding.getSession)throw Error('Verification browser binding unavailable');
+    return new BudgetedBrowserTransportRouter({binding,sessionControl:{closeSession:id=>binding.closeSession!(id),getSession:id=>binding.getSession!(id)},budget:globalOf(this.env),deriveScope:id=>this.isolatedBrowserSessionScope(context,id),retainBackground:work=>this.ctx.waitUntil(work)});
+  }
+  async verifyIsolatedCandidateBrowser(proposed:IsolatedExecutionContext,provided:TrustedGitSource,output:BuildManifest,providedFiles:BuildFile[]){
+    const context=isolatedExecutionContextSchema.parse(proposed),source=structuredClone(provided),manifest=structuredClone(output),files=providedFiles.map(file=>({...file,bytes:file.bytes.slice()}));
+    await this.assertIsolatedSourceProvenance(context,source.proof);
+    await this.recordIsolatedBuildArtifact(context,manifest,files);
+    const policy=await deriveTrustedBrowserPolicy(this.load().candidates[context.candidateId]!.frozenVerificationPolicy);
+    const guards=this.isolatedBrowserGuards(context);
+    const receipt=await new TrustedBrowserReceipts(this.ctx.storage).verifyAndRecord(context.scope.attemptId,{scope:context.scope,source:source.sourceManifest,sourceFiles:source.files,output:manifest,outputFiles:files,policy:policy.policy,transport:this.isolatedBrowserTransport(context),authorize:guards.authorize,budget:guards.authorize},guards);
+    await guards.authorize();const expected=await guards.expected(context.scope.attemptId);
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS candidate_browser_attempts(candidate_id TEXT PRIMARY KEY,context TEXT NOT NULL)');
+    try{
+      this.ctx.storage.transactionSync(()=>{
+        guards.assertCurrent(expected);
+        const old=this.ctx.storage.sql.exec<{context:string}>('SELECT context FROM candidate_browser_attempts WHERE candidate_id=?',context.candidateId).toArray()[0];
+        const encoded=JSON.stringify(context);
+        if(old&&old.context!==encoded)throw Error('Candidate browser proof binding is immutable');
+        if(!old)this.ctx.storage.sql.exec('INSERT INTO candidate_browser_attempts VALUES(?,?)',context.candidateId,encoded);
+        const state=this.load(),candidate=state.candidates[context.candidateId],evidence=candidate?.evidenceId?state.evidence[candidate.evidenceId]:undefined;
+        if(!evidence||evidence.candidateCommit!==context.scope.commit||evidence.candidateTree!==context.scope.tree)throw Error('Native identity changed before browser binding');
+        evidence.builtOutputDigest=receipt.buildDigest;this.save();
+      });
+    }catch(error){this.state=null;throw error;}
+    return receipt;
+  }
+  private async publicationBrowserGate(candidate:CandidateGeneration):Promise<boolean>{
+    if(!('trustedBrowserFixture' in candidate.frozenVerificationPolicy)&&!('trustedBrowserPolicyDigest' in candidate.frozenVerificationPolicy))return true;
+    try{
+      if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='candidate_browser_attempts'").toArray().length)return false;
+      const row=this.ctx.storage.sql.exec<{context:string}>('SELECT context FROM candidate_browser_attempts WHERE candidate_id=?',candidate.id).toArray()[0];if(!row)return false;
+      const context=isolatedExecutionContextSchema.parse(JSON.parse(row.context));if(context.candidateId!==candidate.id||context.scope.commit!==candidate.candidateCommit)return false;
+      const receipt=await new TrustedBrowserReceipts(this.ctx.storage).getVerified(context.scope.attemptId,this.isolatedBrowserGuards(context));
+      const current=this.load().candidates[candidate.id],evidence=current?.evidenceId?this.load().evidence[current.evidenceId]:undefined;
+      return Boolean(receipt&&evidence?.builtOutputDigest===receipt.buildDigest);
+    }catch{return false;}
+  }
+  async authorizeIsolatedExecution(context:{scope:IsolatedExecutionContext["scope"];sourceDigest:string;image:string}):Promise<boolean>{
+    try{const ledger=this.isolatedExecutionGrants(),grant=ledger.get(context.scope.attemptId);if(!grant||JSON.stringify(grant.context.scope)!==JSON.stringify(context.scope)||grant.context.sourceDigest!==context.sourceDigest||grant.context.image!==context.image)return false;await ledger.allow(grant.context);return true;}catch{return false;}
+  }
   async reserveIntegrationNativeRuntime(workflowId:string,candidateId:string,nativeId:string,stage:string):Promise<void>{const scope=await this.integrationRuntimeScope(workflowId,candidateId);this.assertIntegrationNativeLocal(scope);if(await accountOf(this.env,scope.accountKey).accountLifecycle()!=="active")throw new LegacyRerunError("Native runtime authority changed.");this.assertIntegrationNativeLocal(scope);new IntegrationNativeRuntimeLedger(this.ctx.storage).reserve(scope,nativeId,stage);}
   async admitIntegrationNativeCommand(workflowId:string,candidateId:string,nativeId:string,commandId:string):Promise<IntegrationNativeRuntimeScope>{const scope=await this.integrationRuntimeScope(workflowId,candidateId);this.assertIntegrationNativeLocal(scope);if(await accountOf(this.env,scope.accountKey).accountLifecycle()!=="active")throw new LegacyRerunError("Native command authority changed.");this.assertIntegrationNativeLocal(scope);new IntegrationNativeRuntimeLedger(this.ctx.storage).admitCommand(scope,nativeId,commandId);return scope;}
   async integrationNativeCommandAllowed(scope:IntegrationNativeRuntimeScope,nativeId:string,commandId:string):Promise<boolean>{try{this.assertIntegrationNativeLocal(scope);if(await accountOf(this.env,scope.accountKey).accountLifecycle()!=="active")return false;this.assertIntegrationNativeLocal(scope);return new IntegrationNativeRuntimeLedger(this.ctx.storage).commandAllowed(scope,nativeId,commandId);}catch{return false;}}
@@ -3631,6 +3898,29 @@ export class RepositoryController extends DurableObject<Env> {
     new ManagedSpendLedger(this.ctx.storage).cancelUnstarted(runIds, accountKey);
   }
   async managedReservationAttribution(input: {month:string;cursor?:string}) { return new ManagedSpendLedger(this.ctx.storage).attributionPage(input); }
+  async managedSpendReservation(runId:string){return new ManagedSpendLedger(this.ctx.storage).get(runId);}
+  private verificationBrowserBudget(){
+    const assertGlobal=()=>{if(this.ctx.id.toString()!==this.env.REPOSITORY_CONTROLLER.idFromName('global').toString())throw Error('Global browser admission required');};
+    assertGlobal();
+    return new BrowserSessionBudget(this.ctx.storage,{
+      authorize:async scope=>{
+        assertGlobal();const configured=this.env.BROWSER_SESSION_RESERVATION_USD_MICROS,binding=this.env.VERIFICATION_BROWSER;
+        if(!configured||!binding?.closeSession||!binding.getSession||!await projectOf(this.env,scope.projectId).authorizeIsolatedBrowserSession(scope))throw Error('Current browser authority unavailable');
+        return ()=>{assertGlobal();if(this.env.BROWSER_SESSION_RESERVATION_USD_MICROS!==configured||this.env.VERIFICATION_BROWSER!==binding)throw Error('Browser operator configuration changed');};
+      },
+      funding:()=>{assertGlobal();const configured=this.env.BROWSER_SESSION_RESERVATION_USD_MICROS;return{reservationUsdMicros:configured&&/^\d+$/.test(configured)?Number(configured):null,budget:managedBudget(this.env)};},
+      attestClosure:async sessionId=>{
+        assertGlobal();const binding=this.env.VERIFICATION_BROWSER;
+        if(!binding?.closeSession||!binding.getSession)return null;
+        return retireBrowserSession({closeSession:id=>binding.closeSession!(id),getSession:id=>binding.getSession!(id)},sessionId);
+      },
+    });
+  }
+  async admitVerificationBrowser(scope:BrowserSessionScope){return this.verificationBrowserBudget().admit(scope);}
+  async beginVerificationBrowserAcquire(scope:BrowserSessionScope){return this.verificationBrowserBudget().beginAcquire(scope);}
+  async recordVerificationBrowserAcquired(scope:BrowserSessionScope,sessionId:string):Promise<void>{this.verificationBrowserBudget().recordAcquired(scope,sessionId);}
+  async beforeVerificationBrowserWork(scope:BrowserSessionScope):Promise<void>{await this.verificationBrowserBudget().beforeWork(scope);}
+  async closeVerificationBrowser(scope:BrowserSessionScope){return this.verificationBrowserBudget().close(scope);}
   async managedSpendReserved(month: string, accountKey?: string): Promise<number> {
     if (!/^\d{4}-\d{2}$/.test(month) || (accountKey !== undefined && !/^[A-Za-z0-9_-]{1,200}$/.test(accountKey))) throw new Error("Invalid spending scope");
     return new ManagedSpendLedger(this.ctx.storage).used(month, accountKey);
@@ -4005,6 +4295,9 @@ export class RepositoryController extends DurableObject<Env> {
     try { assertCurrent = await this.authorizeHumanDecision(recorded.actor); assertCurrent(); }
     catch { return { ok: false, error: "The approving owner no longer has publication authority" }; }
     try{if(!(await this.delegatedReviewGate(candidateId)).passed)return {ok:false,error:"Required delegated reviews are no longer satisfied"};assertCurrent();}catch{return {ok:false,error:"Delegated review authority needs a fresh candidate"};}
+    const browserCandidate=this.load().candidates[candidateId];
+    if(browserCandidate&&!await this.publicationBrowserGate(browserCandidate))return {ok:false,error:'Exact isolated browser verification is required before publication'};
+    assertCurrent();
     const s = this.load();
     const c = s.candidates[candidateId];
     const ev = c?.evidenceId ? s.evidence[c.evidenceId] : undefined;
@@ -4117,6 +4410,9 @@ export class RepositoryController extends DurableObject<Env> {
     try { assertCurrent = await this.authorizeHumanDecision(recorded.actor); assertCurrent(); }
     catch { return false; }
     try{if(!(await this.delegatedReviewGate(candidateId)).passed)return false;assertCurrent();}catch{return false;}
+    const browserCandidate=this.load().candidates[candidateId];
+    if(browserCandidate&&!await this.publicationBrowserGate(browserCandidate))return false;
+    try{assertCurrent();}catch{return false;}
     const state = this.load(), candidate = state.candidates[candidateId];
     if(!candidate||this.legacyCandidateRerunFrozen(candidateId)||this.candidatePreservationFailure(candidate))return false;
     if(candidate.participatingTaskIds.some(id=>!state.tasks[id]||state.tasks[id]!.status==="cancelled"))return false;

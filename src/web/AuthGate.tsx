@@ -1,3 +1,4 @@
+import { InvitationSignIn } from "./pages/InvitationSignIn";
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ClerkProvider, SignIn, UserButton, useAuth, useSession } from "@clerk/clerk-react";
 import { GitBranch, RefreshCw, Sun, ArrowUpRight } from "lucide-react";
@@ -89,6 +90,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const [signingIn, setSigningIn] = useState(() => initialSignInActive(window.location.hash, rememberedReturn()));
   const [returnTo, setReturnTo] = useState(() => initialSignInReturn(window.location.hash, rememberedReturn()));
   const beginSignIn = (intent = safeSignInReturn(window.location.hash) ?? "/") => { const destination = safeSignInReturn(intent) ?? "/"; setReturnTo(destination); try { sessionStorage.setItem(RETURN_KEY, destination); } catch { /* In-memory return still supports nonredirect sign-in. */ } setSigningIn(true); };
+  const beginInvitationSignIn = (destination: string) => { window.history.replaceState(null, "", `/#${destination}`); window.dispatchEvent(new HashChangeEvent("hashchange")); beginSignIn(destination); };
   const [appearanceOpen, setAppearanceOpen] = useState(false);
   const { resolvedTheme } = useTheme();
   const [key, setKey] = useState<string | null>(null);
@@ -137,10 +139,11 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   </div></Entry>;
   if (!key) return <Entry><div className="rounded-xl border border-border bg-card p-8 text-sm text-muted-foreground"><p role="status">Loading sign-in…</p><Button variant="outline" className="mt-5" onClick={retryConfiguration}>Retry sign-in setup</Button></div></Entry>;
 
+  const invitationResumeLanding = route.name === "join-resume" ? <Entry><div className="space-y-4 text-sm"><h1 className="text-2xl font-semibold">Sign in to review your saved invitation</h1><p className="text-muted-foreground">FlareGit will recover this invitation after sign-in. Joining still requires your decision.</p><Button onClick={() => beginSignIn(`/join-resume?context=${route.nonce}`)}>Continue to sign in</Button><Button variant="ghost" onClick={() => navigate("/")}>Go to your repositories</Button></div></Entry> : <Landing onSignIn={() => beginSignIn()} />;
   return (
     <ClerkProvider publishableKey={key}>
-      <AuthSessionController signingIn={signingIn} destination={returnTo} landing={<Landing onSignIn={()=>beginSignIn()} />} signedOut={
-        !signingIn ? <Landing onSignIn={() => beginSignIn()} /> : <Entry>
+      <AuthSessionController signingIn={signingIn} destination={returnTo} landing={route.name === "join" ? <Entry><InvitationSignIn projectId={route.projectId} token={route.token} onPrepared={beginInvitationSignIn} onCancel={()=>{window.history.replaceState(null,"","/#/");window.dispatchEvent(new HashChangeEvent("hashchange"));}} /></Entry> : invitationResumeLanding} signedOut={
+        !signingIn ? route.name === "join" ? <Entry><InvitationSignIn projectId={route.projectId} token={route.token} onPrepared={beginInvitationSignIn} onCancel={()=>{window.history.replaceState(null,"","/#/");window.dispatchEvent(new HashChangeEvent("hashchange"));}} /></Entry> : invitationResumeLanding : <Entry>
           <Button variant="ghost" className="mb-6 -ml-3 text-muted-foreground" onClick={() => { try { sessionStorage.removeItem(RETURN_KEY); } catch { /* No stored return. */ } setSigningIn(false); }}>Back to FlareGit</Button>
           <SignIn routing="hash" forceRedirectUrl={`/#${returnTo}`} signUpForceRedirectUrl={`/#${returnTo}`} appearance={{
             variables: { colorPrimary: "#e85412", colorBackground: resolvedTheme === "dark" ? "#151515" : "#ffffff", colorText: resolvedTheme === "dark" ? "#f4f4f4" : "#202020", colorTextSecondary: resolvedTheme === "dark" ? "#a3a3a3" : "#666666", colorInputBackground: resolvedTheme === "dark" ? "#0a0a0a" : "#ffffff", colorInputText: resolvedTheme === "dark" ? "#f4f4f4" : "#202020", borderRadius: "0.5rem", fontFamily: "Inter, sans-serif", fontSize: "1rem" },

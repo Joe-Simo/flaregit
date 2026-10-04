@@ -13,7 +13,8 @@ export function safeSignInReturn(value: string): string | null {
   const segments = path.split("/").slice(1);
   if (new Set([...query.keys()]).size !== [...query.keys()].length) return null;
   const allowed = new Set(["signin"]);
-  if (["/", "/new", "/account", "/inbox", "/operator"].includes(path)) { /* Exact local routes need no parameters. */ }
+  if (path === "/join-resume") { allowed.add("context"); const context = query.get("context"); if (!context || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(context)) return null; destination.set("context", context); }
+  else if (["/", "/new", "/account", "/inbox", "/operator"].includes(path)) { /* Exact local routes need no parameters. */ }
   else if (path === "/report") {
     allowed.add("target"); allowed.add("kind");
     const target = query.get("target"), kind = query.get("kind");
