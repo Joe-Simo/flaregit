@@ -78,3 +78,5 @@ test("a callback SPA entry refreshes remembered intent and preserves validated i
  expect(callbackSignInReturn("/sign-in/sso-callback?code=synthetic", "/community?view=people")).toBe("/community?view=people");
  expect(callbackSignInReturn(null, "https://evil.example")).toBe("/");
 });
+
+test("a validated remembered OAuth destination opens secure sign-in on the root return",async()=>{const{initialSignInActive}=await import("../src/web/sign-in-return");expect(initialSignInActive("#/","/community?view=following")).toBe(true);expect(initialSignInActive("#/",null)).toBe(false);expect(initialSignInActive("#/","https://evil.invalid")).toBe(false);expect(initialSignInActive("#/sign-in/sso-callback?code=synthetic",null)).toBe(true);});

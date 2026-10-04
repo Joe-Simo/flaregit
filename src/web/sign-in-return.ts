@@ -74,3 +74,5 @@ export function isSignInCallback(value: string): boolean {
 export function callbackSignInReturn(remembered: string | null, current: string): string {
   return (remembered ? safeSignInReturn(remembered) : null) ?? safeSignInReturn(current) ?? "/";
 }
+
+export function initialSignInActive(current:string,remembered:string|null):boolean{return explicitSignInReturn(current)!==null||isSignInCallback(current)||(remembered!==null&&safeSignInReturn(remembered)!==null);}

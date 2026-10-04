@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ClerkProvider, ClerkLoading, ClerkFailed, SignedIn, SignedOut, SignIn, UserButton, useAuth, useSession } from "@clerk/clerk-react";
+import { ClerkProvider, SignIn, UserButton, useAuth, useSession } from "@clerk/clerk-react";
 import { GitBranch, RefreshCw, Sun, ArrowUpRight } from "lucide-react";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { bindApiSession } from "./api";
@@ -12,7 +12,8 @@ import { Pricing } from "./pages/Pricing";
 import { About } from "./pages/About";
 import { Community } from "./pages/Community";
 import { CloudflareBadgeFooter } from "./components/CloudflareBadge";
-import { safeSignInReturn, explicitSignInReturn, initialSignInReturn, isSignInCallback, callbackSignInReturn } from "./sign-in-return";
+import { safeSignInReturn, explicitSignInReturn, initialSignInReturn, isSignInCallback, callbackSignInReturn, initialSignInActive } from "./sign-in-return";
+import { authTransition, recoverSignIn } from "./auth-transition";
 import { loadAuthConfiguration } from "./auth-configuration";
 import { navigate, useRoute } from "./router";
 
@@ -23,12 +24,19 @@ function SignInReturn({ destination }: { destination: string | null }) {
   useEffect(() => { restoreReturn(destination); }, [destination]);
   return null;
 }
-function SignedInWorkspace({ children }: { children: React.ReactNode }) {
-  const { userId } = useAuth();
-  const { session } = useSession();
-  const principal = userId && session ? `${userId}:${session.id}` : null;
-  if (!principal || !session) return <p role="status">Loading secure workspace…</p>;
-  return <SessionWorkspace key={principal} principal={principal} session={session}>{children}</SessionWorkspace>;
+export function AuthTransitionSurface({snapshot,signingIn,onRetry,signedOut,signedIn,landing}:{snapshot:Parameters<typeof authTransition>[0];signingIn:boolean;onRetry:()=>void;signedOut:React.ReactNode;signedIn:React.ReactNode;landing:React.ReactNode}){
+  const phase=authTransition(snapshot),securePending=phase==="pending"&&(signingIn||snapshot.signedIn===true||Boolean(snapshot.userId)||Boolean(snapshot.sessionId));
+  const [expired,setExpired]=useState(false);
+  useEffect(()=>{setExpired(false);if(!securePending)return;const timer=setTimeout(()=>setExpired(true),15_000);return()=>clearTimeout(timer);},[securePending,snapshot.userId,snapshot.sessionId]);
+  if(phase==="signed-out")return signedOut;
+  if(phase==="signed-in")return signedIn;
+  if(!securePending)return landing;
+  return <Entry><h2 className="text-xl font-semibold">{expired?"Sign-in needs another try":"Opening your workspace"}</h2><p role={expired?"alert":"status"} className="mt-4 text-sm text-muted-foreground">{expired?"The authentication service has not finished connecting. Your repository history is preserved.":"Waiting for your secure session…"}</p><Button variant="outline" className="mt-5" onClick={onRetry}>Retry sign-in</Button></Entry>;
+}
+function AuthSessionController({signingIn,destination,signedOut,landing,children}:{signingIn:boolean;destination:string;signedOut:React.ReactNode;landing:React.ReactNode;children:React.ReactNode}){
+  const auth=useAuth(),{isLoaded,session}=useSession();
+  const snapshot={authLoaded:auth.isLoaded,sessionLoaded:isLoaded,signedIn:auth.isSignedIn,userId:auth.userId,sessionId:session?.id,sessionUserId:session?.user?.id,sessionStatus:session?.status};
+  return <AuthTransitionSurface snapshot={snapshot} signingIn={signingIn} onRetry={()=>recoverSignIn(destination,{replace:url=>window.history.replaceState(null,"",url),reload:()=>window.location.reload()})} signedOut={signedOut} landing={landing} signedIn={session&&auth.userId?<SessionWorkspace key={`${auth.userId}:${session.id}`} principal={`${auth.userId}:${session.id}`} session={session}>{children}</SessionWorkspace>:null}/>;
 }
 function SessionWorkspace({ principal, session, children }: { principal: string; session: NonNullable<ReturnType<typeof useSession>["session"]>; children: React.ReactNode }) {
   useLayoutEffect(() => bindApiSession(principal, () => session.getToken()), [principal, session]);
@@ -76,7 +84,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const route = useRoute();
   const explicitReturn = explicitSignInReturn(window.location.hash);
   const callbackEntry = isSignInCallback(window.location.hash);
-  const [signingIn, setSigningIn] = useState(() => explicitReturn !== null || callbackEntry);
+  const [signingIn, setSigningIn] = useState(() => initialSignInActive(window.location.hash, rememberedReturn()));
   const [returnTo, setReturnTo] = useState(() => initialSignInReturn(window.location.hash, rememberedReturn()));
   const beginSignIn = (intent = safeSignInReturn(window.location.hash) ?? "/") => { const destination = safeSignInReturn(intent) ?? "/"; setReturnTo(destination); try { sessionStorage.setItem(RETURN_KEY, destination); } catch { /* In-memory return still supports nonredirect sign-in. */ } setSigningIn(true); };
   const [appearanceOpen, setAppearanceOpen] = useState(false);
@@ -129,28 +137,23 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   return (
     <ClerkProvider publishableKey={key}>
-      <ClerkLoading>{signingIn ? <Entry><p role="status" className="text-sm text-muted-foreground">Loading secure sign-in…</p></Entry> : <Landing onSignIn={() => beginSignIn()} />}</ClerkLoading>
-      <ClerkFailed>{!signingIn ? <Landing onSignIn={() => beginSignIn()} /> : <Entry><h2 className="text-xl font-semibold">Sign-in is unavailable</h2><p role="alert" className="mt-4 text-sm text-muted-foreground">The authentication service could not load. Retry to reconnect.</p><Button variant="outline" className="mt-5" onClick={() => window.location.reload()}>Retry sign-in</Button></Entry>}</ClerkFailed>
-      <SignedOut>
-        {!signingIn ? <Landing onSignIn={() => beginSignIn()} /> : <Entry>
+      <AuthSessionController signingIn={signingIn} destination={returnTo} landing={<Landing onSignIn={()=>beginSignIn()} />} signedOut={
+        !signingIn ? <Landing onSignIn={() => beginSignIn()} /> : <Entry>
           <Button variant="ghost" className="mb-6 -ml-3 text-muted-foreground" onClick={() => { try { sessionStorage.removeItem(RETURN_KEY); } catch { /* No stored return. */ } setSigningIn(false); }}>Back to FlareGit</Button>
           <SignIn routing="hash" forceRedirectUrl={`/#${returnTo}`} signUpForceRedirectUrl={`/#${returnTo}`} appearance={{
             variables: { colorPrimary: "#e85412", colorBackground: resolvedTheme === "dark" ? "#151515" : "#ffffff", colorText: resolvedTheme === "dark" ? "#f4f4f4" : "#202020", colorTextSecondary: resolvedTheme === "dark" ? "#a3a3a3" : "#666666", colorInputBackground: resolvedTheme === "dark" ? "#0a0a0a" : "#ffffff", colorInputText: resolvedTheme === "dark" ? "#f4f4f4" : "#202020", borderRadius: "0.5rem", fontFamily: "Inter, sans-serif", fontSize: "1rem" },
             elements: { rootBox: "w-full", cardBox: "w-full shadow-none border-0 rounded-none", card: "shadow-none border-0 bg-transparent p-0", headerTitle: "text-[30px] leading-tight font-semibold tracking-tight", headerSubtitle: "text-muted-foreground", socialButtonsBlockButton: "h-12 border border-border text-foreground shadow-none", formFieldInput: "h-12 border border-border shadow-none", formButtonPrimary: "h-12 shadow-none normal-case font-medium", footer: "bg-transparent shadow-none p-0 pt-6", footerAction: "justify-center", dividerLine: "bg-border" },
           }} />
           <p className="mt-5 text-xs leading-relaxed text-muted-foreground">By continuing you agree to the <a className="underline rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" href="/terms">Terms</a> and <a className="underline rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" href="/privacy">Privacy Policy</a>.</p>
-        </Entry>}
-      </SignedOut>
-      <SignedIn>
-        <SignedInWorkspace>
+        </Entry>
+      }>
         <SignInReturn destination={explicitReturn ?? rememberedReturn()} />
         <div className="fixed right-4 top-3 z-50">
           <UserButton><UserButton.MenuItems><UserButton.Action label="Appearance" labelIcon={<Sun className="h-4 w-4" aria-hidden />} onClick={() => setAppearanceOpen(true)} /></UserButton.MenuItems></UserButton>
         </div>
         <AppearanceDialog open={appearanceOpen} onOpenChange={setAppearanceOpen} />
         {children}
-        </SignedInWorkspace>
-      </SignedIn>
+      </AuthSessionController>
     </ClerkProvider>
   );
 }
