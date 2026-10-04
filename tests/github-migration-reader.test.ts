@@ -157,3 +157,21 @@ test("authority and funding callback errors retain their original class before a
   expect(reads).toBe(0);
   await expect(readPublicGithubRepositoryIdentity(scope.sourceUrl, async () => {}, async () => {}, async () => json({ token: "never-log-malformed-metadata" }))).rejects.toThrow("could not be validated");
 });
+
+
+test("default metadata transport preserves global native fetch receiver and restores the test seam", async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = new Proxy(original, { apply(_target, receiver, args) {
+    if (receiver !== globalThis) throw new Error("Synthetic native fetch receiver required");
+    const request: unknown = args[0];
+    if (!(request instanceof Request)) throw new Error("Expected constructed request");
+    calls++; expect(new URL(request.url).origin).toBe("https://api.github.com");
+    return Promise.resolve(json(repository));
+  } });
+  try {
+    expect(await readPublicGithubRepositoryIdentity(scope.sourceUrl, async () => {}, async () => {})).toEqual({ repositoryId: scope.repositoryId, repositoryNodeId: scope.repositoryNodeId, sourceUrl: scope.sourceUrl });
+    expect(calls).toBe(1);
+  } finally { globalThis.fetch = original; }
+  expect(globalThis.fetch).toBe(original);
+});

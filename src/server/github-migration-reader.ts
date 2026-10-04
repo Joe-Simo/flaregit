@@ -111,7 +111,7 @@ async function readGithubJson(url: string, capabilities: GithubReadCapabilities,
     finally { if (timer) clearTimeout(timer); }
 
 }
-export async function readPublicGithubRepositoryIdentity(sourceUrl: string, authorize: () => Promise<void>, beforeCall: () => Promise<void>, fetcher: (request: Request) => Promise<Response> = fetch): Promise<{repositoryId:string;repositoryNodeId:string;sourceUrl:string}> {
+export async function readPublicGithubRepositoryIdentity(sourceUrl: string, authorize: () => Promise<void>, beforeCall: () => Promise<void>, fetcher: (request: Request) => Promise<Response> = request => globalThis.fetch(request)): Promise<{repositoryId:string;repositoryNodeId:string;sourceUrl:string}> {
   const normalized = normalizeGithubMigrationSource(sourceUrl), path = new URL(normalized).pathname;
   const repository = validated(z.object({ id, node_id: nodeId, html_url: z.string(), private: z.boolean() }), await readGithubJson(`https://api.github.com/repos${path}`, { authorize, beforeCall, fetch: fetcher }));
   const canonical = normalizeGithubMigrationSource(repository.html_url);
