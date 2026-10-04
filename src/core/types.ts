@@ -1,3 +1,4 @@
+import type {FrozenAcceptedTarget} from "./accepted-target.js";
 import type { ExternalCheckPolicy } from "./external-checks.js";
 import type { FrozenContributorProof } from "./verification/integrity.js";
 export type ContributorType = "human" | "agent";
@@ -61,6 +62,8 @@ export interface TaskWorkspace {
 }
 
 export interface Task {
+  /** Explicit immutable repository-ledger target; absent on primary compatibility records. */
+  readonly acceptedTarget?: FrozenAcceptedTarget;
   id: string;
   goal: string;
   contributor: Contributor;
@@ -101,6 +104,8 @@ export interface RepairAttempt {
 }
 
 export interface CandidateGeneration {
+  /** Explicit immutable repository-ledger target; absent on primary compatibility records. */
+  readonly acceptedTarget?: FrozenAcceptedTarget;
   /** Explicit fresh-review successor of a preserved legacy candidate. */
   predecessorCandidateId?: string;
   legacyRerunId?: string;
@@ -149,6 +154,8 @@ export interface TestResultItem {
 }
 
 export interface VerificationEvidence {
+  /** Explicit immutable repository-ledger target; absent on primary compatibility records. */
+  readonly acceptedTarget?: FrozenAcceptedTarget;
   id: string;
   candidateCommit: string;
   /** Git tree hash of the verified commit; publication must find this exact tree. */
@@ -174,6 +181,8 @@ export interface VerificationEvidence {
 export type JournalState = "PREPARED" | "REF_UPDATED" | "ACCEPTED" | "ABORTED";
 
 export interface PublicationJournalEntry {
+  /** Explicit immutable repository-ledger target; absent on primary compatibility records. */
+  readonly acceptedTarget?: FrozenAcceptedTarget;
   id: string;
   candidateId: string;
   candidateCommit: string;
@@ -184,7 +193,7 @@ export interface PublicationJournalEntry {
   state: JournalState;
   timestamp: string;
   error?: string;
-  publicationAuthority?: { actor: HumanDecisionActor; reviewedAt: string; commit: string; tree: string; policyVersion: number; authorizedAt: string };
+  publicationAuthority?: { readonly acceptedTarget?: FrozenAcceptedTarget; actor: HumanDecisionActor; reviewedAt: string; commit: string; tree: string; policyVersion: number; authorizedAt: string };
 }
 
 export interface DecisionOption {
@@ -214,6 +223,8 @@ export interface ProductDecision {
 }
 
 export interface AcceptanceRecord {
+  /** Explicit immutable repository-ledger target; absent on primary compatibility records. */
+  readonly acceptedTarget?: FrozenAcceptedTarget;
   commit: string;
   candidateId: string;
   acceptedAt: string;
