@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { apiJson, bindApiSession } from "../src/web/api";
+import { apiJson, bindApiSession, clearVerifiedApiSession } from "../src/web/api";
 test("concurrent session reads share transport but cancellation and parsed values remain independent", async () => {
   const original = globalThis.fetch;
   const release = bindApiSession("synthetic-dedup-session", async () => "synthetic-token");
@@ -19,7 +19,7 @@ test("concurrent session reads share transport but cancellation and parsed value
     left.rows.push(2);
     expect(right.rows).toEqual([1]);
     expect(calls).toBe(1);
-  } finally { release(); globalThis.fetch = original; await Promise.resolve(); }
+  } finally { release(); clearVerifiedApiSession(); globalThis.fetch = original; await Promise.resolve(); }
 });
 
 test("mutation invalidates preexisting reads and postmutation reads use fresh transport", async () => {
@@ -39,5 +39,5 @@ test("mutation invalidates preexisting reads and postmutation reads use fresh tr
     finish(Response.json({ version: 1 }));
     expect(await stale).toMatchObject({ name: "AbortError" });
     expect(gets).toBe(2);
-  } finally { release(); globalThis.fetch = original; await Promise.resolve(); }
+  } finally { release(); clearVerifiedApiSession(); globalThis.fetch = original; await Promise.resolve(); }
 });
