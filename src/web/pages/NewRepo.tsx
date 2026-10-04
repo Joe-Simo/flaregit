@@ -146,10 +146,10 @@ export function NewRepo() {
             <p className="text-sm text-muted-foreground">A ready-made ticket-checkout app with protected checks, for trying out parallel agents, conflicts and decisions.</p>
           )}
           {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>}
-          {busy && <p role="status" className="text-sm text-muted-foreground">{mode === "import" ? "Submitting the import request. Repository availability is checked before opening it." : "Creating the demo repository…"}</p>}
+          {busy && <p role="status" className="text-sm text-muted-foreground">{checkingId ? "Checking the saved import. No new import is requested." : mode === "import" ? "Submitting the import request. Repository availability is checked before opening it." : "Creating the demo repository…"}</p>}
           <div className="flex flex-wrap gap-2">
             {!activeImport && <Button type="submit" variant="orange" disabled={disabled}>
-              {busy ? "Creating…" : mode === "import" ? "Import repository" : "Create demo repository"}
+              {busy ? checkingId ? "Checking import…" : "Creating…" : mode === "import" ? "Import repository" : "Create demo repository"}
             </Button>}
             <Button type="button" variant="outline" onClick={() => navigate("/")} disabled={busy}>{activeImport ? "Back to repositories" : "Cancel"}</Button>
           </div>
