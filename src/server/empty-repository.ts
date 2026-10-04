@@ -85,7 +85,7 @@ export async function createEmptyRepository(env: Env, input: EmptyRepositoryInpu
   const nativeName = `empty-${input.eventId}`;
   let allocated = false, readToken: string | undefined, revoked = false, stopped = false, proof: EmptyRepositoryProof | undefined;
   try {
-    await journal.authorize(); await admitNativeCompute(env, await accountKeyFor(input.userId), nativeName); await journal.nativeIntent(nativeName);
+    await journal.authorize(); await admitNativeCompute(env, await accountKeyFor(input.userId), nativeName, "native-essential"); await journal.nativeIntent(nativeName);
     const sandbox = env.INTEGRATOR.getByName(nativeName); allocated = true;
     await journal.authorize(); await journal.beforeReadCredential();
     const issued = await repository.createToken("read", 60); readToken = issued.plaintext;

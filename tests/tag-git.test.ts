@@ -27,7 +27,7 @@ async function fixture() {
     return { success: exit === 0, stdout };
   } };
   let marked = 0;
-  const options = { identity, remote: fixtureRemote, token: "synthetic_token", directory: work, dispatch: "prepared" as "prepared" | "unknown", markDispatch: async () => { marked++; } };
+  const options = { identity, remote: fixtureRemote, token: "synthetic_token", directory: work, dispatch: "prepared" as "prepared" | "unknown", nativeOwnership:{attemptId:crypto.randomUUID(),nativeId:crypto.randomUUID()},markDispatch: async () => { marked++; return true; } };
   return { directory, remote, git, identity, commands, fences, executor, options, marks: () => marked, cleanup: () => rm(directory, { recursive: true, force: true }) };
 }
 
@@ -94,3 +94,5 @@ test("lost push acknowledgement is confirmed only by exact raw-object readback",
     expect(f.commands.filter(command => command.includes(" push ")).length).toBe(1);
   } finally { await f.cleanup(); }
 });
+
+test('lost native dispatch ownership refuses the actual push even with a stale prepared snapshot',async()=>{const f=await fixture();try{const result=await createNativeTag(f.executor,{...f.options,markDispatch:async(ownership)=>{expect(ownership).toEqual(f.options.nativeOwnership);return false;}});expect(result.status).toBe('unknown');expect(f.commands.some(command=>command.includes(' push '))).toBe(false);expect(await f.git(['for-each-ref','--format=%(refname)','refs/tags/'])).toBe('');}finally{await f.cleanup();}});

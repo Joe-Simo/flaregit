@@ -11,6 +11,8 @@ export const tagCreationSchema = z.object({
   sourceCommit: sha, sourceTree: sha, acceptedCommit: sha,
 }).strict().refine(value => value.sourceCommit === value.acceptedCommit, "Exact accepted commit required");
 export type TagCreationIdentity = z.infer<typeof tagCreationSchema>;
+export const tagNativeOwnershipSchema=z.object({attemptId:z.uuid(),nativeId:z.uuid()}).strict();
+export type TagNativeOwnership=z.infer<typeof tagNativeOwnershipSchema>;
 export interface TagGitObservation { object: string; commit?: string; tree?: string; type?: "commit" | "tag" }
 export type TagGitResult = { status: "confirmed" | "existing" | "different" | "unknown"; observation?: TagGitObservation };
 
@@ -19,9 +21,9 @@ export type TagGitResult = { status: "confirmed" | "existing" | "different" | "u
  * Ordinary Git clients must remain unable to write canonical refs. This helper
  * is not a provider-wide protection rule or an annotated-tag creation feature.
  */
-export async function createNativeTag(executor: BranchGitExecutor, options: { identity: TagCreationIdentity; remote: string; token: string; directory: string; dispatch: "prepared" | "unknown"; markDispatch(): Promise<void> }): Promise<TagGitResult> {
+export async function createNativeTag(executor: BranchGitExecutor, options: { identity: TagCreationIdentity; remote: string; token: string; directory: string; dispatch: "prepared" | "unknown"; nativeOwnership:TagNativeOwnership;markDispatch(ownership:TagNativeOwnership): Promise<boolean> }): Promise<TagGitResult> {
   validateRecoveryRemote(options.remote);
-  const identity = tagCreationSchema.parse(options.identity), ref = `refs/tags/${identity.tag}`;
+  const identity = tagCreationSchema.parse(options.identity), ownership=tagNativeOwnershipSchema.parse(options.nativeOwnership), ref = `refs/tags/${identity.tag}`;
   if (!options.directory.startsWith("/") || options.directory === "/" || /[\x00-\x1f\x7f]/.test(options.directory)) throw new Error("Owned tag workspace required");
   const env = { ...gitAuthEnv(options.token), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_COUNT: "3", GIT_CONFIG_KEY_1: "http.followRedirects", GIT_CONFIG_VALUE_1: "false", GIT_CONFIG_KEY_2: "core.hooksPath", GIT_CONFIG_VALUE_2: "/dev/null" };
   const run = async (command: string) => { await executor.beforeCommand("before"); const result = await executor.exec(command, env); await executor.beforeCommand("after"); return result; };
@@ -63,7 +65,7 @@ export async function createNativeTag(executor: BranchGitExecutor, options: { id
   const commit = await run(`git -C ${q(options.directory)} rev-parse --verify ${q(`${identity.sourceCommit}^{commit}`)}`);
   const tree = await run(`git -C ${q(options.directory)} rev-parse --verify ${q(`${identity.sourceCommit}^{tree}`)}`);
   if (!commit.success || commit.stdout.trim() !== identity.sourceCommit || !tree.success || tree.stdout.trim() !== identity.sourceTree) throw new Error("Exact accepted tag commit or tree differs");
-  await options.markDispatch();
+  if(!await options.markDispatch(ownership))return{status:"unknown"};
   // Empty expected value is a create-only CAS. It never replaces an existing tag.
   await run(`git -C ${q(options.directory)} push --quiet --force-with-lease=${q(`${ref}:`)} ${q(options.remote)} ${q(`${identity.sourceCommit}:${ref}`)}`);
   const observed = await advertise();

@@ -1,3 +1,4 @@
+import type { NativeComputeKind } from "./managed-spend-ledger.js";
 import type { Env } from "./env.js";
 import { accountOf, globalOf, managedBudget } from "./projects.js";
 
@@ -6,10 +7,11 @@ export class NativeComputeAdmissionError extends Error {
 }
 
 /** Bounded native compute shares the funded pool without inventing AI usage. */
-export async function admitNativeCompute(env: Env, accountKey: string, runId: string): Promise<void> {
+export async function admitNativeCompute(env: Env, accountKey: string, runId: string,resourceKind?:NativeComputeKind): Promise<void> {
   try {
+  if(resourceKind!==undefined&&resourceKind!=="native-essential"&&resourceKind!=="native-optional")throw new NativeComputeAdmissionError();
   if (await accountOf(env, accountKey).accountLifecycle() !== "active") throw new Error("Compute account unavailable");
-  const reservation = await globalOf(env).reserveManagedSpend({ runId, accountKey, usdMicros: 43_008, maxInputBytes: 1, maxOutputTokens: 1, maxCalls: 1, maxContainerSeconds: 1200 }, managedBudget(env));
+  const reservation = await globalOf(env).reserveManagedSpend({ ...(resourceKind?{resourceKind}:{}),runId, accountKey, usdMicros: 43_008, maxInputBytes: 1, maxOutputTokens: 1, maxCalls: 1, maxContainerSeconds: 1200 }, managedBudget(env));
   if (!reservation.allowed) throw new Error("Native compute budget unavailable; repository browsing remains available");
   await globalOf(env).consumeManagedSpend(runId, 0, 0, 1200);
   } catch { throw new NativeComputeAdmissionError(); }

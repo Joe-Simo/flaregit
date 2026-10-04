@@ -35,8 +35,8 @@ test("empty-source receipts require exact immutable scope and read/native cleanu
 
 test("complete advertisement distinguishes missing HEAD from a matched unborn symbolic HEAD",()=>{
  const result=(advertisement:string)=>({success:true,stdout:JSON.stringify({version:1,advertisement})});
- expect(assertEmptyNativeAdvertisement(result(""),"refs/heads/main")).toEqual({headSymref:null});
- expect(assertEmptyNativeAdvertisement(result("ref: refs/heads/main\tHEAD\n"),"refs/heads/main")).toEqual({headSymref:"refs/heads/main"});
+ expect(assertEmptyNativeAdvertisement(result(""),"refs/heads/main")).toEqual({headSymref:null,privateRefs:[]});
+ expect(assertEmptyNativeAdvertisement(result("ref: refs/heads/main\tHEAD\n"),"refs/heads/main")).toEqual({headSymref:"refs/heads/main",privateRefs:[]});
  for(const value of [{success:true,stdout:""},{success:false,stdout:JSON.stringify({version:1,advertisement:""})},result("a".repeat(40)+"\trefs/heads/main\n"),result("ref: refs/heads/other\tHEAD\n")])expect(()=>assertEmptyNativeAdvertisement(value,"refs/heads/main")).toThrow();
 });
 

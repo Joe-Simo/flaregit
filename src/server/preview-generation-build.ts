@@ -21,7 +21,7 @@ export async function buildPreviewGeneration(env:Env,projectId:string,generation
   const authorize=async()=>{const current=await repository.previewGenerationScope(generation);if(JSON.stringify(current)!==JSON.stringify(scope))throw new Error("Preview generation authorization changed");};
   lease=await claimNativeCompute(env,operation);
   if(!lease){await fail("compute_start_unconfirmed");await activity("preview.generation_start_unconfirmed","Replacement preview compute could not be confirmed; saved reservations remain intact");return;}
-  try{await admitNativeCompute(env,scope.accountKey,`native-${lease}`);}catch{await global.finishNativeCompute(operation,lease);lease=null;await fail("compute_unavailable");return;}
+  try{await admitNativeCompute(env,scope.accountKey,`native-${lease}`,"native-optional");}catch{await global.finishNativeCompute(operation,lease);lease=null;await fail("compute_unavailable");return;}
   await authorize();const workspace=env.INTEGRATOR.getByName(`native-${lease}`);sandbox=workspace;
   const run=async(command:string,environment?:Record<string,string>)=>{await authorize();return workspace.exec(["sh","-c",command],{env:environment});};
   const state=await repository.getState();await authorize();repoName=state.canonicalRepoName;

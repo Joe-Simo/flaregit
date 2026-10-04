@@ -70,6 +70,7 @@ async function fixture(options: { unborn?:boolean; lostPush?: boolean; lostCheck
   } as unknown as AgentExecutionLedger;
   const env = {
     MANAGED_ACCOUNT_MONTHLY_USD_MICROS: "5000000", MANAGED_GLOBAL_MONTHLY_USD_MICROS: "10000000",
+    MANAGED_ESSENTIAL_ACCOUNT_MONTHLY_USD_MICROS: "1000000", MANAGED_ESSENTIAL_GLOBAL_MONTHLY_USD_MICROS: "2000000",
     REPOSITORY_CONTROLLER: { idFromName: (name: string) => name, get: (name: string) => name === "global" ? {
       reserveManagedSpend: async (input: Parameters<ManagedSpendLedger["reserve"]>[0], budget: Parameters<ManagedSpendLedger["reserve"]>[1]) => spend.reserve(input, budget),
       consumeManagedSpend: async (...args: Parameters<ManagedSpendLedger["consume"]>) => spend.consume(...args),

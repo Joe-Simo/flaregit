@@ -120,7 +120,7 @@ test("operation error survives failed shutdown and cleanup failure becomes durab
   expect(activities).toEqual(["container.cleanup_failed"]);
 });
 
-test.each(["normal","evidence-failure","preview-failure","git-integrity","unborn-one","unborn-batch","unborn-conflict","unborn-stack"] as const)("candidate remains durable through optional storage state: %s", async (mode) => {
+test.each(["normal","evidence-failure","preview-failure","git-integrity","git-integrity-no-optional","unborn-one","unborn-batch","unborn-conflict","unborn-stack"] as const)("candidate remains durable through optional storage state: %s", async (mode) => {
   const uploadFails=mode==="evidence-failure",previewFails=mode==="preview-failure";
   const root = await mkdtemp(join(tmpdir(), "external-workflow-"));
   const canonical = join(root, "canonical.git"), seed = join(root, "seed"), work = join(root, "integration");
@@ -147,6 +147,7 @@ test.each(["normal","evidence-failure","preview-failure","git-integrity","unborn
     const commands: string[] = [], stored: string[] = [];
     const env = {
       ...lifecycleFunding(retention),
+      ...(mode==="git-integrity-no-optional"?{MANAGED_ACCOUNT_MONTHLY_USD_MICROS:"1000000",MANAGED_GLOBAL_MONTHLY_USD_MICROS:"2000000"}:{}),
       ARTIFACTS: { get: async () => ({ info: async () => ({ remote: fixtureRemote }), createToken: async (scope:string) => ({ plaintext: "fixture-token",scope,expiresAt:new Date(Date.now()+900000).toISOString() }),revokeToken:async()=>true,[Symbol.dispose]:()=>{} }) },
       EVIDENCE_BUCKET: { head:async()=>null, put: async (key: string) => { stored.push(key); if(uploadFails || (previewFails && key.endsWith("app.js")))throw new Error("R2 unavailable"); return {etag:"confirmed-fixture"}; } }, AI: { run: async () => { aiCalls++; throw new Error("AI must not run"); } },
       INTEGRATOR: { getByName: () => ({ exec: async (argv: string[]) => {
@@ -165,12 +166,12 @@ test.each(["normal","evidence-failure","preview-failure","git-integrity","unborn
     const task = { ...(unbornTarget?{acceptedTarget:unbornTarget}:{}),id: "one", baseCommit: base, currentCommit: head, allowedScope: ["src/feature.ts"], workspace: { repoName: "repo", branch: "task/one" }, contributor: { name: "Fixture", id: "one" } };
     const candidate: CandidateGeneration = { ...(unbornTarget?{acceptedTarget:unbornTarget}:{}),id: "external-one", attemptNumber: 1, frozenRequirements: [], repairAttempts: [], status: "composing", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), expectedAcceptedBase: base, participatingTaskIds: ["one"], participatingCommits: { one: head }, frozenPolicyVersion: 1, frozenVerificationPolicy: { kind: "command", test: "touch CUSTOMER_COMMAND_EXECUTED", install: "touch CUSTOMER_INSTALL_EXECUTED", allowedScope: ["src/feature.ts"], protectedPaths: ["tests/"] }, frozenExternalChecksPolicy: { version: 1, mode: "external", checks: [{ id: "check", providerId: "provider", required: true }] }, frozenContributorProofs: [{ id: "one", commit: head, baseCommit: base, ref: "refs/flaregit/tasks/one", allowedScope: ["src/feature.ts"] }] };
     if(previewFails){delete candidate.frozenExternalChecksPolicy;candidate.frozenVerificationPolicy={};}
-    if(mode==="git-integrity"||mode.startsWith("unborn")){delete candidate.frozenExternalChecksPolicy;candidate.frozenVerificationPolicy={kind:"git-integrity",allowedScope:["*"],protectedPaths:[".flaregit/"],landing:"merge"};}
+    if(mode.startsWith("git-integrity")||mode.startsWith("unborn")){delete candidate.frozenExternalChecksPolicy;candidate.frozenVerificationPolicy={kind:"git-integrity",allowedScope:["*"],protectedPaths:[".flaregit/"],landing:"merge"};}
     if(secondHead){candidate.participatingTaskIds.push("two");candidate.participatingCommits.two=secondHead;candidate.frozenContributorProofs!.push({id:"two",commit:secondHead,baseCommit:mode==="unborn-stack"?head:null,...(mode==="unborn-stack"?{stackedOn:{taskId:"one",commit:head,ref:"refs/flaregit/tasks/one"}}:{}),ref:"refs/flaregit/tasks/two",allowedScope:[mode==="unborn-conflict"?"src/feature.ts":"second.txt"]});}
     if(mode==="unborn-stack")candidate.participatingTaskIds.reverse();
     const evidence: import("../src/core/types.js").VerificationEvidence[] = [];
-    const activities:string[]=[];
-    const ledger = {...retention,recordScopedEvidenceCopy:async()=>{},previewStorageScope:async(commit:string)=>({projectId:"p123456789abc",incarnation:"11111111-1111-4111-8111-111111111111",commit,accountKey:await accountKeyFor("fixture-human")}),getWorkflowRun:async()=>({actorId:"fixture-human"}),roleOf:async()=>"owner", logActivity:async(_actor:string,kind:string)=>{activities.push(kind);}, getState: async () => ({ projectId:"p123456789abc",canonicalRepoName: "repo", tasks: { one: task,...(secondHead?{two:{...task,id:"two",baseCommit:mode==="unborn-stack"?head:null,...(mode==="unborn-stack"?{dependsOn:"one"}:{}),currentCommit:secondHead,allowedScope:[mode==="unborn-conflict"?"src/feature.ts":"second.txt"],workspace:{repoName:"repo",branch:"task/two"}}}:{}) }, defaultBranch: "main" }), recordComposition: async () => {}, recordVerification: async (_id: string, _commit: string, proof: import("../src/core/types.js").VerificationEvidence) => { evidence.push(proof); } } as unknown as Ledger;
+    const activities:string[]=[],candidatePins:Array<{ref:string;observedCommit:string;workflowId:string}>=[];
+    const ledger = {...retention,recordCandidateProtectedPin:async(_candidateId:string,_commit:string,proof:{ref:string;observedCommit:string;workflowId:string})=>{candidatePins.push(proof);},recordScopedEvidenceCopy:async()=>{},previewStorageScope:async(commit:string)=>({projectId:"p123456789abc",incarnation:"11111111-1111-4111-8111-111111111111",commit,accountKey:await accountKeyFor("fixture-human")}),getWorkflowRun:async()=>({actorId:"fixture-human"}),roleOf:async()=>"owner", logActivity:async(_actor:string,kind:string)=>{activities.push(kind);}, getState: async () => ({ projectId:"p123456789abc",canonicalRepoName: "repo", tasks: { one: task,...(secondHead?{two:{...task,id:"two",baseCommit:mode==="unborn-stack"?head:null,...(mode==="unborn-stack"?{dependsOn:"one"}:{}),currentCommit:secondHead,allowedScope:[mode==="unborn-conflict"?"src/feature.ts":"second.txt"],workspace:{repoName:"repo",branch:"task/two"}}}:{}) }, defaultBranch: "main" }), recordComposition: async () => {}, recordVerification: async (_id: string, _commit: string, proof: import("../src/core/types.js").VerificationEvidence) => { evidence.push(proof); } } as unknown as Ledger;
     const workflow = new FlareGitIntegrationWorkflow({} as ExecutionContext, env);
     Object.assign(workflow,{projectId:"p123456789abc",computeAccountKey:await accountKeyFor("fixture-human"),computeWorkflowId:"registered-parent"});
     const callable = workflow as unknown as { composeRepairVerify(candidate: CandidateGeneration, params: { projectId: string; taskIds: string[] }, ledger: Ledger,parentWorkflowId?:string): Promise<{ ok: boolean; commit?: string }> };
@@ -179,6 +180,7 @@ test.each(["normal","evidence-failure","preview-failure","git-integrity","unborn
     expect(result.ok).toBe(true); expect(destroyed).toBe(1); expect(aiCalls).toBe(0);expect(retention.pendingCredentials()).toBe(0);const savedPins=retention.savedPins();expect(savedPins).toHaveLength(secondHead?2:1);expect(await git(["--git-dir",canonical,"rev-parse",savedPins[0]!.protectedRef])).toBe(head);const protectedBase=savedPins[0]!.protectedBaseRef;if(base===null){expect(protectedBase).toBeNull();expect(await git(["--git-dir",canonical,"rev-list","--max-parents=0",head])).toMatch(/^[a-f0-9]{40}$/);}else{if(protectedBase===null)throw Error("Committed fixture needs a retained base ref");expect(await git(["--git-dir",canonical,"rev-parse",protectedBase])).toBe(base);}
     if(mode==="unborn-stack"){const childPin=savedPins.find(pin=>pin.taskId==="two")!;expect(childPin.base).toBe(head);expect(childPin.stackedOn).toMatchObject({taskId:"one",commit:head,ref:savedPins[0]!.protectedRef});if(childPin.protectedBaseRef===null)throw Error("Stacked contribution requires actual parent base pin");expect(await git(["--git-dir",canonical,"rev-parse",childPin.protectedBaseRef])).toBe(head);}
     if(secondHead){expect((await git(["--git-dir",canonical,"rev-list","--max-parents=0",result.commit!] )).split("\n")).toHaveLength(mode==="unborn-stack"?1:2);expect(await git(["--git-dir",canonical,"ls-tree","--name-only",result.commit!])).toContain("second.txt");}
+    expect(candidatePins).toEqual([{ref:"refs/flaregit/candidates/external-one",observedCommit:result.commit!,workflowId:"registered-parent"}]);
     expect(evidence[0]?.verifierIdentity).toBe(previewFails?"synthetic-test-only":"flaregit-native-integrity-v1");
     expect(activities.includes("evidence.copy_failed")).toBe(uploadFails);
     expect(stored).toHaveLength(previewFails?2:1);
@@ -189,4 +191,16 @@ test.each(["normal","evidence-failure","preview-failure","git-integrity","unborn
     expect(await git(["--git-dir", canonical, "rev-parse", "refs/flaregit/candidates/external-one"])).toBe(result.commit!);
     if(base===null)expect(await git(["--git-dir",canonical,"for-each-ref","--format=%(refname)","refs/heads/main"])).toBe("");else expect(await git(["--git-dir", canonical, "rev-parse", "main"])).toBe(base);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("optional mirror sandbox cannot consume the reserved floor while core verification can",async()=>{
+ const funding=nativeFunding(),key=await accountKeyFor("fixture-human");let allocations=0;
+ const env={...funding,INTEGRATOR:{getByName:()=>{allocations++;return{destroy:async()=>{}};}}} as unknown as Env;
+ const global=env.REPOSITORY_CONTROLLER.get(env.REPOSITORY_CONTROLLER.idFromName("global")) as unknown as Ledger;
+ const budget=(await import("../src/server/projects")).managedBudget(env);
+ for(const [runId,accountKey] of [["optional-a",key],["optional-b","other-account"]])expect((await global.reserveManagedSpend({runId:runId!,accountKey:accountKey!,resourceKind:"managed-agent",usdMicros:4000000,maxInputBytes:100,maxOutputTokens:10,maxCalls:1,maxContainerSeconds:30},budget)).allowed).toBe(true);
+ const workflow=new FlareGitIntegrationWorkflow({} as ExecutionContext,env);Object.assign(workflow,{projectId:"p123456789abc",computeAccountKey:key,computeWorkflowId:"registered-parent"});
+ const callable=workflow as unknown as {sandbox:(id:string,kind?:import("../src/server/managed-spend-ledger").NativeComputeKind)=>Promise<{destroy():Promise<void>}>};
+ await expect(callable.sandbox("mirror-explicit","native-optional")).rejects.toThrow("Native compute budget unavailable");expect(allocations).toBe(0);
+ const core=await callable.sandbox("verification-core");expect(allocations).toBe(1);await core.destroy();
 });

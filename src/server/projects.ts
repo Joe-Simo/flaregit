@@ -1,3 +1,4 @@
+import type { ManagedEnvelope } from "./managed-spend-ledger.js";
 import type { Ledger } from "./durable-object.js";
 import type { Env } from "./env.js";
 import { projectIdFor } from "./shell.js";
@@ -54,7 +55,7 @@ const explicitMicros = (value: string | undefined): number | null => {
   const number = Number(value);
   return Number.isSafeInteger(number) ? number : null;
 };
-export const managedBudget = (env: Env) => ({ accountUsdMicros: explicitMicros(env.MANAGED_ACCOUNT_MONTHLY_USD_MICROS), globalUsdMicros: explicitMicros(env.MANAGED_GLOBAL_MONTHLY_USD_MICROS) });
+export const managedBudget = (env: Pick<Env,"MANAGED_ACCOUNT_MONTHLY_USD_MICROS"|"MANAGED_GLOBAL_MONTHLY_USD_MICROS"|"MANAGED_ESSENTIAL_ACCOUNT_MONTHLY_USD_MICROS"|"MANAGED_ESSENTIAL_GLOBAL_MONTHLY_USD_MICROS">) => ({ accountUsdMicros: explicitMicros(env.MANAGED_ACCOUNT_MONTHLY_USD_MICROS), globalUsdMicros: explicitMicros(env.MANAGED_GLOBAL_MONTHLY_USD_MICROS), essentialAccountUsdMicros:explicitMicros(env.MANAGED_ESSENTIAL_ACCOUNT_MONTHLY_USD_MICROS),essentialGlobalUsdMicros:explicitMicros(env.MANAGED_ESSENTIAL_GLOBAL_MONTHLY_USD_MICROS) });
 /** Conservative token bound uses one input token per UTF-8 byte plus framing.
  * Model rate snapshot: GPT OSS 120B $0.35/$0.75 per million input/output tokens.
  * Container allocation is separately reserved at $0.129024/hr for standard-2.
@@ -67,11 +68,11 @@ export async function reserveManagedAgent(env: Env, accountKey: string | undefin
   return result.reservation;
 }
 
-export function managedAgentEnvelope(accountKey: string, runId: string) {
+export function managedAgentEnvelope(accountKey: string, runId: string):ManagedEnvelope {
   const maxInputBytes = 120_000, maxOutputTokens = 8192, maxCalls = 8, maxContainerSeconds = 1200;
   const modelMicros = Math.ceil(((maxInputBytes + 4096) * 0.35 + maxOutputTokens * 0.75) * maxCalls);
   const containerMicros = Math.ceil(maxContainerSeconds * 129_024 / 3600);
-  return { runId, accountKey, usdMicros: modelMicros + containerMicros, maxInputBytes, maxOutputTokens, maxCalls, maxContainerSeconds };
+  return { resourceKind:"managed-agent",runId, accountKey, usdMicros: modelMicros + containerMicros, maxInputBytes, maxOutputTokens, maxCalls, maxContainerSeconds };
 }
 export async function reserveManagedAgents(env: Env, accountKey: string, runIds: string[]): Promise<Response | null> {
   if (env.RUNS_ENABLED === "false") return new Response("Managed execution is temporarily paused", { status: 503 });

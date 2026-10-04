@@ -26,7 +26,7 @@ export class FlareGitRebaseResumeWorkflow extends WorkflowEntrypoint<Env,RebaseR
      if(proof.workspaceHead===app.commit)return project.finishRebaseResume(attemptId,generation,event.instanceId,proof);
      if(proof.workspaceHead!==app.input.commit)throw new RebaseRecoveryError("Workspace contains newer work; saved recovery did not replace it",409);
      if(proof.original!==app.input.commit||proof.originalBase!==app.input.base||proof.result!==app.commit||proof.targetBase!==app.base)throw new RebaseRecoveryError("Protected result proof is unavailable",503);
-     await authorize();await admitNativeCompute(this.env,initial.accountKey,initial.nativeRunId);await authorize();
+     await authorize();await admitNativeCompute(this.env,initial.accountKey,initial.nativeRunId,"native-essential");await authorize();
      await project.rebaseResumeNativeIntent(attemptId,generation,event.instanceId);
      const sandbox=this.env.INTEGRATOR.getByName(initial.nativeRunId);
      const connection=async(purpose:"canonical"|"workspace")=>{

@@ -74,7 +74,7 @@ export class ServiceApiFixture extends RepositoryController {
       AGENT_WORKFLOW: {create:async()=>{this.ctx.storage.sql.exec("INSERT INTO expensive_calls VALUES(1)");throw new Error("Unexpected agent start");}},
       API_LIMITER: { limit: async () => ({ success: true }) },
       FREE_RUNS_PER_DAY: "10", PRO_RUNS_PER_DAY: "200",
-      MANAGED_ACCOUNT_MONTHLY_USD_MICROS:await this.ctx.storage.get("native-budget-deny")?"0":"1000000",MANAGED_GLOBAL_MONTHLY_USD_MICROS:"1000000",
+      MANAGED_ACCOUNT_MONTHLY_USD_MICROS:await this.ctx.storage.get("native-budget-deny")?"0":"1000000",MANAGED_GLOBAL_MONTHLY_USD_MICROS:"1000000",MANAGED_ESSENTIAL_ACCOUNT_MONTHLY_USD_MICROS:"100000",MANAGED_ESSENTIAL_GLOBAL_MONTHLY_USD_MICROS:"200000",
       ASSETS: { fetch: async () => new Response("<!doctype html><title>Pricing route fixture</title>", { headers: { "Content-Type": "text/html" } }) },
     } as unknown as Env;
     return worker.fetch(request, env, this.ctx as unknown as ExecutionContext);

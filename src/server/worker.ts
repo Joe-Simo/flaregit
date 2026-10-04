@@ -1434,9 +1434,10 @@ export default {
           }else if(!await project.revokeTaskCreationForkToken(intent.eventId))throw Error("Saved fork acknowledgement or credential cleanup remains unconfirmed; no replacement fork was started");
           await assertCreation();using destination=await env.ARTIFACTS.get(repoName);const fork=await destination.info();await assertCreation();
           let emptySourceProof:{ref:string;refs:[]}|undefined;
-          if(selection.baseCommit===null){const observed=await project.inspectTaskCreationUnborn(intent.eventId,"workspace",userId,creationCredential);await assertCreation();if(observed.providerRepoId!==fork.id||observed.repositoryName!==repoName||observed.sourceRepoName!==selection.sourceRepoName||observed.defaultRef!==selection.acceptedTarget?.ref||observed.expectedHead!==null||observed.visibleRefs.length!==0)throw Error("Saved empty workspace proof differs from the original target");emptySourceProof={ref:observed.defaultRef,refs:[]};}
+          let unbornSourceProof:{ref:string;acceptedHead:null;privateRefs:Array<{ref:string;commit:string}>;workspacePrivateRefs:Array<{ref:string;commit:string}>}|undefined;
+          if(selection.baseCommit===null){const observed=await project.inspectTaskCreationUnborn(intent.eventId,"workspace",userId,creationCredential);await assertCreation();if(observed.providerRepoId!==fork.id||observed.repositoryName!==repoName||observed.sourceRepoName!==selection.sourceRepoName||observed.defaultRef!==selection.acceptedTarget?.ref||observed.expectedHead!==null)throw Error("Saved empty workspace proof differs from the original target");const originalSource=await project.inspectTaskCreationUnborn(intent.eventId,"source",userId,creationCredential);await assertCreation();if(originalSource.defaultRef!==observed.defaultRef||originalSource.sourceRepoName!==selection.sourceRepoName||originalSource.expectedHead!==null)throw Error("Original source native proof differs from the saved target");if(originalSource.visibleRefs.length===0){if(observed.visibleRefs.length!==0)throw Error("An empty source cannot explain copied workspace refs");emptySourceProof={ref:observed.defaultRef,refs:[]};}else unbornSourceProof={ref:observed.defaultRef,acceptedHead:null,privateRefs:structuredClone(originalSource.visibleRefs),workspacePrivateRefs:structuredClone(observed.visibleRefs)};}
           else{const copied=await destination.readCommit(selection.baseCommit);await assertCreation();if(!copied||copied.hash!==selection.baseCommit)throw Error("Original accepted source commit is unavailable in the saved fork");}
-          intent=await project.confirmTaskCreationFork(intent.eventId,{allocationId:intent.allocationId,workspaceRepoName:repoName,sourceRepoName:selection.sourceRepoName,sourceCommit:selection.baseCommit,providerRepoId:fork.id,nativeState:"not_allocated",credentialsComplete:true,...(emptySourceProof?{emptySourceProof}:{})},userId,creationCredential);
+          intent=await project.confirmTaskCreationFork(intent.eventId,{allocationId:intent.allocationId,workspaceRepoName:repoName,sourceRepoName:selection.sourceRepoName,sourceCommit:selection.baseCommit,providerRepoId:fork.id,nativeState:"not_allocated",credentialsComplete:true,...(emptySourceProof?{emptySourceProof}:{}),...(unbornSourceProof?{unbornSourceProof}:{})},userId,creationCredential);
           await project.settleArtifactAllocation(repoName,intent.allocationId);await account.settleArtifactAllocation(repoName,intent.allocationId);
           const remote=gitRemote(url.origin,projectId,b.taskId);
           const creationSettings=selection.acceptedTarget?settingsFor(selection.acceptedTarget.policy):settings;
@@ -2140,7 +2141,7 @@ export default {
           const remote = String((await repo.info()).remote);
           const canonicalToken = (await repo.createToken("read", 900)).plaintext;
           const nativeRunId=`native-${crypto.randomUUID()}`;
-          await admitNativeCompute(env,accountKey,nativeRunId);
+          await admitNativeCompute(env,accountKey,nativeRunId,"native-optional");
           const sb = env.INTEGRATOR.getByName(nativeRunId);
           const exec = (cmd: string, e?: Record<string, string>) => sb.exec(["sh", "-c", cmd], { env: e });
           const cleanup = async () => {
@@ -2261,7 +2262,7 @@ async function createDemoRepository(env: Env, projectId: string, name: string, u
   const ledger = projectOf(env, projectId);
   const canonicalName = canonicalNameFor(projectId);
   const nativeRunId=`native-${crypto.randomUUID()}`;
-  await admitNativeCompute(env,await accountKeyFor(userId),nativeRunId);
+  await admitNativeCompute(env,await accountKeyFor(userId),nativeRunId,"native-essential");
   const created = await allocateArtifact(env,{name:canonicalName,projectId,userId,kind:"canonical"},()=>env.ARTIFACTS.create(canonicalName,{description:`FlareGit demo repository for ${name}`}));
   const sb = env.INTEGRATOR.getByName(nativeRunId);
   const run = (cmd: string, e?: Record<string, string>) => sb.exec(["sh", "-c", cmd], { env: e });

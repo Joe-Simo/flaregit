@@ -12,7 +12,7 @@ export function nativeFunding() {
   const previews=new PreviewStorageLedger(storage as unknown as DurableObjectStorage),evidence=new EvidenceStorageLedger(storage as unknown as DurableObjectStorage),writers=new PreviewStorageWriters(storage as unknown as DurableObjectStorage);
   const budget={globalBytes:64*1024*1024,accountBytes:64*1024*1024};
   const active=new Map<string,string>(),failures=new Set<string>(),failureReasons=new Map<string,string>();
-  return {MANAGED_ACCOUNT_MONTHLY_USD_MICROS:"5000000",MANAGED_GLOBAL_MONTHLY_USD_MICROS:"10000000",REPOSITORY_CONTROLLER:{idFromName:(name:string)=>name,get:(name:string)=>name==="global"?{
+  return {MANAGED_ACCOUNT_MONTHLY_USD_MICROS:"5000000",MANAGED_GLOBAL_MONTHLY_USD_MICROS:"10000000",MANAGED_ESSENTIAL_GLOBAL_MONTHLY_USD_MICROS:"2000000",MANAGED_ESSENTIAL_ACCOUNT_MONTHLY_USD_MICROS:"1000000",REPOSITORY_CONTROLLER:{idFromName:(name:string)=>name,get:(name:string)=>name==="global"?{
     nativeComputeFailure:async(key:string)=>failures.has(key),
     nativeComputeFailureReason:async(key:string)=>failureReasons.get(key)??null,
     setNativeComputeFailureReason:async(key:string,reason:string)=>{failures.add(key);failureReasons.set(key,reason);},
@@ -34,5 +34,5 @@ export function nativeFunding() {
     claimNativeCompute:async(key:string)=>{if(active.has(key))return null;const token=crypto.randomUUID();active.set(key,token);return token;},
     nativeComputeStatus:async(key:string)=>active.has(key)?{active:true,token:active.get(key),sandboxName:`native-${active.get(key)}`,deadline:Date.now()+1200000}:null,
     finishNativeCompute:async(key:string,token:string)=>{if(active.get(key)===token)active.delete(key);},
-  }:{accountLifecycle:async()=>"active",getWorkflowRun:async()=>({actorId:"fixture-human"}),roleOf:async()=>"owner",previewStorageScope:async(commit:string)=>({projectId:"p123456789abc",incarnation:"11111111-1111-4111-8111-111111111111",commit,accountKey:"b".repeat(12)}),logActivity:async()=>{}}}} as unknown as Pick<Env,"REPOSITORY_CONTROLLER"|"MANAGED_ACCOUNT_MONTHLY_USD_MICROS"|"MANAGED_GLOBAL_MONTHLY_USD_MICROS">;
+  }:{accountLifecycle:async()=>"active",getWorkflowRun:async()=>({actorId:"fixture-human"}),roleOf:async()=>"owner",previewStorageScope:async(commit:string)=>({projectId:"p123456789abc",incarnation:"11111111-1111-4111-8111-111111111111",commit,accountKey:"b".repeat(12)}),logActivity:async()=>{}}}} as unknown as Pick<Env,"REPOSITORY_CONTROLLER"|"MANAGED_ACCOUNT_MONTHLY_USD_MICROS"|"MANAGED_GLOBAL_MONTHLY_USD_MICROS"|"MANAGED_ESSENTIAL_ACCOUNT_MONTHLY_USD_MICROS"|"MANAGED_ESSENTIAL_GLOBAL_MONTHLY_USD_MICROS">;
 }

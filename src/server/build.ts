@@ -14,7 +14,7 @@ export async function ensureBuild(env: Env, projectId: string, commit: string, c
   if(await globalOf(env).nativeComputeFailure(operationKey))throw new Error("Preview build failed; owner retry is required");
   const lease = await claimNativeCompute(env, operationKey);
   if (!lease) return;
-  try { await admitNativeCompute(env, accountKey, `native-${lease}`); }
+  try { await admitNativeCompute(env, accountKey, `native-${lease}`,"native-optional"); }
   catch (error) { await globalOf(env).finishNativeCompute(operationKey, lease); throw error; }
   // Durable single-flight covers the exact repository commit.
   let repo: Awaited<ReturnType<Env["ARTIFACTS"]["get"]>> | undefined;

@@ -1,8 +1,9 @@
 import { z } from "zod";
-import { tagCreationSchema, type TagCreationIdentity, type TagGitObservation } from "./tag-git";
+import { tagCreationSchema, type TagCreationIdentity, type TagGitObservation,tagNativeOwnershipSchema,type TagNativeOwnership } from "./tag-git";
 
 export interface TagCreationOperation extends TagCreationIdentity {
   phase: "prepared" | "unknown" | "confirmed" | "refused";
+  native?:TagNativeOwnership&{stopped:boolean};
   createdAt: number;
   reason?: "existing_ref" | "different_ref" | "owner_abandoned_prepared";
   observation?: TagGitObservation;
@@ -52,11 +53,16 @@ export class TagCreationOperations {
       return operation;
     });
   }
-  markDispatch(identity: TagCreationIdentity, validate: () => void): TagCreationOperation {
-    return this.update(identity, validate, operation => {
-      if (operation.phase === "prepared") operation.phase = "unknown";
-      else if (operation.phase !== "unknown") throw new Error("Tag operation is terminal");
-    });
+  claimNative(identity:TagCreationIdentity,input:TagNativeOwnership,validate:()=>void):boolean {
+    const ownership=tagNativeOwnershipSchema.parse(input);let claimed=false;
+    this.update(identity,validate,operation=>{if(operation.phase!=="prepared")throw Error("Tag native operation is unavailable");if(operation.native){if(operation.native.attemptId!==ownership.attemptId||operation.native.nativeId!==ownership.nativeId)throw Error("Tag native ownership differs");return;}operation.native={...ownership,stopped:false};claimed=true;});return claimed;
+  }
+  confirmNativeStopped(identity:TagCreationIdentity,input:TagNativeOwnership,proof:{name:string;sealed:true;stopped:true}):void {
+    const ownership=tagNativeOwnershipSchema.parse(input);this.update(identity,()=>{},operation=>{if(!operation.native||operation.native.attemptId!==ownership.attemptId||operation.native.nativeId!==ownership.nativeId||proof.name!==`tag-${ownership.nativeId}`||proof.sealed!==true||proof.stopped!==true)throw Error("Tag native closure proof differs");operation.native.stopped=true;});
+  }
+  markDispatch(identity: TagCreationIdentity, input:TagNativeOwnership, validate: () => void):boolean {
+    const ownership=tagNativeOwnershipSchema.parse(input);let dispatched=false;
+    this.update(identity,validate,operation=>{if(!operation.native||operation.native.attemptId!==ownership.attemptId||operation.native.nativeId!==ownership.nativeId)throw Error("Exact tag native ownership required");if(operation.phase==="unknown"||operation.native.stopped)return;if(operation.phase!=="prepared")throw Error("Tag operation is terminal");operation.phase="unknown";dispatched=true;});return dispatched;
   }
   observe(identity: TagCreationIdentity, input: TagGitObservation | null, validate: () => void): TagCreationOperation {
     const observation = input === null ? null : observationSchema.parse(input);

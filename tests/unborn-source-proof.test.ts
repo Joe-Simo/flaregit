@@ -16,7 +16,7 @@ test("actual native inventory succeeds only for an empty repository and detects 
   spawnSync("git",["init","--bare","--quiet","-b","main",bare]);
   const command=unbornSourceAdvertisementCommand(remote).replaceAll(q(remote),q(bare)).replaceAll("/workspace/unborn-source-proof",path.join(work,"inspection"));
   const run=()=>{const result=spawnSync("sh",["-c",command],{encoding:"utf8"});return{success:result.status===0,stdout:result.stdout};};
-  expect(assertEmptyNativeAdvertisement(run(),"refs/heads/main")).toEqual({headSymref:null});
+  expect(assertEmptyNativeAdvertisement(run(),"refs/heads/main")).toEqual({headSymref:null,privateRefs:[]});
   spawnSync("git",["init","--quiet",source]);fs.writeFileSync(path.join(source,"README.md"),"Actual Git content\n");spawnSync("git",["-C",source,"add","."]);spawnSync("git",["-C",source,"-c","user.name=Owner","-c","user.email=owner@example.test","commit","--quiet","-m","Root"]);spawnSync("git",["-C",source,"push","--quiet",bare,"HEAD:refs/tags/retained"]);
   expect(()=>assertEmptyNativeAdvertisement(run(),"refs/heads/main")).toThrow("Git history");
  }finally{fs.rmSync(work,{recursive:true,force:true});}
@@ -81,7 +81,7 @@ test("pre-bind metadata interruption leaves native funding untouched for the ide
  let information=0,reservations=0,issuances=0;
  const metadata={id:"provider-id",name:"canonical",remote:"https://"+"a".repeat(32)+".artifacts.cloudflare.net/git/default/canonical.git",defaultBranch:"main",source:null,description:null};
  const repository={info:async()=>{if(information++===0)throw new Error("Metadata transport unavailable");return metadata;},createToken:async()=>{issuances++;return{id:"read-id",plaintext:"synthetic-read-token",scope:"read",expiresAt:new Date(Date.now()+900000).toISOString()};},revokeToken:async()=>true,[Symbol.dispose]:()=>{}};
- const global={accountLifecycle:async()=>"active",reserveManagedSpend:async()=>({allowed:++reservations===1}),consumeManagedSpend:async()=>{}};
+ const global={accountLifecycle:async()=>"active",reserveManagedSpend:async(request:{resourceKind?:string})=>{expect(request.resourceKind).toBe("native-essential");return{allowed:++reservations===1};},consumeManagedSpend:async()=>{}};
  const native={exec:async()=>({success:true,stdout:JSON.stringify({version:1,advertisement:""})}),seal:async()=>{},destroy:async()=>{},lifetimeStatus:async()=>({state:"stopped",sealed:true})};
  const env={ARTIFACTS:{get:async()=>repository},INTEGRATOR:{getByName:()=>native},REPOSITORY_CONTROLLER:{idFromName:()=>"fixture",get:()=>global}} as unknown as Env;
  const journal:UnbornSourceJournal={beforeProvider:async()=>{},authorize:async()=>{},bindSource:async()=>{},beforeCredential:async()=>{},credentialIssued:async()=>{},nativeIntent:async()=>{},credentialRevoked:async()=>{},nativeStopped:async()=>{},pendingObservation:async()=>{},failedObservation:async()=>{},observed:async()=>{}};

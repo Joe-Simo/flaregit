@@ -56,6 +56,8 @@ export interface Env {
   RUNS_ENABLED?: string;
   /** Explicit USD micros caps; unset disables managed execution. No customer billing effect. */
   MANAGED_ACCOUNT_MONTHLY_USD_MICROS?: string;
+  MANAGED_ESSENTIAL_ACCOUNT_MONTHLY_USD_MICROS?: string;
+  MANAGED_ESSENTIAL_GLOBAL_MONTHLY_USD_MICROS?: string;
   MANAGED_GLOBAL_MONTHLY_USD_MICROS?: string;
   FREE_RUNS_PER_DAY?: string;
   PRO_RUNS_PER_DAY?: string;

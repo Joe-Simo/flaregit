@@ -18,7 +18,7 @@ export async function inspectSavedImport(env:Env,job:ImportJob,credentialHash?:s
  const fund=async()=>{await authorize();const admission=await globalOf(env).reserveCoreGitOperation(`import-ref-${crypto.randomUUID()}`,accountKey,{accountUsdMicros:configuredGitCap(env.CORE_GIT_ACCOUNT_MONTHLY_USD_MICROS),globalUsdMicros:configuredGitCap(env.CORE_GIT_GLOBAL_MONTHLY_USD_MICROS),readAccountUsdMicros:configuredGitCap(env.REPOSITORY_READ_ACCOUNT_MONTHLY_USD_MICROS),readGlobalUsdMicros:configuredGitCap(env.REPOSITORY_READ_GLOBAL_MONTHLY_USD_MICROS)});if(!admission.allowed)throw new Error("Import read capacity unavailable");await authorize();};
  let proof:ImportNativeSnapshot|undefined,readiness:ImportReadiness;
  try{
-  await authorize();await admitNativeCompute(env,accountKey,nativeId);await authorize();
+  await authorize();await admitNativeCompute(env,accountKey,nativeId,"native-essential");await authorize();
   credential=await account.createImportReadCredential(scope,credentialHash,sessionExpiresAt);await authorize();
   const sandbox=env.INTEGRATOR.getByName(nativeId);
   const witness=async(remote:string,branch:string)=>{

@@ -66,7 +66,7 @@ export async function createReadmeRepository(env: Env, input: ReadmeRepositoryIn
   const nativeName = `readme-${input.eventId}`;
   let nativeAllocated = false, receipt: InitialCommitReceipt | undefined, revoked = false, stopped = false;
   try {
-    await journal.authorize(); await admitNativeCompute(env, await accountKeyFor(input.userId), nativeName); await journal.nativeIntent(nativeName);
+    await journal.authorize(); await admitNativeCompute(env, await accountKeyFor(input.userId), nativeName, "native-essential"); await journal.nativeIntent(nativeName);
     const sandbox = env.INTEGRATOR.getByName(nativeName); nativeAllocated = true;
     receipt = await initializeReadmeGit({ exec: (command, environment) => sandbox.exec(["sh", "-c", command], { env: environment }) }, input, created.remote, created.token, () => journal.authorize(), value => journal.committed(value), () => journal.beforePush(), value => journal.published(value));
   } finally {

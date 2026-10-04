@@ -1,3 +1,5 @@
+import type { NativeComputeKind } from "./managed-spend-ledger.js";
+import {retainCandidateGitPin} from "./candidate-git-pin";
 import {confirmCompositionBranch} from "./composition-branch";
 import { retainGitInput, retainUnbornGitInput, retainedGitInputRef } from "./retained-git-input.js";
 import type { RetainedInput } from "./retained-inputs.js";
@@ -193,7 +195,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       try {
         const cfg=await stub.mirrorSecret();
         if(!cfg)return{skipped:true as const};
-        mirror=await this.sandbox(`mirror-${candidate.id}`);
+        mirror=await this.sandbox(`mirror-${candidate.id}`,"native-optional");
         const input=await stub.prepareRetainedInput(candidate.participatingTaskIds[0]!,event.instanceId,candidate.id,crypto.randomUUID(),true);
         const canonical=await this.retainedRemote(stub,input,"canonical","read");
         try { await this.fundedRetainedCommand(input,stub);return await pushMirror({exec:mirror.exec},{target:cfg.target,githubToken:cfg.token,canonicalRemote:canonical.remote,canonicalToken:canonical.token,branch:integrated.branch,commit:integrated.commit}); }
@@ -313,11 +315,11 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
   private nativeRuntimeCandidateId?:string;
   private computeAccountKey?: string;
   private computeWorkflowId?: string;
-  private async sandbox(id: string) {
+  private async sandbox(id: string,resourceKind:NativeComputeKind="native-essential") {
     const repository=ledgerOf(this.env,this.projectId);
     await assertManagedInitiator(this.env,repository,this.computeWorkflowId,this.computeAccountKey);
     const nativeId=crypto.randomUUID(),allocationId=`native-${nativeId}`;
-    await admitNativeCompute(this.env,this.computeAccountKey!,allocationId);
+    await admitNativeCompute(this.env,this.computeAccountKey!,allocationId,resourceKind);
     if(this.nativeRuntimeCandidateId)await repository.reserveIntegrationNativeRuntime(this.computeWorkflowId!,this.nativeRuntimeCandidateId,nativeId,id);
     const sb = this.env.INTEGRATOR.getByName(allocationId);
     const command=async()=>{const commandId=crypto.randomUUID(),scope=await repository.admitIntegrationNativeCommand(this.computeWorkflowId!,this.nativeRuntimeCandidateId!,nativeId,commandId);return {commandId,scope};};
@@ -554,13 +556,14 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       await stub.recordVerification(candidate.id, commit, evidence);
       if (evidence.status === "passed") {
         // Retain the verified Git candidate before optional R2 copies.
-        await this.fundedRetainedCommand(inputs[0]!, stub);
-        const shared = await run(`git -C ${WORK} push --quiet ${q(activeCanonical.remote)} ${q(`${commit}:refs/flaregit/candidates/${candidate.id}`)}`, gitAuthEnv(activeCanonical.token));
-        if (!shared.success) return { ok: false, error: "Could not store the candidate for review" };
+        const pin=await retainCandidateGitPin({candidateId:candidate.id,commit,directory:WORK,remote:activeCanonical.remote,token:activeCanonical.token,exec:(command,env)=>sb.exec(command,env,()=>this.retainedAuthority(inputs[0]!,stub)),beforeCommand:async phase=>{if(phase==="before")await this.fundedRetainedCommand(inputs[0]!,stub);else await this.retainedAuthority(inputs[0]!,stub);}});
+        await stub.recordCandidateProtectedPin(candidate.id,commit,{...pin,workflowId:parentWorkflowId});
         const previewKey=`build-${params.projectId}-${commit}`;
         try {
           const hasPage = !nativeOnly && settings.fixture === "ticket-booking" && (await run(`test -f ${WORK}/index.html`)).success;
           if (hasPage) {
+            if(!spending)throw new Error("Optional preview funding is unavailable");
+            await admitNativeCompute(this.env,spending.accountKey,`preview-${candidate.id}-${commit}`,"native-optional");
             const built = await run(`bun /opt/flaregit/src/core/verification/build-preview.ts ${q(WORK)} /tmp/build-out`);
             if (!built.success) throw new Error("Optional preview build failed");
             const scope=await stub.previewStorageScope(commit,state.canonicalRepoName);

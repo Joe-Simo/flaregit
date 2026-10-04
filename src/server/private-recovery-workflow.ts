@@ -75,7 +75,7 @@ export class FlareGitPrivateRecoveryWorkflow extends WorkflowEntrypoint<Env, Pri
         const sandbox = this.env.INTEGRATOR.getByName(sandboxName);
         let allocated = false;
         try {
-          await admitNativeCompute(this.env, operation.accountKey, sandboxName);
+          await admitNativeCompute(this.env, operation.accountKey, sandboxName, "native-essential");
           await authorize();
           using repository = await this.env.ARTIFACTS.get(operation.canonicalRepoName);
           const info = await repository.info();

@@ -8,7 +8,7 @@ test("production Worker service routes verify signatures before user login and e
   if (await workerdChild("tests/service-api.test.ts")) return;
   const built = await Bun.build({ entrypoints: ["tests/support/service-api-worker.ts"], target: "browser", external: ["cloudflare:workers", "node:*"] });
   if (!built.success) throw new Error(built.logs.join("\n"));
-  const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ name: "service-api-test", unsafeDirectSockets: [{host:"127.0.0.1"}], modules: true, script: await built.outputs[0]!.text(), compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], durableObjects: { TEST: { className: "ServiceApiFixture", useSQLite: true } } }] }));
+  const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ name: "service-api-test", unsafeDirectSockets: [{host:"127.0.0.1"}], modules: true, script: await built.outputs[0]!.text(), compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"], bindings:{MANAGED_ACCOUNT_MONTHLY_USD_MICROS:"1000000",MANAGED_GLOBAL_MONTHLY_USD_MICROS:"1000000",MANAGED_ESSENTIAL_ACCOUNT_MONTHLY_USD_MICROS:"100000",MANAGED_ESSENTIAL_GLOBAL_MONTHLY_USD_MICROS:"200000"}, durableObjects: { TEST: { className: "ServiceApiFixture", useSQLite: true } } }] }));
   const directUrl = await mf.unsafeGetDirectURL("service-api-test");
   // Auth/body rejection can finish before consuming the request stream. Exercise
   // real HTTP with independent connections rather than Miniflare's object proxy

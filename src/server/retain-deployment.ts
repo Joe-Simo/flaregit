@@ -9,7 +9,7 @@ import {isSafeRef,isSafeSha} from "../core/sanitize.js";
  */
 export async function retainDeploymentTarget(env:Env,canonicalRepoName:string,target:AcceptedDeploymentTarget, accountKey: string, computeRunId: string):Promise<void>{
   if(!isSafeSha(target.commit)||!isSafeSha(target.tree)||!isSafeRef(target.recoverableRef)||!target.recoverableRef.startsWith("refs/flaregit/deployments/"))throw new Error("Invalid accepted deployment target");
-  await admitNativeCompute(env, accountKey, computeRunId);
+  await admitNativeCompute(env, accountKey, computeRunId,"native-essential");
   using repository=await env.ARTIFACTS.get(canonicalRepoName);
   const sandbox=env.INTEGRATOR.getByName(computeRunId);
   let token:string|undefined;

@@ -38,7 +38,7 @@ export class FlareGitImportHistoryWorkflow extends WorkflowEntrypoint<Env,Import
     if(!sourceAllowed){await step.do("pause-unsupported-source",async()=>project.pauseHistoryInspection(operationId,"unsupported_source",{generation:attempt.generation,workflowId:event.instanceId}));return{operationId,status:"paused"};}
     const prepared=await step.do("prepare-pinned-source",{retries:{limit:0,delay:"5 seconds",backoff:"constant"},timeout:"5 minutes"},async()=>{
      try{
-     await authorize();await admitNativeCompute(this.env,accountKey,attempt.nativeRunId);await authorize();await project.historyInspectionNativeIntent(operationId,attempt.generation,event.instanceId);
+     await authorize();await admitNativeCompute(this.env,accountKey,attempt.nativeRunId,"native-optional");await authorize();await project.historyInspectionNativeIntent(operationId,attempt.generation,event.instanceId);
      const sandbox=this.env.INTEGRATOR.getByName(attempt.nativeRunId);
      const source=await preparePublicSourceHistoryClone({exec:(command,options)=>sandbox.exec(["sh","-c",command],{env:options?.env,timeoutMs:options?.timeout})},scope.source,scope.branch,expectedHead,directory,authorize);
      if(!source||source.shallow){await project.pauseHistoryInspection(operationId,source?.shallow?"source_shallow":"source_unavailable",{generation:attempt.generation,workflowId:event.instanceId});return false;}await authorize();return true;
