@@ -47,6 +47,12 @@ export function assertIntegrationPublicationTarget(candidate:CandidateGeneration
   assertCompatibleAcceptedTargetBatch([target,journal.acceptedTarget,journal.publicationAuthority.acceptedTarget]);
 }
 
+/** Last awaited server fence: a bound CAS becomes possible durably before native dispatch. */
+export async function authorizeIntegrationPublicationDispatch(candidate:CandidateGeneration,journal:PublicationJournalEntry,commit:string,ledger:Pick<Ledger,"authorizeCandidatePublication"|"markCandidatePublicationDispatch">):Promise<void>{
+  if(!await ledger.authorizeCandidatePublication(candidate.id,commit))throw Error("Exact publication authority changed before dispatch; nothing was pushed");
+  if(candidate.acceptedTarget&&!await ledger.markCandidatePublicationDispatch(candidate.id,journal.id,commit))throw Error("Prepared publication was cancelled or its dispatch marker changed; nothing was pushed");
+}
+
 export interface IntegrationParams {
   nativeRuntimeProtocolVersion?:1;
   projectId: string;
@@ -633,7 +639,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     const res = await sb.exec(
       `git -C ${dir} push --quiet --force-with-lease=${q(`${targetRef}:${candidate.expectedAcceptedBase}`)} ${q(canonical.remote)} ${q(`${commit}:${targetRef}`)}`,
       gitAuthEnv(canonical.token),
-      async()=>{if(!await stub.authorizeCandidatePublication(candidate.id,commit))throw new Error("Exact publication authority changed before dispatch; nothing was pushed");}
+      ()=>authorizeIntegrationPublicationDispatch(candidate,journal,commit,stub)
     );
     if (res.success) return { ok: true };
     // A retried step may find its own earlier push already landed: that is success, not a conflict.

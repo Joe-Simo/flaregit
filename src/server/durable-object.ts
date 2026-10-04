@@ -630,6 +630,7 @@ export interface Ledger {
   recordReview(candidateId: string, review: { approved: boolean; actor: HumanDecisionActor; note?: string }, expectedCommit: string, credentialHash?: string,expectedTarget?:{ref:string;acceptedCommit:string;acceptedVersion:number}): Promise<{ ok: boolean; instanceId?: string; error?: string; review?: CandidateGeneration["review"] }>;
   preparePublish(candidateId: string): Promise<PrepareResult>;
   authorizeCandidatePublication(candidateId: string, commit: string): Promise<boolean>;
+  markCandidatePublicationDispatch(candidateId:string,journalId:string,commit:string):Promise<boolean>;
   authorizeCandidatePublicationReadback(candidateId:string,journalId:string,commit:string):Promise<boolean>;
   observeCandidatePublicationReadback(candidateId:string,journalId:string,commit:string):Promise<{status:"landed"|"not_landed"|"unavailable";ref:string;commit:string;readbackScope?:string}>;
   completePublish(journalId: string,readbackScope?:string): Promise<void>;
@@ -3649,9 +3650,38 @@ export class RepositoryController extends DurableObject<Env> {
       timestamp: new Date().toISOString(),
     };
     try {
-      this.ctx.storage.transactionSync(() => { assertCurrent(); this.assertCandidateNotRerunFrozen(candidateId);if(this.isNonprimaryCandidate(c))new AcceptedBranchRoots(this.ctx.storage).reservePublication(this.admittedTargetPublication(c,journal),()=>{assertCurrent();this.assertAcceptedCandidateTarget(c,ev);this.assertOwnerAcceptedTargetReview(c);}); s.journal.push(journal); this.save(); });
+      this.ctx.storage.transactionSync(() => { assertCurrent(); this.assertCandidateNotRerunFrozen(candidateId);if(this.isNonprimaryCandidate(c))new AcceptedBranchRoots(this.ctx.storage).reservePublication(this.admittedTargetPublication(c,journal),()=>{assertCurrent();this.assertAcceptedCandidateTarget(c,ev);this.assertOwnerAcceptedTargetReview(c);}); if(c.acceptedTarget){this.publicationDispatchTable();this.ctx.storage.sql.exec("INSERT INTO publication_dispatch_markers VALUES(?,?,?)",journal.id,this.publicationReadbackScope(journal),"never");} s.journal.push(journal); this.save(); });
     } catch (cause) { this.state = null; throw cause; }
     return { ok: true, journal };
+  }
+
+  async cancelUndispatchedPublication(candidateId:string,journalId:string,eventId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<{cancelled:true;journalId:string}> {
+    if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(eventId))throw Error("Invalid cancellation identity");
+    const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authorize();this.publicationDispatchTable();
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS publication_cancellations(event_id TEXT PRIMARY KEY,journal_id TEXT NOT NULL,actor_id TEXT NOT NULL,scope TEXT NOT NULL,at TEXT NOT NULL)");
+    const prior=this.ctx.storage.sql.exec<{journal_id:string;actor_id:string}>("SELECT journal_id,actor_id FROM publication_cancellations WHERE event_id=?",eventId).toArray()[0];if(prior){if(prior.journal_id!==journalId||prior.actor_id!==actor.userId)throw Error("Cancellation identity changed");return{cancelled:true,journalId};}
+    const state=this.load(),candidate=state.candidates[candidateId],journal=state.journal.find(item=>item.id===journalId&&item.candidateId===candidateId);
+    if(!candidate?.acceptedTarget||!journal||journal.state!=="PREPARED"||!candidate.workflowInstanceId)throw Error("Bound pending publication unavailable");
+    const scope=this.publicationReadbackScope(journal),identity={workflowId:candidate.workflowInstanceId,candidateId,projectId:state.projectId,incarnation:candidate.acceptedTarget.incarnation};
+    const assert=()=>{authorize();const marker=this.ctx.storage.sql.exec<{scope:string;state:string}>("SELECT scope,state FROM publication_dispatch_markers WHERE journal_id=?",journalId).toArray()[0],runtime=IntegrationNativeRuntimeLedger.inspect(this.ctx.storage,identity);if(this.publicationReadbackScope(journal)!==scope||journal.state!=="PREPARED"||marker?.scope!==scope||marker.state!=="never"||!runtime.coverage||runtime.sealed!==true||runtime.status!=="stopped")throw Error("Publication dispatch or native shutdown remains unconfirmed");new RetainedCredentialIncidents(this.ctx.storage);new RefReadCredentialIncidents(this.ctx.storage);if(this.ctx.storage.sql.exec("SELECT input_id FROM retained_credential_incidents WHERE json_extract(payload,'$.workflowId')=? AND status!='revoked' LIMIT 1",identity.workflowId).toArray().length||this.ctx.storage.sql.exec("SELECT id FROM ref_read_credential_incidents WHERE json_extract(context,'$.operationId')=? AND status!='revoked' LIMIT 1",journalId).toArray().length)throw Error("Publication credential cleanup remains unconfirmed");};
+    assert();const runtime=IntegrationNativeRuntimeLedger.inspect(this.ctx.storage,identity);
+    for(const allocation of runtime.allocations??[]){const accountKey=await accountKeyFor(actor.userId),funding=await globalOf(this.env).reserveCoreGitOperation(`cancel-publication-${crypto.randomUUID()}`,accountKey,this.currentGitBudget());authorize();if(!funding.allowed)throw Error("Publication cancellation inspection capacity unavailable");const lifetime=await this.env.INTEGRATOR.getByName(`native-${allocation.nativeRunId}`).lifetimeStatus();assert();if(lifetime?.state!=="stopped"||lifetime.sealed!==true)throw Error("Permanent native stop remains unconfirmed");}
+    this.ctx.storage.transactionSync(()=>{assert();if(this.ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) AS n FROM publication_cancellations").one().n>=1000)throw Error("Publication cancellation audit capacity reached");const at=new Date().toISOString();if(this.isNonprimaryCandidate(candidate))new AcceptedBranchRoots(this.ctx.storage).cancelUndispatchedPublication(this.admittedTargetPublication(candidate,journal),{id:eventId,actorId:actor.userId,at},{journalId,candidateId,protocol:1,dispatch:"never",nativeSealed:true,nativeStopped:true,credentialsSettled:true},assert);this.ctx.storage.sql.exec("INSERT INTO publication_cancellations VALUES(?,?,?,?,?)",eventId,journalId,actor.userId,scope,at);this.ctx.storage.sql.exec("UPDATE publication_dispatch_markers SET state='cancelled' WHERE journal_id=?",journalId);journal.state="ABORTED";journal.error="Owner cancelled a proven undispatched publication";journal.timestamp=at;candidate.status="stale";this.ctx.storage.sql.exec("DELETE FROM lease WHERE id=1 AND holder=?",candidate.workflowInstanceId!);for(const id of candidate.participatingTaskIds){const task=state.tasks[id];if(task?.activeCandidateId===candidateId&&task.status!=="cancelled")task.status="ready";}this.save();});return{cancelled:true,journalId};
+  }
+
+  private publicationDispatchTable():void{this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS publication_dispatch_markers(journal_id TEXT PRIMARY KEY,scope TEXT NOT NULL,state TEXT NOT NULL)");}
+  async markCandidatePublicationDispatch(candidateId:string,journalId:string,commit:string):Promise<boolean>{
+    if(!await this.authorizeCandidatePublication(candidateId,commit))return false;
+    this.publicationDispatchTable();
+    return this.ctx.storage.transactionSync(()=>{
+      const state=this.load(),candidate=state.candidates[candidateId],journal=state.journal.find(item=>item.id===journalId&&item.candidateId===candidateId);
+      if(!candidate||!journal||journal.state!=="PREPARED"||journal.newHead!==commit||candidate.participatingTaskIds.some(id=>state.tasks[id]?.status==="cancelled"))return false;
+      if(!candidate.review?.actor||this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",candidate.review.actor.userId).toArray()[0]?.role!=="owner")return false;
+      try{this.assertAcceptedCandidateTarget(candidate,candidate.evidenceId?state.evidence[candidate.evidenceId]:undefined);this.assertOwnerAcceptedTargetReview(candidate);}catch{return false;}
+      const scope=this.publicationReadbackScope(journal),row=this.ctx.storage.sql.exec<{scope:string;state:string}>("SELECT scope,state FROM publication_dispatch_markers WHERE journal_id=?",journalId).toArray()[0];
+      if(!row||row.scope!==scope||!["never","possible"].includes(row.state))return false;
+      this.ctx.storage.sql.exec("UPDATE publication_dispatch_markers SET state='possible' WHERE journal_id=?",journalId);return true;
+    });
   }
 
   /** Fresh authorization for a new Git dispatch; confirmed ref updates reconcile independently. */

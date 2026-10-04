@@ -1,3 +1,4 @@
+import {IntegrationNativeRuntimeLedger} from '../../src/server/integration-native-runtime';
 import {RetainedInputs} from '../../src/server/retained-inputs';
 import {accountKeyFor} from '../../src/server/projects';
 import {VERIFIER_IDENTITIES} from '../../src/core/verification-identities';
@@ -18,6 +19,9 @@ export class AcceptedTargetFixture extends AcceptedRegistryFixture {
  if(url.pathname==='/prepare')return Response.json(await this.preparePublish(url.searchParams.get('id')!));
  if(url.pathname==='/observe-readback'){await this.ctx.storage.put('readbackMode',url.searchParams.get('mode')??'landed');const result=await this.observeCandidatePublicationReadback(url.searchParams.get('id')!,url.searchParams.get('journal')!,url.searchParams.get('commit')!);return Response.json({...result,observedRef:await this.ctx.storage.get('observedRef')});}
  if(url.pathname==='/authorize-readback')return Response.json(await this.authorizeCandidatePublicationReadback(url.searchParams.get('id')!,url.searchParams.get('journal')!,url.searchParams.get('commit')!));
+ if(url.pathname==='/seal-target-runtime'){const state=await this.getState(),candidate=state.candidates[url.searchParams.get('id')!]!,scope={workflowId:candidate.workflowInstanceId!,candidateId:candidate.id,projectId:state.projectId,incarnation:candidate.acceptedTarget!.incarnation,actorId:'owner',accountKey:await accountKeyFor('owner')},runtime=new IntegrationNativeRuntimeLedger(this.ctx.storage);runtime.declareCoverage(scope);runtime.seal(scope);return Response.json({sealed:true});}
+ if(url.pathname==='/mark-dispatch')return Response.json(await this.markCandidatePublicationDispatch(url.searchParams.get('id')!,url.searchParams.get('journal')!,url.searchParams.get('commit')!));
+ if(url.pathname==='/cancel-publication'){const input=await request.json() as {id:string;journal:string;eventId:string};return Response.json(await this.cancelUndispatchedPublication(input.id,input.journal,input.eventId,{userId:'owner',displayName:'Owner',viaToken:false},undefined,Date.now()+60000));}
  if(url.pathname==='/cancel-target'){await this.cancelTask(url.searchParams.get('id')!);return Response.json({cancelled:true});}
  if(url.pathname==='/abort-target'){const input=await request.json() as {id:string;journal:string};await this.abortPublish(input.id,input.journal,'authorization changed','failed');return Response.json(await this.getState());}
  if(url.pathname==='/authorize')return Response.json(await this.authorizeCandidatePublication(url.searchParams.get('id')!,url.searchParams.get('commit')??'a'.repeat(40)));
