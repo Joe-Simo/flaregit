@@ -11,7 +11,14 @@ export function bindTaskAcceptedTarget(roots:AcceptedBranchRoots,state:FlareGitP
  const ref=options?.acceptedTargetRef??parent?.acceptedTarget?.ref;
  if(ref===undefined){if(task.acceptedTarget)throw Error('An explicit registered target is required for a bound task');return task;}
  const target=acceptedTargetSchema.parse(freezeAcceptedTarget(roots,state,incarnation,ref));
- if(parent){if(!parent.acceptedTarget)throw Error('A bound stack cannot inherit an unbound parent');assertCompatibleAcceptedTargetBatch([parent.acceptedTarget,target]);}
+ if(parent){
+  if(parent.status==='accepted'){
+   if(parent.acceptedTarget){const old=parent.acceptedTarget;if(old.projectId!==target.projectId||old.incarnation!==target.incarnation||old.canonicalRepoName!==target.canonicalRepoName||old.ref!==target.ref)throw Error('Accepted parent belongs to another target');}
+   else if(target.ref!==`refs/heads/${state.defaultBranch??''}`)throw Error('Legacy accepted parent only belongs to its recorded primary target');
+   const proven=state.journal.some(journal=>{if(journal.state!=='ACCEPTED')return false;const candidate=state.candidates[journal.candidateId];if(!candidate||!candidate.participatingTaskIds.includes(parent.id)||candidate.participatingCommits[parent.id]!==parent.currentCommit||candidate.candidateCommit!==journal.newHead)return false;const ref=journal.acceptedTarget?.ref??candidate.acceptedTarget?.ref??`refs/heads/${state.defaultBranch??''}`;if(ref!==target.ref)return false;if(target.ref===`refs/heads/${state.defaultBranch??''}`)return state.acceptedState.history.some(item=>item.candidateId===candidate.id&&item.commit===journal.newHead&&item.participatingTasks.includes(parent.id));return roots.get({projectId:target.projectId,incarnation:target.incarnation,canonicalRepoName:target.canonicalRepoName,ref:target.ref})?.history.some(item=>item.operationId===journal.id&&item.commit===journal.newHead)===true;});
+   if(!proven)throw Error('Accepted parent checkpoint has no publication proof on the selected target');
+  }else{if(!parent.acceptedTarget)throw Error('A bound stack cannot inherit an unbound parent');assertCompatibleAcceptedTargetBatch([parent.acceptedTarget,target]);}
+ }
  if(task.acceptedTarget)assertCompatibleAcceptedTargetBatch([task.acceptedTarget,target]);
  const base=parent?.currentCommit??target.acceptedCommit;
  if(task.baseCommit!==base||task.currentCommit!==base)throw Error('New task workspace does not match its selected accepted target or parent checkpoint');

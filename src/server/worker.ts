@@ -1634,7 +1634,14 @@ export default {
         const reviewRoute = /^\/candidates\/([a-z0-9_-]+)\/review$/.exec(sub);
         if (reviewRoute && method === "POST") {
           if (!isOwner) return text("Only the repository owner with a signed-in session or full-access token can review", 403);
-          const b = await body<{ approved?: boolean; note?: string; expectedCommit?: string }>();
+          const b = await body<{ approved?: boolean; note?: string; expectedCommit?: string; expectedTarget?: unknown }>();
+          if (Object.keys(b).some(key => !["approved", "note", "expectedCommit", "expectedTarget"].includes(key)) || (b.note !== undefined && (typeof b.note !== "string" || b.note.length > 5000))) return text("Invalid review fields", 400);
+          let expectedTarget: { ref: string; acceptedCommit: string; acceptedVersion: number } | undefined;
+          if (b.expectedTarget !== undefined) {
+            const target = b.expectedTarget;
+            if (!target || typeof target !== "object" || Array.isArray(target) || Object.keys(target).some(key => !["ref", "acceptedCommit", "acceptedVersion"].includes(key)) || !("ref" in target) || typeof target.ref !== "string" || !target.ref.startsWith("refs/heads/") || !isSafeRef(target.ref) || !("acceptedCommit" in target) || typeof target.acceptedCommit !== "string" || !/^[a-f0-9]{40}$/.test(target.acceptedCommit) || /^0{40}$/.test(target.acceptedCommit) || !("acceptedVersion" in target) || typeof target.acceptedVersion !== "number" || !Number.isSafeInteger(target.acceptedVersion) || target.acceptedVersion < 0) return text("The exact reviewed target branch, base and version are required", 400);
+            expectedTarget = { ref: target.ref, acceptedCommit: target.acceptedCommit, acceptedVersion: target.acceptedVersion };
+          }
           if (typeof b.approved !== "boolean") return text("approved (true or false) is required", 400);
           if (typeof b.expectedCommit !== "string" || !/^[a-f0-9]{40}$/.test(b.expectedCommit)) return text("The exact commit you reviewed is required. Refresh the page and inspect the candidate.", 400);
           const profile = await account.getProfile();
@@ -1644,13 +1651,13 @@ export default {
           const credentialHash = currentAuth.viaToken ? await gitParentTokenHash(request) : undefined;
           const actor = { userId, displayName: clean(profile.displayName, 120) || "Repository owner", viaToken: auth.viaToken === true };
           let r;
-          try { r = await project.recordReview(reviewRoute[1]!, { approved: b.approved, actor, note: clean(b.note, 500) || undefined }, b.expectedCommit, credentialHash); }
+          try { r = await project.recordReview(reviewRoute[1]!, { approved: b.approved, actor, note: clean(b.note, 500) || undefined }, b.expectedCommit, credentialHash, expectedTarget); }
           catch { return text("Review could not be confirmed. Refresh the candidate before retrying.", 409); }
           if (!r.ok || !r.instanceId) return text(r.error ?? "Review failed", 409);
           try {
             await (await env.INTEGRATION_WORKFLOW.get(r.instanceId)).sendEvent({ type: "review", payload: { approved: r.review?.approved ?? b.approved, by: r.review?.by ?? actor.displayName, note: r.review?.note, actor: r.review?.actor } });
-          } catch (e) {
-            console.error("review notify failed", e instanceof Error ? e.message : String(e));
+          } catch {
+            console.error("Review workflow notification unavailable");
             return text("Your decision is saved, but the integration run did not receive it yet. Press the same button again to resend.", 502);
           }
           return json({ recorded: true, approved: b.approved });

@@ -1,3 +1,4 @@
+import {checkedCandidateReviewTarget,ownerReviewPayload,type CandidateReviewTarget} from "../candidate-review-target";
 import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Check, Eye, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -43,14 +44,17 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
   const [note, setNote] = useState("");
   const [noteBrowserSaved,setNoteBrowserSaved]=useState(false);
   const noteRecovery=useRef<ReviewDraftScope|null>(null),ownerIntent=useRef<OwnerDraftIntent|null>(null);
+  const [recoveredTargetMismatch,setRecoveredTargetMismatch]=useState(false);
   const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const passed = evidence?.testResults.reduce((n, s) => n + s.passedCount, 0) ?? 0;
   const nativeOnly = evidence?.verifierIdentity === VERIFIER_IDENTITIES.external || candidate.frozenExternalChecksPolicy?.mode === "external";
   const total = evidence?.testResults.reduce((n, s) => n + s.passedCount + s.failedCount, 0) ?? 0;
 
-  const scope = `${projectId}:${candidate.id}:${candidate.candidateCommit ?? ""}`;
-  useEffect(()=>{setNote("");setNoteBrowserSaved(false);ownerIntent.current=null;const identity=apiSessionIdentity();noteRecovery.current=identity&&candidate.candidateCommit?{identity,projectId,candidateId:candidate.id,commit:candidate.candidateCommit,kind:"owner"}:null;if(!noteRecovery.current)return;try{const recovered=readReviewDraft(sessionStorage,noteRecovery.current);if(recovered){setNote(recovered.note);ownerIntent.current=recovered.intent?.kind==="owner"?recovered.intent:null;setNoteBrowserSaved(true);}}catch{/* Browser recovery is optional. */}},[scope,isOwner]);
+  let reviewTarget:CandidateReviewTarget|null=null,targetInvalid=false;try{reviewTarget=checkedCandidateReviewTarget(projectId,candidate.acceptedTarget,candidate.expectedAcceptedBase,candidate.frozenPolicyVersion);}catch{targetInvalid=true;}
+  const targetScope=JSON.stringify([reviewTarget?.projectId??null,reviewTarget?.incarnation??null,reviewTarget?.canonicalRepoName??null,reviewTarget?.ref??null,reviewTarget?.acceptedCommit??null,reviewTarget?.acceptedVersion??null,reviewTarget?.policyVersion??null,targetInvalid]);
+  const scope = `${projectId}:${candidate.id}:${candidate.candidateCommit ?? ""}:${targetScope}`;
+  useEffect(()=>{setNote("");setNoteBrowserSaved(false);setRecoveredTargetMismatch(false);ownerIntent.current=null;const identity=apiSessionIdentity();noteRecovery.current=identity&&candidate.candidateCommit?{identity,projectId,candidateId:candidate.id,commit:candidate.candidateCommit,kind:"owner"}:null;if(!noteRecovery.current)return;try{const recovered=readReviewDraft(sessionStorage,noteRecovery.current);if(recovered){setNote(recovered.note);ownerIntent.current=recovered.intent?.kind==="owner"?recovered.intent:null;setNoteBrowserSaved(true);const expected=reviewTarget?{ref:reviewTarget.ref,acceptedCommit:reviewTarget.acceptedCommit,acceptedVersion:reviewTarget.acceptedVersion}:undefined;if(recovered.intent?.kind==="owner"&&JSON.stringify(recovered.intent.payload.expectedTarget)!==JSON.stringify(expected))setRecoveredTargetMismatch(true);}}catch{/* Browser recovery is optional. */}},[scope,isOwner]);
   const preserveOwnerNote=(value:string,intent:OwnerDraftIntent|null)=>{const savedScope=noteRecovery.current;if(!savedScope||apiSessionIdentity()!==savedScope.identity)return false;try{return saveReviewDraft(sessionStorage,savedScope,{note:value,intent});}catch{return false;}};
   const onDelegatedGate=useCallback((passed:boolean|null)=>setDelegatedGate({scope,passed}),[scope]);
   const delegatedKnown=delegatedGate?.scope===scope&&delegatedGate.passed===true;
@@ -97,7 +101,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
   const identityMismatch = checks && (checks.frozen.repositoryId !== projectId || checks.frozen.candidateId !== candidate.id || checks.frozen.commit !== candidate.candidateCommit || (candidate.frozenExternalChecksPolicy && (checks.frozen.policy.version !== candidate.frozenExternalChecksPolicy.version || checks.frozen.policy.mode !== candidate.frozenExternalChecksPolicy.mode)) || (evidence && (checks.frozen.commit !== evidence.candidateCommit || checks.frozen.tree !== evidence.candidateTree)));
   const declaredRequiredChecks = candidate.frozenExternalChecksPolicy?.checks.some((check) => check.required) ?? false;
   const checkGate = checks ? externalCheckGate(checks) : declaredRequiredChecks ? "pending" : "passed";
-  const acceptanceBlocked = !delegatedKnown || rerunReserved || candidate.preservationProtocolVersion !== 1 || !reviewReady || !candidate.candidateCommit || blocksExternalAcceptance({ required: declaredRequiredChecks, known: checksKnown, readFailed: checkError !== null, identityMismatch: Boolean(identityMismatch), gate: checkGate, retryingRequired });
+  const acceptanceBlocked = targetInvalid || recoveredTargetMismatch || !delegatedKnown || rerunReserved || candidate.preservationProtocolVersion !== 1 || !reviewReady || !candidate.candidateCommit || blocksExternalAcceptance({ required: declaredRequiredChecks, known: checksKnown, readFailed: checkError !== null, identityMismatch: Boolean(identityMismatch), gate: checkGate, retryingRequired });
   const retryCheck = isOwner ? async (checkId: string) => {
     const sequence = ++requestSequence.current;
     retryInFlight.current = true; setRetryingCheck(true); setRetryingRequired(checks?.frozen.policy.checks.find((check) => check.id === checkId)?.required ?? declaredRequiredChecks);
@@ -116,12 +120,12 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
   </>;
 
   const decide = async (approved: boolean, resendSaved = false) => {
-    if (!isOwner || rerunReserved || busy !== null || !candidate.candidateCommit || (approved && acceptanceBlocked)) return;
+    if (!isOwner || targetInvalid || recoveredTargetMismatch || rerunReserved || busy !== null || !candidate.candidateCommit || (approved && acceptanceBlocked)) return;
     if (resendSaved && (!candidate.review || candidate.review.commit !== candidate.candidateCommit || candidate.review.approved !== approved)) return;
     const generation = decisionGeneration.current;
     setBusy(approved ? "approve" : "reject");
     setError(null);
-    const payload={approved,note:resendSaved?candidate.review?.note??"":note,expectedCommit:resendSaved?candidate.review!.commit:candidate.candidateCommit};
+    const payload=ownerReviewPayload(approved,resendSaved?candidate.review?.note??"":note,resendSaved?candidate.review!.commit:candidate.candidateCommit,reviewTarget);
     ownerIntent.current={kind:"owner",payload};setNoteBrowserSaved(preserveOwnerNote(resendSaved?payload.note:note,ownerIntent.current));
     try {
       const receipt = await apiJson<{ recorded: boolean; approved: boolean }>(`/p/${projectId}/candidates/${candidate.id}/review`, { method: "POST", json: payload,signal:AbortSignal.timeout(15000) });
@@ -134,6 +138,8 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
     }
   };
 
+  const targetSummary=targetInvalid||recoveredTargetMismatch?<p role="alert" className="text-xs text-destructive">Frozen branch target metadata is unavailable or inconsistent. Review decisions are paused; read the diff and refresh before deciding.</p>:reviewTarget?<p className="text-xs text-muted-foreground break-words">Frozen target <strong>{reviewTarget.branch}</strong> · base <code title={reviewTarget.acceptedCommit}>{reviewTarget.acceptedCommit.slice(0,12)}</code> · version {reviewTarget.acceptedVersion}</p>:null;
+
   const delegatedRows=candidate.candidateCommit?<Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Checking reviewer evidence…</p>}><DelegatedCandidateReviews key={scope} projectId={projectId} candidateId={candidate.id} commit={candidate.candidateCommit} base={candidate.expectedAcceptedBase} tree={evidence?.candidateTree} verificationPolicyVersion={candidate.frozenPolicyVersion} reviewReady={reviewReady} editable={["awaiting_review","verified"].includes(candidate.status)} onGate={onDelegatedGate}/></Suspense>:null;
 
   if (candidate.review?.approved && candidate.status === "verified") {
@@ -141,6 +147,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
       <section aria-label="Saved approval awaiting integration" className="rounded-lg border border-border p-4 space-y-2 text-sm">
         <p><span className="font-semibold">Approved by {candidate.review.by}</span> {candidate.review.note ? `(${candidate.review.note})` : ""}: approval saved for <code>{candidate.candidateCommit?.slice(0, 7)}</code>.</p>
         <p className="text-muted-foreground">The decision is saved for this exact commit. A paused or unavailable run may still need recovery. Repository history changes only after confirmed acceptance.</p>
+        {targetSummary}
         {connectedRows}
         {delegatedRows}
         <LegacyCandidateRerun projectId={projectId} candidate={candidate} isOwner={isOwner} onDone={onDone} onReserved={setRerunReserved} />
@@ -155,8 +162,9 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
     <section aria-label="Review needed" className="rounded-lg border border-amber-500/40 bg-amber-500/5 p-4 space-y-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="font-semibold">Waiting for your review</h3>
-        <code className="text-xs text-muted-foreground">{candidate.candidateCommit?.slice(0, 7)} on {candidate.expectedAcceptedBase.slice(0, 7)}</code>
+        <code className="text-xs text-muted-foreground">{candidate.candidateCommit?.slice(0, 7)}{candidate.acceptedTarget===undefined&&<> on {candidate.expectedAcceptedBase.slice(0, 7)}</>}</code>
       </div>
+      {targetSummary}
       <p className="text-sm text-muted-foreground">
         Combines {candidate.participatingTaskIds.join(" and ")}{candidate.compositionMethod ? ` (${candidate.compositionMethod.replace(/_/g, " ")})` : ""}
         {candidate.repairAttempts.length > 0 ? `, with ${candidate.repairAttempts.length} AI repair round${candidate.repairAttempts.length === 1 ? "" : "s"} you should read` : ""}.{" "}
@@ -184,7 +192,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
       <div className="flex flex-wrap gap-2">
         {showOpen && <Button size="sm" variant="outline" onClick={() => navigate(`/p/${projectId}/review?candidate=${candidate.id}`)}><Eye className="h-3.5 w-3.5 mr-1.5" /> Read the diff</Button>}
         <Button size="sm" variant="orange" disabled={!isOwner || busy !== null || acceptanceBlocked} onClick={() => decide(true)}><Check className="h-3.5 w-3.5 mr-1.5" /> {busy === "approve" ? "Accepting…" : "Accept into history"}</Button>
-        <Button size="sm" variant="outline" disabled={!isOwner || rerunReserved || busy !== null || !candidate.candidateCommit} onClick={() => decide(false)}><X className="h-3.5 w-3.5 mr-1.5" /> {busy === "reject" ? "Rejecting…" : "Reject"}</Button>
+        <Button size="sm" variant="outline" disabled={!isOwner || targetInvalid || recoveredTargetMismatch || rerunReserved || busy !== null || !candidate.candidateCommit} onClick={() => decide(false)}><X className="h-3.5 w-3.5 mr-1.5" /> {busy === "reject" ? "Rejecting…" : "Reject"}</Button>
       </div>
     </section>
   );

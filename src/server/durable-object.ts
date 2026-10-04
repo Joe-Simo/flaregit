@@ -30,7 +30,10 @@ import {RetainedCredentialIncidents} from "./retained-credential-incidents.js";
 import {RetainedInputs,retainedInputSchema,type RetainedInput,type RetainedInputReceipt,type RebaseApplication} from "./retained-inputs.js";
 import {ImportHistoryInspection,type HistorySide,type HistoryInspectionActor,type HistoryChunk,type HistoryInspectionSnapshot,type HistoryInspectionBatch} from "./import-history-inspection.js";
 import {ImportHistoryAttempts,type ImportHistoryAttempt} from "./import-history-attempts.js";
-import {taskCreationPayload,type TaskCreationInput} from "./task-creation.js";
+import { bindTaskAcceptedTarget, boundTaskCreationPayload, assertTaskTargetRetry, type InternalTaskTargetOptions } from "./accepted-task-target.js";
+import { freezeAcceptedTarget } from "./accepted-target-binding.js";
+import { assertCompatibleAcceptedTargetBatch, type FrozenAcceptedTarget } from "../core/accepted-target.js";
+import type {TaskCreationInput} from "./task-creation.js";
 import {ownerStorageContext,copyReportPage,privateRecoveryReportPage,type OwnerStorageContext,type CopyReportPage} from "./storage-reconciliation-ledger.js";
 import {PreviewCredentialIncidents,type PreviewCredentialIncidentStatus} from "./preview-credential-incidents.js";
 import {RepositoryPreviewGenerations,type PreviewGenerationRecord} from "./preview-generations.js";
@@ -597,8 +600,8 @@ export interface Ledger {
   repositoryArtifactDeleted(name: string): Promise<boolean>;
   recordRepositoryArtifactDeleted(name: string): Promise<void>;
   initialize(init: { projectId: string; projectName: string; canonicalRepoName: string; head: string; tree?: string; verificationPolicy: Record<string, unknown>; kind?: "demo" | "import" | "empty"; defaultBranch?: string; ownerId?: string; source?: string }): Promise<FlareGitProjectState>;
-  createTask(task: Task, actorId?: string,creationInput?:TaskCreationInput): Promise<Task & {creationReplayed?:boolean}>;
-  taskCreationReplay(taskId:string,actorId:string,input:TaskCreationInput):Promise<Task|null>;
+  createTask(task: Task, actorId?: string,creationInput?:TaskCreationInput,internalTarget?:InternalTaskTargetOptions): Promise<Task & {creationReplayed?:boolean}>;
+  taskCreationReplay(taskId:string,actorId:string,input:TaskCreationInput,internalTarget?:InternalTaskTargetOptions):Promise<Task|null>;
   mintGitCapability(userId: string, taskId: string | null, write: boolean, parentTokenHash?: string): Promise<{token: string; expiresInSeconds: number}>;
   verifyGitCapability(secret: string, taskId: string | null, write: boolean): Promise<{userId:string;parentTokenHash:string|null}|null>;
   canGitAccess(userId: string, taskId: string | null, write: boolean): Promise<boolean>;
@@ -624,7 +627,7 @@ export interface Ledger {
   recordVerification(candidateId: string, commit: string, evidence: VerificationEvidence): Promise<void>;
   recordComposition(candidateId: string, attempts: RepairAttempt[]): Promise<void>;
   awaitReview(candidateId: string, commit: string, workflowInstanceId: string): Promise<void>;
-  recordReview(candidateId: string, review: { approved: boolean; actor: HumanDecisionActor; note?: string }, expectedCommit: string, credentialHash?: string): Promise<{ ok: boolean; instanceId?: string; error?: string; review?: CandidateGeneration["review"] }>;
+  recordReview(candidateId: string, review: { approved: boolean; actor: HumanDecisionActor; note?: string }, expectedCommit: string, credentialHash?: string,expectedTarget?:{ref:string;acceptedCommit:string;acceptedVersion:number}): Promise<{ ok: boolean; instanceId?: string; error?: string; review?: CandidateGeneration["review"] }>;
   preparePublish(candidateId: string): Promise<PrepareResult>;
   authorizeCandidatePublication(candidateId: string, commit: string): Promise<boolean>;
   completePublish(journalId: string): Promise<void>;
@@ -1359,10 +1362,10 @@ export class RepositoryController extends DurableObject<Env> {
   async recordCandidateDelegatedReview(candidateId:string,input:{eventId:string;expectedCommit:string;grantVersion:number;decision:ReviewDecision;note?:string},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){
     if(!actor?.userId||actor.viaToken)throw Error("Delegated human reviews require a signed-in session");if(!Number.isFinite(sessionExpiresAt)||Date.now()>=sessionExpiresAt!)throw Error("Review session expired");const account=accountOf(this.env,await accountKeyFor(actor.userId));if(await account.accountLifecycle()!=="active"||!await this.roleOf(actor.userId))throw Error("Reviewer authority unavailable");if(!["awaiting_review","verified"].includes(this.load().candidates[candidateId]?.status??""))throw Error("Candidate is not open for delegated review");const scope=this.delegatedReviewScope(candidateId);if(scope.commit!==input.expectedCommit)throw Error("The exact commit reviewed changed");return this.delegatedReviews().record({eventId:input.eventId,scope,reviewerId:actor.userId,grantVersion:input.grantVersion,decision:input.decision,note:input.note},()=>{if(this.repositoryDeleting()||Date.now()>=sessionExpiresAt!||!this.ctx.storage.sql.exec("SELECT user_id FROM members WHERE user_id=?",actor.userId).toArray().length||JSON.stringify(this.delegatedReviewScope(candidateId))!==JSON.stringify(scope))throw Error("Reviewer authority or candidate changed");});
   }
-  private agentNativeSnapshot(task:Task):string{return JSON.stringify({id:task.id,goal:task.goal,base:task.baseCommit,commit:task.currentCommit,workspace:task.workspace,scope:task.allowedScope});}
+  private agentNativeSnapshot(task:Task):string{return JSON.stringify({id:task.id,goal:task.goal,base:task.baseCommit,commit:task.currentCommit,workspace:task.workspace,scope:task.allowedScope,...(task.acceptedTarget?{acceptedTarget:task.acceptedTarget}:{})});}
   private assertAgentNativeLocal(attempt:AgentNativeAttemptIdentity):void {
     const state=this.load(),task=state.tasks[attempt.taskId],registered=this.ctx.storage.sql.exec<{actor_id:string|null;kind:string}>("SELECT actor_id,kind FROM project_workflows WHERE instance_id=?",attempt.workflowId).toArray()[0];
-    this.gitTables();const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",attempt.actorId).toArray()[0]?.role;const writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",attempt.taskId).toArray()[0]?.user_id;const selected=task?.agentRunId?this.agentRuns().get(task.agentRunId):null;
+    if(task?.acceptedTarget&&task.acceptedTarget.policyVersion!==state.policyVersion)throw Error("Frozen task policy changed");this.gitTables();const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",attempt.actorId).toArray()[0]?.role;const writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",attempt.taskId).toArray()[0]?.user_id;const selected=task?.agentRunId?this.agentRuns().get(task.agentRunId):null;
     if((role!=="owner"&&writer!==attempt.actorId)||(selected&&selected.runId!==attempt.runId&&!["failed","checkpointed"].includes(selected.phase))||this.repositoryDeleting()||!task||["accepted","cancelled","integrating","verifying"].includes(task.status)||state.projectId!==attempt.projectId||this.readRepositoryIncarnation()!==attempt.incarnation||registered?.actor_id!==attempt.actorId||(registered?.kind==="agent"&&(task.agentWorkflowInstanceId!==attempt.workflowId||attempt.runId!==attempt.workflowId))||!this.ctx.storage.sql.exec("SELECT role FROM members WHERE user_id=?",attempt.actorId).toArray().length||(this.agentRuns().get(attempt.runId)?.generation??0)!==attempt.generation)throw Error("Agent runtime authority changed");
   }
   async beginAgentNativeAttempt(input:{workflowId:string;runId:string;taskId:string;phase:"proposal"|"apply";attemptId:string;nativeId:string}):Promise<AgentNativeAttemptIdentity>{
@@ -1421,10 +1424,12 @@ export class RepositoryController extends DurableObject<Env> {
     const state = this.load();
     const task = state.tasks[input.taskId];
     if (!task || ["accepted", "cancelled", "integrating", "verifying"].includes(task.status) || input.branch !== task.workspace.branch) throw new Error("Change cannot start this agent run");
-    const settings = settingsFor(state.verificationPolicy);
+    if(input.acceptedTarget&&!task.acceptedTarget)throw Error("Unbound agent task cannot consume a bound execution record");if(task.acceptedTarget&&input.acceptedTarget)assertCompatibleAcceptedTargetBatch([task.acceptedTarget,input.acceptedTarget]);
+    if(task.acceptedTarget&&task.acceptedTarget.policyVersion!==state.policyVersion)throw Error("Frozen task policy changed; new bound context is required");
+    const settings = settingsFor(task.acceptedTarget?.policy??state.verificationPolicy);
     try {
       return this.ctx.storage.transactionSync(() => {
-        const result = this.agentRuns().claim({ ...input, goal: task.goal, allowedScope: this.agentScope(task, settings.allowedScope), protectedPaths: settings.protectedPaths });
+        const result = this.agentRuns().claim({ ...input,...(task.acceptedTarget?{acceptedTarget:structuredClone(task.acceptedTarget)}:{}), goal: task.goal, allowedScope: this.agentScope(task, settings.allowedScope), protectedPaths: settings.protectedPaths });
         if (result.kind === "claimed") {
           task.agentRunId = result.run.runId;
           task.status = "working";
@@ -1438,7 +1443,8 @@ export class RepositoryController extends DurableObject<Env> {
     const state = this.load();
     const task = state.tasks[taskId];
     if (!task || task.agentRunId !== previousRunId || ["accepted", "cancelled", "integrating", "verifying"].includes(task.status)) throw new Error("Saved agent work is no longer selected for this change");
-    const settings = settingsFor(state.verificationPolicy);
+    const previous=this.agentRuns().get(previousRunId);if(Boolean(previous?.acceptedTarget)!==Boolean(task.acceptedTarget))throw Error("Saved agent accepted target is unavailable");if(task.acceptedTarget&&previous?.acceptedTarget)assertCompatibleAcceptedTargetBatch([task.acceptedTarget,previous.acceptedTarget]);if(task.acceptedTarget&&task.acceptedTarget.policyVersion!==state.policyVersion)throw Error("Frozen task policy changed; saved proposal remains preserved");
+    const settings = settingsFor(task.acceptedTarget?.policy??state.verificationPolicy);
     try {
       return this.ctx.storage.transactionSync(() => {
         const result = this.agentRuns().resume(runId, taskId, previousRunId, this.agentScope(task, settings.allowedScope), settings.protectedPaths, task.goal);
@@ -1452,8 +1458,8 @@ export class RepositoryController extends DurableObject<Env> {
     if(!row)throw Error("Agent execution authority has no recorded native scope");
     const attempt=JSON.parse(row.doc) as AgentNativeAttemptIdentity,run=this.agentRuns().get(runId),incarnation=this.readRepositoryIncarnation();
     if(!run||run.taskId!==taskId)throw Error("Agent run unavailable");
-    const validate=()=>{const task=this.load().tasks[taskId],current=this.agentRuns().get(runId),registered=this.ctx.storage.sql.exec<{actor_id:string|null}>("SELECT actor_id FROM project_workflows WHERE instance_id=?",attempt.workflowId).toArray()[0];this.gitTables();const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",attempt.actorId).toArray()[0]?.role,writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",taskId).toArray()[0]?.user_id;if(!task||task.agentRunId!==runId||!current||current.generation!==run.generation||this.readRepositoryIncarnation()!==incarnation||incarnation!==attempt.incarnation||registered?.actor_id!==attempt.actorId||(role!=="owner"&&writer!==attempt.actorId)||!role)throw Error("Agent mutation authority changed");};
-    validate();if(await accountOf(this.env,attempt.accountKey).accountLifecycle()!=="active"||!await this.canGitAccess(attempt.actorId,taskId,true))throw Error("Agent mutation writer unavailable");validate();return validate;
+    const validate=()=>{const state=this.load(),task=state.tasks[taskId],current=this.agentRuns().get(runId);if(Boolean(task?.acceptedTarget)!==Boolean(current?.acceptedTarget))throw Error("Agent mutation accepted target changed");if(task?.acceptedTarget&&current?.acceptedTarget){assertCompatibleAcceptedTargetBatch([task.acceptedTarget,current.acceptedTarget]);if(task.acceptedTarget.policyVersion!==state.policyVersion)throw Error("Agent mutation frozen policy changed");}const registered=this.ctx.storage.sql.exec<{actor_id:string|null}>("SELECT actor_id FROM project_workflows WHERE instance_id=?",attempt.workflowId).toArray()[0];this.gitTables();const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",attempt.actorId).toArray()[0]?.role,writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",taskId).toArray()[0]?.user_id;if(!task||task.agentRunId!==runId||!current||current.generation!==run.generation||this.readRepositoryIncarnation()!==incarnation||incarnation!==attempt.incarnation||registered?.actor_id!==attempt.actorId||(role!=="owner"&&writer!==attempt.actorId)||!role)throw Error("Agent mutation authority changed");};
+    validate();const selectedTask=this.load().tasks[taskId];if(Boolean(selectedTask?.acceptedTarget)!==Boolean(run.acceptedTarget))throw Error("Agent run accepted target binding changed");if(selectedTask?.acceptedTarget&&run.acceptedTarget)assertCompatibleAcceptedTargetBatch([selectedTask.acceptedTarget,run.acceptedTarget]);if(await accountOf(this.env,attempt.accountKey).accountLifecycle()!=="active"||!await this.canGitAccess(attempt.actorId,taskId,true))throw Error("Agent mutation writer unavailable");validate();return validate;
   }
   async saveAgentProposal(runId: string, taskId: string, files: Record<string, string>): Promise<boolean> { const validate=await this.authorizeAgentMutation(runId,taskId);return this.ctx.storage.transactionSync(()=>{validate();return this.agentRuns().propose(runId, taskId, files);}); }
   async markAgentPushed(runId: string, taskId: string, commit: string): Promise<boolean> { const validate=await this.authorizeAgentMutation(runId,taskId);return this.ctx.storage.transactionSync(()=>{validate();return this.agentRuns().markPushed(runId, taskId, commit);}); }
@@ -1833,24 +1839,29 @@ export class RepositoryController extends DurableObject<Env> {
     const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId).toArray()[0]?.role;
     if(this.repositoryDeleting()||(role!=="owner"&&role!=="member"))throw new Error("Task creation access changed");
   }
-  async taskCreationReplay(taskId:string,actorId:string,input:TaskCreationInput):Promise<Task|null>{
+  async taskCreationReplay(taskId:string,actorId:string,input:TaskCreationInput,internalTarget?:InternalTaskTargetOptions):Promise<Task|null>{
     await this.requireTaskCreationActor(actorId);
     const state=this.load(),task=state.tasks[taskId];if(!task)return null;
     if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='task_creation_receipts'").toArray().length)throw new Error("Legacy task has no creation receipt");
     const receipt=this.ctx.storage.sql.exec<{actor_id:string;payload:string}>("SELECT actor_id,payload FROM task_creation_receipts WHERE task_id=?",taskId).toArray()[0];
     const writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",taskId).toArray()[0];
-    if(!receipt||receipt.actor_id!==actorId||writer?.user_id!==actorId||receipt.payload!==taskCreationPayload(input))throw new Error("Task creation retry identity changed or is unavailable");
+    if(!receipt||receipt.actor_id!==actorId||writer?.user_id!==actorId||receipt.payload!==boundTaskCreationPayload(input,task.acceptedTarget))throw new Error("Task creation retry identity changed or is unavailable");
+    assertTaskTargetRetry(task,internalTarget,input.dependsOn?state.tasks[input.dependsOn]?.acceptedTarget?.ref:undefined);
     return task;
   }
-  async createTask(task: Task, actorId?: string,creationInput?:TaskCreationInput): Promise<Task & {creationReplayed?:boolean}> {
-    const payload=creationInput?taskCreationPayload(creationInput):null;
+  async createTask(task: Task, actorId?: string,creationInput?:TaskCreationInput,internalTarget?:InternalTaskTargetOptions): Promise<Task & {creationReplayed?:boolean}> {
     if(creationInput&&(!actorId||task.goal!==creationInput.goal||(task.dependsOn??null)!==creationInput.dependsOn||(task.issue??null)!==creationInput.issue))throw new Error("Task creation input or authority changed");
-    if(creationInput)await this.requireTaskCreationActor(actorId!);
+    const boundIntent=internalTarget!==undefined||task.acceptedTarget!==undefined||Boolean(task.dependsOn&&this.load().tasks[task.dependsOn]?.acceptedTarget);
+    if((creationInput||boundIntent)&&!actorId)throw Error("An authenticated task creator is required");
+    if(creationInput||boundIntent)await this.requireTaskCreationActor(actorId!);
     const s = this.load();
-    if (s.tasks[task.id]) {if(creationInput){const existing=await this.taskCreationReplay(task.id,actorId!,creationInput);if(!existing)throw new Error("Saved task changed during creation retry");return {...existing,creationReplayed:true};}return s.tasks[task.id]!;}
+    if (s.tasks[task.id]) {if(creationInput){const existing=await this.taskCreationReplay(task.id,actorId!,creationInput,internalTarget);if(!existing)throw new Error("Saved task changed during creation retry");return {...existing,creationReplayed:true};}const existing=s.tasks[task.id]!;assertTaskTargetRetry(existing,internalTarget,task.dependsOn?s.tasks[task.dependsOn]?.acceptedTarget?.ref:undefined);if(task.acceptedTarget&&existing.acceptedTarget)assertCompatibleAcceptedTargetBatch([task.acceptedTarget,existing.acceptedTarget]);return existing;}
+    if(boundIntent){this.synchronizePrimaryAcceptedRegistry(s);task=bindTaskAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),s,new PrivateRecoveryOperations(this.ctx.storage).incarnation(),task,internalTarget);}
+    const payload=creationInput?boundTaskCreationPayload(creationInput,task.acceptedTarget):null;
     const next={...s,tasks:{...s.tasks,[task.id]:task}};
     this.ctx.storage.transactionSync(() => {
-      if(creationInput&&this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId!).toArray()[0]?.role===undefined)throw new Error("Task creation access changed");
+      if((creationInput||boundIntent)&&this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId!).toArray()[0]?.role===undefined)throw new Error("Task creation access changed");
+      if(task.acceptedTarget){const current=freezeAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),this.load(),new PrivateRecoveryOperations(this.ctx.storage).incarnation(),task.acceptedTarget.ref);assertCompatibleAcceptedTargetBatch([task.acceptedTarget,current]);}
       if(actorId) { this.gitTables(); this.ctx.storage.sql.exec("INSERT INTO git_task_writers(task_id,user_id) VALUES (?,?)",task.id,actorId); }
       if(payload){this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS task_creation_receipts(task_id TEXT PRIMARY KEY,actor_id TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL)");this.ctx.storage.sql.exec("INSERT INTO task_creation_receipts VALUES(?,?,?,?)",task.id,actorId!,payload,task.createdAt);}
       if(this.repositoryDeleting())throw new Error("Repository deletion is in progress");
@@ -3405,6 +3416,11 @@ export class RepositoryController extends DurableObject<Env> {
       const parent = t.dependsOn ? s.tasks[t.dependsOn] : undefined;
       if (parent && parent.status !== "accepted" && !req.taskIds.includes(parent.id)) return { reason: `Task ${t.id} is stacked on ${parent.id}, which is not accepted` };
     }
+    let acceptedTarget:FrozenAcceptedTarget|undefined;
+    if(tasks.some(task=>task.acceptedTarget!==undefined)){
+      if(tasks.some(task=>task.acceptedTarget===undefined))return{reason:"Bound and legacy unbound targets cannot share an integration batch"};
+      try{const recorded=assertCompatibleAcceptedTargetBatch(tasks.map(task=>task.acceptedTarget!));this.synchronizePrimaryAcceptedRegistry(s);const current=freezeAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),s,new PrivateRecoveryOperations(this.ctx.storage).incarnation(),recorded.ref);acceptedTarget=assertCompatibleAcceptedTargetBatch([recorded,current]);}catch{return{reason:"Accepted target scope, base, version, requirements or policy changed; start a fresh bound task"};}
+    }
     // Contradictions are a product decision: check every pair, and every change against what is already accepted.
     const approved = (t: Task) => t.requirements.filter((r) => r.status === "approved");
     for (let i = 0; i < tasks.length; i++) {
@@ -3432,13 +3448,15 @@ export class RepositoryController extends DurableObject<Env> {
     }
     const candidate = freezeCandidateGeneration({
       tasks,
-      acceptedBaseCommit: s.acceptedState.currentCommit,
-      policyVersion: s.policyVersion,
-      verificationPolicy: s.verificationPolicy,
-      approvedRequirements: [...s.acceptedState.activeRequirements, ...tasks.flatMap((t) => t.requirements)].filter((r: Requirement) => r.status === "approved"),
+      ...(acceptedTarget?{acceptedTarget}:{}),
+      acceptedBaseCommit: acceptedTarget?.acceptedCommit??s.acceptedState.currentCommit,
+      policyVersion: acceptedTarget?.policyVersion??s.policyVersion,
+      verificationPolicy: acceptedTarget?.policy??s.verificationPolicy,
+      approvedRequirements: [...(acceptedTarget?.requirements??s.acceptedState.activeRequirements), ...tasks.flatMap((t) => t.requirements)].filter((r: Requirement) => r.status === "approved"),
     });
     try {
       this.ctx.storage.transactionSync(() => {
+        if(acceptedTarget){const current=freezeAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),this.load(),acceptedTarget.incarnation,acceptedTarget.ref);assertCompatibleAcceptedTargetBatch([acceptedTarget,current]);}
         if (Object.hasOwn(s.candidates, candidate.id)) throw new Error("Candidate identity already exists; retry the integration claim");
         if(rerun){this.assertLegacyRerunScope(rerun);candidate.predecessorCandidateId=rerun.predecessorCandidateId;candidate.legacyRerunId=rerun.id;rerun.successorCandidateId=candidate.id;rerun.phase="attached";reruns.save(rerun);}
         candidate.workflowInstanceId = req.holder;
@@ -3475,6 +3493,7 @@ export class RepositoryController extends DurableObject<Env> {
     const s = this.load();
     const c = s.candidates[candidateId];
     if (!c) throw new Error("Unknown candidate");
+    if(c.acceptedTarget){if(!evidence.acceptedTarget)throw Error("Bound candidate verification omitted its accepted target");assertCompatibleAcceptedTargetBatch([c.acceptedTarget,evidence.acceptedTarget]);}else if(evidence.acceptedTarget)throw Error("Unbound candidate cannot consume bound evidence");
     s.evidence[evidence.id] = evidence;
     c.candidateCommit = commit;
     c.evidenceId = evidence.id;
@@ -3565,8 +3584,18 @@ export class RepositoryController extends DurableObject<Env> {
     return null;
   }
 
+  private assertPrimaryAcceptedCandidate(candidate:CandidateGeneration,evidence?:VerificationEvidence,requireCurrent=true):void {
+    const target=candidate.acceptedTarget;if(!target){if(evidence?.acceptedTarget)throw Error("Unbound candidate cannot consume bound verification evidence");return;}
+    const state=this.load();if(!state.defaultBranch||target.ref!==`refs/heads/${state.defaultBranch}`)throw Error("Nonprimary target publication is not enabled");
+    if(!evidence?.acceptedTarget)throw Error("Verification evidence omitted the frozen accepted target");
+    assertCompatibleAcceptedTargetBatch([target,evidence.acceptedTarget,{...target,projectId:state.projectId,incarnation:this.readRepositoryIncarnation()??"",canonicalRepoName:state.canonicalRepoName,ref:`refs/heads/${state.defaultBranch}`,branch:state.defaultBranch,acceptedCommit:candidate.expectedAcceptedBase,policyVersion:candidate.frozenPolicyVersion,policy:candidate.frozenVerificationPolicy}]);
+    if(requireCurrent){this.synchronizePrimaryAcceptedRegistry(state);const current=freezeAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),state,target.incarnation,target.ref);assertCompatibleAcceptedTargetBatch([target,current]);}
+  }
+  private assertOwnerAcceptedTargetReview(candidate:CandidateGeneration):void{if(!candidate.acceptedTarget)return;this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS owner_review_accepted_targets(candidate_id TEXT PRIMARY KEY,actor_id TEXT NOT NULL,commit_id TEXT NOT NULL,target TEXT NOT NULL)");const receipt=this.ctx.storage.sql.exec<{actor_id:string;commit_id:string;target:string}>("SELECT actor_id,commit_id,target FROM owner_review_accepted_targets WHERE candidate_id=?",candidate.id).toArray()[0];if(!receipt||receipt.actor_id!==candidate.review?.actor?.userId||receipt.commit_id!==candidate.candidateCommit)throw Error("The approving owner has no exact accepted target review receipt");assertCompatibleAcceptedTargetBatch([candidate.acceptedTarget,JSON.parse(receipt.target) as FrozenAcceptedTarget]);}
+  private assertBoundPublicationJournal(candidate:CandidateGeneration,journal:PublicationJournalEntry):void {if(!candidate.acceptedTarget){if(journal.acceptedTarget||journal.publicationAuthority?.acceptedTarget)throw Error("Unbound publication cannot consume a bound journal");return;}if(!journal.acceptedTarget||!journal.publicationAuthority?.acceptedTarget)throw Error("Publication journal omitted its frozen accepted target");assertCompatibleAcceptedTargetBatch([candidate.acceptedTarget,journal.acceptedTarget,journal.publicationAuthority.acceptedTarget]);if(journal.expectedHead!==candidate.acceptedTarget.acceptedCommit)throw Error("Publication journal changed its frozen accepted base");}
   /** Ledger step 1: validate every invariant, then journal PREPARED. The workflow then pushes with a lease. */
   async preparePublish(candidateId: string): Promise<PrepareResult> {
+    const bound=this.load().candidates[candidateId]?.acceptedTarget;if(bound&&bound.ref!==`refs/heads/${this.load().defaultBranch??""}`)return{ok:false,error:"Nonprimary target publication is not enabled; the frozen target was preserved and primary history was not changed"};
     if(this.legacyCandidateRerunFrozen(candidateId))return {ok:false,error:"This preserved predecessor has a saved owner rerun. Review the linked fresh candidate before publication."};
     if(this.legacyPreparedPublication(candidateId)){await this.ensureRecoveryAlarm();return {ok:false,recoveryRequired:true,error:"A previously prepared publication needs Git readback before recovery. Its journal, review and saved changes remain pending."};}
     const recorded = this.load().candidates[candidateId]?.review;
@@ -3579,6 +3608,7 @@ export class RepositoryController extends DurableObject<Env> {
     const c = s.candidates[candidateId];
     const ev = c?.evidenceId ? s.evidence[c.evidenceId] : undefined;
     if (!c || !ev || !c.candidateCommit) return { ok: false, error: "No verified candidate" };
+    try{this.assertPrimaryAcceptedCandidate(c,ev);this.assertOwnerAcceptedTargetReview(c);}catch{return{ok:false,error:"Frozen accepted target or verification evidence changed; publication was not prepared"};}
     if(this.legacyCandidateRerunFrozen(candidateId))return {ok:false,error:"This predecessor is preserved by an owner rerun."};
     const preservationFailure=this.candidatePreservationFailure(c);
     if(preservationFailure)return {ok:false,error:preservationFailure};
@@ -3606,11 +3636,12 @@ export class RepositoryController extends DurableObject<Env> {
       candidateId,
       candidateCommit: c.candidateCommit,
       candidateTree: ev.candidateTree,
+      ...(c.acceptedTarget?{acceptedTarget:structuredClone(c.acceptedTarget)}:{}),
       expectedHead: c.expectedAcceptedBase,
       newHead: c.candidateCommit,
       outputDigest: ev.builtOutputDigest,
       state: "PREPARED",
-      publicationAuthority: { actor: { ...recorded.actor }, reviewedAt: recorded.at, commit: c.candidateCommit, tree: ev.candidateTree, policyVersion: c.frozenPolicyVersion, authorizedAt: new Date().toISOString() },
+      publicationAuthority: { ...(c.acceptedTarget?{acceptedTarget:structuredClone(c.acceptedTarget)}:{}), actor: { ...recorded.actor }, reviewedAt: recorded.at, commit: c.candidateCommit, tree: ev.candidateTree, policyVersion: c.frozenPolicyVersion, authorizedAt: new Date().toISOString() },
       timestamp: new Date().toISOString(),
     };
     try {
@@ -3621,6 +3652,7 @@ export class RepositoryController extends DurableObject<Env> {
 
   /** Fresh authorization for a new Git dispatch; confirmed ref updates reconcile independently. */
   async authorizeCandidatePublication(candidateId: string, commit: string): Promise<boolean> {
+    const bound=this.load().candidates[candidateId]?.acceptedTarget;if(bound&&bound.ref!==`refs/heads/${this.load().defaultBranch??""}`)return false;
     if(this.legacyCandidateRerunFrozen(candidateId))return false;
     const recorded = this.load().candidates[candidateId]?.review;
     if (!recorded?.approved || recorded.commit !== commit || !recorded.actor) return false;
@@ -3633,6 +3665,7 @@ export class RepositoryController extends DurableObject<Env> {
     const evidence = candidate?.evidenceId ? state.evidence[candidate.evidenceId] : undefined;
     const journal = state.journal.find(item => item.candidateId === candidateId && item.state === "PREPARED" && item.newHead === commit);
     const authority = journal?.publicationAuthority;
+    try{this.assertPrimaryAcceptedCandidate(candidate,evidence);this.assertOwnerAcceptedTargetReview(candidate);if(journal)this.assertBoundPublicationJournal(candidate,journal);else if(candidate.acceptedTarget)return false;}catch{return false;}
     return !!candidate && candidate.candidateCommit === commit && candidate.review?.approved === true && candidate.review.commit === commit && candidate.review.actor?.userId === recorded.actor.userId && !!authority && authority.actor.userId === recorded.actor.userId && authority.commit === commit && authority.tree === evidence?.candidateTree && authority.policyVersion === candidate.frozenPolicyVersion;
   }
 
@@ -3645,9 +3678,11 @@ export class RepositoryController extends DurableObject<Env> {
     const j = s.journal.find((e) => e.id === journalId);
     if(readbackScope&&j?.state!=="ACCEPTED"&&(!j||this.publicationReadbackScope(j)!==readbackScope))throw new Error("Publication proof scope changed before reconciliation");
     if (!j) throw new Error("Unknown journal entry");
+    const bound=j.acceptedTarget??s.candidates[j.candidateId]?.acceptedTarget;if(bound&&bound.ref!==`refs/heads/${s.defaultBranch??""}`)throw Error("Nonprimary target publication is not enabled; exact branch journal remains preserved");
     if (j.state === "ABORTED") throw new Error("Aborted publication cannot be accepted");
     const alreadyAccepted = j.state === "ACCEPTED";
     const c = s.candidates[j.candidateId]!;
+    if(c.acceptedTarget||j.acceptedTarget){this.assertPrimaryAcceptedCandidate(c,c.evidenceId?s.evidence[c.evidenceId]:undefined,false);this.assertBoundPublicationJournal(c,j);this.assertOwnerAcceptedTargetReview(c);}
     const advanceHead = s.acceptedState.currentCommit === j.expectedHead || s.acceptedState.currentCommit === j.newHead;
     let deliveries: string[] = [];
     try {
@@ -3734,7 +3769,7 @@ export class RepositoryController extends DurableObject<Env> {
     assertCurrent();
     return assertCurrent;
   }
-  async recordReview(candidateId: string, review: { approved: boolean; actor: HumanDecisionActor; note?: string }, expectedCommit: string, credentialHash?: string): Promise<{ ok: boolean; instanceId?: string; error?: string; review?: CandidateGeneration["review"] }> {
+  async recordReview(candidateId: string, review: { approved: boolean; actor: HumanDecisionActor; note?: string }, expectedCommit: string, credentialHash?: string,expectedTarget?:{ref:string;acceptedCommit:string;acceptedVersion:number}): Promise<{ ok: boolean; instanceId?: string; error?: string; review?: CandidateGeneration["review"] }> {
     const assertCurrent = await this.authorizeHumanDecision(review.actor, credentialHash, true);
     assertCurrent();
     if(review.approved&&!(await this.delegatedReviewGate(candidateId)).passed)return {ok:false,error:"Required delegated reviews have not passed for this exact candidate"};assertCurrent();
@@ -3742,6 +3777,8 @@ export class RepositoryController extends DurableObject<Env> {
     const c = s.candidates[candidateId];
     if(this.legacyCandidateRerunFrozen(candidateId))return {ok:false,error:"This preserved predecessor has a saved owner rerun. Review its linked fresh candidate."};
     if (!c || !c.candidateCommit || !c.workflowInstanceId) return { ok: false, error: "This candidate is not waiting for review" };
+    const targetEcho=()=>{if(c.acceptedTarget){if(!expectedTarget||expectedTarget.ref!==c.acceptedTarget.ref||expectedTarget.acceptedCommit!==c.acceptedTarget.acceptedCommit||expectedTarget.acceptedVersion!==c.acceptedTarget.acceptedVersion)throw Error("The exact branch, accepted base and root version reviewed are required");}else if(expectedTarget)throw Error("An unbound review cannot acquire a target through its decision");};
+    try{targetEcho();if(review.approved)this.assertPrimaryAcceptedCandidate(c,c.evidenceId?s.evidence[c.evidenceId]:undefined);}catch{return{ok:false,error:"Reviewed accepted target or bound verification evidence was not confirmed"};}
     if (!/^[a-f0-9]{40}$/.test(expectedCommit ?? "") || expectedCommit !== c.candidateCommit) return { ok: false, error: "The candidate changed from the commit you reviewed. Refresh and inspect its diff before deciding." };
     if(review.approved){const preservationFailure=this.candidatePreservationFailure(c);if(preservationFailure)return {ok:false,error:preservationFailure};}
     // Idempotent: the same decision can be re-sent if notifying the integration run failed the first time.
@@ -3756,7 +3793,8 @@ export class RepositoryController extends DurableObject<Env> {
     try {
       this.ctx.storage.transactionSync(() => {
         assertCurrent();
-        this.assertCandidateNotRerunFrozen(candidateId);
+        this.assertCandidateNotRerunFrozen(candidateId);targetEcho();if(review.approved)this.assertPrimaryAcceptedCandidate(c,c.evidenceId?s.evidence[c.evidenceId]:undefined);
+        if(c.acceptedTarget){this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS owner_review_accepted_targets(candidate_id TEXT PRIMARY KEY,actor_id TEXT NOT NULL,commit_id TEXT NOT NULL,target TEXT NOT NULL)");this.ctx.storage.sql.exec("INSERT INTO owner_review_accepted_targets VALUES(?,?,?,?) ON CONFLICT(candidate_id) DO UPDATE SET actor_id=excluded.actor_id,commit_id=excluded.commit_id,target=excluded.target",c.id,review.actor.userId,c.candidateCommit!,JSON.stringify(c.acceptedTarget));}
         c.review = { ...review, actor: { ...review.actor }, by: review.actor.displayName, at: new Date().toISOString(), commit: c.candidateCommit! };
         c.status = review.approved ? "verified" : "failed";
         c.updatedAt = new Date().toISOString();

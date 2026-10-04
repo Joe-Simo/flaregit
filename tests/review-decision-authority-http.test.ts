@@ -22,6 +22,9 @@ test("native owner review and decision HTTP preserve authority and replay attrib
  try{
   const tokens=await(await call("/fixture/bootstrap")).json() as {full:string;write:string};const owner=await session("owner"),member=await session("member");
   const before=await state();
+  for(const invalid of [{...payload,unexpectedField:true},{...payload,expectedTarget:null},{...payload,expectedTarget:[]},{...payload,expectedTarget:{ref:"refs/tags/release",acceptedCommit:"b".repeat(40),acceptedVersion:0}},{...payload,expectedTarget:{ref:"refs/heads/main",acceptedCommit:"b".repeat(40),acceptedVersion:0.5}},{...payload,expectedTarget:{ref:"refs/heads/main",acceptedCommit:"b".repeat(40),acceptedVersion:0,extra:true}}])expect((await call(review("candidate-session"),owner,invalid)).status).toBe(400);
+  expect((await call(review("candidate-session"),owner,{...payload,expectedTarget:{ref:"refs/heads/main",acceptedCommit:"b".repeat(40),acceptedVersion:0}})).status).toBe(409);
+  expect(await state()).toEqual(before);expect(await events()).toEqual([]);
   expect((await call(review("candidate-session"),undefined,payload)).status).toBe(401);
   for(const credential of [member,tokens.write]){expect((await call(review("candidate-session"),credential,payload)).status).toBe(403);expect((await call(decision,credential,{decisionId:"decision-session",selectedOptionId:"one"})).status).toBe(403);}
   expect((await call(review("candidate-session"),owner,{...payload,expectedCommit:"f".repeat(40)})).status).toBe(409);
