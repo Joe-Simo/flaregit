@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { App } from "./App";
 import { ThemeProvider } from "./ThemeProvider";
 import { AuthGate } from "./AuthGate";
+import { ApplicationRecoveryBoundary } from "./ApplicationRecoveryBoundary";
 import "@fontsource/inter/latin-400.css";
 import "@fontsource/inter/latin-500.css";
 import "@fontsource/inter/latin-600.css";
@@ -16,7 +17,7 @@ if (rootElement) {
   ReactDOM.createRoot(rootElement).render(
     <React.StrictMode>
       <ThemeProvider><AuthGate>
-        <App />
+        <ApplicationRecoveryBoundary><App /></ApplicationRecoveryBoundary>
       </AuthGate></ThemeProvider>
     </React.StrictMode>
   );

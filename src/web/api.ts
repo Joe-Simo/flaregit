@@ -8,17 +8,20 @@ const responseGuards = new WeakMap<Response, () => void>();
 
 /** Bind the captured session resource, not Clerk's dynamically active session. */
 export function bindApiSession(principal: string, getToken: () => Promise<string | null>): () => void {
-  if (identity !== principal) { if (identity) clearSessionConversationDrafts(identity); identity = principal; epoch++; }
+  if (identity !== principal) { const previousIdentity=identity; if (previousIdentity) { clearSessionConversationDrafts(previousIdentity); clearSessionReviewDrafts(previousIdentity); } clearOtherSessionRecovery(principal); identity = principal; epoch++; }
   const owner = Symbol(principal);
   session = { identity: principal, getToken, owner };
   return () => {
     if (session?.owner !== owner) return;
     session = null;
-    // React StrictMode immediately rebinds the same layout effect. Clear credentials
-    // synchronously, but avoid treating that rehearsal as a different principal.
-    queueMicrotask(() => { if (!session && identity === principal) { clearSessionConversationDrafts(principal); identity = null; epoch++; } });
+    // Binding loss can be loading, a public route or a remount. Clear credentials
+    // immediately; preserve scoped recovery until verified sign-out or another principal.
+    queueMicrotask(() => { if (!session && identity === principal) epoch++; });
   };
 }
+
+/** Invoke only after the authentication SDK confirms a loaded signed-out state. */
+export function clearVerifiedApiSession():void{session=null;identity=null;epoch++;clearVerifiedSessionRecovery();}
 
 function requestGuard(binding: SessionBinding | null, requestEpoch: number): () => void {
   return () => {
@@ -60,6 +63,7 @@ class SessionResponse extends Response {
 
 export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
   const binding = session;
+  if(!binding&&identity!==null)throw new DOMException("Your secure session is temporarily unavailable. Wait for authentication before retrying.","AbortError");
   const assertCurrent = requestGuard(binding, epoch);
   const token = binding ? await binding.getToken() : null;
   assertCurrent();
@@ -115,3 +119,5 @@ export async function apiJson<T>(path: string, init: RequestInit & { json?: unkn
   return (text ? JSON.parse(text) : {}) as T;
 }
 import { clearSessionConversationDrafts } from "./conversation-recovery";
+
+import {clearSessionReviewDrafts,clearVerifiedSessionRecovery,clearOtherSessionRecovery} from "./review-draft-recovery";

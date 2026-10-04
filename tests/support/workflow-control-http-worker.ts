@@ -4,6 +4,8 @@ import {accountKeyFor,accountOf} from '../../src/server/projects';
 import type {Env} from '../../src/server/env';
 const id='p123456789abc',calls:string[]=[];let mode='running',status='running',scopeReads=0;let scenarioTokenId='';
 export class WorkflowControlFixture extends RepositoryController {
+ override async conversationMigrationSource(...args:Parameters<RepositoryController["conversationMigrationSource"]>){if(mode==='conversation-funding-denied')return{projectId:id,incarnation:'12345678-1234-1234-1234-123456789abc',ownerId:'owner',accountKey:await accountKeyFor('owner'),sourceUrl:'https://github.com/synthetic/repository'};return super.conversationMigrationSource(...args);}
+
  override async agentNativeRecoverySummary(...args:Parameters<RepositoryController["agentNativeRecoverySummary"]>){const result=await super.agentNativeRecoverySummary(...args);if(mode==='agent-summary-withdraw'){mode='running';await this.addMember('owner','member');}return result;}
 
  override async ownerScenarioRuns(...args:Parameters<RepositoryController["ownerScenarioRuns"]>){const report=await super.ownerScenarioRuns(...args);if(mode==='scenario-withdraw'){mode='running';await this.addMember('owner','member');}else if(mode==='scenario-delete'){mode='running';await this.beginRepositoryDeletion();}else if(mode==='scenario-incarnation'){mode='running';this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS private_recovery_incarnation (id INTEGER PRIMARY KEY,value TEXT NOT NULL)");this.ctx.storage.sql.exec("INSERT OR REPLACE INTO private_recovery_incarnation (id,value) VALUES (1,?)",crypto.randomUUID());}else if(mode==='scenario-revoke-token'){mode='running';await accountOf(this.env,await accountKeyFor('owner')).revokeApiToken(scenarioTokenId);}return report;}

@@ -1,3 +1,4 @@
+import {conversationMigrationFailure,conversationCaptureFailure,ConversationMigrationAuthorityError,ConversationMigrationCapacityError} from "./conversation-migration-failure.js";
 import {readPublicGithubRepositoryIdentity} from "./github-migration-reader.js";
 import {repositoryReviewPolicySchema} from "./repository-review-ledger.js";
 import {importedAllocationReady} from "./import-allocation-readiness.js";
@@ -107,7 +108,7 @@ export default {
       const admission = await admitGitOperation(env, userId, operationId);
       return admission instanceof Response ? admission : { finish: admission.finish ?? (async () => {}) };
     },true);
-    if (url.pathname === "/pricing" && request.method === "GET" && request.headers.get("Accept")?.includes("text/html")) return env.ASSETS.fetch(request);
+    if (url.pathname === "/pricing" && request.method === "GET" && request.headers.get("Accept")?.includes("text/html")) return appAssetResponse(request, env.ASSETS);
     if (["/pricing", "/plan-price"].includes(url.pathname) && request.method === "GET") {
       const ip = request.headers.get("CF-Connecting-IP");
       if (!ip) return text("Public pricing is unavailable", 503);
@@ -153,7 +154,7 @@ export default {
       });
     }
 
-    if (!url.pathname.startsWith("/api/")) return env.ASSETS.fetch(request);
+    if (!url.pathname.startsWith("/api/")) return appAssetResponse(request, env.ASSETS);
 
     if (url.pathname.startsWith("/api/profiles/")) {
       const respond = (data: unknown, status = 200) => Response.json(data, { status, headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
@@ -877,13 +878,15 @@ export default {
             else if(!conversationMigrationRoute){
               const input=await body<{operationId?:unknown}>();if(input===null||typeof input!=="object"||Array.isArray(input)||Object.keys(input).some(key=>key!=="operationId")||typeof input.operationId!=="string"||!/^[A-Za-z0-9_-]{1,200}$/.test(input.operationId))return text("A stable conversation migration operation ID is required",400);
               const source=await project.conversationMigrationSource(actor,credentialHash,current.expiresAt);
-              const authorize=async()=>{const fresh=await freshOwner();if(fresh instanceof Response)throw Error("Owner authentication changed");const now=await project.conversationMigrationSource(actor,credentialHash,fresh.expiresAt);if(JSON.stringify(now)!==JSON.stringify(source))throw Error("Conversation source changed");};
-              const identity=await readPublicGithubRepositoryIdentity(source.sourceUrl,authorize,async()=>{await authorize();const funding=await globalOf(env).reserveRepositoryReadOperation(`conversation-source-${crypto.randomUUID()}`,accountKey);if(!funding.allowed)throw Error("Conversation capture capacity unavailable");await authorize();});
+              const authorize=async()=>{const fresh=await freshOwner();if(fresh instanceof Response)throw new ConversationMigrationAuthorityError();let now;try{now=await project.conversationMigrationSource(actor,credentialHash,fresh.expiresAt);}catch{throw new ConversationMigrationAuthorityError();}if(JSON.stringify(now)!==JSON.stringify(source))throw new ConversationMigrationAuthorityError();};
+              const identity=await readPublicGithubRepositoryIdentity(source.sourceUrl,authorize,async()=>{await authorize();const funding=await globalOf(env).reserveRepositoryReadOperation(`conversation-source-${crypto.randomUUID()}`,accountKey);if(!funding.allowed)throw new ConversationMigrationCapacityError(funding.reason);await authorize();});
               const finalAuth=await freshOwner();if(finalAuth instanceof Response)return finalAuth;
               result=await project.beginConversationMigration({operationId:input.operationId,repositoryId:identity.repositoryId,repositoryNodeId:identity.repositoryNodeId},actor,credentialHash,finalAuth.expiresAt);
             }else if(action==="capture"){
               const input=await body<{expectedRevision?:unknown}>();if(input===null||typeof input!=="object"||Array.isArray(input)||Object.keys(input).some(key=>key!=="expectedRevision")||typeof input.expectedRevision!=="number"||!Number.isSafeInteger(input.expectedRevision)||input.expectedRevision<0)return text("The exact staged capture revision is required",400);
-              result=await project.captureConversationMigration(conversationMigrationRoute[1]!,input.expectedRevision,actor,credentialHash,current.expiresAt);
+              const captured=await project.captureConversationMigration(conversationMigrationRoute[1]!,input.expectedRevision,actor,credentialHash,current.expiresAt);
+              if(!captured.ok){const failure=conversationCaptureFailure(captured);if(failure)throw failure;throw Error("Unconfirmed capture response");}
+              result=captured.value;
             }else if(action==="publish"){
               const input=await body<{eventId?:unknown;expectedRevision?:unknown;manifestHash?:unknown}>();if(input===null||typeof input!=="object"||Array.isArray(input)||Object.keys(input).some(key=>!["eventId","expectedRevision","manifestHash"].includes(key))||typeof input.eventId!=="string"||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(input.eventId)||typeof input.expectedRevision!=="number"||!Number.isSafeInteger(input.expectedRevision)||input.expectedRevision<0||typeof input.manifestHash!=="string"||!/^[a-f0-9]{64}$/.test(input.manifestHash))return text("Exact staged manifest hash, revision, and stable publication event ID are required",400);
               result=await project.publishConversationMigration(conversationMigrationRoute[1]!,{eventId:input.eventId,expectedRevision:input.expectedRevision,manifestHash:input.manifestHash},actor,credentialHash,current.expiresAt);
@@ -891,7 +894,7 @@ export default {
             const finalAuth=await freshOwner();if(finalAuth instanceof Response)return finalAuth;
             await project.conversationMigrationSource(actor,credentialHash,finalAuth.expiresAt);
             return repositoryReadJson(result);
-          }catch(error){if(error instanceof RequestBodyError)throw error;return repositoryReadJson({error:"Conversation migration was not confirmed. Saved pages and imported repository history remain preserved; refresh the staged operation before retrying."},409);}
+          }catch(error){if(error instanceof RequestBodyError)throw error;const failure=conversationMigrationFailure(error);const {status,...payload}=failure;return Response.json(payload,{status,headers:{"Cache-Control":"no-store","X-Content-Type-Options":"nosniff",...("retryAfterSeconds" in failure?{"Retry-After":String(failure.retryAfterSeconds)}:{})}});}
         }
 
         const historyOperationRoute = /^\/import-history\/(import-history-[a-f0-9-]{36})$/.exec(sub);
@@ -2181,3 +2184,4 @@ async function fundedPreviewSource(env:Env,identity:PreviewStorageIdentity,previ
  for(const key of new Set(keys)){try{return{key,capacity:await globalOf(env).previewGenerationCapacity(key,identity)};}catch{/* A failed unfunded generation retains its immutable funded ancestor key. */}}
  throw new Error("Funded preview source is unavailable");
 }
+import { appAssetResponse } from "./app-assets";

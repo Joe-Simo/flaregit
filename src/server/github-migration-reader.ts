@@ -1,6 +1,34 @@
 import { z } from "zod";
 import { classifyGithubIssue, type MigrationExternalIssue, type MigrationIssueScope, type MigrationExternalComment, type MigrationIssuePage } from "./migration-issues-ledger";
 
+export type GithubMigrationFailureCode = "rate_limited" | "auth" | "not_found" | "provider_unavailable" | "timeout" | "invalid" | "source_changed";
+const failureMessages: Record<GithubMigrationFailureCode, string> = {
+  rate_limited: "GitHub read allowance is temporarily unavailable. Saved migration progress is preserved.",
+  auth: "GitHub refused this read. Public source access must be restored before migration can continue.",
+  not_found: "GitHub could not find this public source. Saved migration progress is preserved.",
+  provider_unavailable: "Migration read not confirmed; saved cursor retained",
+  timeout: "GitHub read timed out. Saved migration progress is preserved.",
+  invalid: "GitHub source data could not be validated. Saved migration progress is preserved.",
+  source_changed: "Public migration source identity changed",
+};
+export class GithubMigrationReadError extends Error {
+  readonly status: number;
+  constructor(readonly code: GithubMigrationFailureCode, readonly httpStatus?: number, readonly retryAfterSeconds?: number) {
+    super(failureMessages[code]); this.name = "GithubMigrationReadError";
+    this.status = { rate_limited: 429, auth: 403, not_found: 404, provider_unavailable: 503, timeout: 504, invalid: 409, source_changed: 409 }[code];
+  }
+}
+function retryDelay(headers: Headers): number | undefined {
+  const value = headers.get("Retry-After"), reset = headers.get("X-RateLimit-Reset");
+  let seconds: number | undefined;
+  if (value && /^\d{1,6}$/.test(value)) seconds = Number(value);
+  else if (value && Number.isFinite(Date.parse(value))) seconds = Math.ceil((Date.parse(value) - Date.now()) / 1000);
+  else if (reset && /^\d{1,12}$/.test(reset)) seconds = Math.ceil(Number(reset) - Date.now() / 1000);
+  return seconds !== undefined && Number.isSafeInteger(seconds) && seconds >= 0 && seconds <= 3600 ? seconds : undefined;
+}
+function validated<T>(schema: z.ZodType<T>, value: unknown): T {
+  const result = schema.safeParse(value); if (!result.success) throw new GithubMigrationReadError("invalid"); return result.data;
+}
 const PER_PAGE = 10;
 const MAX_PAGE = 1000;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
@@ -32,19 +60,19 @@ function actor(value: z.infer<typeof actorSchema>): MigrationExternalIssue["acto
   return value ? { providerId: value.id, login: value.login, displayName: value.name ?? null } : { providerId: null, login: "deleted-user", displayName: null };
 }
 export function normalizeGithubMigrationSource(sourceUrl: string): string {
-  const url = new URL(sourceUrl);
+  let url: URL; try { url = new URL(sourceUrl); } catch { throw new GithubMigrationReadError("invalid"); }
   const path = url.pathname.replace(/\/$/, "").replace(/\.git$/i, "");
-  if (url.protocol !== "https:" || url.hostname !== "github.com" || url.port || url.username || url.password || url.search || url.hash || !/^\/[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+$/.test(path)) throw new Error("Exact public GitHub source required");
+  if (url.protocol !== "https:" || url.hostname !== "github.com" || url.port || url.username || url.password || url.search || url.hash || !/^\/[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+$/.test(path)) throw new GithubMigrationReadError("invalid");
   return `https://github.com${path}`;
 }
 function source(scope: MigrationIssueScope): { path: string; api: string } {
-  if (scope.provider !== "github") throw new Error("Exact public GitHub source required");
+  if (scope.provider !== "github") throw new GithubMigrationReadError("invalid");
   const path = new URL(normalizeGithubMigrationSource(scope.sourceUrl)).pathname;
   return { path, api: `https://api.github.com/repos${path}` };
 }
 function sourceOrigin(value: string, pathname: string, commentId?: string): void {
-  const url = new URL(value);
-  if (url.protocol !== "https:" || url.hostname !== "github.com" || url.port || url.username || url.password || url.search || url.pathname.toLowerCase() !== pathname.toLowerCase() || (commentId === undefined ? Boolean(url.hash) : url.hash !== `#issuecomment-${commentId}`)) throw new Error("GitHub origin changed");
+  let url: URL; try { url = new URL(value); } catch { throw new GithubMigrationReadError("source_changed"); }
+  if (url.protocol !== "https:" || url.hostname !== "github.com" || url.port || url.username || url.password || url.search || url.pathname.toLowerCase() !== pathname.toLowerCase() || (commentId === undefined ? Boolean(url.hash) : url.hash !== `#issuecomment-${commentId}`)) throw new GithubMigrationReadError("source_changed");
 }
 async function hash(body: string): Promise<string> {
   return [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body)))].map(byte => byte.toString(16).padStart(2, "0")).join("");
@@ -56,69 +84,73 @@ function advanceComments(cursor: Cursor): Cursor | null {
 }
 interface GithubReadCapabilities { authorize(): Promise<void>; beforeCall(): Promise<void>; fetch(request: Request): Promise<Response>; token?: string }
 async function readGithubJson(url: string, capabilities: GithubReadCapabilities, allowMissing = false): Promise<unknown | null> {
-    if (new URL(url).origin !== "https://api.github.com") throw new Error("Migration API host is invalid");
+    if (new URL(url).origin !== "https://api.github.com") throw new GithubMigrationReadError("invalid");
     await capabilities.authorize(); await capabilities.beforeCall(); await capabilities.authorize();
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const expired = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error("Migration read deadline reached")); }, 15000); });
+    const expired = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { controller.abort(); reject(new GithubMigrationReadError("timeout")); }, 15000); });
     try {
       const headers = new Headers({ Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "FlareGit-migration" });
       if (capabilities.token) headers.set("Authorization", `Bearer ${capabilities.token}`);
       const response = await Promise.race([capabilities.fetch(new Request(url, { headers, redirect: "manual", signal: controller.signal })), expired]);
-      if (response.status >= 300 && response.status < 400) throw new Error("Migration redirect refused");
+      if (response.status >= 300 && response.status < 400) throw new GithubMigrationReadError("provider_unavailable", response.status);
       if (allowMissing && response.status === 404) return null;
-      if (!response.ok) throw new Error(response.status === 403 || response.status === 429 ? "Migration provider allowance or authorization unavailable; saved cursor retained" : "Migration provider read unavailable; saved cursor retained");
-      if (!response.body) throw new Error("Migration response unavailable");
+      if (!response.ok) {
+        const code: GithubMigrationFailureCode = response.status === 429 || response.status === 403 && response.headers.get("X-RateLimit-Remaining") === "0" ? "rate_limited" : response.status === 401 || response.status === 403 ? "auth" : response.status === 404 ? "not_found" : "provider_unavailable";
+        throw new GithubMigrationReadError(code, response.status, code === "rate_limited" ? retryDelay(response.headers) : undefined);
+      }
+      if (!response.body) throw new GithubMigrationReadError("invalid");
       const reader = response.body.getReader(), chunks: Uint8Array[] = []; let size = 0;
       try {
-        while (true) { const result = await Promise.race([reader.read(), expired]); if (result.done) break; size += result.value.byteLength; if (size > MAX_RESPONSE_BYTES) { await Promise.race([reader.cancel(), expired]); throw new Error("Migration response capacity reached"); } chunks.push(result.value); }
+        while (true) { const result = await Promise.race([reader.read(), expired]); if (result.done) break; size += result.value.byteLength; if (size > MAX_RESPONSE_BYTES) { await Promise.race([reader.cancel(), expired]); throw new GithubMigrationReadError("invalid"); } chunks.push(result.value); }
       } catch (error) { void reader.cancel().catch(() => undefined); throw error; }
       finally { reader.releaseLock(); }
       const bytes = new Uint8Array(size); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-      return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
-    } catch { throw new Error("Migration read not confirmed; saved cursor retained"); }
+      try { return JSON.parse(new TextDecoder().decode(bytes)) as unknown; } catch { throw new GithubMigrationReadError("invalid"); }
+    } catch (error) { if (error instanceof GithubMigrationReadError) throw error; throw new GithubMigrationReadError(controller.signal.aborted ? "timeout" : "provider_unavailable"); }
     finally { if (timer) clearTimeout(timer); }
 
 }
 export async function readPublicGithubRepositoryIdentity(sourceUrl: string, authorize: () => Promise<void>, beforeCall: () => Promise<void>, fetcher: (request: Request) => Promise<Response> = fetch): Promise<{repositoryId:string;repositoryNodeId:string;sourceUrl:string}> {
   const normalized = normalizeGithubMigrationSource(sourceUrl), path = new URL(normalized).pathname;
-  const repository = z.object({ id, node_id: nodeId, html_url: z.string(), private: z.boolean() }).parse(await readGithubJson(`https://api.github.com/repos${path}`, { authorize, beforeCall, fetch: fetcher }));
+  const repository = validated(z.object({ id, node_id: nodeId, html_url: z.string(), private: z.boolean() }), await readGithubJson(`https://api.github.com/repos${path}`, { authorize, beforeCall, fetch: fetcher }));
   const canonical = normalizeGithubMigrationSource(repository.html_url);
-  if (repository.private || new URL(canonical).pathname.toLowerCase() !== path.toLowerCase()) throw new Error("Public migration source identity changed");
+  if (repository.private || new URL(canonical).pathname.toLowerCase() !== path.toLowerCase()) throw new GithubMigrationReadError("source_changed");
   await authorize();
   return { repositoryId: repository.id, repositoryNodeId: repository.node_id, sourceUrl: canonical };
 }
 /** Only constructs known-host read URLs. Tokens never appear in cursor, receipts or errors. */
 export async function readGithubMigrationSlice(scope: MigrationIssueScope, savedCursor: string | null, capabilities: GithubMigrationReaderCapabilities): Promise<GithubMigrationCapture> {
   const origin = source(scope);
-  if (savedCursor !== null && savedCursor.length > 1000) throw new Error("Migration cursor exceeds capacity");
-  const cursor: Cursor = savedCursor === null ? { version: 1, phase: "issues", issuePage: 1, nextIssuePage: null, pendingIssues: [], commentPage: 1 } : cursorSchema.parse(JSON.parse(savedCursor));
-  if (new Set(cursor.pendingIssues).size !== cursor.pendingIssues.length || (cursor.phase === "comments" ? cursor.pendingIssues.length === 0 : cursor.pendingIssues.length !== 0)) throw new Error("Migration cursor identity is invalid");
+  if (savedCursor !== null && savedCursor.length > 1000) throw new GithubMigrationReadError("invalid");
+  let cursor: Cursor;
+  try { cursor = savedCursor === null ? { version: 1, phase: "issues", issuePage: 1, nextIssuePage: null, pendingIssues: [], commentPage: 1 } : validated(cursorSchema, JSON.parse(savedCursor)); } catch { throw new GithubMigrationReadError("invalid"); }
+  if (new Set(cursor.pendingIssues).size !== cursor.pendingIssues.length || (cursor.phase === "comments" ? cursor.pendingIssues.length === 0 : cursor.pendingIssues.length !== 0)) throw new GithubMigrationReadError("invalid");
   await capabilities.authorize(scope);
   let token: string | undefined;
-  try { token = await capabilities.getReadToken?.(); } catch { throw new Error("Migration read credential unavailable"); }
-  if (token !== undefined && (!token || token.length > 255 || /[^A-Za-z0-9_]/.test(token))) throw new Error("Migration read credential is invalid");
+  try { token = await capabilities.getReadToken?.(); } catch { throw new GithubMigrationReadError("auth"); }
+  if (token !== undefined && (!token || token.length > 255 || /[^A-Za-z0-9_]/.test(token))) throw new GithubMigrationReadError("auth");
   const pageId = cursor.phase === "issues" ? `github-issues-${cursor.issuePage}` : `github-comments-${cursor.pendingIssues[0]}-${cursor.commentPage}`;
   const read = (url: string, key: string, allowMissing = false) => readGithubJson(url, {
     authorize: () => capabilities.authorize(scope), beforeCall: () => capabilities.beforeCall(scope, key), fetch: capabilities.fetch, token,
   }, allowMissing);
   // Recheck numeric identity every slice: a renamed/recreated URL is not this source.
-  const repository = z.object({ id, node_id: nodeId, html_url: z.string(), private: z.boolean() }).parse(await read(origin.api, `${pageId}-repository`));
+  const repository = validated(z.object({ id, node_id: nodeId, html_url: z.string(), private: z.boolean() }), await read(origin.api, `${pageId}-repository`));
   sourceOrigin(repository.html_url, origin.path);
-  if (repository.private || repository.id !== scope.repositoryId || repository.node_id !== scope.repositoryNodeId) throw new Error("Public migration source identity changed");
+  if (repository.private || repository.id !== scope.repositoryId || repository.node_id !== scope.repositoryNodeId) throw new GithubMigrationReadError("source_changed");
   const issues: MigrationExternalIssue[] = [], comments: MigrationExternalComment[] = [], missing: GithubMigrationCapture["missing"] = [];
   let next: Cursor | null;
   if (cursor.phase === "issues") {
     const url = `${origin.api}/issues?state=all&sort=created&direction=asc&per_page=${PER_PAGE}&page=${cursor.issuePage}`;
-    const values = z.array(issueSchema).max(PER_PAGE).parse(await read(url, pageId));
-    if (new Set(values.map(value => value.id)).size !== values.length || new Set(values.map(value => value.node_id)).size !== values.length || new Set(values.map(value => value.number)).size !== values.length) throw new Error("Duplicate issue identities in provider page");
-    if (values.length === PER_PAGE && cursor.issuePage === MAX_PAGE) throw new Error("Migration page capacity reached; saved cursor retained");
+    const values = validated(z.array(issueSchema).max(PER_PAGE), await read(url, pageId));
+    if (new Set(values.map(value => value.id)).size !== values.length || new Set(values.map(value => value.node_id)).size !== values.length || new Set(values.map(value => value.number)).size !== values.length) throw new GithubMigrationReadError("invalid");
+    if (values.length === PER_PAGE && cursor.issuePage === MAX_PAGE) throw new GithubMigrationReadError("invalid");
     const pendingIssues: number[] = [];
     for (const value of values) {
-      if (value.pull_request !== undefined && (!value.pull_request || typeof value.pull_request !== "object")) throw new Error("Pull request classification unavailable");
+      if (value.pull_request !== undefined && (!value.pull_request || typeof value.pull_request !== "object")) throw new GithubMigrationReadError("invalid");
       const kind = classifyGithubIssue(value);
       sourceOrigin(value.html_url, `${origin.path}/${kind === "issue" ? "issues" : "pull"}/${value.number}`);
-      if (Date.parse(value.updated_at) < Date.parse(value.created_at) || new TextEncoder().encode(value.body ?? "").length > 65536) throw new Error("Migration timestamps changed");
+      if (Date.parse(value.updated_at) < Date.parse(value.created_at) || new TextEncoder().encode(value.body ?? "").length > 65536) throw new GithubMigrationReadError("invalid");
       issues.push({ providerId: value.id, nodeId: value.node_id, number: value.number, kind, sourceUrl: value.html_url, actor: actor(value.user), title: value.title, body: value.body ?? "", state: value.state, createdAt: value.created_at, updatedAt: value.updated_at, closedAt: value.closed_at });
       if (value.comments > 0) pendingIssues.push(value.number);
     }
@@ -129,15 +161,15 @@ export async function readGithubMigrationSlice(scope: MigrationIssueScope, saved
     const values = await read(`${origin.api}/issues/${issueNumber}/comments?per_page=${PER_PAGE}&page=${cursor.commentPage}`, pageId, true);
     if (values === null) { missing.push({ sourceId: `issue-${issueNumber}-comments`, kind: "comment", reason: "Provider returned inaccessible issue comments" }); next = advanceComments(cursor); }
     else {
-      const parsed = z.array(commentSchema).max(PER_PAGE).parse(values);
-      if (new Set(parsed.map(value => value.id)).size !== parsed.length || new Set(parsed.map(value => value.node_id)).size !== parsed.length) throw new Error("Duplicate comment identities in provider page");
-      if (parsed.length === PER_PAGE && cursor.commentPage === MAX_PAGE) throw new Error("Migration comment capacity reached; saved cursor retained");
+      const parsed = validated(z.array(commentSchema).max(PER_PAGE), values);
+      if (new Set(parsed.map(value => value.id)).size !== parsed.length || new Set(parsed.map(value => value.node_id)).size !== parsed.length) throw new GithubMigrationReadError("invalid");
+      if (parsed.length === PER_PAGE && cursor.commentPage === MAX_PAGE) throw new GithubMigrationReadError("invalid");
       for (const value of parsed) {
         // PR issue comments have /pull/<number> origins; both paths are distinct from inline reviews.
-        const commentUrl = new URL(value.html_url);
-        if (![`${origin.path}/issues/${issueNumber}`, `${origin.path}/pull/${issueNumber}`].includes(commentUrl.pathname)) throw new Error("Comment parent origin changed");
+        let commentUrl: URL; try { commentUrl = new URL(value.html_url); } catch { throw new GithubMigrationReadError("invalid"); }
+        if (![`${origin.path}/issues/${issueNumber}`, `${origin.path}/pull/${issueNumber}`].includes(commentUrl.pathname)) throw new GithubMigrationReadError("source_changed");
         sourceOrigin(value.html_url, commentUrl.pathname, value.id);
-        if (Date.parse(value.updated_at) < Date.parse(value.created_at) || new TextEncoder().encode(value.body).length > 65536) throw new Error("Comment metadata capacity or timestamps invalid");
+        if (Date.parse(value.updated_at) < Date.parse(value.created_at) || new TextEncoder().encode(value.body).length > 65536) throw new GithubMigrationReadError("invalid");
         comments.push({ providerId: value.id, nodeId: value.node_id, issueNumber, repositoryId: scope.repositoryId, repositoryNodeId: scope.repositoryNodeId, sourceUrl: value.html_url, actor: actor(value.user), body: value.body, bodyHash: await hash(value.body), createdAt: value.created_at, updatedAt: value.updated_at, identity: "external-unclaimed", nativeUserId: null });
       }
       next = parsed.length === PER_PAGE ? { ...cursor, commentPage: cursor.commentPage + 1 } : advanceComments(cursor);

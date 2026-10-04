@@ -2,7 +2,8 @@ import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from 
 import { Check, Eye, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { apiJson } from "../api";
+import { apiJson,apiSessionIdentity } from "../api";
+import {readReviewDraft,saveReviewDraft,clearReviewDraft,type ReviewDraftScope,type OwnerDraftIntent} from "../review-draft-recovery";
 import { useVisiblePolling } from "../use-visible-polling";
 import { ExternalCheckRows, type ExternalCheckDetail } from "./ExternalCheckRows";
 import { VERIFIER_IDENTITIES } from "@/core/verification-identities";
@@ -40,6 +41,8 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
   const [delegatedGate,setDelegatedGate]=useState<{scope:string;passed:boolean|null}|null>(null);
   const [rerunReserved, setRerunReserved] = useState(false);
   const [note, setNote] = useState("");
+  const [noteBrowserSaved,setNoteBrowserSaved]=useState(false);
+  const noteRecovery=useRef<ReviewDraftScope|null>(null),ownerIntent=useRef<OwnerDraftIntent|null>(null);
   const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const passed = evidence?.testResults.reduce((n, s) => n + s.passedCount, 0) ?? 0;
@@ -47,6 +50,8 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
   const total = evidence?.testResults.reduce((n, s) => n + s.passedCount + s.failedCount, 0) ?? 0;
 
   const scope = `${projectId}:${candidate.id}:${candidate.candidateCommit ?? ""}`;
+  useEffect(()=>{setNote("");setNoteBrowserSaved(false);ownerIntent.current=null;const identity=apiSessionIdentity();noteRecovery.current=identity&&candidate.candidateCommit?{identity,projectId,candidateId:candidate.id,commit:candidate.candidateCommit,kind:"owner"}:null;if(!noteRecovery.current)return;try{const recovered=readReviewDraft(sessionStorage,noteRecovery.current);if(recovered){setNote(recovered.note);ownerIntent.current=recovered.intent?.kind==="owner"?recovered.intent:null;setNoteBrowserSaved(true);}}catch{/* Browser recovery is optional. */}},[scope,isOwner]);
+  const preserveOwnerNote=(value:string,intent:OwnerDraftIntent|null)=>{const savedScope=noteRecovery.current;if(!savedScope||apiSessionIdentity()!==savedScope.identity)return false;try{return saveReviewDraft(sessionStorage,savedScope,{note:value,intent});}catch{return false;}};
   const onDelegatedGate=useCallback((passed:boolean|null)=>setDelegatedGate({scope,passed}),[scope]);
   const delegatedKnown=delegatedGate?.scope===scope&&delegatedGate.passed===true;
   const checkScope = `${scope}:${isOwner ? "owner" : "member"}`;
@@ -116,10 +121,12 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
     const generation = decisionGeneration.current;
     setBusy(approved ? "approve" : "reject");
     setError(null);
+    const payload={approved,note:resendSaved?candidate.review?.note??"":note,expectedCommit:resendSaved?candidate.review!.commit:candidate.candidateCommit};
+    ownerIntent.current={kind:"owner",payload};setNoteBrowserSaved(preserveOwnerNote(resendSaved?payload.note:note,ownerIntent.current));
     try {
-      const receipt = await apiJson<{ recorded: boolean; approved: boolean }>(`/p/${projectId}/candidates/${candidate.id}/review`, { method: "POST", json: { approved, note: resendSaved ? candidate.review?.note : note, expectedCommit: resendSaved ? candidate.review?.commit : candidate.candidateCommit } });
+      const receipt = await apiJson<{ recorded: boolean; approved: boolean }>(`/p/${projectId}/candidates/${candidate.id}/review`, { method: "POST", json: payload,signal:AbortSignal.timeout(15000) });
       if (receipt.recorded !== true || receipt.approved !== approved) throw new Error("Review delivery was not confirmed. Reload the recorded decision before retrying.");
-      if (generation === decisionGeneration.current) onDone();
+      if (generation === decisionGeneration.current) {const savedScope=noteRecovery.current;if(savedScope&&apiSessionIdentity()===savedScope.identity)clearReviewDraft(sessionStorage,savedScope);ownerIntent.current=null;setNoteBrowserSaved(false);setNote("");onDone();}
     } catch (e) {
       if (generation === decisionGeneration.current) setError(e instanceof Error ? e.message : "Could not record the review");
     } finally {
@@ -171,7 +178,8 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
       {candidate.preservationProtocolVersion !== 1 && <p role="status" className="text-xs text-muted-foreground">This older candidate cannot be accepted. Its review remains available; create a protected successor when eligible.</p>}
       {!reviewReady && <p role="status" className="text-xs text-muted-foreground">Diff files are loading or unavailable. Acceptance from this review is paused; comments and rejection remain available.</p>}
       {checksKnown && !checkError && (identityMismatch || checkGate !== "passed") && <p role="status" className="text-xs text-amber-800 dark:text-amber-200">{identityMismatch ? "Connected check evidence does not match this candidate. Reload before accepting." : checkGate === "failed" ? "A required connected check failed or was cancelled. Acceptance is blocked." : "Waiting for required connected checks before acceptance."}</p>}
-      <Textarea rows={2} maxLength={500} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Review note (optional; required context if you reject)" aria-label="Review note" />
+      <Textarea rows={2} maxLength={500} value={note} onChange={(e) => {setNote(e.target.value);const unchanged=ownerIntent.current?.payload.note===e.target.value?ownerIntent.current:null;ownerIntent.current=unchanged;setNoteBrowserSaved(preserveOwnerNote(e.target.value,unchanged));}} placeholder="Review note (optional; required context if you reject)" aria-label="Review note" />
+      {note.length>0&&<p role="status" className="text-xs text-muted-foreground">{noteBrowserSaved?"Review draft saved in this browser session.":"Browser-session draft save is unavailable. Keep this tab open until the review is confirmed."}</p>}
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       <div className="flex flex-wrap gap-2">
         {showOpen && <Button size="sm" variant="outline" onClick={() => navigate(`/p/${projectId}/review?candidate=${candidate.id}`)}><Eye className="h-3.5 w-3.5 mr-1.5" /> Read the diff</Button>}

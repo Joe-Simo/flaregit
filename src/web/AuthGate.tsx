@@ -2,7 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ClerkProvider, SignIn, UserButton, useAuth, useSession } from "@clerk/clerk-react";
 import { GitBranch, RefreshCw, Sun, ArrowUpRight } from "lucide-react";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { bindApiSession } from "./api";
+import { bindApiSession,clearVerifiedApiSession } from "./api";
 import { Landing } from "./pages/Landing";
 import { AppearanceDialog, useTheme } from "./ThemeProvider";
 import { PublicRepo } from "./pages/PublicRepo";
@@ -36,6 +36,8 @@ export function AuthTransitionSurface({snapshot,signingIn,onRetry,signedOut,sign
 function AuthSessionController({signingIn,destination,signedOut,landing,children}:{signingIn:boolean;destination:string;signedOut:React.ReactNode;landing:React.ReactNode;children:React.ReactNode}){
   const auth=useAuth(),{isLoaded,session}=useSession();
   const snapshot={authLoaded:auth.isLoaded,sessionLoaded:isLoaded,signedIn:auth.isSignedIn,userId:auth.userId,sessionId:session?.id,sessionUserId:session?.user?.id,sessionStatus:session?.status};
+  const phase=authTransition(snapshot);
+  useLayoutEffect(()=>{if(phase==="signed-out")clearVerifiedApiSession();},[phase]);
   return <AuthTransitionSurface snapshot={snapshot} signingIn={signingIn} onRetry={()=>recoverSignIn(destination,{replace:url=>window.history.replaceState(null,"",url),reload:()=>window.location.reload()})} signedOut={signedOut} landing={landing} signedIn={session&&auth.userId?<SessionWorkspace key={`${auth.userId}:${session.id}`} principal={`${auth.userId}:${session.id}`} session={session}>{children}</SessionWorkspace>:null}/>;
 }
 function SessionWorkspace({ principal, session, children }: { principal: string; session: NonNullable<ReturnType<typeof useSession>["session"]>; children: React.ReactNode }) {

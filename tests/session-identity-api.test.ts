@@ -1,11 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
-import { apiFetch, apiJson, bindApiSession } from "../src/web/api";
+import { apiFetch, apiJson, bindApiSession,clearVerifiedApiSession,apiSessionIdentity } from "../src/web/api";
 
 const originalFetch = globalThis.fetch;
 const cleanups: (() => void)[] = [];
 function bind(identity: string, getter: () => Promise<string | null> = async () => `synthetic-${identity}`) { const release = bindApiSession(identity, getter); cleanups.push(release); return release; }
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
-afterEach(async () => { for (const release of cleanups.splice(0).reverse()) release(); await Promise.resolve(); globalThis.fetch = originalFetch; });
+afterEach(async () => { for (const release of cleanups.splice(0).reverse()) release(); await Promise.resolve(); clearVerifiedApiSession(); globalThis.fetch = originalFetch; });
 
 test("session change while obtaining a token never dispatches an old action under another identity", async () => {
   const token = deferred<string | null>(); let calls = 0;
@@ -39,7 +39,7 @@ test("sign-out clears credentials immediately and rejects pending private respon
   globalThis.fetch = Object.assign((async () => { called.resolve(); return network.promise; }), { preconnect: originalFetch.preconnect });
   const release = bind("A"); const pending = apiJson<Record<string, unknown>>("/synthetic-private");
   const rejection = pending.then(() => { throw new Error("Expected identity rejection"); }, cause => cause as Error);
-  await called.promise; release(); network.resolve(Response.json({})); expect(await rejection).toMatchObject({ name: "AbortError" });
+  await called.promise; release();clearVerifiedApiSession(); network.resolve(Response.json({})); expect(await rejection).toMatchObject({ name: "AbortError" });
   const recorded: { authorization: string | null } = { authorization: "not called" };
   globalThis.fetch = Object.assign((async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => { recorded.authorization = new Headers(init?.headers).get("Authorization"); return Response.json({ public: true }); }), { preconnect: originalFetch.preconnect });
   expect(await apiJson<Record<string, unknown>>("/synthetic-public")).toEqual({ public: true }); expect(recorded.authorization).toBeNull();
@@ -110,3 +110,5 @@ test("status-zero responses retain error metadata without bypassing identity gua
   expect(clone.status).toBe(0); expect(clone.type).toBe("error");
   bind("B"); await expect(clone.text()).rejects.toMatchObject({ name: "AbortError" });
 });
+
+test("unconfirmed binding loss blocks authenticated helper requests and keeps session identity unavailable",async()=>{let calls=0;globalThis.fetch=Object.assign(async()=>{calls++;return Response.json({});},{preconnect:originalFetch.preconnect});const release=bind("A");release();await Promise.resolve();expect(apiSessionIdentity()).toBeNull();await expect(apiJson("/synthetic-private",{method:"POST"})).rejects.toMatchObject({name:"AbortError"});expect(calls).toBe(0);bind("A");await apiJson("/synthetic-private");expect(calls).toBe(1);});

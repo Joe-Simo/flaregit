@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { normalizeGithubMigrationSource, readPublicGithubRepositoryIdentity, readGithubMigrationSlice, type GithubMigrationCapture, type GithubMigrationReaderCapabilities } from "../src/server/github-migration-reader";
+import { GithubMigrationReadError, normalizeGithubMigrationSource, readPublicGithubRepositoryIdentity, readGithubMigrationSlice, type GithubMigrationFailureCode, type GithubMigrationCapture, type GithubMigrationReaderCapabilities } from "../src/server/github-migration-reader";
 import type { MigrationIssueScope } from "../src/server/migration-issues-ledger";
 
 const scope: MigrationIssueScope = { operationId: "migration-reader", projectId: "p123456789abc", incarnation: "11111111-1111-4111-8111-111111111111", ownerId: "owner", provider: "github", repositoryId: "123", repositoryNodeId: "R_123", sourceUrl: "https://github.com/synthetic/owned" };
@@ -71,10 +71,10 @@ test("full pages progress through constructed page numbers and ignore arbitrary 
 
 test("oversized streaming response and cross-repository comment origins fail before capture", async () => {
   const huge = fixture(() => new Response("x".repeat(1024 * 1024 + 1)));
-  await expect(readGithubMigrationSlice(scope, null, huge.capabilities)).rejects.toThrow("read not confirmed"); expect(huge.captured.length).toBe(0);
+  await expect(readGithubMigrationSlice(scope, null, huge.capabilities)).rejects.toThrow("could not be validated"); expect(huge.captured.length).toBe(0);
   const f = fixture(request => new URL(request.url).pathname.endsWith("/comments") ? json([{ ...comment, html_url: "https://github.com/other/repo/issues/1#issuecomment-789" }]) : new URL(request.url).pathname.endsWith("/issues") ? json([issue]) : json(repository));
   const first = await readGithubMigrationSlice(scope, null, f.capabilities);
-  await expect(readGithubMigrationSlice(scope, first.nextCursor, f.capabilities)).rejects.toThrow("Comment parent origin changed"); expect(f.captured.length).toBe(1);
+  await expect(readGithubMigrationSlice(scope, first.nextCursor, f.capabilities)).rejects.toThrow("source identity changed"); expect(f.captured.length).toBe(1);
 });
 
 test("opaque cursors resume each nested comment page before returning to issue pagination", async () => {
@@ -107,7 +107,7 @@ test("shared public identity discovery normalizes legitimate aliases and rejects
   await readPublicGithubRepositoryIdentity(scope.sourceUrl, async () => {}, async () => { funded++; }, fetcher);
   expect(funded).toBe(2); expect(authorized).toBe(3);
   for (const value of [{ ...repository, html_url: "https://github.com/foreign/repo" }, { ...repository, private: true }]) await expect(readPublicGithubRepositoryIdentity(scope.sourceUrl, async () => {}, async () => {}, async () => json(value))).rejects.toThrow("identity changed");
-  await expect(readPublicGithubRepositoryIdentity("https://github.com/synthetic/owned?token=secret", async () => {}, async () => {}, fetcher)).rejects.toThrow("Exact public GitHub source required");
+  await expect(readPublicGithubRepositoryIdentity("https://github.com/synthetic/owned?token=secret", async () => {}, async () => {}, fetcher)).rejects.toThrow("could not be validated");
   expect(calls).toBe(2);
 });
 
@@ -120,6 +120,40 @@ test("shared discovery total deadline cancels a stalled body even when transport
   let cancelled = false;
   const stream = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } });
   const started = Date.now();
-  await expect(readPublicGithubRepositoryIdentity(scope.sourceUrl, async () => {}, async () => {}, async () => new Response(stream))).rejects.toThrow("Migration read not confirmed; saved cursor retained");
+  await expect(readPublicGithubRepositoryIdentity(scope.sourceUrl, async () => {}, async () => {}, async () => new Response(stream))).rejects.toThrow("GitHub read timed out");
   expect(cancelled).toBe(true); expect(Date.now() - started).toBeLessThan(17000);
 }, 20000);
+
+
+test("safe provider failure taxonomy identifies actual allowance proof without exposing bodies", async () => {
+  const secret = "never_expose_provider_body_or_token";
+  const cases: Array<{ status: number; headers: Record<string, string>; code: GithubMigrationFailureCode; retry: number | undefined }> = [
+    { status: 429, headers: { "Retry-After": "12" }, code: "rate_limited", retry: 12 },
+    { status: 403, headers: { "X-RateLimit-Remaining": "0", "Retry-After": "999999" }, code: "rate_limited", retry: undefined },
+    { status: 403, headers: { "X-RateLimit-Remaining": "100" }, code: "auth", retry: undefined },
+    { status: 401, headers: {}, code: "auth", retry: undefined },
+    { status: 404, headers: {}, code: "not_found", retry: undefined },
+    { status: 503, headers: {}, code: "provider_unavailable", retry: undefined },
+  ];
+  for (const item of cases) {
+    let caught: unknown;
+    try { await readPublicGithubRepositoryIdentity(scope.sourceUrl, async () => {}, async () => {}, async () => new Response(secret, { status: item.status, headers: item.headers })); } catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(GithubMigrationReadError);
+    const error = caught as GithubMigrationReadError;
+    expect(error.code).toBe(item.code); expect(error.httpStatus).toBe(item.status); expect(error.retryAfterSeconds).toBe(item.retry);
+    expect(error.message).not.toContain(secret); expect(JSON.stringify(error)).not.toContain(secret);
+  }
+});
+
+test("authority and funding callback errors retain their original class before any read", async () => {
+  class FundingUnavailable extends Error {}
+  const funding = new FundingUnavailable("Funded allowance unavailable");
+  let reads = 0;
+  try { await readPublicGithubRepositoryIdentity(scope.sourceUrl, async () => {}, async () => { throw funding; }, async () => { reads++; return json(repository); }); throw new Error("Expected refusal"); }
+  catch (error) { expect(error).toBe(funding); }
+  const authority = new FundingUnavailable("Owner authority changed");
+  try { await readPublicGithubRepositoryIdentity(scope.sourceUrl, async () => { throw authority; }, async () => {}, async () => { reads++; return json(repository); }); throw new Error("Expected refusal"); }
+  catch (error) { expect(error).toBe(authority); }
+  expect(reads).toBe(0);
+  await expect(readPublicGithubRepositoryIdentity(scope.sourceUrl, async () => {}, async () => {}, async () => json({ token: "never-log-malformed-metadata" }))).rejects.toThrow("could not be validated");
+});
