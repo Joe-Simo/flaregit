@@ -1,3 +1,8 @@
+import {isSafeRef} from "../core/sanitize.js";
+import {RefReadCredentialIncidents} from "./ref-read-credential-incidents";
+import {validateRecoveryRemote} from "./private-recovery-bundle.js";
+import {observeExactGitHead,ExactGitInspectionError,type RerunGitHeadVerification} from "./exact-git-ref.js";
+import type {RerunInputObservationScope} from "./rerun-input-observations.js";
 import type {OwnedWorkflow} from "./workflow-control.js";
 import {IntegrationNativeRuntimeLedger,type IntegrationNativeRuntimeScope,type IntegrationNativeInspection} from "./integration-native-runtime.js";
 import { LegacyCandidateReruns, LegacyRerunError, assertLegacyRerunEligible, type LegacyCandidateRerun, type LegacyRerunSnapshot } from "./legacy-candidate-rerun.js";
@@ -53,7 +58,7 @@ import type { ImportJob } from "./import-job.js";
 import type { PublicRepositoryGrant } from "./public-repositories.js";
 import { AgentRunLedger, type AgentRunInput, type AgentRunRecord, type AgentRunClaim } from "./agent-run-ledger.js";
 import { actorName, RepositoryPublicCommunity, type PublicCommunityActor, type PublicCommunityPolicy, type PublicPost, type ContributionRequest } from "./public-community.js";
-export interface RepositoryReadContext { projectId:string; incarnation:string|null; canonicalRepoName:string; repoName:string; ownerId:string; accountKey:string; publicationVersion?:number; acceptedCommit?:string; taskBase?:string; taskCommit?:string; taskBranch?:string; candidateId?:string; candidateCommit?:string; candidateBase?:string; candidateInputCommit?:string; candidateInputBase?:string;retainedInputReceiptId?:string }
+export interface RepositoryReadContext { projectId:string; incarnation:string|null; canonicalRepoName:string; repoName:string; ownerId:string; accountKey:string; publicationVersion?:number; acceptedCommit?:string; taskBase?:string; taskCommit?:string; taskBranch?:string;taskContributorId?:string;taskInitiatorId?:string; candidateId?:string; candidateCommit?:string; candidateBase?:string; candidateInputCommit?:string; candidateInputBase?:string;retainedInputReceiptId?:string }
 export type OwnerRebaseRecoveryResult={ok:true;receipt:RebaseRecoveryReceipt}|{ok:false;status:409|503|429;error:string;report?:RebaseRecoveryReport};
 export type OwnerRebaseResumeResult={ok:true;attempt:RebaseResumeAttempt}|{ok:false;status:409|503|429;error:string;report?:RebaseRecoveryReport};
 export type OwnerRebaseApplication=RebaseRecoveryReport & {resumeAvailable:boolean;resume?:{id:string;generation:number;dispatch:RebaseResumeAttempt["dispatch"];nativeState:RebaseResumeAttempt["nativeState"];terminal?:RebaseResumeAttempt["terminal"];pauseReason?:string}};
@@ -506,7 +511,9 @@ export interface Ledger {
   assertCandidateRuntimeInspection(candidateId:string,workflowId:string|null,incarnation:string,protocol:1|null,actor:HumanDecisionActor,sessionExpiresAt?:number):Promise<void>;
   candidateRuntimeInspection(candidateId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<IntegrationNativeInspection & {candidateId:string;workflowId:string|null;incarnation:string;protocol:1|null;checkedAt:number}>;
   legacyCandidateRuntimeAvailable(candidateId:string):Promise<boolean>;
+  ownerRerunObservationScope(candidateId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<RerunInputObservationScope>;
   legacyCandidateRerunReport(candidateId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<{candidateId:string;expectedCommit:string|null;inputs:Record<string,{commit:string;base:string}>;eligible:boolean;detail:string;operation?:{id:string;phase:LegacyCandidateRerun["phase"];dispatch:LegacyCandidateRerun["dispatch"];abandoned?:LegacyCandidateRerun["abandoned"];successorCandidateId?:string;successorWorkflowId:string;successorDecisionId?:string;continuationWorkflowId?:string}}> ;
+  verifyLegacyCandidateGitHeads(id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<RerunGitHeadVerification>;
   prepareLegacyCandidateRerun(candidateId:string,expectedCommit:string|null,requestId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number,expectedInputs?:Record<string,{commit:string;base:string}>):Promise<LegacyCandidateRerun>;
   getLegacyCandidateRerun(id:string):Promise<LegacyCandidateRerun|null>;
   abandonLegacyCandidateRerun(id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<LegacyCandidateRerun>;
@@ -569,6 +576,7 @@ export interface Ledger {
   setBilling(b: { plan: "free" | "pro"; status: string; subscriptionId?: string; updatedAt: string }): Promise<void>;
   usageToday(): Promise<number>;
   consumeRun(limit: number, admissionKey?: string): Promise<{ allowed: boolean; used: number }>;
+  observeTaskReadyGitHead(taskId:string,userId:string,context:RepositoryReadContext,credentialHash?:string,sessionExpiresAt?:number,expectedHead?:string):Promise<string|null>;
   ingestMemberCheckpoint(ev:{eventId:string;taskId:string;commit:string;ready:boolean;filesChanged?:string[]},userId:string,context:RepositoryReadContext,credentialHash?:string,sessionExpiresAt?:number):Promise<{applied:boolean}>;
   ingestCheckpoint(ev: { eventId: string; taskId: string; commit: string; ready: boolean; filesChanged?: string[] }): Promise<{ applied: boolean }>;
 }
@@ -1722,6 +1730,14 @@ export class RepositoryController extends DurableObject<Env> {
   }
   async markRetainedCredentialRevoked(inputId:string,purpose:"workspace"|"canonical",token:string):Promise<void>{await new RetainedCredentialIncidents(this.ctx.storage).markRevoked(inputId,purpose,token);}
   async retainedCredentialSummary(inputId:string,purpose:"workspace"|"canonical"){const incidents=new RetainedCredentialIncidents(this.ctx.storage);incidents.pendingBatch();return incidents.summary(inputId,purpose);}
+  protected async revokeRefReadCredential(id:string):Promise<boolean>{
+    const ledger=new RefReadCredentialIncidents(this.ctx.storage);if(ledger.summary(id)?.status==="revoked")return true;
+    const pending=ledger.credentialForRevocation(id);if(!pending)return false;
+    const funding=await globalOf(this.env).reserveCoreGitOperation(`ref-read-cleanup-${crypto.randomUUID()}`,pending.accountKey,this.currentGitBudget()).catch(()=>null);
+    if(!funding?.allowed||!ledger.markAttempt(id))return false;
+    try{using repository=await this.env.ARTIFACTS.get(pending.repoName);if(!await repository.revokeToken(pending.token))return false;await ledger.markRevoked(id,pending.token);return true;}catch{return false;}
+  }
+  private async retryRefReadCredentials(){const ledger=new RefReadCredentialIncidents(this.ctx.storage);for(const pending of ledger.pendingBatch()){if(ledger.markAutomaticSweep(pending.id))await this.revokeRefReadCredential(pending.id);}const wake=ledger.nextWake();if(wake!==null)await this.ensureRecoveryAlarm(Math.max(1,wake-Date.now()));}
   private async retryRetainedCredentialIncidents(){
     const incidents=new RetainedCredentialIncidents(this.ctx.storage),pending=incidents.pendingBatch();
     for(const incident of pending){
@@ -1786,6 +1802,9 @@ export class RepositoryController extends DurableObject<Env> {
     const tasks=candidate.participatingTaskIds.map(id=>{const task=state.tasks[id];if(!task)throw new LegacyRerunError("Saved contribution is unavailable.");return {id:task.id,currentCommit:task.currentCommit,baseCommit:task.baseCommit,workspace:{repoName:task.workspace.repoName,branch:task.workspace.branch},dependsOn:task.dependsOn,status:task.status,activeCandidateId:task.activeCandidateId,agentRunId:task.agentRunId};});
     return {projectId:state.projectId,incarnation,canonicalRepoName:state.canonicalRepoName,candidate:structuredClone(candidate),tasks,busy:tasks.some(task=>{if(!task.agentRunId)return false;const run=this.agentRuns().get(task.agentRunId);return !run||["claimed","proposed","pushed"].includes(run.phase);}),publicationBlocked:state.journal.some(entry=>entry.candidateId===candidateId&&(entry.state==="PREPARED"||entry.state==="ACCEPTED"))||state.acceptedState.history.some(entry=>entry.candidateId===candidateId)};
   }
+  async ownerRerunObservationScope(candidateId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<RerunInputObservationScope>{
+    const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();const snapshot=this.legacyRerunSnapshot(candidateId),tasks=snapshot.candidate.participatingTaskIds.map(id=>{const task=snapshot.tasks.find(task=>task.id===id),proof=snapshot.candidate.frozenContributorProofs?.find(proof=>proof.id===id&&proof.commit===snapshot.candidate.participatingCommits[id]);if(!task||!proof)throw new Error("Frozen input proof unavailable");return {id,commit:proof.commit,base:proof.baseCommit,repoName:task.workspace.repoName,branch:task.workspace.branch,currentCommit:task.currentCommit};});assert();return {candidateId,incarnation:snapshot.incarnation,expectedCommit:snapshot.candidate.candidateCommit??null,tasks};
+  }
   async legacyCandidateRerunReport(candidateId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){
     const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();const snapshot=this.legacyRerunSnapshot(candidateId),expectedCommit=snapshot.candidate.candidateCommit??null,inputs:Record<string,{commit:string;base:string}>={};
     for(const proof of snapshot.candidate.frozenContributorProofs??[])if(snapshot.candidate.participatingCommits[proof.id]===proof.commit)inputs[proof.id]={commit:proof.commit,base:proof.baseCommit};
@@ -1796,6 +1815,32 @@ export class RepositoryController extends DurableObject<Env> {
   async prepareLegacyCandidateRerun(candidateId:string,expectedCommit:string|null,requestId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number,expectedInputs?:Record<string,{commit:string;base:string}>):Promise<LegacyCandidateRerun>{
     const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();
     return this.ctx.storage.transactionSync(()=>{assert();const snapshot=this.legacyRerunSnapshot(candidateId);if(!expectedInputs)throw new LegacyRerunError("Exact frozen contribution inputs are required.");const attempt=new LegacyCandidateReruns(this.ctx.storage).prepare({id:requestId,expectedCommit,actor,snapshot,credentialHash,sessionExpiresAt,expectedInputs});this.assertLegacyRerunScope(attempt);attempt.credentialHash=credentialHash;attempt.sessionExpiresAt=sessionExpiresAt;new LegacyCandidateReruns(this.ctx.storage).save(attempt);return attempt;});
+  }
+  async verifyLegacyCandidateGitHeads(id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<RerunGitHeadVerification>{
+    const attempt=await this.assertLegacyCandidateRerun(id,actor,credentialHash,sessionExpiresAt);
+    const authorize=async()=>{await this.assertLegacyCandidateRerun(id,actor,credentialHash,sessionExpiresAt);};
+    for(const task of attempt.snapshot.tasks){let head:string|null;try{head=await this.exactRerunGitHead(attempt,task.id,authorize);}catch(error){await authorize();if(error instanceof ExactGitInspectionError)return {ok:false,reason:error.reason};throw error;}await authorize();if(head===null)return {ok:false,reason:"tip_unavailable"};if(head!==task.currentCommit)return {ok:false,reason:"tip_differs"};}
+    await authorize();return {ok:true};
+  }
+  private async exactRerunGitHead(attempt:LegacyCandidateRerun,taskId:string,authorize:()=>Promise<void>):Promise<string|null>{
+    await authorize();const input=await this.prepareRetainedInput(taskId,attempt.snapshot.candidate.workflowInstanceId!,attempt.predecessorCandidateId,crypto.randomUUID());await authorize();
+    const fund=async()=>{await authorize();const admission=await globalOf(this.env).reserveCoreGitOperation(`exact-ref-${crypto.randomUUID()}`,input.accountKey,this.currentGitBudget());if(!admission.allowed)throw new LegacyRerunError("Git inspection capacity is unavailable. Saved inputs were preserved.");await authorize();};
+    await fund();using repo=await this.env.ARTIFACTS.get(input.workspaceRepoName);await authorize();await fund();const remote=(await repo.info()).remote;validateRecoveryRemote(remote);await authorize();
+    const expiry=Date.now()+60000;if(!await this.beginRetainedCredential(input,"workspace",expiry,"read"))throw new LegacyRerunError("Git inspection credential issuance is unconfirmed.");
+    let token:string|undefined,head:string|null=null,completed=false;
+    try{
+      await fund();const issued=await repo.createToken("read",60);token=issued.plaintext;const expiresAt=Date.parse(issued.expiresAt);
+      try{await this.recordRetainedCredential(input.id,"workspace",input.workspaceRepoName,token,expiresAt);}catch{await this.recordRetainedCredential(input.id,"workspace",input.workspaceRepoName,token,expiresAt);}
+      if(issued.scope!=="read"||!Number.isSafeInteger(expiresAt)||expiresAt<=Date.now()||expiresAt>Date.now()+65000)throw new Error("Invalid inspection credential");
+      await authorize();head=await observeExactGitHead({remote,token,ref:`refs/heads/${input.branch}`,authorize,fund});await authorize();completed=true;
+    }catch{throw new ExactGitInspectionError("inspection_unavailable");}
+    finally{
+      if(token){let revoked=await this.revokeRetainedCredential(input.id,"workspace").catch(()=>false);
+        if(!revoked){try{const admission=await globalOf(this.env).reserveCoreGitOperation(`exact-ref-cleanup-${crypto.randomUUID()}`,input.accountKey,this.currentGitBudget());if(admission.allowed&&await repo.revokeToken(token)){await this.markRetainedCredentialRevoked(input.id,"workspace",token);revoked=true;}}catch{/* Existing issuance intent remains in durable recovery. */}}
+        if(!revoked&&completed)throw new ExactGitInspectionError("cleanup_unconfirmed");
+      }
+    }
+    await authorize();return head;
   }
   async getLegacyCandidateRerun(id:string):Promise<LegacyCandidateRerun|null>{return new LegacyCandidateReruns(this.ctx.storage).get(id);}
   async markLegacyCandidateRerunDispatch(id:string,dispatch:"unknown"|"observed"):Promise<LegacyCandidateRerun>{const attempt=await this.assertLegacyCandidateRerun(id),assert=await this.authorizeHumanDecision(attempt.actor,attempt.credentialHash,true);assert();this.assertLegacyRerunScope(attempt);return new LegacyCandidateReruns(this.ctx.storage).markDispatch(id,dispatch);}
@@ -2051,6 +2096,7 @@ export class RepositoryController extends DurableObject<Env> {
   /** Recovery sweep: re-send deliveries whose queue message was never sent or was lost, until none are pending. */
   override async alarm(): Promise<void> {
     await this.reconcileLegacyPublicationReadbacks();
+    await this.retryRefReadCredentials();
     await this.retryRetainedCredentialIncidents();
     await this.retryRebaseResumeCredentials();
     await this.retryPreviewCredentialIncidents();
@@ -2751,6 +2797,7 @@ export class RepositoryController extends DurableObject<Env> {
   async destroy(): Promise<void> {
     this.repositoryDeleting();
     new RebaseResumeAttempts(this.ctx.storage);
+    if(new RefReadCredentialIncidents(this.ctx.storage).hasPending())throw new Error("Read credential cleanup remains unconfirmed; recovery records preserved");
     if(this.ctx.storage.sql.exec("SELECT 1 FROM rebase_resume_attempts a WHERE rowid=(SELECT MAX(rowid) FROM rebase_resume_attempts b WHERE b.application_id=a.application_id) AND (json_extract(doc,'$.nativeState')!='stopped' OR json_extract(doc,'$.terminal') IS NULL OR json_extract(doc,'$.dispatch')='unknown') LIMIT 1").toArray().length||new SavedRebaseResumeCredentials(this.ctx.storage).hasPending())throw new Error("Saved recovery cleanup is unconfirmed; durable attempts and credentials were preserved");
     const integrationNative=new IntegrationNativeRuntimeLedger(this.ctx.storage);if(integrationNative.hasUnconfirmed()||this.integrationNativeMissingCoverage().some(run=>run.native_protocol!==1||Object.values(this.load(true).candidates).some(candidate=>candidate.workflowInstanceId===run.instance_id)))throw new Error("Integration native shutdown remains unconfirmed; metadata was preserved");
     const tables = this.ctx.storage.sql.exec<{name:string}>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name!='repository_deletion'").toArray();
@@ -2881,13 +2928,13 @@ export class RepositoryController extends DurableObject<Env> {
       retained=new RetainedInputs(this.ctx.storage).lookup(taskId,candidate.id,inputCommit);
       if(retained){if(retained.projectId!==latest.projectId||retained.incarnation!==incarnation||retained.canonicalRepoName!==latest.canonicalRepoName||retained.workflowId!==candidate.workflowInstanceId||(inputBase!==undefined&&retained.base!==inputBase))throw new Error("Retained input scope changed");inputBase=retained.base;repoName=latest.canonicalRepoName;}
     }
-    return {projectId:fresh.projectId,incarnation,canonicalRepoName:fresh.canonicalRepoName,repoName,ownerId,accountKey,...(retained?{retainedInputReceiptId:retained.id}:{}),...(candidate?{candidateId:candidate.id,candidateCommit:candidate.candidateCommit,candidateBase:candidate.expectedAcceptedBase,...(taskId?{candidateInputCommit:inputCommit,candidateInputBase:inputBase}:{})}:{}),...(taskId&&!retained?{taskBase:latest.tasks[taskId]!.baseCommit,taskCommit:latest.tasks[taskId]!.currentCommit,taskBranch:latest.tasks[taskId]!.workspace.branch}:{}),...(grant?{publicationVersion:grant.version,acceptedCommit:grant.acceptedCommit}:{})};
+    return {projectId:fresh.projectId,incarnation,canonicalRepoName:fresh.canonicalRepoName,repoName,ownerId,accountKey,...(retained?{retainedInputReceiptId:retained.id}:{}),...(candidate?{candidateId:candidate.id,candidateCommit:candidate.candidateCommit,candidateBase:candidate.expectedAcceptedBase,...(taskId?{candidateInputCommit:inputCommit,candidateInputBase:inputBase}:{})}:{}),...(taskId&&!retained?{taskBase:latest.tasks[taskId]!.baseCommit,taskCommit:latest.tasks[taskId]!.currentCommit,taskBranch:latest.tasks[taskId]!.workspace.branch,taskContributorId:latest.tasks[taskId]!.contributor.id,taskInitiatorId:latest.tasks[taskId]!.initiatedBy?.id}:{}),...(grant?{publicationVersion:grant.version,acceptedCommit:grant.acceptedCommit}:{})};
   }
   private assertReadLocal(context:RepositoryReadContext,userId:string|null,taskId:string|null,write=false):void {
     const state=this.load(),task=taskId?state.tasks[taskId]:null;
     const role=userId?this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",userId).toArray()[0]?.role:null;
     if(this.repositoryDeleting()||state.projectId!==context.projectId||state.canonicalRepoName!==context.canonicalRepoName||this.readRepositoryIncarnation()!==context.incarnation||(userId&&!role)||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==context.ownerId)throw new Error("Repository read authority changed");
-    if(taskId&&(!task||(!context.retainedInputReceiptId&&(task.workspace.repoName!==context.repoName||task.baseCommit!==context.taskBase||task.currentCommit!==context.taskCommit||task.workspace.branch!==context.taskBranch))))throw new Error("Contribution checkpoint changed");
+    if(taskId&&(!task||(!context.retainedInputReceiptId&&(task.workspace.repoName!==context.repoName||task.baseCommit!==context.taskBase||task.currentCommit!==context.taskCommit||task.workspace.branch!==context.taskBranch||task.contributor.id!==context.taskContributorId||task.initiatedBy?.id!==context.taskInitiatorId))))throw new Error("Contribution checkpoint changed");
     if(context.candidateId){const candidate=state.candidates[context.candidateId];if(!candidate||candidate.candidateCommit!==context.candidateCommit||candidate.expectedAcceptedBase!==context.candidateBase)throw new Error("Candidate review changed");if(taskId&&( !candidate.participatingTaskIds.includes(taskId)||candidate.participatingCommits[taskId]!==context.candidateInputCommit||((candidate.frozenContributorProofs?.find(proof=>proof.id===taskId&&proof.commit===context.candidateInputCommit)?.baseCommit!==undefined||!context.retainedInputReceiptId)&&candidate.frozenContributorProofs?.find(proof=>proof.id===taskId&&proof.commit===context.candidateInputCommit)?.baseCommit!==context.candidateInputBase)))throw new Error("Frozen candidate input changed");}
     if(context.retainedInputReceiptId){const retained=new RetainedInputs(this.ctx.storage).get(context.retainedInputReceiptId);if(!retained||retained.projectId!==context.projectId||retained.incarnation!==context.incarnation||retained.canonicalRepoName!==context.repoName||retained.taskId!==taskId||retained.candidateId!==context.candidateId||retained.commit!==context.candidateInputCommit||retained.base!==context.candidateInputBase)throw new Error("Retained input read scope changed");}
     if(write){this.gitTables();if(!task||["accepted","cancelled"].includes(task.status)||(role!=="owner"&&!this.ctx.storage.sql.exec("SELECT task_id FROM git_task_writers WHERE task_id=? AND user_id=?",taskId!,userId!).toArray().length))throw new Error("Contribution writer authority changed");}
@@ -2898,6 +2945,39 @@ export class RepositoryController extends DurableObject<Env> {
     if(credentialHash&&(!userId||!await accountOf(this.env,await accountKeyFor(userId)).apiTokenHashCanRead(credentialHash,userId,context.projectId)))return false;
     this.assertReadLocal(context,userId,taskId);return true;
   }catch{return false;}}
+  async observeTaskReadyGitHead(taskId:string,userId:string,context:RepositoryReadContext,credentialHash?:string,sessionExpiresAt?:number,expectedHead?:string):Promise<string|null>{
+    const scope=()=>{
+      this.assertReadLocal(context,userId,taskId,true);
+      const task=this.load().tasks[taskId]!;
+      if(!context.incarnation||context.candidateId||context.retainedInputReceiptId||["accepted","cancelled"].includes(task.status)||!isSafeRef(task.workspace.branch))throw new RepositoryReadError(503,"authorization");
+      const parent=task.dependsOn?this.load().tasks[task.dependsOn]:undefined;
+      if(task.dependsOn&&parent?.status!=="accepted")throw new RepositoryReadError(503,"authorization");
+      return JSON.stringify({context,taskId,status:task.status,contributor:task.contributor,initiatedBy:task.initiatedBy,base:task.baseCommit,commit:task.currentCommit,repoName:task.workspace.repoName,branch:task.workspace.branch,dependsOn:task.dependsOn,parentCommit:parent?.currentCommit,activeCandidateId:task.activeCandidateId});
+    };
+    const snapshot=scope();
+    const local=()=>{if(!credentialHash&&(!Number.isFinite(sessionExpiresAt)||Date.now()>=sessionExpiresAt!))throw new RepositoryReadError(503,"authorization");if(scope()!==snapshot)throw new RepositoryReadError(503,"authorization");};
+    const authorize=async()=>{local();if(!await this.assertRepositoryReadContext(context,userId,taskId,credentialHash))throw new RepositoryReadError(503,"authorization");if(credentialHash&&!await accountOf(this.env,await accountKeyFor(userId)).apiTokenHashCanRead(credentialHash,userId,context.projectId,true))throw new RepositoryReadError(503,"authorization");local();};
+    if(expectedHead!==undefined&&!/^[a-f0-9]{40}$/.test(expectedHead))throw new RepositoryReadError(503,"authorization");
+    await authorize();
+    const snapshotDigest=await this.sha256(snapshot);await authorize();
+    const operationId=crypto.randomUUID(),ref=`refs/heads/${context.taskBranch}`;
+    const fund=async()=>{await authorize();const admission=await globalOf(this.env).reserveCoreGitOperation(`task-ref-${crypto.randomUUID()}`,context.accountKey,this.currentGitBudget());if(!admission.allowed)throw new RepositoryReadError(admission.reason==="unconfigured"?503:429,admission.reason);await authorize();};
+    await fund();using repo=await this.env.ARTIFACTS.get(context.repoName);await authorize();await fund();const remote=(await repo.info()).remote;await authorize();
+    const incidents=new RefReadCredentialIncidents(this.ctx.storage);await this.ensureRecoveryAlarm();await authorize();
+    if(!incidents.begin(operationId,{kind:"task-ready",operationId,projectId:context.projectId,incarnation:context.incarnation!,repoName:context.repoName,actorId:userId,accountKey:context.accountKey,snapshotDigest,ref},Date.now()+60000,local))throw new RepositoryReadError(503,"authorization");
+    let issued=false,completed=false,head:string|null=null;
+    try{
+      await fund();const credential=await repo.createToken("read",60);issued=true;const expiresAt=Date.parse(credential.expiresAt);
+      try{await incidents.record(operationId,context.repoName,credential.plaintext,expiresAt);}catch{await incidents.record(operationId,context.repoName,credential.plaintext,expiresAt);}
+      if(credential.scope!=="read"||!Number.isSafeInteger(expiresAt)||expiresAt<=Date.now()||expiresAt>Date.now()+65000)throw new RepositoryReadError(503,"provider_limit");
+      await authorize();head=await observeExactGitHead({remote,token:credential.plaintext,ref,authorize,fund});await authorize();
+      if(expectedHead!==undefined&&head!==expectedHead)throw new RepositoryReadError(503,"authorization");
+      completed=true;
+    }finally{
+      if(issued){const revoked=await this.revokeRefReadCredential(operationId).catch(()=>false);if(completed&&!revoked)throw new RepositoryReadError(503,"provider_limit");}
+    }
+    await authorize();return head;
+  }
   async ingestMemberCheckpoint(ev:{eventId:string;taskId:string;commit:string;ready:boolean;filesChanged?:string[]},userId:string,context:RepositoryReadContext,credentialHash?:string,sessionExpiresAt?:number):Promise<{applied:boolean}>{
     await this.ensureRecoveryAlarm();
     if(!await this.assertRepositoryReadContext(context,userId,ev.taskId))throw new Error("Checkpoint authority changed");
@@ -3047,6 +3127,19 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   protected publicationRecoveryProvider():Pick<Env,"ARTIFACTS"> {return this.env;}
+  protected async publicationNativeHead(context:RepositoryReadContext,scope:string,journalId:string,ref:string,authorize:()=>Promise<void>):Promise<string|null>{
+    const id=crypto.randomUUID(),ledger=new RefReadCredentialIncidents(this.ctx.storage);
+    const digest=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(scope))),value=>value.toString(16).padStart(2,"0")).join("");
+    const fund=async()=>{await authorize();const admission=await globalOf(this.env).reserveCoreGitOperation(`publication-ref-${crypto.randomUUID()}`,context.accountKey,this.currentGitBudget());if(!admission.allowed)throw new RepositoryReadError(429,"global_budget");await authorize();};
+    await authorize();await this.ensureRecoveryAlarm();await fund();using repository=await this.publicationRecoveryProvider().ARTIFACTS.get(context.canonicalRepoName);await authorize();
+    ledger.begin(id,{kind:"publication",operationId:journalId,projectId:context.projectId,incarnation:context.incarnation!,repoName:context.canonicalRepoName,actorId:context.ownerId,accountKey:context.accountKey,snapshotDigest:digest,ref},Date.now()+60000,()=>{if(this.repositoryDeleting()||this.publicationReadbackScope(this.load().journal.find(item=>item.id===journalId)!)!==scope)throw new Error("Publication inspection scope changed");});
+    let token:string|undefined;
+    try{await fund();const issued=await repository.createToken("read",60);token=issued.plaintext;const expiry=Date.parse(issued.expiresAt);try{await ledger.record(id,context.canonicalRepoName,token,expiry);}catch{await ledger.record(id,context.canonicalRepoName,token,expiry);}
+      if(issued.scope!=="read"||!Number.isSafeInteger(expiry)||expiry<=Date.now()||expiry>Date.now()+65000)throw new Error("Read credential scope unavailable");
+      await fund();const remote=String((await repository.info()).remote);await authorize();return await observeExactGitHead({remote,token,ref,authorize,fund});
+    }finally{if(token&&!await this.revokeRefReadCredential(id))throw new Error("Publication inspection credential cleanup unconfirmed");}
+  }
+
   private publicationReadbackScope(journal:PublicationJournalEntry):string {
     const state=this.load(),candidate=state.candidates[journal.candidateId];
     if(!candidate)throw new Error("Publication candidate unavailable");
@@ -3075,7 +3168,8 @@ export class RepositoryController extends DurableObject<Env> {
       const context=await this.repositoryReadContext(ownerId);if(!context.incarnation)throw new RepositoryReadError(503,"authorization");
       const authorize=async()=>{await ownerAuthorize?.();if(!await this.assertRepositoryReadContext(context,ownerId)||this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",ownerId).toArray()[0]?.role!=="owner"||this.publicationReadbackScope(journal)!==scope||this.load().journal.find(item=>item.id===journalId)?.state!=="PREPARED")throw new RepositoryReadError(503,"authorization");};
       using repository=await openRepositoryRead(this.publicationRecoveryProvider(),{repoName:context.canonicalRepoName,authorize,reserveGroup:id=>globalOf(this.env).reserveRepositoryReadOperation(id,context.accountKey),limits:{maxProviderCalls:16,deadlineMs:10000}});
-      result=await inspectPublicationReadback(repository,this.load().defaultBranch??"main",journal.newHead,journal.candidateTree??"");await authorize();
+      const branch=this.load().defaultBranch??"main",head=await this.publicationNativeHead(context,scope,journalId,`refs/heads/${branch}`,authorize);
+      result=await inspectPublicationReadback(repository,branch,journal.newHead,journal.candidateTree??"",head);await authorize();
       if(result.reason==="confirmed"){
         // No await between the final scope fence and entering completePublish.
         // completePublish reconciles existing history rather than dispatching a push.
@@ -3362,8 +3456,8 @@ export class RepositoryController extends DurableObject<Env> {
     if(rerun){
       const scopeKey=JSON.stringify({projectId:s.projectId,incarnation:this.readRepositoryIncarnation(),canonicalRepoName:s.canonicalRepoName});
       const authorize=async()=>{assertCurrent=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assertCurrent();if(JSON.stringify({projectId:this.load().projectId,incarnation:this.readRepositoryIncarnation(),canonicalRepoName:this.load().canonicalRepoName})!==scopeKey)throw new LegacyRerunError("Decision repository scope changed.");this.assertLegacyRerunScope(rerun);};
-      await authorize();const accountKey=await accountKeyFor(actor.userId);await authorize();
-      for(const task of rerun.snapshot.tasks){using repository=await openRepositoryRead(this.env,{repoName:task.workspace.repoName,authorize,reserveGroup:operationId=>globalOf(this.env).reserveCoreGitOperation(operationId,accountKey,this.currentGitBudget()),limits:{maxProviderCalls:8,deadlineMs:10000}});const head=(await repository.log({ref:`refs/heads/${task.workspace.branch}`,limit:1}))[0]?.hash;if(head===undefined)throw new LegacyRerunError("A contribution branch tip is unavailable. No product choice or continuation was applied.");if(head!==task.currentCommit)throw new LegacyRerunError("A contribution branch tip differs from the saved input. No product choice or continuation was applied.");}
+      await authorize();
+      for(const task of rerun.snapshot.tasks){let head:string|null;try{head=await this.exactRerunGitHead(rerun,task.id,authorize);}catch(error){await authorize();if(error instanceof ExactGitInspectionError)throw new LegacyRerunError(error.reason==="cleanup_unconfirmed"?"Git inspection credential cleanup is unconfirmed. No product choice or continuation was applied.":"Exact Git branch inspection is unavailable. No product choice or continuation was applied.");throw error;}if(head===null)throw new LegacyRerunError("A contribution branch tip is unavailable. No product choice or continuation was applied.");if(head!==task.currentCommit)throw new LegacyRerunError("A contribution branch tip differs from the saved input. No product choice or continuation was applied.");}
       await authorize();
     }
 

@@ -7,8 +7,8 @@ import { ExternalCheckRows, type ExternalCheckDetail } from "./ExternalCheckRows
 import { VERIFIER_IDENTITIES } from "@/core/verification-identities";
 import { externalCheckGate, type ExternalCheckState } from "@/core/external-checks";
 import { blocksExternalAcceptance } from "../review-gate";
-import { navigate } from "../router";
-import { abandonLegacyRerun, legacyRerunDraft, requestLegacyRerun, type LegacyRerunDraft, type LegacyRerunReport } from "../legacy-candidate-rerun";
+import { navigate, timeAgo } from "../router";
+import { abandonLegacyRerun, checkedLegacyInputObservations, legacyRerunDraft, requestLegacyRerun, type LegacyRerunDraft, type LegacyRerunReport } from "../legacy-candidate-rerun";
 import type { CandidateGeneration, Task, VerificationEvidence } from "@/core/types";
 
 /** Requirements and input commits are frozen; legacy task descriptions are current context only. */
@@ -189,6 +189,7 @@ export function LegacyCandidateRerun({ projectId, candidate, isOwner, onDone, on
     if (isOwner && candidate.status !== "accepted" && (candidate.preservationProtocolVersion !== 1 || ["composing", "repairing", "verifying", "failed", "stale"].includes(candidate.status))) void apiJson<LegacyRerunReport>(`/p/${projectId}/candidates/${candidate.id}/rerun`, { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]) }).then(report => {
       if (current !== generation.current) return;
       if (report.candidateId !== candidate.id || report.expectedCommit !== (candidate.candidateCommit ?? null)) throw new Error("Candidate changed. Refresh before requesting a rerun.");
+      checkedLegacyInputObservations(report);
       draft.current = legacyRerunDraft(draft.current, projectId, report);
       setLoaded({ scope, report }); onReserved?.(Boolean(report.operation));
     }).catch(cause => { if (current === generation.current && !controller.signal.aborted) setFailure(cause instanceof Error ? cause.message : "Rerun availability is unknown."); });
@@ -229,6 +230,8 @@ export function LegacyCandidateRerun({ projectId, candidate, isOwner, onDone, on
     <p className="text-xs text-muted-foreground">Keep this candidate’s reviews and conversation. A successor protects the recorded inputs, runs fresh checks, and needs a new approval.</p>
     <p role="status" className="text-xs text-muted-foreground">{report?.detail ?? "Checking saved inputs and rerun availability…"}</p>
     {report && <div className="text-xs text-muted-foreground space-y-1"><p>{report.expectedCommit ? <>Original candidate <code>{report.expectedCommit.slice(0, 7)}</code></> : "No candidate commit was recorded. Rebuilding uses only the frozen contribution inputs below."}</p><ul>{Object.entries(report.inputs).map(([id, input]) => <li key={id} className="break-words">{id}: <code title={input.base}>{input.base.slice(0, 7)}</code> → <code title={input.commit}>{input.commit.slice(0, 7)}</code></li>)}</ul></div>}
+    {report&&report.inputObservations===null&&<p role="status" className="text-xs text-muted-foreground">Branch observations are unavailable. No current tip or saved-object availability was confirmed.</p>}
+    {report?.inputObservations&&<section aria-label="Saved branch observations" className="space-y-2 text-xs"><p className="text-muted-foreground">Branch observations {report.inputObservations.status==='unavailable'?'incomplete or unavailable':''} · {timeAgo(report.inputObservations.checkedAt)}. These reads do not authorize replacement or change the frozen inputs.</p>{report.inputObservations.rows.length===0&&<p>Current branch tips and saved-object availability were not confirmed.</p>}{report.inputObservations.rows.map(row=><div key={row.taskId} className="space-y-1 rounded-md border border-border p-2"><p className="font-medium break-all">{row.taskId} · <code>{row.ref}</code></p><p className="break-all">Saved expected commit <code>{row.expectedCommit}</code></p><p className="break-all">Observed full-ref tip {row.observedCommit?<code>{row.observedCommit}</code>:row.status==='unavailable'?<span>Unavailable</span>:<span>No tip returned</span>}</p><p>Saved commit object {row.expectedObjectAvailable===null?'Availability unconfirmed':row.expectedObjectAvailable?'Available':'Not returned by provider'}</p>{row.namedBranchObservedCommit!==null&&row.namedBranchObservedCommit!==row.observedCommit&&<p className="break-all text-muted-foreground">Named-branch diagnostic <code>{row.namedBranchObservedCommit}</code>. This differs from the full-ref read and cannot substitute for it.</p>}</div>)}</section>}
     {report?.operation && <p className="text-xs text-muted-foreground">{report.operation.phase === "awaiting_decision" ? "A product decision needs your explicit choice before the successor can continue." : report.operation.phase === "abandoned" ? "Saved rerun abandoned. Contributions need normal Ready checks before another attempt." : report.operation.phase === "prepared" ? "Request saved. Replacement is held until the original run and workspace are confirmed stopped." : report.operation.phase === "attached" ? "Successor candidate created." : "Saved rerun is continuing; new approval is still required."}</p>}
     {failure && <p role="alert" className="text-xs text-destructive">{failure}</p>}
     <div className="flex flex-wrap gap-2">

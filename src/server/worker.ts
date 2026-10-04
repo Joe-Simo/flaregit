@@ -1,3 +1,4 @@
+import {observeRerunInputs} from "./rerun-input-observations.js";
 import {LegacyRerunError} from "./legacy-candidate-rerun.js";
 export {FlareGitRebaseResumeWorkflow} from "./rebase-resume-workflow.js";
 import { openRepositoryRead, RepositoryReadError } from "./repository-read-budget.js";
@@ -1291,11 +1292,13 @@ export default {
                 if (!sessionValid() || !await project.assertRepositoryReadContext(readContext, userId, task.id, credentialHash) || !sessionValid()) throw new RepositoryReadError(503, "authorization");
               };
               using repo = await openRepositoryRead(env, { repoName: task.workspace.repoName, authorize, reserveGroup: (operationId) => globalOf(env).reserveRepositoryReadOperation(operationId, readContext.accountKey), limits: { maxProviderCalls: 10_016, deadlineMs: 120_000 } });
-              const head = (await repo.log({ ref: `refs/heads/${task.workspace.branch}`, limit: 1 }))[0]?.hash ?? (await repo.log({ ref: task.workspace.branch, limit: 1 }))[0]?.hash;
+              const head = await project.observeTaskReadyGitHead(task.id,userId,readContext,credentialHash,auth.expiresAt);
               if (!head) return repositoryReadText(`Nothing pushed to ${task.workspace.branch} yet`, 409);
               const [base, tip] = await Promise.all([resolveCommit(repo, task.baseCommit), resolveCommit(repo, head)]);
               if (!base || !tip) return repositoryReadText("Could not read the saved change and base; retry without marking ready", 503);
               const filesChanged = (await diffTrees(repo, base.treeHash, tip.treeHash)).map((file) => file.path);
+              await authorize();
+              await project.observeTaskReadyGitHead(task.id,userId,readContext,credentialHash,auth.expiresAt,head);
               await authorize();
               const { applied } = await project.ingestMemberCheckpoint({ eventId: `ready-${task.id}-${head}`, taskId: task.id, commit: head, ready: true, filesChanged }, userId, readContext, credentialHash, auth.expiresAt);
               return Response.json({ task: task.id, commit: head, applied }, { headers: { "Cache-Control": "no-store" } });
@@ -1373,8 +1376,10 @@ export default {
           try{
             if(runtimeInspectionRoute){if(currentAuth.viaToken)return text("Signed-in owner required for runtime inspection",403);const report=await project.candidateRuntimeInspection(candidateId,actor,credentialHash,currentAuth.expiresAt),finalAuth=await authenticate(request,env);if(finalAuth instanceof Response)return finalAuth;if(finalAuth.id!==userId||finalAuth.viaToken)return text("Owner authentication changed",403);await project.assertCandidateRuntimeInspection(candidateId,report.workflowId,report.incarnation,report.protocol,actor,finalAuth.expiresAt);return Response.json({...report,source:"recorded-ledger",providerVerified:false},{headers:{"Cache-Control":"no-store"}}); }
             if(method==="GET"){
-              const available=await project.legacyCandidateRuntimeAvailable(candidateId),report=await project.legacyCandidateRerunReport(candidateId,actor,credentialHash,currentAuth.expiresAt);
-              return Response.json(!available&&report.eligible?{...report,eligible:false,detail:"The old native runtime identities were not recorded. Operator recovery is required before rerun; no workspace is guessed stopped."}:report,{headers:{"Cache-Control":"no-store"}});
+              await project.legacyCandidateRerunReport(candidateId,actor,credentialHash,currentAuth.expiresAt);
+              let scope:Awaited<ReturnType<typeof project.ownerRerunObservationScope>>|null=null;try{scope=await project.ownerRerunObservationScope(candidateId,actor,credentialHash,currentAuth.expiresAt);}catch{/* Missing legacy proof keeps review report available; fresh owner authorization below still required. */}const authorize=async()=>{const fresh=await authenticate(request,env);if(fresh instanceof Response||fresh.id!==userId||(fresh.viaToken===true)!==(actor.viaToken)||(fresh.viaToken&&(fresh.tokenScope!=="full"||(fresh.tokenRepo&&fresh.tokenRepo!==projectId))))throw new RepositoryReadError(503,"authorization");const now=await project.ownerRerunObservationScope(candidateId,actor,credentialHash,fresh.expiresAt);if(scope&&JSON.stringify(now)!==JSON.stringify(scope))throw new RepositoryReadError(503,"authorization");};
+              const inputObservations=scope?await observeRerunInputs(scope,(repoName,remainingMs)=>openRepositoryRead(env,{repoName,authorize,reserveGroup:operationId=>globalOf(env).reserveRepositoryReadOperation(operationId,accountKey),limits:{maxProviderCalls:4,maxMetadataBytes:32768,maxBlobBytes:1,deadlineMs:remainingMs}}),authorize).catch(()=>({checkedAt:new Date().toISOString(),rows:[],status:"unavailable" as const})):{checkedAt:new Date().toISOString(),rows:[],status:"unavailable"};const currentAvailable=await project.legacyCandidateRuntimeAvailable(candidateId);const finalAuth=await authenticate(request,env);if(finalAuth instanceof Response||finalAuth.id!==userId||(finalAuth.viaToken===true)!==actor.viaToken||(finalAuth.viaToken&&(finalAuth.tokenScope!=="full"||(finalAuth.tokenRepo&&finalAuth.tokenRepo!==projectId))))throw new RepositoryReadError(503,"authorization");const freshReport=await project.legacyCandidateRerunReport(candidateId,actor,credentialHash,finalAuth.expiresAt);if(scope)await authorize();
+              return Response.json({...(!currentAvailable&&freshReport.eligible?{...freshReport,eligible:false,detail:"The old native runtime identities were not recorded. Operator recovery is required before rerun; no workspace is guessed stopped."}:freshReport),inputObservations},{headers:{"Cache-Control":"no-store"}});
             }
             if(legacyAbandonRoute){const b=await body<{requestId?:string;confirm?:string}>();if(!b||Object.keys(b).some(key=>key!=="requestId"&&key!=="confirm")||typeof b.requestId!=="string"||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(b.requestId)||b.confirm!=="abandon pending rerun")return text("Confirm the saved undispatched rerun identity",400);const known=await project.getLegacyCandidateRerun(b.requestId);if(!known||known.predecessorCandidateId!==candidateId)return text("Saved rerun unavailable",404);const abandoned=await project.abandonLegacyCandidateRerun(b.requestId,actor,credentialHash,currentAuth.expiresAt);return Response.json({id:abandoned.id,phase:abandoned.phase,dispatch:abandoned.dispatch},{headers:{"Cache-Control":"no-store"}});}
             const b=await body<{expectedCommit?:string|null;expectedInputs?:Record<string,{commit:string;base:string}>;requestId?:string}>();
@@ -1384,13 +1389,7 @@ export default {
             if(attempt.phase==="abandoned")return text("This rerun was explicitly abandoned. Use a new request after checking current contribution inputs.",409);
             if(attempt.phase!=="attached"&&attempt.phase!=="awaiting_decision"&&!attempt.continuationWorkflowId){
               const accountKey=await accountKeyFor(userId);await authorize();
-              const verifyHeads=async()=>{for(const task of attempt.snapshot.tasks){
-                using repository=await openRepositoryRead(env,{repoName:task.workspace.repoName,authorize,reserveGroup:operationId=>globalOf(env).reserveCoreGitOperation(operationId,accountKey,{accountUsdMicros:null,globalUsdMicros:null})});
-                const head=(await repository.log({ref:`refs/heads/${task.workspace.branch}`,limit:1}))[0]?.hash;
-                if(head===undefined)throw new LegacyRerunError("A contributor branch tip is unavailable. Saved inputs were preserved; rerun was not dispatched.");
-                if(head!==task.currentCommit)throw new LegacyRerunError("A contributor branch tip differs from the saved input. Saved inputs were preserved; rerun was not dispatched.");
-              }
-              };await verifyHeads();
+              const verifyHeads=async()=>{const proof=await project.verifyLegacyCandidateGitHeads(attempt.id,actor,credentialHash,currentAuth.expiresAt);if(!proof.ok){const messages={tip_unavailable:"A contributor branch tip is unavailable. Saved inputs were preserved; rerun was not dispatched.",tip_differs:"A contributor branch tip differs from the saved input. Saved inputs were preserved; rerun was not dispatched.",inspection_unavailable:"Exact Git branch inspection is unavailable. Saved inputs were preserved.",cleanup_unconfirmed:"Git inspection credential cleanup is unconfirmed. Saved inputs were preserved."};throw new LegacyRerunError(messages[proof.reason]);}};await verifyHeads();
               await authorize();attempt=await project.stopLegacyCandidateRerun(attempt.id);await authorize();await verifyHeads();
               const {plan}=await account.getBilling();const denied=await admitRun(env,account,planLimits(env)[plan],attempt.successorWorkflowId);if(denied)return denied;await authorize();
               attempt=await project.commitLegacyCandidateRerunReassignment(attempt.id);await authorize();

@@ -4,11 +4,12 @@ export type PublicationReadbackReason="awaiting_readback"|"confirmed"|"not_obser
 export interface PublicationReadbackResult {reason:PublicationReadbackReason;head?:string;checkedAt:string}
 export interface PublicationReadbackReport extends PublicationReadbackResult {journalId:string;automaticAttempts:number;canCheck:boolean}
 /** A pinned canonical HEAD ancestry proof; absence never proves the push did not land. */
-export async function inspectPublicationReadback(repo:Pick<RepositoryReadCapability,"log"|"readCommit">,branch:string,commit:string,tree:string):Promise<PublicationReadbackResult>{
+export async function inspectPublicationReadback(repo:Pick<RepositoryReadCapability,"log"|"readCommit">,branch:string,commit:string,tree:string,observedHead:string|null):Promise<PublicationReadbackResult>{
  if(!isSafeRef(branch)||![commit,tree].every(hash=>/^[a-f0-9]{40}$/.test(hash)))throw new Error("Invalid publication proof scope");
- const checkedAt=new Date().toISOString(),heads=await repo.log({ref:`refs/heads/${branch}`,limit:1});
- if(heads.length!==1||!/^[a-f0-9]{40}$/.test(heads[0]!.hash))return {reason:"not_observed",checkedAt};
- const head=heads[0]!.hash;
+ const checkedAt=new Date().toISOString();
+ if(observedHead===null)return {reason:"not_observed",checkedAt};
+ if(!/^[a-f0-9]{40}$/.test(observedHead))throw new Error("Invalid native canonical head");
+ const head=observedHead;
  for(let offset=0;offset<1000;offset+=100){
   const page=await repo.log({ref:head,limit:100,offset});
   if(page.length>100||page.some(item=>!/^[a-f0-9]{40}$/.test(item.hash)))throw new Error("Invalid publication ancestry response");

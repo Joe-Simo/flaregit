@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { abandonLegacyRerun, legacyRerunDraft, requestLegacyRerun, type LegacyRerunReport } from "../src/web/legacy-candidate-rerun";
+import { checkedLegacyInputObservations, abandonLegacyRerun, legacyRerunDraft, requestLegacyRerun, type LegacyRerunReport, type LegacyInputObservation } from "../src/web/legacy-candidate-rerun";
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 const report: LegacyRerunReport = { candidateId: "old", expectedCommit: "a".repeat(40), inputs: { task: { commit: "b".repeat(40), base: "c".repeat(40) } }, eligible: true, detail: "Eligible" };
@@ -38,4 +38,24 @@ test("incomplete candidate rebuild retains null SHA without inventing a commit",
     return Response.json({ id: draft.requestId, phase: "prepared", dispatch: "not_started", successorWorkflowId: "saved" }, { status: 202 });
   }, { preconnect: originalFetch.preconnect });
   await requestLegacyRerun("repository", "old", draft);
+});
+
+test('branch diagnostic changes preserve frozen request identity and reject unrelated inputs',()=>{
+ const draft=legacyRerunDraft(null,'repository',report);
+ const observations={status:'unavailable' as const,checkedAt:'2026-10-03T00:00:00Z',rows:[{taskId:'task',expectedCommit:'b'.repeat(40),ref:'refs/heads/task/task',observedCommit:null,namedBranchObservedCommit:'d'.repeat(40),expectedObjectAvailable:null,status:'unavailable' as const}]};
+ const observed={...report,inputObservations:observations};expect(checkedLegacyInputObservations(observed)).toEqual(observations);expect(legacyRerunDraft(draft,'repository',observed)).toBe(draft);expect(draft.expectedInputs.task?.commit).toBe('b'.repeat(40));
+ expect(()=>checkedLegacyInputObservations({...observed,inputObservations:{...observations,rows:[{...observations.rows[0]!,expectedCommit:'e'.repeat(40)}]}})).toThrow();
+ expect(()=>checkedLegacyInputObservations({...observed,inputObservations:{...observations,rows:[observations.rows[0]!,observations.rows[0]!]}})).toThrow();
+ expect(checkedLegacyInputObservations(report)).toBeNull();
+});
+
+test('branch evidence distinguishes whole-unavailable fallback from partial known observations',()=>{
+ const observation:LegacyInputObservation={taskId:'task',expectedCommit:'b'.repeat(40),ref:'refs/heads/task/task',observedCommit:null,namedBranchObservedCommit:null,expectedObjectAvailable:null,status:'unavailable' as const};
+ const checked=(rows:typeof observation[],status:'observed'|'unavailable'='unavailable')=>checkedLegacyInputObservations({...report,inputObservations:{status,checkedAt:'2026-10-03T00:00:00Z',rows}});
+ expect(()=>checked([],'observed')).toThrow('incomplete');
+ expect(checked([])?.status).toBe('unavailable');
+ expect(checked([{...observation,observedCommit:'d'.repeat(40)}])?.rows[0]?.observedCommit).toBe('d'.repeat(40));
+ expect(()=>checked([observation],'observed')).toThrow('incomplete');
+ expect(checkedLegacyInputObservations({...report,inputObservations:null})).toBeNull();
+ expect(checked([{...observation,namedBranchObservedCommit:'d'.repeat(40)}])?.rows[0]?.status).toBe('unavailable');
 });
