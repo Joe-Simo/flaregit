@@ -17,7 +17,7 @@ if (process.argv[2] === "--native-integrity") {
     repoDir: z.string().min(1), candidateCommit: sha, candidateTree: sha, expectedBase: sha.nullable(), acceptedTarget: acceptedTargetSchema.optional(),
     requirementsVersion: z.number().int().positive(), policy: z.record(z.string(), z.unknown()),
     protectedPaths: z.array(z.string()), allowedScope: z.array(z.string()).min(1), landing: z.enum(["merge", "squash"]),
-    contributors: z.array(z.object({ id: z.string().min(1), commit: sha, baseCommit: sha.nullable(), ref: z.string().min(1), allowedScope: z.array(z.string()).min(1) }).strict()).min(1).max(8),
+    contributors: z.array(z.object({ id: z.string().min(1), commit: sha, baseCommit: sha.nullable(), ref: z.string().min(1), allowedScope: z.array(z.string()).min(1), stackedOn:z.object({taskId:z.string().min(1),commit:sha,ref:z.string().min(1)}).strict().optional() }).strict()).min(1).max(8),
   }).strict();
   try {
     const input = schema.parse(JSON.parse(process.argv[3] ?? ""));

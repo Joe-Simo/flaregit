@@ -30,3 +30,19 @@ test("native integrity proves actual parallel initial roots without fabricating 
     expect(gitOrThrow(canonical,["rev-list","--max-parents=0","refs/heads/main"],{gitDir:true}).trim().split("\n").sort()).toEqual([a,b].sort());
   }finally{fs.rmSync(work,{recursive:true,force:true});}
 });
+
+test("stacked initial child keeps its real parent checkpoint and requires that reviewed parent in the batch",async()=>{
+ const work=fs.mkdtempSync(path.join(os.tmpdir(),"flaregit-stacked-first-"));try{
+  const run=(args:string[])=>gitOrThrow(work,args).trim();run(["init","--quiet","-b","main"]);run(["config","user.name","Contributor"]);run(["config","user.email","contributor@example.test"]);
+  fs.mkdirSync(path.join(work,"src"));fs.writeFileSync(path.join(work,"src/parent.ts"),"parent contribution\n");run(["add","."]);run(["commit","--quiet","-m","Actual parent root"]);const parent=run(["rev-parse","HEAD"]);run(["update-ref","refs/flaregit/tasks/parent",parent]);
+  fs.writeFileSync(path.join(work,"src/child.ts"),"child contribution\n");run(["add","."]);run(["commit","--quiet","-m","Actual stacked child"]);const child=run(["rev-parse","HEAD"]);run(["update-ref","refs/flaregit/tasks/child",child]);
+  const policy={kind:"git-integrity"},target={kind:"unborn" as const,projectId:"synthetic",incarnation:crypto.randomUUID(),canonicalRepoName:"canonical",ref:"refs/heads/main",branch:"main",acceptedCommit:null,acceptedVersion:0 as const,policyVersion:1,policy,requirements:[] as []};
+  const input:NativeIntegrityInput={repoDir:work,candidateCommit:child,candidateTree:run(["rev-parse","HEAD^{tree}"]),expectedBase:null,acceptedTarget:target,requirementsVersion:1,policy,protectedPaths:["tests/"],allowedScope:["src/"],landing:"merge",contributors:[{id:"parent",commit:parent,baseCommit:null,ref:"refs/flaregit/tasks/parent",allowedScope:["src/parent.ts"]},{id:"child",commit:child,baseCommit:parent,ref:"refs/flaregit/tasks/child",allowedScope:["src/child.ts"],stackedOn:{taskId:"parent",commit:parent,ref:"refs/flaregit/tasks/parent"}}]};
+  expect((await verifyNativeIntegrity(input)).status).toBe("passed");
+  expect((await verifyNativeIntegrity({...input,contributors:[input.contributors[1]!]})).status).toBe("failed");
+  expect((await verifyNativeIntegrity({...input,contributors:[input.contributors[0]!,{...input.contributors[1]!,stackedOn:undefined}]})).status).toBe("failed");
+  expect((await verifyNativeIntegrity({...input,contributors:[{...input.contributors[0]!,allowedScope:["src/child.ts"]},input.contributors[1]!]})).status).toBe("failed");
+  const cycle=await verifyNativeIntegrity({...input,contributors:[{...input.contributors[0]!,baseCommit:child,stackedOn:{taskId:"child",commit:child,ref:"refs/flaregit/tasks/child"}},input.contributors[1]!]});
+  expect(cycle.status).toBe("failed");expect(cycle.testResults[0]?.items[0]?.message).toContain("cycle");
+ }finally{fs.rmSync(work,{recursive:true,force:true});}
+});

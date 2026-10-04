@@ -66,3 +66,33 @@ test("independent controllers race create-only publication without overwriting e
   expect(gitOrThrow(second.workspace.localPath!,["rev-parse","HEAD"])).toBe(secondCheckpoint.currentCommit!);
  }finally{await rm(f.directory,{recursive:true,force:true});}
 });
+
+test("stacked initial child retains actual parent base and requires the same frozen batch parent",async()=>{
+ const f=await fixture();try{
+  const parent=await f.task("initial-parent","README.md","# Parent contribution\n");
+  const child=await f.controller.createTask({taskId:"initial-child",goal:"Add a license on the pending parent",contributorName:"Child",contributorType:"human",dependsOn:parent.id,allowedScope:["LICENSE"]});
+  expect(child.baseCommit).toBe(parent.currentCommit);expect(child.currentCommit).toBe(parent.currentCommit);expect(child.dependsOn).toBe(parent.id);
+  await Bun.write(join(child.workspace.localPath!,"LICENSE"),"MIT\n");const checkpoint=f.controller.recordTaskCheckpoint({taskId:child.id,isReadyForIntegration:true});
+  await expect(f.controller.prepareFirstRootCandidate(child.id)).rejects.toThrow();
+  const prepared=await f.controller.prepareFirstRootCandidate([parent.id,child.id]);expect(prepared.candidate?.status).toBe("verified");
+  expect(prepared.candidate?.frozenContributorProofs?.find(proof=>proof.id===child.id)).toMatchObject({baseCommit:parent.currentCommit,stackedOn:{taskId:parent.id,commit:parent.currentCommit,ref:`refs/flaregit/tasks/${parent.id}`}});
+  expect((await f.controller.acceptFirstRootCandidate(prepared.candidate!.id,{commit:prepared.candidate!.candidateCommit!,tree:prepared.evidence!.candidateTree,actorId:"reviewer"})).success).toBe(true);
+  expect(git(f.canonical.remote,["merge-base","--is-ancestor",parent.currentCommit,prepared.candidate!.candidateCommit!],{gitDir:true}).ok).toBe(true);
+  expect(git(f.canonical.remote,["merge-base","--is-ancestor",checkpoint.currentCommit!,prepared.candidate!.candidateCommit!],{gitDir:true}).ok).toBe(true);
+  expect(gitOrThrow(child.workspace.localPath!,["rev-parse","HEAD"])).toBe(checkpoint.currentCommit!);
+ }finally{await rm(f.directory,{recursive:true,force:true});}
+});
+
+test("advancing a pending initial parent does not rewrite or relabel its child's saved base",async()=>{
+ const f=await fixture();try{
+  const parent=await f.task("pending-parent","README.md","Original parent\n");
+  const child=await f.controller.createTask({taskId:"pending-child",goal:"Add child work",contributorName:"Child",contributorType:"human",dependsOn:parent.id});
+  await Bun.write(join(child.workspace.localPath!,"LICENSE"),"MIT\n");const originalChild=f.controller.recordTaskCheckpoint({taskId:child.id,isReadyForIntegration:true});
+  await Bun.write(join(parent.workspace.localPath!,"README.md"),"Advanced parent\n");const advanced=f.controller.recordTaskCheckpoint({taskId:parent.id,isReadyForIntegration:true});
+  await expect(f.controller.prepareFirstRootCandidate([parent.id,child.id])).rejects.toThrow();
+  expect(f.controller.getState().tasks[child.id]?.baseCommit).toBe(parent.currentCommit);
+  expect(gitOrThrow(child.workspace.localPath!,["rev-parse","HEAD"])).toBe(originalChild.currentCommit!);
+  expect(gitOrThrow(parent.workspace.localPath!,["rev-parse","HEAD"])).toBe(advanced.currentCommit!);
+  expect(git(f.canonical.remote,["for-each-ref"],{gitDir:true}).stdout).toBe("");
+ }finally{await rm(f.directory,{recursive:true,force:true});}
+});

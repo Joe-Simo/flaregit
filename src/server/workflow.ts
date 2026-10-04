@@ -391,11 +391,11 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
   private async canonicalRemote(stub: Stub, input: RetainedInput) { return this.retainedRemote(stub, input, "canonical", "write"); }
   private async pinInput(input: RetainedInput, directory: string, remote: {remote:string;token:string}, stub: Stub, exec: (command:string,env?:Record<string,string>)=>Promise<{success:boolean;stdout:string}>) {
     const beforeCommand = async (phase: "before" | "after") => { if (phase === "before") await this.fundedRetainedCommand(input, stub); else await this.retainedAuthority(input, stub); };
-    if (input.base === null) {
+    if (input.base === null || input.acceptedTarget?.kind === "unborn") {
       if (input.acceptedTarget?.kind !== "unborn") throw new Error("Unborn preservation requires the frozen target");
-      const original = await retainUnbornGitInput({ exec, directory, remote: remote.remote, token: remote.token, incarnation: input.incarnation, taskId: input.taskId, commit: input.commit, beforeCommand, acceptedTarget: input.acceptedTarget });
-      if (original.ref !== input.protectedRef || input.protectedBaseRef !== null) throw new Error("Protected unborn contribution scope differs");
-      return stub.recordRetainedInput(input, { commit: original.commit, base: null, rootCommit: original.rootCommit, rootAncestryVerified: true });
+      const original = await retainUnbornGitInput({ exec, directory, remote: remote.remote, token: remote.token, incarnation: input.incarnation, taskId: input.taskId, commit: input.commit, beforeCommand, acceptedTarget: input.acceptedTarget, base:input.base, stackedOn:input.stackedOn });
+      if (original.ref !== input.protectedRef || original.protectedBaseRef !== input.protectedBaseRef) throw new Error("Protected unborn contribution scope differs");
+      return stub.recordRetainedInput(input, { commit: original.commit, base: original.base, rootCommit: original.rootCommit, rootAncestryVerified: true });
     }
     const original = await retainGitInput({ exec, directory, remote: remote.remote, token: remote.token, incarnation: input.incarnation, taskId: input.taskId, commit: input.commit, beforeCommand });
     const base = await retainGitInput({ exec, directory, remote: remote.remote, token: remote.token, incarnation: input.incarnation, taskId: input.taskId, commit: input.base, beforeCommand });
@@ -427,6 +427,11 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       return { ok: false, error: "Managed verification budget unavailable; saved contributor checkpoints remain available. Configure a budget or use external checks." };
     }
 
+    if(candidate.acceptedTarget?.kind==="unborn"){
+      const pending=[...tasks],ordered:typeof tasks=[];
+      while(pending.length){const index=pending.findIndex(task=>{const proof=candidate.frozenContributorProofs?.find(value=>value.id===task.id);return proof?.baseCommit===null||!!proof?.stackedOn&&ordered.some(parent=>parent.id===proof.stackedOn!.taskId);});if(index<0)return{ok:false,error:"Initial stacked contributions require their exact frozen parent in this batch"};ordered.push(pending.splice(index,1)[0]!);}
+      tasks.splice(0,tasks.length,...ordered);
+    }
     const inputs = await Promise.all(tasks.map(task => stub.prepareRetainedInput(task.id, parentWorkflowId, candidate.id, crypto.randomUUID())));
     if(candidate.acceptedTarget&&inputs.some(input=>input.incarnation!==candidate.acceptedTarget!.incarnation||input.projectId!==candidate.acceptedTarget!.projectId||input.canonicalRepoName!==candidate.acceptedTarget!.canonicalRepoName))return{ok:false,error:"Frozen integration target incarnation or repository changed before preservation"};
     if (!inputs.length || inputs.some(input => input.commit !== candidate.participatingCommits[input.taskId])) return { ok: false, error: "A frozen contribution advanced before preservation; no candidate was composed" };

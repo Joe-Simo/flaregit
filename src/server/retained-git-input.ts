@@ -56,10 +56,13 @@ export async function retainGitInput(options: RetainGitInputOptions): Promise<Re
 }
 
 /** Pin only real contributor history for an unborn target; there is no base object to pin. */
-export async function retainUnbornGitInput(options: RetainGitInputOptions & { acceptedTarget: UnbornAcceptedTarget }): Promise<RetainedGitInput & { base: null; protectedBaseRef: null; rootCommit: string; rootAncestryVerified: true }> {
+export async function retainUnbornGitInput(options: RetainGitInputOptions & { acceptedTarget: UnbornAcceptedTarget; base?:string|null; stackedOn?:{taskId:string;commit:string;ref:string} }): Promise<RetainedGitInput & { base: string|null; protectedBaseRef: string|null; rootCommit: string; rootAncestryVerified: true }> {
   retainedGitInputRef(options.incarnation,options.taskId,options.commit);
   const target=acceptedTargetSchema.parse(options.acceptedTarget);
   if(target.kind!=="unborn"||target.incarnation!==options.incarnation)throw new Error("Retained unborn target scope differs");
+  const base=options.base??null;
+  if(base!==null){const stack=options.stackedOn;if(!stack||stack.taskId===options.taskId||stack.commit!==base||stack.ref!==retainedGitInputRef(options.incarnation,stack.taskId,base))throw new Error("Exact frozen initial parent checkpoint required");}
+  else if(options.stackedOn)throw new Error("Root input cannot claim an initial parent");
   await options.beforeCommand("before");
   const roots=await options.exec(`git --no-replace-objects -C ${q(options.directory)} rev-list --max-parents=0 ${q(options.commit)}`);
   await options.beforeCommand("after");
@@ -69,6 +72,13 @@ export async function retainUnbornGitInput(options: RetainGitInputOptions & { ac
   const ancestry=await options.exec(`git --no-replace-objects -C ${q(options.directory)} merge-base --is-ancestor ${q(values[0]!)} ${q(options.commit)}`);
   await options.beforeCommand("after");
   if(!ancestry.success)throw new Error("Contributor root ancestry was not confirmed");
+  if(base!==null){
+    await options.beforeCommand("before");const parent=await options.exec(`git --no-replace-objects -C ${q(options.directory)} merge-base --is-ancestor ${q(base)} ${q(options.commit)}`);await options.beforeCommand("after");
+    if(!parent.success)throw new Error("Frozen initial parent is not an ancestor");
+    await options.beforeCommand("before");const remoteParent=await options.exec(`git -C ${q(options.directory)} ls-remote --refs ${q(options.remote)} ${q(options.stackedOn!.ref)}`,gitAuthEnv(options.token));await options.beforeCommand("after");
+    if(!remoteParent.success||remoteParent.stdout.trim()!==`${base}\t${options.stackedOn!.ref}`)throw new Error("Frozen initial parent pin was not confirmed");
+  }
   const retained=await retainGitInput(options);
-  return{...retained,base:null,protectedBaseRef:null,rootCommit:values[0]!,rootAncestryVerified:true};
+  const protectedBaseRef=base===null?null:(await retainGitInput({...options,commit:base})).ref;
+  return{...retained,base,protectedBaseRef,rootCommit:values[0]!,rootAncestryVerified:true};
 }

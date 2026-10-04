@@ -40,6 +40,19 @@ export function freezeCandidateGeneration(
     participatingCommits[task.id] = task.currentCommit;
   }
 
+  const initialProofs=acceptedTarget?.kind==="unborn"?opts.tasks.map(task=>{
+    if(!/^[A-Za-z0-9_-]+$/.test(task.id))throw Error("Initial contributor identity cannot form a platform-owned proof ref");
+    const ref=`refs/flaregit/tasks/${task.id}`;
+    if(task.baseCommit===null){if(task.dependsOn)throw Error("A root contributor cannot conceal a pending parent dependency");return{id:task.id,commit:participatingCommits[task.id]!,baseCommit:null,ref,allowedScope:[...task.allowedScope]};}
+    const parent=task.dependsOn?opts.tasks.find(value=>value.id===task.dependsOn):undefined;
+    if(!parent||parent.id===task.id||parent.currentCommit!==task.baseCommit)throw Error("An initial stacked change requires its exact parent checkpoint in the reviewed batch");
+    return{id:task.id,commit:participatingCommits[task.id]!,baseCommit:task.baseCommit,ref,allowedScope:[...task.allowedScope],stackedOn:{taskId:parent.id,commit:task.baseCommit,ref:`refs/flaregit/tasks/${parent.id}`}};
+  }):undefined;
+  if(initialProofs){
+    if(new Set(initialProofs.map(proof=>proof.id)).size!==initialProofs.length)throw Error("Initial contribution identities must be unique");
+    for(const proof of initialProofs){let current=proof;const visited=new Set<string>();while(current.stackedOn){if(visited.has(current.id))throw Error("Initial stack dependencies cannot form a cycle");visited.add(current.id);const parent=initialProofs.find(value=>value.id===current.stackedOn!.taskId);if(!parent)throw Error("Initial stack root contribution is missing");current=parent;}}
+  }
+
   // Deep clone frozen requirements to guarantee immutability
   const frozenRequirements: Requirement[] = JSON.parse(
     JSON.stringify(opts.approvedRequirements)
@@ -58,6 +71,7 @@ export function freezeCandidateGeneration(
     frozenPolicyVersion: opts.policyVersion,
     frozenVerificationPolicy: JSON.parse(JSON.stringify(opts.verificationPolicy)),
     frozenRequirements,
+    ...(initialProofs?{frozenContributorProofs:initialProofs}:{}),
     repairAttempts: [],
     status: "composing",
     createdAt: new Date().toISOString(),

@@ -185,21 +185,26 @@ export class FlareGitRepositoryController {
     contributorType: "human" | "agent";
     requirements?: Requirement[];
     allowedScope?: string[];
+    dependsOn?: string;
   }): Promise<Task> {
     if (this.state.tasks[opts.taskId]) throw new Error(`Task ${opts.taskId} already exists`);
+    const parent=opts.dependsOn?this.state.tasks[opts.dependsOn]:undefined;
+    if(opts.dependsOn&&(!parent||!parent.currentCommit||parent.status==="cancelled"))throw Error("Stacked parent checkpoint is unavailable");
+    if(parent&&this.state.acceptedState.kind==="unborn"&&JSON.stringify(parent.acceptedTarget)!==JSON.stringify(this.deps.unbornTarget))throw Error("Stacked parent accepted target changed");
     const isolated = await isolateTaskWorkspace(this.deps.artifacts, {
       projectId: this.state.projectId,
       taskId: opts.taskId,
       goal: opts.goal,
       contributorName: opts.contributorName,
       contributorType: opts.contributorType,
-      canonicalRepoName: this.state.canonicalRepoName,
-      baseCommit: this.state.acceptedState.currentCommit,
+      canonicalRepoName: parent?.workspace.repoName??this.state.canonicalRepoName,
+      baseCommit: parent?.currentCommit??this.state.acceptedState.currentCommit,
       ...(this.state.acceptedState.kind==="unborn"?{unbornTarget:this.deps.unbornTarget}:{}),
       allowedScope: opts.allowedScope??(settingsFor(this.state.verificationPolicy).fixture==="git-integrity"?settingsFor(this.state.verificationPolicy).allowedScope:undefined),
       workspacesDir: path.join(this.deps.storageDir, "workspaces", opts.taskId),
     });
     const task:Task=this.state.acceptedState.kind==="unborn"&&this.deps.unbornTarget?{...isolated,acceptedTarget:structuredClone(this.deps.unbornTarget)}:isolated;
+    if(parent)task.dependsOn=parent.id;
     if (opts.requirements) task.requirements = opts.requirements;
     this.state.tasks[task.id] = task;
     this.persist();
@@ -282,7 +287,7 @@ export class FlareGitRepositoryController {
 
   private policyViolations(repoDir: string, task: Task): string[] {
     if(!task.currentCommit)throw new Error("Contribution has no committed checkpoint");
-    const files = changedFiles(repoDir, this.state.acceptedState.currentCommit, task.currentCommit);
+    const files = changedFiles(repoDir, this.state.acceptedState.currentCommit===null?task.baseCommit:this.state.acceptedState.currentCommit, task.currentCommit);
     const scoped = (f: string) =>
       task.allowedScope.some((s) => s==="*"||(s.endsWith("/**/*") ? f.startsWith(s.slice(0, -4)) : s.endsWith("/") ? f.startsWith(s) : f === s));
     const protectedHit = (f: string) => this.deps.verifier.protectedPaths.some((p) => (p.endsWith("/") ? f.startsWith(p) : f === p));
@@ -297,7 +302,7 @@ export class FlareGitRepositoryController {
     const taskIds=typeof ids==="string"?[ids]:ids,target=this.deps.unbornTarget;
     if(this.state.acceptedState.currentCommit!==null||!target)return{success:false,error:"Initial target is stale; preserve the contribution and explicitly rebase it"};
     if(!taskIds.length||taskIds.length>8||new Set(taskIds).size!==taskIds.length)throw Error("One to eight distinct initial contributions required");
-    const tasks=taskIds.map(id=>{const task=this.state.tasks[id];if(!task||!task.currentCommit||task.baseCommit!==null||task.status==="cancelled")throw Error("Initial contribution checkpoints are unavailable");return task;});
+    const tasks=taskIds.map(id=>{const task=this.state.tasks[id];if(!task||!task.currentCommit||task.status==="cancelled")throw Error("Initial contribution checkpoints are unavailable");return task;});
     for(let a=0;a<tasks.length;a++)for(let b=a+1;b<tasks.length;b++)for(const left of tasks[a]!.requirements.filter(requirement=>requirement.status==="approved"))for(const right of tasks[b]!.requirements.filter(requirement=>requirement.status==="approved")){if(detectContradiction(left,right)){const decision=createProductDecision(left,right);this.state.decisions[decision.id]=decision;this.setStatus(tasks,"needs_decision");return{success:false,decision,error:"Initial requirements conflict; a human decision is required before composition"};}}
     const candidate=freezeCandidateGeneration({tasks,acceptedTarget:target,acceptedBaseCommit:null,policyVersion:this.state.policyVersion,verificationPolicy:this.state.verificationPolicy,approvedRequirements:tasks.flatMap(task=>task.requirements).filter(requirement=>requirement.status==="approved")});
     this.state.candidates[candidate.id]=candidate;this.persist();this.emit("candidate.frozen",candidate);
@@ -308,7 +313,8 @@ export class FlareGitRepositoryController {
       const branch=`candidate/${candidate.id}`;gitOrThrow(workspace,["checkout","--quiet","-B",branch,first]);
       for(const id of taskIds.slice(1)){const commit=candidate.participatingCommits[id];if(!commit)throw Error("Frozen checkpoint unavailable");const merged=git(workspace,["-c","user.name=FlareGit Integrator","-c","user.email=integrator@flaregit.com","merge","--allow-unrelated-histories","--no-ff","--no-edit",commit]);if(!merged.ok){candidate.status="failed";const files=git(workspace,["diff","--name-only","--diff-filter=U"]).stdout.trim().split("\n").filter(Boolean);candidate.repairAttempts.push({round:0,prompt:"Human resolution required",patch:"",affectedContracts:[],diagnosticError:`Initial Git conflict: ${files.join(", ")}`,durationMs:0,timestamp:new Date().toISOString()});this.persist();return{success:false,candidate,error:`Initial contributions conflict in ${files.join(", ")}; original checkpoints remain preserved for an explicit resolution`};}}
       const commit=gitOrThrow(workspace,["rev-parse","HEAD"]),tree=gitOrThrow(workspace,["rev-parse","HEAD^{tree}"]),settings=settingsFor(this.state.verificationPolicy);
-      const evidence=await verifyNativeIntegrity({repoDir:workspace,candidateCommit:commit,candidateTree:tree,expectedBase:null,acceptedTarget:target,requirementsVersion:this.state.policyVersion,policy:this.state.verificationPolicy,protectedPaths:settings.protectedPaths,allowedScope:settings.allowedScope,landing:"merge",contributors:tasks.map(task=>({id:task.id,commit:candidate.participatingCommits[task.id]!,baseCommit:null,ref:`refs/flaregit/tasks/${task.id}`,allowedScope:task.allowedScope}))});
+      const proofs=candidate.frozenContributorProofs;if(!proofs?.length)throw Error("Frozen initial contributor proofs are unavailable");
+      const evidence=await verifyNativeIntegrity({repoDir:workspace,candidateCommit:commit,candidateTree:tree,expectedBase:null,acceptedTarget:target,requirementsVersion:this.state.policyVersion,policy:this.state.verificationPolicy,protectedPaths:settings.protectedPaths,allowedScope:settings.allowedScope,landing:"merge",contributors:proofs});
       candidate.candidateCommit=commit;candidate.evidenceId=evidence.id;candidate.status=evidence.status==="passed"?"verified":"failed";this.state.evidence[evidence.id]=evidence;this.persist();this.emit(evidence.status==="passed"?"candidate.verified":"candidate.failed",{candidate,evidence});return{success:false,candidate,evidence,error:evidence.status==="passed"?"Exact initial candidate is ready for human review; no accepted branch was created":"Initial Git integrity verification failed"};
     }catch(error){candidate.status="failed";this.persist();return{success:false,candidate,error:error instanceof Error?error.message:"Initial preparation failed"};}
   }

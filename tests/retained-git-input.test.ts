@@ -55,3 +55,14 @@ test("unborn contributor pin preserves real root history without a synthetic bas
   expect(await f.git(`git -C ${q(f.bare)} rev-list --max-parents=0 ${q(receipt.ref)}`)).toBe(f.base);
  }finally{await f.cleanup();}
 });
+
+test("stacked unborn retention pins actual parent checkpoint and never substitutes missing accepted history",async()=>{
+ const f=await fixture(),inc=crypto.randomUUID();try{
+  const target={kind:"unborn" as const,projectId:"synthetic-project",incarnation:inc,canonicalRepoName:"synthetic-canonical",ref:"refs/heads/main",branch:"main",acceptedCommit:null,acceptedVersion:0 as const,policyVersion:1,policy:{kind:"git-integrity"},requirements:[] as []};
+  const parent=await retainUnbornGitInput({exec:f.exec,directory:f.work,remote,token:"server-only",incarnation:inc,taskId:"parent-task",commit:f.base,beforeCommand:async()=>{},acceptedTarget:target});
+  const child=await retainUnbornGitInput({exec:f.exec,directory:f.work,remote,token:"server-only",incarnation:inc,taskId:"child-task",commit:f.input,beforeCommand:async()=>{},acceptedTarget:target,base:f.base,stackedOn:{taskId:"parent-task",commit:f.base,ref:parent.ref}});
+  expect(child.base).toBe(f.base);expect(child.rootCommit).toBe(f.base);expect(child.protectedBaseRef).toBe(retainedGitInputRef(inc,"child-task",f.base));
+  expect(await f.git(`git -C ${q(f.bare)} rev-parse ${q(child.protectedBaseRef!)}`)).toBe(f.base);
+  await expect(retainUnbornGitInput({exec:f.exec,directory:f.work,remote,token:"server-only",incarnation:inc,taskId:"missing-parent",commit:f.input,beforeCommand:async()=>{},acceptedTarget:target,base:f.base})).rejects.toThrow("frozen initial parent");
+ }finally{await f.cleanup();}
+});

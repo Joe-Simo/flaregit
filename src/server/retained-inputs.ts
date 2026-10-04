@@ -1,11 +1,17 @@
 import { z } from "zod";
 import { acceptedTargetSchema } from "../core/accepted-target";
 const sha = z.string().regex(/^[a-f0-9]{40}$/), id = z.string().min(1).max(200).regex(/^[A-Za-z0-9_-]+$/);
-export const retainedInputSchema = z.object({ id: z.string().uuid(), projectId: id, incarnation: z.string().uuid(), taskId: id, commit: sha, base: sha.nullable(), canonicalRepoName: id, workspaceRepoName: id, branch: z.string().min(1).max(200), protectedRef: z.string().max(500), protectedBaseRef: z.string().max(500).nullable(), acceptedTarget: acceptedTargetSchema.optional(), workflowId: id, candidateId: id, actorId: z.string().min(1).max(256), ownerId: z.string().min(1).max(256), accountKey: z.string().regex(/^[a-f0-9]{12}$/), followup: z.literal(true).optional(), dependsOn: id.optional(), version: z.literal(1) }).strict().superRefine((value,ctx)=>{
+export const retainedInputSchema = z.object({ id: z.string().uuid(), projectId: id, incarnation: z.string().uuid(), taskId: id, commit: sha, base: sha.nullable(), canonicalRepoName: id, workspaceRepoName: id, branch: z.string().min(1).max(200), protectedRef: z.string().max(500), protectedBaseRef: z.string().max(500).nullable(), acceptedTarget: acceptedTargetSchema.optional(), stackedOn:z.object({taskId:id,commit:sha,ref:z.string().max(500)}).strict().optional(), workflowId: id, candidateId: id, actorId: z.string().min(1).max(256), ownerId: z.string().min(1).max(256), accountKey: z.string().regex(/^[a-f0-9]{12}$/), followup: z.literal(true).optional(), dependsOn: id.optional(), version: z.literal(1) }).strict().superRefine((value,ctx)=>{
     if(value.base===null){
         const target=value.acceptedTarget;
-        if(value.protectedBaseRef!==null||target?.kind!=="unborn"||target.projectId!==value.projectId||target.incarnation!==value.incarnation||target.canonicalRepoName!==value.canonicalRepoName)ctx.addIssue({code:"custom",message:"Unborn input requires its exact recorded target and no base pin"});
-    }else if(value.protectedBaseRef===null||value.acceptedTarget?.kind==="unborn")ctx.addIssue({code:"custom",message:"Committed input requires its actual base pin"});
+        if(value.stackedOn!==undefined||value.protectedBaseRef!==null||target?.kind!=="unborn"||target.projectId!==value.projectId||target.incarnation!==value.incarnation||target.canonicalRepoName!==value.canonicalRepoName)ctx.addIssue({code:"custom",message:"Unborn input requires its exact recorded target and no base pin"});
+    }else {
+        if(value.protectedBaseRef===null)ctx.addIssue({code:"custom",message:"Committed input requires its actual base pin"});
+        if(value.acceptedTarget?.kind==="unborn"){
+            const stack=value.stackedOn,target=value.acceptedTarget;
+            if(!stack||stack.taskId===value.taskId||stack.taskId!==value.dependsOn||stack.commit!==value.base||stack.ref!==`refs/flaregit/inputs/${value.incarnation}/${stack.taskId}/${stack.commit}`||target.projectId!==value.projectId||target.incarnation!==value.incarnation||target.canonicalRepoName!==value.canonicalRepoName)ctx.addIssue({code:"custom",message:"Unborn child requires its exact frozen parent checkpoint and pin"});
+        }else if(value.stackedOn)ctx.addIssue({code:"custom",message:"Initial parent witness requires an unborn target"});
+    }
 });
 export type RetainedInput = z.infer<typeof retainedInputSchema>;
 export interface RetainedInputReceipt extends RetainedInput {
@@ -53,8 +59,12 @@ export class RetainedInputs {
             throw new Error("Retained Git proof does not match input");
         if (value.protectedRef !== `refs/flaregit/inputs/${value.incarnation}/${value.taskId}/${value.commit}` || (value.base !== null && value.protectedBaseRef !== `refs/flaregit/inputs/${value.incarnation}/${value.taskId}/${value.base}`))
             throw new Error("Retained ref scope changed");
-        if(value.base===null&&(!proof.rootCommit||!sha.safeParse(proof.rootCommit).success||/^0{40}$/.test(proof.rootCommit)||proof.rootAncestryVerified!==true))throw new Error("Actual contributor root ancestry proof required");
-        const payload = value.base===null ? JSON.stringify({input:value,rootCommit:proof.rootCommit}) : JSON.stringify(value);
+        if(value.stackedOn){
+            const parent=this.lookup(value.stackedOn.taskId,value.candidateId,value.stackedOn.commit);
+            if(!parent||parent.projectId!==value.projectId||parent.incarnation!==value.incarnation||parent.canonicalRepoName!==value.canonicalRepoName||parent.workflowId!==value.workflowId||parent.ownerId!==value.ownerId||parent.accountKey!==value.accountKey||parent.protectedRef!==value.stackedOn.ref||parent.acceptedTarget?.kind!=="unborn"||!parent.rootCommit)throw new Error("Same-batch frozen retained parent receipt required");
+        }
+        if(value.acceptedTarget?.kind==="unborn"&&(!proof.rootCommit||!sha.safeParse(proof.rootCommit).success||/^0{40}$/.test(proof.rootCommit)||proof.rootAncestryVerified!==true))throw new Error("Actual contributor root ancestry proof required");
+        const payload = value.acceptedTarget?.kind==="unborn" ? JSON.stringify({input:value,rootCommit:proof.rootCommit}) : JSON.stringify(value);
         return this.storage.transactionSync(() => {
             const old = this.storage.sql.exec<{
                 payload: string;
@@ -65,7 +75,7 @@ export class RetainedInputs {
                     throw new Error("Retained receipt identity changed");
                 return JSON.parse(old.doc) as RetainedInputReceipt;
             }
-            const receipt = { ...value, ...(value.base===null?{rootCommit:proof.rootCommit}:{}), verifiedAt: new Date().toISOString() };
+            const receipt = { ...value, ...(value.acceptedTarget?.kind==="unborn"?{rootCommit:proof.rootCommit}:{}), verifiedAt: new Date().toISOString() };
             this.storage.sql.exec("INSERT INTO retained_inputs VALUES(?,?,?)", value.id, payload, JSON.stringify(receipt));
             return receipt;
         });

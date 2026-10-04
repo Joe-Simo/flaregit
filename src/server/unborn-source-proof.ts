@@ -4,7 +4,7 @@ import { accountKeyFor } from "./projects";
 import { admitNativeCompute } from "./native-compute";
 import { gitAuthEnv, q } from "./shell";
 import { validateRecoveryRemote } from "./private-recovery-bundle";
-import { parseUnbornAdvertisement } from "./unborn-source-advertisement";
+import { parseUnbornAdvertisement, UnbornSourceNotEmptyError } from "./unborn-source-advertisement";
 import { sealAndStopInitializer } from "./readme-repository";
 import type { TaskSourceInspections } from "./task-source-inspections";
 
@@ -20,6 +20,7 @@ export interface UnbornSourceJournal {
   nativeIntent(name: string): Promise<void>;
   credentialRevoked(id: string): Promise<void>;
   nativeStopped(name: string): Promise<void>;
+  failedObservation(kind: "nonempty" | "unavailable"): Promise<void>;
   pendingObservation(proof: UnbornSourceObservation): Promise<void>;
   observed(proof: UnbornSourceObservation): Promise<void>;
 }
@@ -67,7 +68,7 @@ export async function proveUnbornSource(env: Env, proposed: UnbornSourceInput, j
     if(input.purpose==="workspace"){await journal.authorize(input);await journal.beforeProvider("parentGet");using parent=await env.ARTIFACTS.get(input.sourceRepoName);await journal.authorize(input);await journal.beforeProvider("parentInfo");if((await parent.info()).id!==input.expectedParentProviderRepoId)throw new Error("Original parent provider identity changed");}
     observation={providerRepoId:metadata.id,purpose:input.purpose,repositoryName:input.repositoryName,sourceRepoName:input.sourceRepoName,defaultRef:target.ref,expectedHead:null,visibleRefs:[],headSymref:nativeProof.headSymref,nativeName};
     await journal.pendingObservation(observation);
-  }finally{
+  }catch(error){await journal.failedObservation(error instanceof UnbornSourceNotEmptyError?"nonempty":"unavailable");throw error;}finally{
     if(credential)try{await journal.beforeProvider("revokeToken");if(await repository.revokeToken(credential.id||credential.plaintext)){await journal.credentialRevoked(credential.id);revoked=true;}}catch{/* Durable issuance stays unresolved. */}
     if(nativeAllocated)try{if(await sealAndStopInitializer(env.INTEGRATOR.getByName(nativeName))){await journal.nativeStopped(nativeName);stopped=true;}}catch{/* Durable native intent stays unresolved. */}
   }

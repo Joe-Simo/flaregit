@@ -25,7 +25,6 @@ export function NewRepo() {
   const [unconfirmed, setUnconfirmed] = useState(false);
   const [mode, setMode] = useState("repository");
   const [initialization,setInitialization]=useState<RepositoryCreationRequest["initialization"]>("readme");
-  const allowEmptyInitialization=false; // Activated after the complete server readiness gate.
   const [description,setDescription]=useState(""),[defaultBranch,setDefaultBranch]=useState("main");
   const savedRepositoryRequest=useRef<RepositoryCreationRequest|null>(null);
   const [name, setName] = useState("");
@@ -160,7 +159,7 @@ export function NewRepo() {
               </div>
             </>
           ) : (
-            <RepositoryInitializationFields description={description} defaultBranch={defaultBranch} initialization={initialization} allowEmpty={allowEmptyInitialization} onInitialization={setInitialization} disabled={busy||unconfirmed} onDescription={setDescription} onBranch={setDefaultBranch}/>
+            <RepositoryInitializationFields description={description} defaultBranch={defaultBranch} initialization={initialization} allowEmpty onInitialization={setInitialization} disabled={busy||unconfirmed} onDescription={setDescription} onBranch={setDefaultBranch}/>
           )}
           {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>}
           {busy && <p role="status" className="text-sm text-muted-foreground">{checkingId ? "Checking the saved import. No new import is requested." : mode === "import" ? "Submitting the import request. Repository availability is checked before opening it." : "Initializing the repository and checking its first committed Git state…"}</p>}

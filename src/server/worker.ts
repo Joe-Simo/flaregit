@@ -1519,12 +1519,11 @@ export default {
             return json({ cancelled: task.id });
           }
           if (action === "ready") {
-            const parent = task.dependsOn ? state.tasks[task.dependsOn] : undefined;
-            if (parent && parent.status !== "accepted") return repositoryReadText(`Stacked on "${parent.id}", which is ${parent.status}; it must be accepted first`, 409);
             if (!isSafeRef(task.workspace.branch)) return repositoryReadText("The saved workspace branch is unavailable; Git work is preserved", 503);
             try {
               const readContext = await project.repositoryReadContext(userId, task.id);
               const credentialHash = auth.viaToken ? await gitParentTokenHash(request) : undefined;
+              if(!await project.taskReadyDependency(task.id,userId,credentialHash,auth.expiresAt))return repositoryReadText("The recorded parent checkpoint or accepted target no longer permits readiness. Saved Git work is preserved.",409);
               const authorize = async () => {
                 const sessionValid = () => auth.viaToken ? Boolean(credentialHash) : Boolean(auth.expiresAt && auth.expiresAt > Date.now());
                 if (!sessionValid() || !await project.assertRepositoryReadContext(readContext, userId, task.id, credentialHash) || !sessionValid()) throw new RepositoryReadError(503, "authorization");
@@ -1538,6 +1537,7 @@ export default {
               await authorize();
               await project.observeTaskReadyGitHead(task.id,userId,readContext,credentialHash,auth.expiresAt,head);
               await authorize();
+              if(!await project.taskReadyDependency(task.id,userId,credentialHash,auth.expiresAt))throw new RepositoryReadError(503,"authorization");
               const { applied } = await project.ingestMemberCheckpoint({ eventId: `ready-${task.id}-${head}`, taskId: task.id, commit: head, ready: true, filesChanged }, userId, readContext, credentialHash, auth.expiresAt);
               return Response.json({ task: task.id, commit: head, applied }, { headers: { "Cache-Control": "no-store" } });
             } catch (error) {

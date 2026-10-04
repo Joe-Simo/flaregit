@@ -42,5 +42,9 @@ test("unborn retention stores only actual contributor pin and frozen target with
  expect(ledger.lookup(scope.taskId,scope.candidateId,commit,null)).toEqual(receipt);
  expect(ledger.lookup(scope.taskId,scope.candidateId,commit,"b".repeat(40))).toBeNull();
  expect(ledger.record(scope,proof)).toEqual(receipt);
+ const childCommit="c".repeat(40),childScope:RetainedInput={...scope,id:crypto.randomUUID(),taskId:"child",commit:childCommit,base:commit,dependsOn:scope.taskId,stackedOn:{taskId:scope.taskId,commit,ref:scope.protectedRef},protectedRef:`refs/flaregit/inputs/${incarnation}/child/${childCommit}`,protectedBaseRef:`refs/flaregit/inputs/${incarnation}/child/${commit}`};
+ expect(()=>ledger.record({...childScope,stackedOn:undefined},{commit:childCommit,base:commit,rootCommit:commit,rootAncestryVerified:true})).toThrow();
+ expect(ledger.record(childScope,{commit:childCommit,base:commit,rootCommit:commit,rootAncestryVerified:true})).toMatchObject({base:commit,rootCommit:commit,stackedOn:{taskId:scope.taskId,commit}});
+
  expect(()=>ledger.record(scope,{...proof,rootCommit:"b".repeat(40)})).toThrow("identity changed");
 });

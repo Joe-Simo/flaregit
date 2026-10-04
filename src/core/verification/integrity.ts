@@ -12,6 +12,8 @@ export interface FrozenContributorProof {
   /** Platform-owned fetched ref, whose head must still equal the frozen checkpoint. */
   ref: string;
   allowedScope: string[];
+  /** Before first acceptance, a child base is a frozen contributor checkpoint, never accepted history. */
+  stackedOn?: { taskId: string; commit: string; ref: string };
 }
 export interface NativeIntegrityInput {
   repoDir: string;
@@ -55,6 +57,14 @@ export async function verifyNativeIntegrity(input: NativeIntegrityInput): Promis
     } else prove(sha.test(input.expectedBase!), "Exact accepted base hash required");
     prove(Number.isSafeInteger(input.requirementsVersion) && input.requirementsVersion > 0, "Invalid frozen policy version");
     prove(input.contributors.length > 0 && input.contributors.length <= 8 && new Set(input.contributors.map((p) => p.id)).size === input.contributors.length, "One to eight distinct frozen contributors required");
+    if(unborn)for(const contributor of input.contributors){
+      let current=contributor;const visited=new Set<string>();
+      while(current.baseCommit!==null){
+        prove(!visited.has(current.id),"Initial contributor dependency cycle refused");visited.add(current.id);
+        const parent=current.stackedOn&&input.contributors.find(proof=>proof.id===current.stackedOn!.taskId);
+        prove(Boolean(parent),"Initial stacked change requires a frozen parent in the batch");current=parent!;
+      }
+    }
     tree = inspect(["rev-parse", "--verify", `${input.candidateCommit}^{tree}`]).trim();
     prove(tree === input.candidateTree, "Candidate tree differs from frozen tree");
     prove(inspect(["rev-parse", "--verify", `${input.candidateCommit}^{commit}`]).trim() === input.candidateCommit, "Candidate is not the exact commit object");
@@ -63,10 +73,15 @@ export async function verifyNativeIntegrity(input: NativeIntegrityInput): Promis
     const paths = (base: string | null, commit: string) => inspect(base === null ? ["ls-tree", "-r", "--name-only", "-z", commit] : ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", base, commit, "--"]).split("\0").filter(Boolean);
     const contributorRoots = new Set<string>();
     for (const contributor of input.contributors) {
-      prove(sha.test(contributor.commit) && (unborn ? contributor.baseCommit === null : typeof contributor.baseCommit === "string" && sha.test(contributor.baseCommit)), "Invalid contributor commit identity");
+      prove(sha.test(contributor.commit) && (unborn ? contributor.baseCommit === null || typeof contributor.baseCommit === "string" && sha.test(contributor.baseCommit) : typeof contributor.baseCommit === "string" && sha.test(contributor.baseCommit)), "Invalid contributor commit identity");
       prove(/^refs\/flaregit\/[A-Za-z0-9_/-]+$/.test(contributor.ref) && !contributor.ref.includes("..") && !contributor.ref.includes("//"), "Contributor proof requires a platform-owned safe ref");
       prove(inspect(["rev-parse", "--verify", `${contributor.ref}^{commit}`]).trim() === contributor.commit, "Contributor ref differs from frozen checkpoint");
       if (unborn) {
+        if(contributor.baseCommit!==null){
+          const stack=contributor.stackedOn,parent=stack&&input.contributors.find(proof=>proof.id===stack.taskId);
+          prove(Boolean(stack&&parent&&parent.id!==contributor.id&&stack.commit===contributor.baseCommit&&parent.commit===stack.commit&&parent.ref===stack.ref),"Initial stacked change requires its exact frozen parent in the same batch");
+          inspect(["merge-base","--is-ancestor",contributor.baseCommit,contributor.commit]);
+        }else prove(contributor.stackedOn===undefined,"Initial root contribution cannot claim a parent checkpoint");
         const roots = inspect(["rev-list", "--max-parents=0", contributor.commit]).trim().split("\n");
         prove(roots.length === 1 && sha.test(roots[0]!), "Initial contributor must preserve one genuine root lineage");
         contributorRoots.add(roots[0]!);
