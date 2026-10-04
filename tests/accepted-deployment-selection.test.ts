@@ -51,3 +51,38 @@ test("deployment record/outbox bind explicit nonprimary ref and reject key reuse
     expect(() => ledger.request({ ...selection.target, acceptedRef: "refs/heads/main" }, "registered-service", "staging", "owner-key", "owner", () => {})).toThrow("different accepted state"); expect(events.length).toBe(1);
   } finally { db.close(); }
 });
+
+test("bound primary reconciliation uses genuine primary history without inventing branch metadata", () => {
+  const value = context(), frozen = { ...value.journals[0]!.acceptedTarget!, branch: "main", ref: "refs/heads/main" };
+  value.journals = [{ ...value.journals[0]!, acceptedTarget: frozen }];
+  value.roots = [{ ...value.roots[0]!, kind: "primary", ref: frozen.ref, history: [{ commit, operationId: journalId }, { commit: later, operationId: "later-publication" }] }];
+  // Deliberately different property insertion order: identical bindings are semantic.
+  const reordered = { policy: frozen.policy, policyVersion: frozen.policyVersion, requirements: frozen.requirements, acceptedVersion: frozen.acceptedVersion, acceptedCommit: frozen.acceptedCommit, branch: frozen.branch, ref: frozen.ref, canonicalRepoName: frozen.canonicalRepoName, incarnation: frozen.incarnation, projectId: frozen.projectId };
+  value.primaryHistory = [{ commit, candidateId: value.journals[0]!.candidateId, acceptedAt: "2026-10-04T00:00:01Z", participatingTasks: ["task"], evidenceId: "evidence", outputDigest: "digest", acceptedTarget: reordered }];
+  expect(selectAcceptedDeploymentJournal(value, journalId)?.target).toMatchObject({ acceptedRef: frozen.ref, acceptedRootVersion: 1, commit, tree });
+  value.primaryHistory = [{ ...value.primaryHistory[0]!, acceptedTarget: { ...frozen, acceptedVersion: 1 } }];
+  expect(selectAcceptedDeploymentJournal(value, journalId)).toBeNull();
+});
+
+test("nonprimary journal cannot borrow a primary acceptance record to replace a missing receipt", () => {
+  const value = context(); value.roots = [{ ...value.roots[0]!, history: [{ commit, operationId: journalId }] }];
+  value.primaryHistory = [{ commit, candidateId: value.journals[0]!.candidateId, acceptedAt: "2026-10-04T00:00:01Z", participatingTasks: ["task"], evidenceId: "evidence", outputDigest: "digest" }];
+  expect(selectAcceptedDeploymentJournal(value, journalId)).toBeNull();
+});
+
+test("trusted primary compatibility recovers a legacy request without changing its stable event", () => {
+  const db = new Database(":memory:"), value = context();
+  try {
+    const ledger = new RepositoryDeployments(storage(db), value.projectId), events: DeploymentRequestedEvent[] = [];
+    const legacy = { journalId, candidateId: value.journals[0]!.candidateId, commit, tree, acceptedAt: "2026-10-04T00:00:01Z", recoverableRef: `refs/flaregit/deployments/${journalId}` };
+    const first = ledger.request(legacy, "service", "production", "old-key", "owner", event => events.push(event));
+    const bound = { ...legacy, acceptedRef: "refs/heads/main", acceptedRootVersion: 1 };
+    const compatibility = { acceptedRef: "refs/heads/main", journalId, commit, tree };
+    expect(() => ledger.existingRequest(bound, "service", "production", "old-key", "owner")).toThrow("different accepted state");
+    expect(ledger.existingRequest(bound, "service", "production", "old-key", "owner", compatibility)).toEqual(first.deployment);
+    const replay = ledger.request(bound, "service", "production", "old-key", "owner", () => { throw new Error("Do not restage an old event"); }, compatibility);
+    expect(replay.kind).toBe("duplicate"); expect(replay.deployment.requestEventId).toBe(first.deployment.requestEventId); expect(replay.deployment.target.acceptedRef).toBeUndefined();
+    expect(() => ledger.request({ ...bound, acceptedRef: "refs/heads/release" }, "service", "production", "old-key", "owner", () => {}, compatibility)).toThrow("different accepted state");
+    expect(events.length).toBe(1); expect(events[0]?.data.acceptedRef).toBeUndefined();
+  } finally { db.close(); }
+});

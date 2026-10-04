@@ -4,6 +4,19 @@ import { safeContent } from "./public-community.js";
 import { isSafeRef } from "../core/sanitize.js";
 
 export interface AcceptedDeploymentTarget { journalId:string;candidateId:string;commit:string;tree:string;acceptedAt:string;recoverableRef:string;acceptedRef?:string;acceptedRootVersion?:number }
+/** Server-derived actual primary journal binding; never accept this from a client.
+ * It permits reading an older exact receipt without rewriting its event metadata. */
+export interface LegacyPrimaryDeploymentCompatibility { acceptedRef:string;journalId:string;commit:string;tree:string }
+function sameDeploymentPayload(saved:string,target:AcceptedDeploymentTarget,serviceId:string,environment:string,compatibility?:LegacyPrimaryDeploymentCompatibility):boolean {
+  const frozen=targetSchema.parse(target),payload=JSON.stringify({target:frozen,serviceId,environment:environment.trim()});
+  if(saved===payload)return true;
+  if(!compatibility||frozen.acceptedRef!==compatibility.acceptedRef||!compatibility.acceptedRef.startsWith("refs/heads/")||!isSafeRef(compatibility.acceptedRef)||frozen.journalId!==compatibility.journalId||frozen.commit!==compatibility.commit||frozen.tree!==compatibility.tree)return false;
+  let previous:unknown;try{previous=JSON.parse(saved);}catch{return false;}
+  const old=z.object({target:targetSchema,serviceId:z.string(),environment:z.string()}).strict().safeParse(previous);
+  if(!old.success||old.data.target.acceptedRef!==undefined||old.data.target.acceptedRootVersion!==undefined)return false;
+  const {acceptedRef:_ref,acceptedRootVersion:_version,...legacyTarget}=frozen;
+  return JSON.stringify(old.data)===JSON.stringify({target:legacyTarget,serviceId,environment:environment.trim()});
+}
 export type DeploymentStatus="requested"|"queued"|"running"|"succeeded"|"failed"|"cancelled";
 export interface DeploymentRecord { id:string;repositoryId:string;serviceId:string;environment:string;target:AcceptedDeploymentTarget;requestEventId:string;status:DeploymentStatus;sequence:number;summary?:string;detailsUrl?:string;createdAt:string;updatedAt:string }
 export interface DeploymentRequestedEvent { id:string;type:"deployment.requested";createdAt:string;repositoryId:string;data:{deploymentId:string;serviceId:string;environment:string;commit:string;tree:string;acceptedJournalId:string;recoverableRef:string;acceptedRef?:string;acceptedRootVersion?:number} }
@@ -25,19 +38,19 @@ export class RepositoryDeployments {
   constructor(private readonly storage:DurableObjectStorage,private readonly repositoryId:string){storage.sql.exec(`CREATE TABLE IF NOT EXISTS deployments(id TEXT PRIMARY KEY,doc TEXT NOT NULL);CREATE TABLE IF NOT EXISTS deployment_requests(actor_id TEXT NOT NULL,event_key TEXT NOT NULL,payload TEXT NOT NULL,deployment_id TEXT NOT NULL,PRIMARY KEY(actor_id,event_key));CREATE TABLE IF NOT EXISTS deployment_receipts(service_id TEXT NOT NULL,event_id TEXT NOT NULL,payload TEXT NOT NULL,deployment_id TEXT NOT NULL,PRIMARY KEY(service_id,event_id));`);}
   get(deploymentId:string):DeploymentRecord|null{const row=this.storage.sql.exec<{doc:string}>("SELECT doc FROM deployments WHERE id=?",deploymentId).toArray()[0];return row?JSON.parse(row.doc) as DeploymentRecord:null;}
   list():DeploymentRecord[]{return this.storage.sql.exec<{doc:string}>("SELECT doc FROM deployments ORDER BY id").toArray().map(row=>JSON.parse(row.doc) as DeploymentRecord);}
-  existingRequest(target: AcceptedDeploymentTarget, serviceId: string, environment: string, key: string, actorId: string): DeploymentRecord | null {
+  existingRequest(target: AcceptedDeploymentTarget, serviceId: string, environment: string, key: string, actorId: string, compatibility?: LegacyPrimaryDeploymentCompatibility): DeploymentRecord | null {
     const row=this.storage.sql.exec<{payload:string;deployment_id:string}>("SELECT payload,deployment_id FROM deployment_requests WHERE actor_id=? AND event_key=?",actorId,key).toArray()[0];
     if(!row)return null;
-    if(row.payload!==JSON.stringify({target:targetSchema.parse(target),serviceId,environment:environment.trim()}))throw new Error("Deployment request key belongs to different accepted state");
-    return this.get(row.deployment_id);
+    if(!sameDeploymentPayload(row.payload,target,serviceId,environment,compatibility))throw new Error("Deployment request key belongs to different accepted state");
+    const record=this.get(row.deployment_id);if(!record)throw new Error("Saved deployment receipt is unavailable");return record;
   }
-  request(target:AcceptedDeploymentTarget,serviceId:string,environment:string,idempotencyKey:string,actorId:string,stage:(event:DeploymentRequestedEvent)=>void){
+  request(target:AcceptedDeploymentTarget,serviceId:string,environment:string,idempotencyKey:string,actorId:string,stage:(event:DeploymentRequestedEvent)=>void,compatibility?:LegacyPrimaryDeploymentCompatibility){
     const frozen=targetSchema.parse(target);id.parse(serviceId);id.parse(actorId);id.parse(idempotencyKey);
     if(typeof environment!=="string"||!environment.trim()||environment.length>100||/[\x00-\x1f<>]/.test(environment)||redactSecrets(environment)!==environment)throw new Error("Invalid deployment environment");
     return this.storage.transactionSync(()=>{
       const payload=JSON.stringify({target:frozen,serviceId,environment:environment.trim()});
       const previous=this.storage.sql.exec<{payload:string;deployment_id:string}>("SELECT payload,deployment_id FROM deployment_requests WHERE actor_id=? AND event_key=?",actorId,idempotencyKey).toArray()[0];
-      if(previous){if(previous.payload!==payload)throw new Error("Deployment request key belongs to different accepted state");return{kind:"duplicate" as const,deployment:this.get(previous.deployment_id)!};}
+      if(previous){if(!sameDeploymentPayload(previous.payload,frozen,serviceId,environment,compatibility))throw new Error("Deployment request key belongs to different accepted state");const record=this.get(previous.deployment_id);if(!record)throw new Error("Saved deployment receipt is unavailable");return{kind:"duplicate" as const,deployment:record};}
       if(this.storage.sql.exec<{n:number}>("SELECT COUNT(*) AS n FROM deployments").toArray()[0]!.n>=1000)throw new Error("Deployment record limit reached");
       const now=new Date().toISOString(),record:DeploymentRecord={id:`deploy_${crypto.randomUUID()}`,repositoryId:this.repositoryId,serviceId,environment:environment.trim(),target:frozen,requestEventId:`evt_${crypto.randomUUID()}`,status:"requested",sequence:-1,createdAt:now,updatedAt:now};
       this.storage.sql.exec("INSERT INTO deployments VALUES(?,?)",record.id,JSON.stringify(record));this.storage.sql.exec("INSERT INTO deployment_requests VALUES(?,?,?,?)",actorId,idempotencyKey,payload,record.id);

@@ -1,3 +1,4 @@
+import {selectAcceptedDeploymentJournal,confirmAcceptedDeploymentSelection,type AcceptedDeploymentSelection,type CommittedDeploymentPin} from "./accepted-deployment-selection";
 import {inspectGitGatewayRecovery} from "./git-gateway-recovery";
 import {GitGatewayLedger,type GitGatewayScope} from "./git-gateway-ledger";
 import {TaskTargetGenerations,type TaskTargetGenerationIntent,type TaskTargetGenerationSettlement} from "./task-target-generations";
@@ -349,11 +350,11 @@ export interface Ledger {
   reserveManagedSpend(input: ManagedEnvelope, budget: ManagedBudget): Promise<ManagedAdmission>;
   consumeManagedSpend(runId: string, inputBytes: number, outputTokens: number, containerSeconds: number): Promise<ManagedReservation>;
 
-  acceptedDeploymentTarget(journalId:string):Promise<{canonicalRepoName:string;target:AcceptedDeploymentTarget}|null>;
+  acceptedDeploymentTarget(journalId:string):Promise<{canonicalRepoName:string;target:AcceptedDeploymentTarget;selection:AcceptedDeploymentSelection}|null>;
   acceptedDeploymentTargets():Promise<AcceptedDeploymentTarget[]>;
   privateRecoveryTargets():Promise<PrivateRecoveryTarget[]>;
   listDeployments():Promise<DeploymentRecord[]>;
-  requestDeployment(target:AcceptedDeploymentTarget,serviceId:string,environment:string,key:string,actorId:string):Promise<{kind:"created"|"duplicate";deployment:DeploymentRecord}>;
+  requestDeployment(target:AcceptedDeploymentTarget,serviceId:string,environment:string,key:string,actorId:string,pin?:CommittedDeploymentPin):Promise<{kind:"created"|"duplicate";deployment:DeploymentRecord}>;
   discussionList(publicOnly:boolean,actor?:PublicCommunityActor):Promise<ReturnType<RepositoryDiscussions["list"]>>;
   publicDiscussionActivity(query:string,ids?:string[]):Promise<DiscussionTopic[]>;
   publicDiscussionActivitySnapshot(ids:string[]):Promise<{directory:DirectoryState;grant:PublicGrantMetadata|null;topics:DiscussionTopic[]}>;
@@ -1056,12 +1057,21 @@ export class RepositoryController extends DurableObject<Env> {
   async privateRecoveryFail(id:string,_message:string,expectedScope:string):Promise<void>{const ops=new PrivateRecoveryOperations(this.ctx.storage),operation=ops.get(id);if(operation&&recoveryScopeId(operation)===expectedScope)ops.fail(id);}
 
 
-  async acceptedDeploymentTarget(journalId:string):Promise<{canonicalRepoName:string;target:AcceptedDeploymentTarget}|null>{
-    const state=this.load(),journal=state.journal.find(item=>item.id===journalId&&item.state==="ACCEPTED");
-    if(!journal?.candidateTree)return null;
-    const accepted=state.acceptedState.history.find(item=>item.commit===journal.newHead&&item.candidateId===journal.candidateId);
-    if(!accepted)return null;
-    return {canonicalRepoName:state.canonicalRepoName,target:{journalId,candidateId:journal.candidateId,commit:journal.newHead,tree:journal.candidateTree,acceptedAt:accepted.acceptedAt,recoverableRef:`refs/flaregit/deployments/${journalId}`}};
+  private selectRecordedDeployment(journalId:string):AcceptedDeploymentSelection|null{
+    const state=this.load();if(this.repositoryDeleting())return null;this.synchronizePrimaryAcceptedRegistry(state);
+    const incarnation=this.readRepositoryIncarnation();if(!incarnation)return null;
+    const journals=state.journal.filter(journal=>journal.id===journalId);if(journals.length!==1)return null;
+    const primaryRows=this.ctx.storage.sql.exec<{doc:string|null}>("SELECT CASE WHEN LENGTH(CAST(doc AS BLOB))<=1048576 THEN doc ELSE NULL END AS doc FROM accepted_branch_roots WHERE project_id=? AND incarnation=? AND repo_name=? AND kind='primary' ORDER BY ref LIMIT 2",state.projectId,incarnation,state.canonicalRepoName).toArray();if(primaryRows.length>1||primaryRows.some(row=>row.doc===null))return null;
+    const primary=primaryRows.map(row=>JSON.parse(row.doc!) as import("./accepted-branch-roots").AcceptedBranchRoot),primaryRef=primary[0]?.ref??(state.defaultBranch?`refs/heads/${state.defaultBranch}`:"");
+    const frozen=journals[0]!.acceptedTarget??journals[0]!.publicationAuthority?.acceptedTarget,selectedRows=frozen&&frozen.ref!==primaryRef?this.ctx.storage.sql.exec<{doc:string|null}>("SELECT CASE WHEN LENGTH(CAST(doc AS BLOB))<=1048576 THEN doc ELSE NULL END AS doc FROM accepted_branch_roots WHERE project_id=? AND incarnation=? AND repo_name=? AND ref=? LIMIT 2",state.projectId,incarnation,state.canonicalRepoName,frozen.ref).toArray():[];if(selectedRows.length>1||selectedRows.some(row=>row.doc===null))return null;
+    const roots=[...primary,...selectedRows.map(row=>JSON.parse(row.doc!) as import("./accepted-branch-roots").AcceptedBranchRoot)],candidateIds=new Set(journals.map(journal=>journal.candidateId));
+    return selectAcceptedDeploymentJournal({projectId:state.projectId,incarnation,canonicalRepoName:state.canonicalRepoName,primaryRef,journals,primaryHistory:state.acceptedState.history.filter(entry=>candidateIds.has(entry.candidateId)),roots},journalId);
+  }
+  private legacyPrimaryDeploymentCompatibility(selection:AcceptedDeploymentSelection):import("./deployments").LegacyPrimaryDeploymentCompatibility|undefined{
+    const ref=selection.target.acceptedRef;if(!ref)return undefined;const rows=this.ctx.storage.sql.exec<{kind:string}>("SELECT kind FROM accepted_branch_roots WHERE project_id=? AND incarnation=? AND repo_name=? AND ref=?",selection.projectId,selection.incarnation,selection.canonicalRepoName,ref).toArray();if(rows.length!==1||rows[0]!.kind!=="primary")return undefined;return{acceptedRef:ref,journalId:selection.target.journalId,commit:selection.target.commit,tree:selection.target.tree};
+  }
+  async acceptedDeploymentTarget(journalId:string):Promise<{canonicalRepoName:string;target:AcceptedDeploymentTarget;selection:AcceptedDeploymentSelection}|null>{
+    const selection=this.selectRecordedDeployment(journalId);return selection?{canonicalRepoName:selection.canonicalRepoName,target:selection.target,selection}:null;
   }
   private legacyRecoveryTarget(): PrivateRecoveryTarget | null {
     const state = this.load();
@@ -1100,7 +1110,7 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   async privateRecoveryTargets():Promise<PrivateRecoveryTarget[]>{
-    const state=this.load(),records=await Promise.all(state.journal.filter(entry=>entry.state==="ACCEPTED").map(entry=>this.acceptedDeploymentTarget(entry.id))),targets:PrivateRecoveryTarget[]=records.filter((entry):entry is NonNullable<typeof entry>=>entry!==null).map(({target})=>({journalId:target.journalId,commit:target.commit,tree:target.tree,acceptedAt:target.acceptedAt})),baseline=state.acceptedBaseline;
+    const state=this.load(),records=await Promise.all(state.journal.filter(entry=>entry.state==="ACCEPTED").map(entry=>this.acceptedDeploymentTarget(entry.id))),targets:PrivateRecoveryTarget[]=records.filter((entry):entry is NonNullable<typeof entry>=>entry!==null&&this.legacyPrimaryDeploymentCompatibility(entry.selection)!==undefined).map(({target})=>({journalId:target.journalId,commit:target.commit,tree:target.tree,acceptedAt:target.acceptedAt})),baseline=state.acceptedBaseline;
     if(baseline&&isSafeSha(baseline.commit)&&(!baseline.tree||isSafeSha(baseline.tree)))targets.unshift({journalId:"baseline",commit:baseline.commit,tree:baseline.tree??null,acceptedAt:baseline.acceptedAt});
     else { const legacy = this.legacyRecoveryTarget(); if (legacy) targets.unshift(legacy); }
     return targets;
@@ -1110,18 +1120,19 @@ export class RepositoryController extends DurableObject<Env> {
     const targets=await Promise.all(this.load().journal.filter(entry=>entry.state==="ACCEPTED").slice(-100).map(entry=>this.acceptedDeploymentTarget(entry.id)));
     return targets.filter((entry):entry is NonNullable<typeof entry>=>entry!==null).map(entry=>entry.target);
   }
-  async requestDeployment(target:AcceptedDeploymentTarget,serviceId:string,environment:string,key:string,actorId:string){
-    if(await this.roleOf(actorId)!=="owner")throw new Error("Only the owner can request a deployment");
-    const accepted=await this.acceptedDeploymentTarget(target.journalId);
-    if(!accepted||JSON.stringify(accepted.target)!==JSON.stringify(target))throw new Error("Deployment target must match an accepted publication journal");
-    const service=this.connections().signingConfig(serviceId);
-    if(!service?.capabilities.includes("report-deployment"))throw new Error("Deployment reporting service unavailable");
-    if(!(await this.listWebhooks()).some(hook=>hook.active&&hook.events.split(",").includes("deployment.requested")))throw new Error("Configure an active deployment.requested webhook before requesting delivery");
-    await this.ensureRecoveryAlarm();
-    let deliveryIds:string[]=[];
-    const result=new RepositoryDeployments(this.ctx.storage,this.load().projectId).request(target,serviceId,environment,key,actorId,event=>{deliveryIds=this.stageEvent(event.type,event.data,{id:event.id,createdAt:event.createdAt});});
-    await Promise.all(deliveryIds.map(deliveryId=>this.enqueueWebhookDelivery(deliveryId)));
-    return result;
+  async requestDeployment(target:AcceptedDeploymentTarget,serviceId:string,environment:string,key:string,actorId:string,pin?:CommittedDeploymentPin){
+    const context=await this.repositoryReadContext(actorId);if(await this.roleOf(actorId)!=="owner")throw Error("Only the owner can request a deployment");
+    const selection=this.selectRecordedDeployment(target.journalId);if(!selection||JSON.stringify(selection.target)!==JSON.stringify(target))throw Error("Deployment target must match an exact accepted publication journal");
+    const ledger=new RepositoryDeployments(this.ctx.storage,this.load().projectId),duplicate=ledger.existingRequest(target,serviceId,environment,key,actorId,this.legacyPrimaryDeploymentCompatibility(selection));if(duplicate)return{kind:"duplicate" as const,deployment:duplicate};
+    if(!pin)throw Error("Trusted exact deployment pin required before creating an event");confirmAcceptedDeploymentSelection(selection,pin);
+    const service=this.connections().signingConfig(serviceId);if(!service?.capabilities.includes("report-deployment"))throw Error("Deployment reporting service unavailable");
+    if(!(await this.listWebhooks()).some(hook=>hook.active&&hook.events.split(",").includes("deployment.requested")))throw Error("Configure an active deployment.requested webhook before requesting delivery");
+    await this.ensureRecoveryAlarm();if(!await this.assertRepositoryReadContext(context,actorId)||await this.roleOf(actorId)!=="owner")throw Error("Deployment owner authority changed");
+    let deliveryIds:string[]=[];const result=this.ctx.storage.transactionSync(()=>{
+      if(this.repositoryDeleting()||this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId).toArray()[0]?.role!=="owner")throw Error("Deployment owner authority changed");const current=this.selectRecordedDeployment(target.journalId);if(!current||JSON.stringify(current)!==JSON.stringify(selection))throw Error("Accepted deployment receipt changed");confirmAcceptedDeploymentSelection(current,pin);
+      const freshService=this.connections().signingConfig(serviceId);if(!freshService?.capabilities.includes("report-deployment")||!this.ctx.storage.sql.exec<{events:string}>("SELECT events FROM webhooks WHERE active=1").toArray().some(hook=>hook.events.split(",").includes("deployment.requested")))throw Error("Deployment service or delivery authorization changed");
+      return ledger.request(current.target,serviceId,environment,key,actorId,event=>{deliveryIds=this.stageEvent(event.type,event.data,{id:event.id,createdAt:event.createdAt});},this.legacyPrimaryDeploymentCompatibility(current));
+    });await Promise.all(deliveryIds.map(deliveryId=>this.enqueueWebhookDelivery(deliveryId)));return result;
   }
 
   private discussions(publicOnly:boolean){return new RepositoryDiscussions(this.ctx.storage,publicOnly);}
@@ -1299,7 +1310,7 @@ export class RepositoryController extends DurableObject<Env> {
   private synchronizePrimaryAcceptedRegistry(state:FlareGitProjectState):AcceptedBranchScope|null{
     this.acceptedRegistryRepairTable();const scope=this.primaryAcceptedRegistryScope(state);if(!scope){this.recordAcceptedRegistryRepair("primary-unrecorded",state.acceptedState.currentCommit,"recorded_primary_scope_unavailable");return null;}
     const captured=JSON.stringify({branch:state.defaultBranch,accepted:state.acceptedState,journal:state.journal}),validate=()=>{const current=this.load();if(this.repositoryDeleting()||current.projectId!==scope.projectId||current.canonicalRepoName!==scope.canonicalRepoName||this.readRepositoryIncarnation()!==scope.incarnation||JSON.stringify({branch:current.defaultBranch,accepted:current.acceptedState,journal:current.journal})!==captured)throw Error("Recorded accepted registry scope changed");};
-    try{this.ctx.storage.transactionSync(()=>{const registry=new AcceptedBranchRoots(this.ctx.storage),recorded={commit:state.acceptedState.currentCommit,requirements:state.acceptedState.activeRequirements};registry.initializePrimary(scope,recorded,validate);registry.reconcilePrimaryRecorded(scope,recorded,state.journal,validate);this.clearAcceptedRegistryRepair(scope.ref);});return scope;}catch{this.recordAcceptedRegistryRepair(scope.ref,state.acceptedState.currentCommit,"registry_projection_pending");return null;}
+    try{this.ctx.storage.transactionSync(()=>{const registry=new AcceptedBranchRoots(this.ctx.storage),recorded={commit:state.acceptedState.currentCommit,requirements:state.acceptedState.activeRequirements};registry.initializePrimary(scope,recorded,validate);registry.reconcilePrimaryRecorded(scope,recorded,state.journal.map(journal=>{const target=journal.acceptedTarget??state.candidates[journal.candidateId]?.acceptedTarget;return{...journal,...(target?{targetRef:target.ref}:{})};}),validate);this.clearAcceptedRegistryRepair(scope.ref);});return scope;}catch{this.recordAcceptedRegistryRepair(scope.ref,state.acceptedState.currentCommit,"registry_projection_pending");return null;}
   }
   private registerCreatedAcceptedRoot(operation:BranchCreationOperation):void{
     if(operation.phase!=="confirmed"||operation.observedCommit!==operation.sourceCommit)return;const state=this.load(),primary=this.synchronizePrimaryAcceptedRegistry(state),ref=`refs/heads/${operation.branch}`;if(!primary){this.recordAcceptedRegistryRepair(ref,operation.sourceCommit,"source_registry_projection_pending");return;}
@@ -3271,7 +3282,7 @@ export class RepositoryController extends DurableObject<Env> {
   async existingDeploymentRequest(target: AcceptedDeploymentTarget, serviceId: string, environment: string, key: string, actorId: string): Promise<DeploymentRecord | null> {
     if(await this.roleOf(actorId)!=="owner")throw new Error("Owner required");
     const state=await this.getState();
-    return new RepositoryDeployments(this.ctx.storage,state.projectId).existingRequest(target,serviceId,environment,key,actorId);
+    const selection=this.selectRecordedDeployment(target.journalId);return new RepositoryDeployments(this.ctx.storage,state.projectId).existingRequest(target,serviceId,environment,key,actorId,selection?this.legacyPrimaryDeploymentCompatibility(selection):undefined);
   }
   async reserveHealthProbe(): Promise<HealthProbeAdmission> {
     return new HealthProbeBudget(this.ctx.storage).reserve();

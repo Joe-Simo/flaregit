@@ -1,3 +1,4 @@
+import {deploymentTargetRefLabel,deploymentTargetOptionLabel} from "../deployment-target-display";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,7 +10,11 @@ import type { AcceptedDeploymentTarget, DeploymentRecord } from "@/server/deploy
 
 interface Service { id: string; name: string; active: boolean; capabilities: string[] }
 interface Delivery { id: string; event: string; status: string; attempts: number }
-const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+const field = "w-full min-w-0 max-w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+export function DeploymentTargetSummary({target}:{target:AcceptedDeploymentTarget}){
+ return <dl className="grid min-w-0 gap-x-3 gap-y-1 text-xs sm:grid-cols-[auto_1fr]"><dt className="text-muted-foreground">Accepted branch</dt><dd className="break-all font-mono">{deploymentTargetRefLabel(target)}</dd><dt className="text-muted-foreground">Commit</dt><dd className="break-all font-mono">{target.commit}</dd><dt className="text-muted-foreground">Recovery ref</dt><dd className="break-all font-mono text-muted-foreground">{target.recoverableRef}</dd></dl>;
+}
 
 export function DeploymentCard({ projectId }: { projectId: string }) {
   const [records, setRecords] = useState<DeploymentRecord[] | null>(null);
@@ -78,14 +83,14 @@ export function DeploymentCard({ projectId }: { projectId: string }) {
           } catch (cause) { if (current === generation.current) setError(cause instanceof Error ? cause.message : "Request outcome is unknown. Retry unchanged fields to reuse the same request key."); }
           finally { if (current === generation.current) setBusy(false); }
         }}>
-          <label className="block text-sm">Accepted revision<select className={field} value={journalId} disabled={busy} onChange={event => setJournalId(event.target.value)}><option value="">Choose accepted history</option>{targets.map(item => <option key={item.journalId} value={item.journalId}>{item.commit.slice(0, 12)} · {new Date(item.acceptedAt).toLocaleString()}</option>)}</select></label>
-          {target && <code className="block break-all text-xs text-muted-foreground">{target.recoverableRef}</code>}
+          <label className="block text-sm">Accepted revision<select className={field} value={journalId} disabled={busy} onChange={event => setJournalId(event.target.value)}><option value="">Choose accepted history</option>{targets.map(item => <option key={item.journalId} value={item.journalId}>{deploymentTargetOptionLabel(item)}</option>)}</select></label>
+          {target && <DeploymentTargetSummary target={target}/>}
           <label className="block text-sm">Deployment service<select className={field} value={serviceId} disabled={busy} onChange={event => setServiceId(event.target.value)}><option value="">Choose connected service</option>{services.map(service => <option key={service.id} value={service.id}>{service.name}</option>)}</select></label>
           <label className="block text-sm">Environment<Input value={environment} maxLength={100} disabled={busy} onChange={event => setEnvironment(event.target.value)} /></label>
           {configurationKnown && (!targets.length || !services.length) && <p className="text-xs text-muted-foreground">Accept a reviewed change and connect a service with deployment reporting enabled. Configure its webhook for deployment.requested below.</p>}
           <Button variant="outline" disabled={busy || !configurationKnown || !target || !services.some(service => service.id === serviceId) || !environment.trim()}>{busy ? "Saving…" : "Request deployment"}</Button>
         </form>
-        <ul className="divide-y divide-border">{records.length === 0 && <li className="text-sm text-muted-foreground">No deployment requests.</li>}{records.slice().reverse().map(record => <li key={record.id} className="space-y-1 py-3"><div className="flex flex-wrap items-center justify-between gap-2"><span className="text-sm font-medium">{record.environment}</span><Badge variant="outline">{record.status === "requested" ? "Awaiting service report" : record.status}</Badge></div><code className="block text-xs break-all">{record.target.commit}</code>{record.summary && <p className="text-sm break-words">{record.summary}</p>}{record.detailsUrl && <a href={record.detailsUrl} target="_blank" rel="noopener noreferrer" className="text-xs underline">Deployment details</a>}<p className="text-xs text-muted-foreground break-all">Request event: {record.requestEventId}</p></li>)}</ul>
+        <ul className="divide-y divide-border">{records.length === 0 && <li className="text-sm text-muted-foreground">No deployment requests.</li>}{records.slice().reverse().map(record => <li key={record.id} className="space-y-1 py-3"><div className="flex flex-wrap items-center justify-between gap-2"><span className="text-sm font-medium">{record.environment}</span><Badge variant="outline">{record.status === "requested" ? "Awaiting service report" : record.status}</Badge></div><p className="text-xs break-all font-mono text-muted-foreground">{deploymentTargetRefLabel(record.target)}</p><code className="block text-xs break-all">{record.target.commit}</code>{record.summary && <p className="text-sm break-words">{record.summary}</p>}{record.detailsUrl && <a href={record.detailsUrl} target="_blank" rel="noopener noreferrer" className="text-xs underline">Deployment details</a>}<p className="text-xs text-muted-foreground break-all">Request event: {record.requestEventId}</p></li>)}</ul>
         {deliveryKnown && deliveries.length > 0 && <p className="text-xs text-muted-foreground">Webhook delivery: {deliveries.filter(row => row.status === "success").length} delivered · {deliveries.filter(row => row.status === "pending").length} pending · {deliveries.filter(row => row.status === "failed").length} failed. <a href="#deployment-deliveries" className="underline">Inspect and replay failed delivery below</a>.</p>}
       </>}
     </CardContent>

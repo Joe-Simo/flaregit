@@ -1118,18 +1118,20 @@ export default {
           return json({targets:await project.acceptedDeploymentTargets()});
         }
         if(sub==="/deployments"&&method==="POST"){
-          if(!isOwner)return text("Only the owner can request deployment delivery",403);
+          if(!isOwner||(auth.viaToken&&auth.tokenScope!=="full"))return text("Only the owner with full access can request deployment delivery",403);
+          const currentDeploymentOwner=async()=>{const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||(current.viaToken&&(current.tokenScope!=="full"||(current.tokenRepo&&current.tokenRepo!==projectId))))return text("Deployment owner authentication changed",403);if(await project.roleOf(userId)!=="owner")return text("Deployment owner access changed",403);if(!current.viaToken&&(!current.expiresAt||current.expiresAt<=Date.now()))return text("Deployment owner session expired",401);return current;};
+          const initialOwner=await currentDeploymentOwner();if(initialOwner instanceof Response)return initialOwner;
           const parsed=deploymentRequestParametersSchema.safeParse(await body<unknown>());
           if(!parsed.success)return text("Valid accepted journal, service, environment and stable request key are required",400);
           const input=parsed.data;
           const accepted=await project.acceptedDeploymentTarget(input.journalId);
           if(!accepted)return text("Only recoverable accepted publication journals can be deployment targets",409);
           try{
+            const duplicate = await project.existingDeploymentRequest(accepted.target,input.serviceId,input.environment,input.idempotencyKey,userId);
+            if(duplicate){const current=await currentDeploymentOwner();if(current instanceof Response)return current;return json({kind:"duplicate",deployment:duplicate});}
             const service=await project.connectionSigningConfig(input.serviceId);
             if(!service?.capabilities.includes("report-deployment"))return text("Register an active deployment reporting service first",409);
             if(!(await project.listWebhooks()).some(hook=>hook.active&&hook.events.split(",").includes("deployment.requested")))return text("Configure an active deployment.requested webhook first",409);
-            const duplicate = await project.existingDeploymentRequest(accepted.target,input.serviceId,input.environment,input.idempotencyKey,userId);
-            if(duplicate)return json({kind:"duplicate",deployment:duplicate});
             const operationKey = `deployment-${await accountKeyFor(`${projectId}-${userId}-${input.idempotencyKey}`)}`;
             const computeLease = await claimNativeCompute(env, operationKey);
             if(!computeLease)return text("Deployment verification is already in progress; retry the same key",409);
@@ -1138,7 +1140,9 @@ export default {
               await retainDeploymentTarget(env,accepted.canonicalRepoName,accepted.target,accountKey,`native-${computeLease}`);
               // The pin helper returns only after its trusted native lifetime confirms stopped.
               nativeStopConfirmed = true;
-              return json(await project.requestDeployment(accepted.target,input.serviceId,input.environment,input.idempotencyKey,userId),201);
+              const current=await currentDeploymentOwner();if(current instanceof Response)return current;
+              const pin={projectId:accepted.selection.projectId,incarnation:accepted.selection.incarnation,canonicalRepoName:accepted.canonicalRepoName,ref:accepted.target.recoverableRef,commit:accepted.target.commit,tree:accepted.target.tree,verified:true as const};
+              return json(await project.requestDeployment(accepted.target,input.serviceId,input.environment,input.idempotencyKey,userId,pin),201);
             } catch(error) {
               if(error instanceof NativeComputeAdmissionError) nativeStopConfirmed=true;
               throw error;
