@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { apiJson } from "../api";
+import { apiJson, apiSessionIdentity } from "../api";
+import { clearConversationDraft, commentContent, readConversationDraft, saveConversationDraft, type CommentAnchor } from "../conversation-recovery";
 import { timeAgo } from "../router";
 
 export interface Comment { id: number; author: string; body: string; path: string | null; line: number | null; commit: string | null; created_at: string }
@@ -30,6 +31,25 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
   const [comments, setComments] = useState<Comment[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [recoveredAnchor, setRecoveredAnchor] = useState<CommentAnchor | null>(null);
+  const [browserSaved, setBrowserSaved] = useState(false);
+  const recoveryScope = useRef<{ identity: string; projectId: string; subject: string } | null>(null);
+  const activeAnchor = anchor ?? recoveredAnchor;
+  useEffect(() => {
+    setDraft(""); setRecoveredAnchor(null); requestIntent.current = null; setBrowserSaved(false);
+    const identity = apiSessionIdentity();
+    recoveryScope.current = identity ? { identity, projectId, subject } : null;
+    if (!recoveryScope.current) return;
+    try {
+      const recovered = readConversationDraft(sessionStorage, recoveryScope.current);
+      if (recovered) { setDraft(recovered.body); setRecoveredAnchor(recovered.anchor); requestIntent.current = recovered.intent; setBrowserSaved(true); }
+    } catch { /* Browser storage is optional; the editor stays available. */ }
+  }, [projectId, subject]);
+  const preserveDraft = (body: string, selectedAnchor: CommentAnchor | null, intent = requestIntent.current) => {
+    const scope = recoveryScope.current;
+    if (!scope || apiSessionIdentity() !== scope.identity) return false;
+    try { return saveConversationDraft(sessionStorage, scope, { body, anchor: selectedAnchor, intent }); } catch { return false; }
+  };
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -75,9 +95,10 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
 
   const send = async () => {
     if (sending.current || !draft.trim()) return;
-    const content = { subject, body: draft.trim(), ...(anchor ? { path: anchor.path, line: anchor.line, commit: anchor.commit } : {}) };
+    const content = commentContent(subject, draft, activeAnchor);
     const payload = JSON.stringify(content);
     if (requestIntent.current?.payload !== payload) requestIntent.current = { payload, key: crypto.randomUUID() };
+    setBrowserSaved(preserveDraft(draft, activeAnchor));
     const idempotencyKey = requestIntent.current.key; sending.current = true;
     const generation = lifetime.current;
     readSequence.current++;
@@ -88,6 +109,8 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
       await apiJson<Comment>(`/p/${projectId}/comments`, { method: "POST", json: { ...content, idempotencyKey } });
       if (generation !== lifetime.current) return;
       requestIntent.current = null; setDraft("");
+      setRecoveredAnchor(null); setBrowserSaved(false);
+      try { if (recoveryScope.current && apiSessionIdentity() === recoveryScope.current.identity) clearConversationDraft(sessionStorage, recoveryScope.current); } catch { /* Server confirmation remains authoritative. */ }
       setSaved(true);
       onAnchorUsed?.();
       await load();
@@ -127,15 +150,16 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
         </ol>
       )}
       <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); void send(); }}>
-        {anchor && (
-          <p id={anchorId} className="text-xs text-muted-foreground break-all">Commenting on <code>{anchor.path}:{anchor.line}</code> at <code title={anchor.commit}>{anchor.commit.slice(0, 7)}</code> <button type="button" className="underline" onClick={onAnchorUsed}>clear</button></p>
+        {activeAnchor && (
+          <p id={anchorId} className="text-xs text-muted-foreground break-all">Commenting on <code>{activeAnchor.path}:{activeAnchor.line}</code> at <code title={activeAnchor.commit}>{activeAnchor.commit.slice(0, 7)}</code> <button type="button" className="underline" onClick={() => { setRecoveredAnchor(null); requestIntent.current = null; setBrowserSaved(preserveDraft(draft, null, null)); onAnchorUsed?.(); }}>clear</button></p>
         )}
         <label htmlFor={draftId} className="sr-only">Comment</label>
-        <Textarea ref={draftInput} id={draftId} aria-describedby={anchor ? anchorId : undefined} rows={3} maxLength={10000} value={draft} disabled={saving}
-          onChange={(e) => { setDraft(e.target.value); setSaved(false); }}
+        <Textarea ref={draftInput} id={draftId} aria-describedby={activeAnchor ? anchorId : undefined} rows={3} maxLength={10000} value={draft} disabled={saving}
+          onChange={(e) => { const body = e.target.value; setDraft(body); if (requestIntent.current?.payload !== JSON.stringify(commentContent(subject, body, activeAnchor))) requestIntent.current = null; setBrowserSaved(preserveDraft(body, activeAnchor)); setSaved(false); }}
           onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void send(); } }}
           placeholder="Write a comment (⌘/Ctrl+Enter to send)" />
         {error && <div role="alert" className={alertCls}>{error}</div>}
+        {browserSaved && draft && <p role="status" className="text-xs text-muted-foreground">Draft saved in this browser session.</p>}
         {saved && <p role="status" className="text-xs text-emerald-300">Comment posted.</p>}
         <Button type="submit" size="sm" disabled={saving || !draft.trim()}>{saving ? "Saving…" : "Comment"}</Button>
       </form>

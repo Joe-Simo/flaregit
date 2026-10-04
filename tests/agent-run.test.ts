@@ -1,3 +1,5 @@
+import {AgentRuntimeLedger,type AgentNativeAttemptIdentity} from "../src/server/agent-runtime-ledger";
+import {AgentCredentialIncidents,type AgentCredentialScope} from "../src/server/agent-credential-incidents";
 import { Database } from "bun:sqlite";
 import { accountKeyFor } from "../src/server/projects.js";
 import { ManagedSpendLedger } from "../src/server/managed-spend-ledger.js";
@@ -12,7 +14,7 @@ import type { Env } from "../src/server/env.js";
 
 // Native Git with a deterministic model double and in-memory durable-store double.
 // These assertions verify recovery orchestration, not hosted provider execution.
-async function fixture(options: { lostPush?: boolean; lostCheckpoint?: boolean; infoFails?: boolean; secret?: boolean; revokeBeforeModel?: "account" | "membership" } = {}) {
+async function fixture(options: { lostPush?: boolean; lostCheckpoint?: boolean; infoFails?: boolean; secret?: boolean; revokeBeforeModel?: "account" | "membership";badTokenScope?:boolean;revokeFails?:boolean;stopFails?:boolean;revokeDuringModel?:"account"|"membership" } = {}) {
   const root = await mkdtemp(join(tmpdir(), "agent-recovery-")), canonical = join(root, "repo.git"), seed = join(root, "seed");
   const git = async (args: string[]) => {
     const child = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@localhost", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@localhost" } });
@@ -27,12 +29,17 @@ async function fixture(options: { lostPush?: boolean; lostCheckpoint?: boolean; 
   const actorId = "fixture-human", accountKey = await accountKeyFor(actorId);
   let lifecycle: "active" | "deleted" = "active", membership = true;
   const db = new Database(":memory:");
-  const storage = { sql: { exec(query: string, ...bindings: Array<string | number>) { const rows = db.query(query).all(...bindings); return { toArray: () => rows }; } }, transactionSync<T>(callback: () => T): T { return db.transaction(callback)(); } };
-  const spend = new ManagedSpendLedger(storage as unknown as DurableObjectStorage);
+  const storage = { sql: { exec(query: string, ...bindings: Array<string | number>) { const rows = db.query(query).all(...bindings); return { toArray: () => rows,one:()=>rows[0] }; } }, transactionSync<T>(callback: () => T): T { return db.transaction(callback)(); } };
+  const spend = new ManagedSpendLedger(storage as unknown as DurableObjectStorage),native=new AgentRuntimeLedger(storage as unknown as DurableObjectStorage),credentials=new AgentCredentialIncidents(storage as unknown as DurableObjectStorage),credentialScopes=new Map<string,AgentCredentialScope>();
   const runs = new Map<string, AgentRunRecord>(); let active: string | undefined;
   let modelCalls = 0, destroyed = 0, revoked = 0, checkpoints = 0, lostPush = options.lostPush, lostCheckpoint = options.lostCheckpoint;
   const order: string[] = [];
   const ledger = {
+    beginAgentNativeAttempt:async(input:{workflowId:string;runId:string;taskId:string;phase:"proposal"|"apply";attemptId:string;nativeId:string})=>{if(db.query("SELECT id FROM agent_credential_incidents WHERE status!='revoked' LIMIT 1").get())throw Error("credential cleanup unconfirmed");const identity:AgentNativeAttemptIdentity={...input,projectId:"project1",incarnation:"11111111-1111-4111-8111-111111111111",actorId,accountKey,generation:runs.get(input.runId)?.generation??0,snapshotDigest:"a".repeat(64)};native.begin(identity,()=>{if(!membership||lifecycle!=="active")throw Error("revoked");});return identity;},
+    beginAgentCredential:async(attemptId:string,id:string,scope:"read"|"write",expiresAt:number)=>{const attempt=native.get(attemptId)!;const {state:_state,createdAt:_created,stoppedAt:_stopped,...identity}=attempt,context={...identity,repoName:task.workspace.repoName,scope};if(!credentials.begin(id,context,expiresAt,()=>{if(!membership||lifecycle!=="active")throw Error("revoked");}))return null;credentialScopes.set(id,context);return context;},
+    recordAgentCredential:async(_attemptId:string,id:string,token:string,expiry:number)=>credentials.record(id,credentialScopes.get(id)!,token,expiry),
+    revokeAgentCredential:async(id:string)=>{const pending=credentials.credentialForRevocation(id);if(!pending)return credentials.summary(id)?.status==="revoked";if(options.revokeFails)return false;revoked++;credentials.markAttempt(id);await credentials.markRevoked(id,pending.token);return true;},
+    confirmAgentNativeStopped:async(attemptId:string,nativeId:string)=>{const attempt=native.get(attemptId)!;const {state:_state,createdAt:_created,stoppedAt:_stopped,...identity}=attempt;if(options.stopFails)return false;native.confirmStopped(identity,{nativeId,state:"stopped"});return true;},
     getWorkflowRun: async (id: string) => ({ instanceId: id, kind: "agent", actorId }),
     roleOf: async (id: string) => membership && id === actorId ? "owner" : null,
     canGitAccess: async (id: string, taskId: string) => membership && id === actorId && taskId === task.id,
@@ -82,10 +89,10 @@ async function fixture(options: { lostPush?: boolean; lostCheckpoint?: boolean; 
         destroy: async () => { destroyed++; await rm(work, { recursive: true, force: true }); },
       };
     } },
-    ARTIFACTS: { get: async () => ({ info: async () => { if (options.infoFails) throw new Error("Info unavailable"); return { remote: canonical }; }, createToken: async () => ({ plaintext: "fixture-token" }), revokeToken: async () => { revoked++; return true; }, [Symbol.dispose]: () => {} }) },
-    AI: { run: async () => { modelCalls++; return { response: '<file path="src/app.ts">\nexport const value = 2;\n</file>' }; } },
+    ARTIFACTS: { get: async () => ({ info: async () => { if (options.infoFails) throw new Error("Info unavailable"); return { remote: canonical }; }, createToken: async (scope:"read"|"write",ttl:number) => ({ plaintext: "fixture-token",scope:options.badTokenScope?"admin":scope,expiresAt:new Date(Date.now()+ttl*1000).toISOString() }), revokeToken: async () => { revoked++; return true; }, [Symbol.dispose]: () => {} }) },
+    AI: { run: async () => { modelCalls++;if(options.revokeDuringModel==="account")lifecycle="deleted";if(options.revokeDuringModel==="membership")membership=false; return { response: '<file path="src/app.ts">\nexport const value = 2;\n</file>' }; } },
   } as unknown as Env;
-  return { env, ledger, task, runs, order, git, canonical, root, funding: { accountKey, parentWorkflowId: "registered-parent" }, deleteAccount: () => { lifecycle = "deleted"; }, revokeMembership: () => { membership = false; }, counts: () => ({ modelCalls, destroyed, revoked, checkpoints }), cleanup: () => rm(root, { recursive: true, force: true }) };
+  return { env, ledger, task, runs, order, git, canonical, root, funding: { accountKey, parentWorkflowId: "registered-parent" }, deleteAccount: () => { lifecycle = "deleted"; }, revokeMembership: () => { membership = false; }, native,credentials, counts: () => ({ modelCalls, destroyed, revoked, checkpoints }), cleanup: () => rm(root, { recursive: true, force: true }) };
 }
 
 test.each(["lostPush", "lostCheckpoint"] as const)("%s retry recovers the same pushed commit and persisted context without regenerating", async (failure) => {
@@ -227,3 +234,8 @@ test.each(["account", "membership"] as const)("%s revocation after funded contai
 test.each(["account","membership"] as const)("checkpointed replay revalidates %s before returning saved success",async(kind)=>{
  const f=await fixture();try{const first=await runAgentTask(f.env,f.ledger,f.task,"run-checkpointed",f.funding);expect(f.runs.get("run-checkpointed")?.phase).toBe("checkpointed");const saved=structuredClone(f.runs.get("run-checkpointed")),counts=f.counts();expect(await runAgentTask(f.env,f.ledger,f.task,"run-checkpointed",f.funding)).toEqual(first);expect(f.counts()).toEqual(counts);if(kind==="account")f.deleteAccount();else f.revokeMembership();await expect(runAgentTask(f.env,f.ledger,f.task,"run-checkpointed",f.funding)).rejects.toThrow("revoked");expect(f.runs.get("run-checkpointed")).toEqual(saved);expect(f.counts()).toEqual(counts);expect(f.task.currentCommit).toBe(first.commit);}finally{await f.cleanup();}
 });
+
+test("native attempt and token receipts precede use; wrong provider scope refuses model and revokes exact receipt",async()=>{const f=await fixture({badTokenScope:true});try{await expect(runAgentTask(f.env,f.ledger,f.task,"bad-token",f.funding)).rejects.toThrow("scope or expiry");expect(f.counts().modelCalls).toBe(0);expect(f.counts().revoked).toBe(1);expect(f.native.hasUnconfirmed()).toBe(false);expect(f.credentials.pendingBatch()).toHaveLength(0);}finally{await f.cleanup();}});
+test.each(["credential","native"] as const)("unconfirmed %s cleanup preserves durable hold and refuses replacement compute",async(kind)=>{const f=await fixture({revokeFails:kind==="credential",stopFails:kind==="native"});try{await runAgentTask(f.env,f.ledger,f.task,"held-run",{...f.funding,stopAfterProposal:true});const before=f.counts();await expect(runAgentTask(f.env,f.ledger,f.task,"held-run",f.funding)).rejects.toThrow(/unconfirmed/);expect(f.counts()).toEqual(before);expect(f.runs.get("held-run")?.proposal).toBeDefined();if(kind==="native")expect(f.native.hasUnconfirmed()).toBe(true);else expect(f.credentials.pendingBatch()).toHaveLength(1);}finally{await f.cleanup();}});
+
+test.each(["account","membership"] as const)("%s withdrawn while model runs refuses persistence and Git publication",async(kind)=>{const f=await fixture({revokeDuringModel:kind});try{await expect(runAgentTask(f.env,f.ledger,f.task,"mid-model",f.funding)).rejects.toThrow("revoked");expect(f.counts().modelCalls).toBe(1);expect(f.order).not.toContain("proposal-saved");expect(f.order).not.toContain("materialize");expect(f.runs.get("mid-model")?.proposal).toBeUndefined();expect(f.counts().checkpoints).toBe(0);expect(await f.git(["--git-dir",f.canonical,"for-each-ref","--format=%(refname)"])).toBe("refs/heads/main");expect(f.counts().revoked).toBe(1);expect(f.native.hasUnconfirmed()).toBe(false);}finally{await f.cleanup();}});

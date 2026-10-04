@@ -13,6 +13,8 @@ import {openRepositoryRead,RepositoryReadError} from "./repository-read-budget.j
 import {SavedRebaseResumeCredentials,type SavedRebaseResumeCredentialPurpose} from "./saved-rebase-resume-credentials.js";
 import {RebaseResumeAttempts,assertRebaseResumeSessionDelegation,type RebaseResumeAttempt} from "./rebase-resume-attempts.js";
 import {RebaseRecoveryLedger,RebaseRecoveryError,verifyRebaseRecovery,type RebaseRecoverySnapshot,type RebaseRecoveryReport,type RebaseRecoveryReceipt,type RebaseRecoveryProof} from "./rebase-recovery.js";
+import { AgentRuntimeLedger, type AgentNativeAttemptIdentity } from "./agent-runtime-ledger.js";
+import { AgentCredentialIncidents, type AgentCredentialScope } from "./agent-credential-incidents.js";
 import {RetainedCredentialIncidents} from "./retained-credential-incidents.js";
 import {RetainedInputs,retainedInputSchema,type RetainedInput,type RetainedInputReceipt,type RebaseApplication} from "./retained-inputs.js";
 import {ImportHistoryInspection,type HistorySide,type HistoryInspectionActor,type HistoryChunk,type HistoryInspectionSnapshot,type HistoryInspectionBatch} from "./import-history-inspection.js";
@@ -356,6 +358,13 @@ export interface Ledger {
   finishAccountDeletion(): Promise<void>;
   accountArtifactDeleted(name:string):Promise<boolean>;
   recordAccountArtifactDeleted(name:string):Promise<void>;
+  beginAgentNativeAttempt(input:{workflowId:string;runId:string;taskId:string;phase:"proposal"|"apply";attemptId:string;nativeId:string}):Promise<import("./agent-runtime-ledger").AgentNativeAttemptIdentity>;
+  beginAgentCredential(attemptId:string,issuanceId:string,scope:"read"|"write",expiresAt:number):Promise<import("./agent-credential-incidents").AgentCredentialScope|null>;
+  recordAgentCredential(attemptId:string,issuanceId:string,token:string,expiresAt:number):Promise<void>;
+  revokeAgentCredential(issuanceId:string):Promise<boolean>;
+  confirmAgentNativeStopped(attemptId:string,nativeId:string):Promise<boolean>;
+  agentNativeRecoverySummary(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<{attempts:Array<{attemptId:string;workflowId:string;runId:string;taskId:string;phase:"proposal"|"apply";generation:number;stopped:boolean;credentialStatuses:string[]}>;truncated:boolean;providerVerified:false}>;
+  recoverAgentNativeAttempt(attemptId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<{stopped:boolean;credentialsComplete:boolean}>;
   getAgentRun(runId: string): Promise<AgentRunRecord | null>;
   claimAgentRun(input: AgentRunInput): Promise<AgentRunClaim>;
   resumeAgentRun(runId: string, taskId: string, previousRunId: string): Promise<AgentRunClaim>;
@@ -1229,6 +1238,57 @@ export class RepositoryController extends DurableObject<Env> {
   async accountArtifactDeleted(name:string):Promise<boolean> {this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS account_artifact_deletions(name TEXT PRIMARY KEY)");return this.ctx.storage.sql.exec("SELECT name FROM account_artifact_deletions WHERE name=?",name).toArray().length>0;}
   async recordAccountArtifactDeleted(name:string):Promise<void> {this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS account_artifact_deletions(name TEXT PRIMARY KEY)");this.ctx.storage.sql.exec("INSERT OR IGNORE INTO account_artifact_deletions VALUES(?)",name);}
 
+  private agentNativeSnapshot(task:Task):string{return JSON.stringify({id:task.id,goal:task.goal,base:task.baseCommit,commit:task.currentCommit,workspace:task.workspace,scope:task.allowedScope});}
+  private assertAgentNativeLocal(attempt:AgentNativeAttemptIdentity):void {
+    const state=this.load(),task=state.tasks[attempt.taskId],registered=this.ctx.storage.sql.exec<{actor_id:string|null;kind:string}>("SELECT actor_id,kind FROM project_workflows WHERE instance_id=?",attempt.workflowId).toArray()[0];
+    this.gitTables();const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",attempt.actorId).toArray()[0]?.role;const writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",attempt.taskId).toArray()[0]?.user_id;const selected=task?.agentRunId?this.agentRuns().get(task.agentRunId):null;
+    if((role!=="owner"&&writer!==attempt.actorId)||(selected&&selected.runId!==attempt.runId&&!["failed","checkpointed"].includes(selected.phase))||this.repositoryDeleting()||!task||["accepted","cancelled","integrating","verifying"].includes(task.status)||state.projectId!==attempt.projectId||this.readRepositoryIncarnation()!==attempt.incarnation||registered?.actor_id!==attempt.actorId||(registered?.kind==="agent"&&(task.agentWorkflowInstanceId!==attempt.workflowId||attempt.runId!==attempt.workflowId))||!this.ctx.storage.sql.exec("SELECT role FROM members WHERE user_id=?",attempt.actorId).toArray().length||(this.agentRuns().get(attempt.runId)?.generation??0)!==attempt.generation)throw Error("Agent runtime authority changed");
+  }
+  async beginAgentNativeAttempt(input:{workflowId:string;runId:string;taskId:string;phase:"proposal"|"apply";attemptId:string;nativeId:string}):Promise<AgentNativeAttemptIdentity>{
+    await this.ensureRecoveryAlarm();const run=await this.getWorkflowRun(input.workflowId),state=this.load(),task=state.tasks[input.taskId],incarnation=new PrivateRecoveryOperations(this.ctx.storage).incarnation();
+    if(!run?.actorId||!task||!incarnation||(run.kind!=="agent"&&run.kind!=="scenario")||(run.kind==="agent"&&(task.agentWorkflowInstanceId!==input.workflowId||input.runId!==input.workflowId)))throw Error("Registered agent initiator required");
+    const snapshot=this.agentNativeSnapshot(task),accountKey=await accountKeyFor(run.actorId),digest=await this.sha256(snapshot);
+    if(await accountOf(this.env,accountKey).accountLifecycle()!=="active"||!await this.canGitAccess(run.actorId,input.taskId,true))throw Error("Agent account or task writer unavailable");
+    const attempt:AgentNativeAttemptIdentity={...input,projectId:state.projectId,incarnation,actorId:run.actorId,accountKey,generation:this.agentRuns().get(input.runId)?.generation??0,snapshotDigest:digest};
+    return new AgentRuntimeLedger(this.ctx.storage).begin(attempt,()=>{this.assertAgentNativeLocal(attempt);new AgentCredentialIncidents(this.ctx.storage);if(this.ctx.storage.sql.exec("SELECT id FROM agent_credential_incidents WHERE json_extract(payload,'$.taskId')=? AND status!='revoked' LIMIT 1",input.taskId).toArray().length)throw Error("Earlier agent credential cleanup remains unconfirmed");if(this.agentNativeSnapshot(this.load().tasks[input.taskId]!)!==snapshot)throw Error("Agent task changed during allocation");});
+  }
+  async beginAgentCredential(attemptId:string,id:string,scope:"read"|"write",expiresAt:number):Promise<AgentCredentialScope|null>{
+    const runtime=new AgentRuntimeLedger(this.ctx.storage),attempt=runtime.get(attemptId);if(!attempt||attempt.state!=="possible")throw Error("Agent allocation unavailable");this.assertAgentNativeLocal(attempt);
+    if(attempt.phase==="proposal"&&scope!=="read")throw Error("Proposal only permits read credentials");
+    const task=this.load().tasks[attempt.taskId]!,snapshot=this.agentNativeSnapshot(task);if(await this.sha256(snapshot)!==attempt.snapshotDigest||await accountOf(this.env,attempt.accountKey).accountLifecycle()!=="active")throw Error("Agent credential scope changed");
+    const {state:_state,createdAt:_created,stoppedAt:_stopped,...identity}=attempt;
+    const context:AgentCredentialScope={...identity,repoName:task.workspace.repoName,scope};
+    await this.ensureRecoveryAlarm();return new AgentCredentialIncidents(this.ctx.storage).begin(id,context,expiresAt,()=>{this.assertAgentNativeLocal(identity);if(this.agentNativeSnapshot(this.load().tasks[identity.taskId]!)!==snapshot)throw Error("Agent credential task changed");})?context:null;
+  }
+  async recordAgentCredential(attemptId:string,id:string,token:string,expiresAt:number):Promise<void>{const ledger=new AgentCredentialIncidents(this.ctx.storage),context=ledger.context(id);if(!context||context.attemptId!==attemptId)throw Error("Agent credential intent unavailable");await ledger.record(id,context,token,expiresAt);await this.ensureRecoveryAlarm();}
+  async revokeAgentCredential(id:string):Promise<boolean>{const ledger=new AgentCredentialIncidents(this.ctx.storage);if(ledger.summary(id)?.status==="revoked")return true;const pending=ledger.credentialForRevocation(id);if(!pending)return false;const funded=await globalOf(this.env).reserveCoreGitOperation(`agent-cleanup-${crypto.randomUUID()}`,pending.context.accountKey,this.currentGitBudget()).catch(()=>null);if(!funded?.allowed||!ledger.markAttempt(id))return false;try{using repo=await this.env.ARTIFACTS.get(pending.context.repoName);if(!await repo.revokeToken(pending.token))return false;await ledger.markRevoked(id,pending.token);return true;}catch{return false;}}
+  async confirmAgentNativeStopped(attemptId:string,nativeId:string):Promise<boolean>{const ledger=new AgentRuntimeLedger(this.ctx.storage),attempt=ledger.get(attemptId);if(!attempt||attempt.nativeId!==nativeId)return false;if(attempt.state==="stopped")return true;try{const sandbox=this.env.AGENT.getByName(`agent-${nativeId}`);await sandbox.destroy();if((await sandbox.lifetimeStatus())?.state!=="stopped")return false;const {state:_state,createdAt:_created,stoppedAt:_stopped,...identity}=attempt;ledger.confirmStopped(identity,{nativeId,state:"stopped"});return true;}catch{return false;}}
+  protected async agentWorkflowTerminalStatus(workflowId:string,kind:string):Promise<string>{if(kind!=="agent"&&kind!=="scenario")throw Error("Recorded agent workflow unavailable");const workflow=kind==="agent"?this.env.AGENT_WORKFLOW:this.env.SCENARIO_WORKFLOW;return(await(await workflow.get(workflowId)).status()).status;}
+  protected async retryAgentNativeStops():Promise<void>{
+    new AgentRuntimeLedger(this.ctx.storage);this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS agent_native_cleanup_attempts(attempt_id TEXT PRIMARY KEY,observations INTEGER NOT NULL DEFAULT 0,stops INTEGER NOT NULL DEFAULT 0,terminal INTEGER NOT NULL DEFAULT 0)");
+    const rows=this.ctx.storage.sql.exec<{attempt_id:string;doc:string;kind:string|null}>("SELECT a.attempt_id,a.doc,p.kind FROM agent_native_attempts a LEFT JOIN project_workflows p ON p.instance_id=json_extract(a.doc,'$.workflowId') LEFT JOIN agent_native_cleanup_attempts c ON c.attempt_id=a.attempt_id WHERE json_extract(a.doc,'$.state')!='stopped' AND (COALESCE(c.observations,0)<4 OR (c.terminal=1 AND c.stops<4 AND c.observations<8)) ORDER BY a.rowid LIMIT 20").toArray();
+    for(const row of rows){
+      const attempt=JSON.parse(row.doc) as AgentNativeAttemptIdentity;
+      this.ctx.storage.sql.exec("INSERT INTO agent_native_cleanup_attempts(attempt_id,observations) VALUES(?,1) ON CONFLICT(attempt_id) DO UPDATE SET observations=observations+1",row.attempt_id);
+      const funding=await globalOf(this.env).reserveCoreGitOperation(`agent-native-cleanup-${crypto.randomUUID()}`,attempt.accountKey,this.currentGitBudget()).catch(()=>null);if(!funding?.allowed)continue;
+      try{const status=await this.agentWorkflowTerminalStatus(attempt.workflowId,row.kind??"");if(!["complete","errored","terminated"].includes(status))continue;this.ctx.storage.sql.exec("UPDATE agent_native_cleanup_attempts SET terminal=1,stops=stops+1 WHERE attempt_id=?",row.attempt_id);await this.confirmAgentNativeStopped(attempt.attemptId,attempt.nativeId);}catch{/* Unknown provider state retains the recorded allocation. */}
+    }
+    if(rows.length)await this.ensureRecoveryAlarm(120000);
+  }
+  async agentNativeRecoverySummary(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){
+    const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authorize();new AgentRuntimeLedger(this.ctx.storage);new AgentCredentialIncidents(this.ctx.storage);const incarnation=this.readRepositoryIncarnation();
+    const rows=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM agent_native_attempts a WHERE json_extract(doc,'$.incarnation')=? AND (json_extract(doc,'$.state')!='stopped' OR EXISTS(SELECT id FROM agent_credential_incidents c WHERE json_extract(c.payload,'$.attemptId')=a.attempt_id AND c.status!='revoked')) ORDER BY rowid LIMIT 21",incarnation??"").toArray();
+    return{attempts:rows.slice(0,20).map(row=>{const attempt=JSON.parse(row.doc) as AgentNativeAttemptIdentity&{state:string};return{attemptId:attempt.attemptId,workflowId:attempt.workflowId,runId:attempt.runId,taskId:attempt.taskId,phase:attempt.phase,generation:attempt.generation,stopped:attempt.state==="stopped",credentialStatuses:this.ctx.storage.sql.exec<{status:string}>("SELECT DISTINCT status FROM agent_credential_incidents WHERE json_extract(payload,'$.attemptId')=? AND status!='revoked'",attempt.attemptId).toArray().map(value=>value.status)};}),truncated:rows.length>20,providerVerified:false as const};
+  }
+  async recoverAgentNativeAttempt(attemptId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<{stopped:boolean;credentialsComplete:boolean}>{
+    if(await this.roleOf(actor.userId)!=="owner")throw Error("Owner runtime recovery required");const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt),runtime=new AgentRuntimeLedger(this.ctx.storage),attempt=runtime.get(attemptId);if(!attempt||attempt.projectId!==this.load().projectId||attempt.incarnation!==this.readRepositoryIncarnation())throw Error("Exact saved agent attempt unavailable");
+    const run=await this.getWorkflowRun(attempt.workflowId);authorize();if(!run||!await globalOf(this.env).reserveCoreGitOperation(`agent-owner-cleanup-${crypto.randomUUID()}`,await accountKeyFor(actor.userId),this.currentGitBudget()).then(value=>value.allowed))throw Error("Runtime recovery allowance unavailable");authorize();
+    const status=await this.agentWorkflowTerminalStatus(attempt.workflowId,run.kind);authorize();if(!["complete","errored","terminated"].includes(status))throw Error("Workflow termination is unconfirmed; terminate the exact saved workflow before recovery");
+    const stopped=await this.confirmAgentNativeStopped(attempt.attemptId,attempt.nativeId);authorize();
+    const credentials=new AgentCredentialIncidents(this.ctx.storage);credentials.pendingBatch();const ids=this.ctx.storage.sql.exec<{id:string}>("SELECT id FROM agent_credential_incidents WHERE json_extract(payload,'$.attemptId')=? AND status!='revoked' LIMIT 21",attemptId).toArray();for(const item of ids.slice(0,20)){authorize();await this.revokeAgentCredential(item.id);}authorize();
+    const remaining=this.ctx.storage.sql.exec("SELECT id FROM agent_credential_incidents WHERE json_extract(payload,'$.attemptId')=? AND status!='revoked' LIMIT 1",attemptId).toArray().length>0;return{stopped,credentialsComplete:!remaining};
+  }
+  private async retryAgentCredentialIncidents():Promise<void>{const ledger=new AgentCredentialIncidents(this.ctx.storage);for(const pending of ledger.pendingBatch())if(ledger.markAutomaticSweep(pending.id))await this.revokeAgentCredential(pending.id);const wake=ledger.nextAlarm();if(wake!==null)await this.ensureRecoveryAlarm(Math.max(1,wake-Date.now()));}
   private agentRuns() { return new AgentRunLedger(this.ctx.storage); }
   private agentScope(task: Task, projectScope: string[]): string[] {
     const scope = [...new Set((task.allowedScope ?? projectScope).flatMap((requested) => projectScope.flatMap((allowed) => requested === "*" ? [allowed] : allowed === "*" ? [requested] : requested.startsWith(allowed) ? [requested] : allowed.startsWith(requested) ? [allowed] : [])))];
@@ -1266,9 +1326,18 @@ export class RepositoryController extends DurableObject<Env> {
       });
     } catch (error) { this.state = null; throw error; }
   }
-  async saveAgentProposal(runId: string, taskId: string, files: Record<string, string>): Promise<boolean> { return this.agentRuns().propose(runId, taskId, files); }
-  async markAgentPushed(runId: string, taskId: string, commit: string): Promise<boolean> { return this.agentRuns().markPushed(runId, taskId, commit); }
+  private async authorizeAgentMutation(runId:string,taskId:string):Promise<()=>void>{
+    new AgentRuntimeLedger(this.ctx.storage);const row=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM agent_native_attempts WHERE run_id=? AND task_id=? ORDER BY rowid DESC LIMIT 1",runId,taskId).toArray()[0];
+    if(!row)throw Error("Agent execution authority has no recorded native scope");
+    const attempt=JSON.parse(row.doc) as AgentNativeAttemptIdentity,run=this.agentRuns().get(runId),incarnation=this.readRepositoryIncarnation();
+    if(!run||run.taskId!==taskId)throw Error("Agent run unavailable");
+    const validate=()=>{const task=this.load().tasks[taskId],current=this.agentRuns().get(runId),registered=this.ctx.storage.sql.exec<{actor_id:string|null}>("SELECT actor_id FROM project_workflows WHERE instance_id=?",attempt.workflowId).toArray()[0];this.gitTables();const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",attempt.actorId).toArray()[0]?.role,writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",taskId).toArray()[0]?.user_id;if(!task||task.agentRunId!==runId||!current||current.generation!==run.generation||this.readRepositoryIncarnation()!==incarnation||incarnation!==attempt.incarnation||registered?.actor_id!==attempt.actorId||(role!=="owner"&&writer!==attempt.actorId)||!role)throw Error("Agent mutation authority changed");};
+    validate();if(await accountOf(this.env,attempt.accountKey).accountLifecycle()!=="active"||!await this.canGitAccess(attempt.actorId,taskId,true))throw Error("Agent mutation writer unavailable");validate();return validate;
+  }
+  async saveAgentProposal(runId: string, taskId: string, files: Record<string, string>): Promise<boolean> { const validate=await this.authorizeAgentMutation(runId,taskId);return this.ctx.storage.transactionSync(()=>{validate();return this.agentRuns().propose(runId, taskId, files);}); }
+  async markAgentPushed(runId: string, taskId: string, commit: string): Promise<boolean> { const validate=await this.authorizeAgentMutation(runId,taskId);return this.ctx.storage.transactionSync(()=>{validate();return this.agentRuns().markPushed(runId, taskId, commit);}); }
   async checkpointAgentRun(runId: string, taskId: string, eventId: string, commit: string): Promise<boolean> {
+    const validate=await this.authorizeAgentMutation(runId,taskId);validate();
     const task = this.load().tasks[taskId];
     if (!task || task.agentRunId !== runId || task.currentCommit !== commit || !["ready", "integrating", "verifying", "accepted"].includes(task.status)) return false;
     return this.agentRuns().checkpoint(runId, taskId, eventId, commit);
@@ -2244,6 +2313,8 @@ export class RepositoryController extends DurableObject<Env> {
     await this.reconcileLegacyPublicationReadbacks();
     await this.retryRefReadCredentials();
     await this.retryRetainedCredentialIncidents();
+    await this.retryAgentCredentialIncidents();
+    await this.retryAgentNativeStops();
     await this.retryRebaseResumeCredentials();
     await this.retryPreviewCredentialIncidents();
     await this.reconcileDirectoryRegistration();
@@ -2944,6 +3015,7 @@ export class RepositoryController extends DurableObject<Env> {
     new RebaseResumeAttempts(this.ctx.storage);
     if(new RefReadCredentialIncidents(this.ctx.storage).hasPending())throw new Error("Read credential cleanup remains unconfirmed; recovery records preserved");
     if(this.ctx.storage.sql.exec("SELECT 1 FROM rebase_resume_attempts a WHERE rowid=(SELECT MAX(rowid) FROM rebase_resume_attempts b WHERE b.application_id=a.application_id) AND (json_extract(doc,'$.nativeState')!='stopped' OR json_extract(doc,'$.terminal') IS NULL OR json_extract(doc,'$.dispatch')='unknown') LIMIT 1").toArray().length||new SavedRebaseResumeCredentials(this.ctx.storage).hasPending())throw new Error("Saved recovery cleanup is unconfirmed; durable attempts and credentials were preserved");
+    const agentRuntime=new AgentRuntimeLedger(this.ctx.storage),agentCredentials=new AgentCredentialIncidents(this.ctx.storage);agentCredentials.pendingBatch();if(agentRuntime.hasUnconfirmed()||this.ctx.storage.sql.exec("SELECT id FROM agent_credential_incidents WHERE status!='revoked' LIMIT 1").toArray().length)throw Error("Agent shutdown or credential cleanup remains unconfirmed; metadata preserved");
     const integrationNative=new IntegrationNativeRuntimeLedger(this.ctx.storage);if(integrationNative.hasUnconfirmed()||this.integrationNativeMissingCoverage().some(run=>run.native_protocol!==1||Object.values(this.load(true).candidates).some(candidate=>candidate.workflowInstanceId===run.instance_id)))throw new Error("Integration native shutdown remains unconfirmed; metadata was preserved");
     const tables = this.ctx.storage.sql.exec<{name:string}>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name!='repository_deletion'").toArray();
     this.ctx.storage.transactionSync(() => {

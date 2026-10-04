@@ -26,6 +26,10 @@ export class PublicationFixture extends RepositoryController {
     this.ctx.storage.sql.exec("INSERT INTO lease (id, holder, expires_at) VALUES (1, ?, ?)", holder, Date.now() + 60_000);
     this.ctx.storage.sql.exec("INSERT INTO webhooks (id,url,secret,events,active,created_at) VALUES ('hook','https://example.com/hook','test-secret','change.accepted,change.ready,change.blocked,decision.needed',1,'now')");
   }
+  async fixtureAgentNativeAuthority(runId:string,taskId:string){
+    await this.registerWorkflow(runId,"agent",taskId,"test-reviewer");
+    return this.beginAgentNativeAttempt({workflowId:runId,runId,taskId,phase:"apply",attemptId:crypto.randomUUID(),nativeId:crypto.randomUUID()});
+  }
   async fixtureRecoveryHead(commit:string) {
     const state=await this.getState();
     state.acceptedState.currentCommit=commit;
@@ -116,6 +120,7 @@ export default {
       if (url.pathname === "/agent-resume") { const input = await request.json() as { runId:string;taskId:string;previousRunId:string }; return Response.json(await stub.resumeAgentRun(input.runId,input.taskId,input.previousRunId)); }
       if (url.pathname === "/verification-policy") await stub.setVerificationPolicy(await request.json() as Record<string,unknown>);
       if (url.pathname === "/agent-claim") return Response.json(await stub.claimAgentRun(await request.json() as AgentRunInput));
+      if (url.pathname === "/agent-native-authority") {const input=await request.json() as {runId:string;taskId:string};return Response.json(await stub.fixtureAgentNativeAuthority(input.runId,input.taskId));}
       if (url.pathname === "/agent-proposal") { const input = await request.json() as { runId: string; taskId: string; files: Record<string,string> }; return Response.json(await stub.saveAgentProposal(input.runId,input.taskId,input.files)); }
       if (url.pathname === "/agent-push") { const input = await request.json() as { runId: string; taskId: string; commit: string }; return Response.json(await stub.markAgentPushed(input.runId,input.taskId,input.commit)); }
       if (url.pathname === "/agent-checkpoint") { const input = await request.json() as { runId: string; taskId: string; commit: string; eventId: string }; await stub.ingestCheckpoint({ ...input, ready: true }); return Response.json(await stub.checkpointAgentRun(input.runId,input.taskId,input.eventId,input.commit)); }

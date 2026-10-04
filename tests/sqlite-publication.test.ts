@@ -200,7 +200,7 @@ test("local workerd SQLite executes production publication rollback and recovery
     expect((await (await request(`/review?name=exact-review&expected=${reviewedCommit}`)).json() as { ok: boolean }).ok).toBe(true);
     expect((await (await request(`/review?name=exact-review&expected=${"a".repeat(40)}`)).json() as { ok: boolean }).ok).toBe(false);
     expect((await (await request(`/review?name=exact-review&expected=${reviewedCommit}`)).json() as { ok: boolean }).ok).toBe(true);
-    const agentTask = { ...publishable.tasks.task, status: "ready", baseCommit: "a".repeat(40), allowedScope: ["src/"], workspace: { repoName: "test-agent", remote: "https://git.example.com/test", branch: "task/task" }, currentCommit: "a".repeat(40) };
+    const agentTask = { ...publishable.tasks.task, agentWorkflowInstanceId:"run-one", status: "ready", baseCommit: "a".repeat(40), allowedScope: ["src/"], workspace: { repoName: "test-agent", remote: "https://git.example.com/test", branch: "task/task" }, currentCommit: "a".repeat(40) };
     const agentState = { ...publishable, tasks: { task: agentTask } };
     const agentClaim = { runId: "run-one", taskId: "task", startingCommit: "a".repeat(40), startingBranchHead: null, branch: "task/task", goal: "Frozen goal", context: { comments: [] }, allowedScope: ["src/"], protectedPaths: [] };
     await request("/seed?name=agent-atomic", { state: agentState, holder: "old-holder" });
@@ -210,6 +210,7 @@ test("local workerd SQLite executes production publication rollback and recovery
     expect(((await (await request("/agent-state?name=agent-atomic")).json()) as { tasks: { task: { status: string } } }).tasks.task.status).toBe("ready");
     await request("/fail?name=agent-atomic&enabled=false");
     expect((await request("/agent-claim?name=agent-atomic", agentClaim)).status).toBe(200);
+    expect((await request("/agent-native-authority?name=agent-atomic",{runId:"run-one",taskId:"task"})).status).toBe(200);
     await request("/agent-proposal?name=agent-atomic", { runId: "run-one", taskId: "task", files: { "src/file.ts": "export const value=1;" } });
     await request("/agent-push?name=agent-atomic", { runId: "run-one", taskId: "task", commit: "b".repeat(40) });
     expect(await (await request("/agent-checkpoint?name=agent-atomic", { runId: "run-one", taskId: "task", commit: "b".repeat(40), eventId: "saved-checkpoint" })).json()).toBe(true);
@@ -227,6 +228,7 @@ test("local workerd SQLite executes production publication rollback and recovery
     await request("/fail?name=agent-atomic&enabled=false");
     await request("/seed?name=agent-resume", { state: agentState, holder: "old-holder" });
     await request("/agent-claim?name=agent-resume", agentClaim);
+    expect((await request("/agent-native-authority?name=agent-resume",{runId:"run-one",taskId:"task"})).status).toBe(200);
     await request("/agent-proposal?name=agent-resume", { runId:"run-one",taskId:"task",files:{"src/file.ts":"export const value=1;"} });
     await request("/agent-fail?name=agent-resume", { runId:"run-one",taskId:"task" });
     const resume={runId:"resumed-run",taskId:"task",previousRunId:"run-one"};

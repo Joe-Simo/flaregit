@@ -2,11 +2,13 @@ type SessionBinding = { identity: string; getToken: () => Promise<string | null>
 let session: SessionBinding | null = null;
 let identity: string | null = null;
 let epoch = 0;
+/** Recovery data is scoped to the captured active session, never an email or repository alone. */
+export function apiSessionIdentity(): string | null { return session?.identity ?? null; }
 const responseGuards = new WeakMap<Response, () => void>();
 
 /** Bind the captured session resource, not Clerk's dynamically active session. */
 export function bindApiSession(principal: string, getToken: () => Promise<string | null>): () => void {
-  if (identity !== principal) { identity = principal; epoch++; }
+  if (identity !== principal) { if (identity) clearSessionConversationDrafts(identity); identity = principal; epoch++; }
   const owner = Symbol(principal);
   session = { identity: principal, getToken, owner };
   return () => {
@@ -14,7 +16,7 @@ export function bindApiSession(principal: string, getToken: () => Promise<string
     session = null;
     // React StrictMode immediately rebinds the same layout effect. Clear credentials
     // synchronously, but avoid treating that rehearsal as a different principal.
-    queueMicrotask(() => { if (!session && identity === principal) { identity = null; epoch++; } });
+    queueMicrotask(() => { if (!session && identity === principal) { clearSessionConversationDrafts(principal); identity = null; epoch++; } });
   };
 }
 
@@ -112,3 +114,4 @@ export async function apiJson<T>(path: string, init: RequestInit & { json?: unkn
   }
   return (text ? JSON.parse(text) : {}) as T;
 }
+import { clearSessionConversationDrafts } from "./conversation-recovery";

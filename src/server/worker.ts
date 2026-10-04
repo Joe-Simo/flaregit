@@ -1384,6 +1384,28 @@ export default {
           return json({ queued: eventId }, 202);
         }
 
+        if(sub==="/agent-runtime/recovery"&&(method==="GET"||method==="POST")){
+          if(!isOwner)return text("Only the repository owner can reconcile saved agent runtime cleanup",403);
+          if([...url.searchParams.keys()].length)return text("Invalid runtime recovery query",400);
+          const currentOwner=async()=>{const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||(current.viaToken&&(current.tokenScope!=="full"||(current.tokenRepo&&current.tokenRepo!==projectId))))return text("Runtime recovery owner authentication changed",403);return current;};
+          const current=await currentOwner();if(current instanceof Response)return current;
+          const actor={userId,displayName:"Repository owner",viaToken:current.viaToken===true},credentialHash=current.viaToken?await gitParentTokenHash(request):undefined;
+          try{
+            if(method==="GET"){
+              await project.agentNativeRecoverySummary(actor,credentialHash,current.expiresAt);
+              const finalAuth=await currentOwner();if(finalAuth instanceof Response)return finalAuth;
+              const summary=await project.agentNativeRecoverySummary(actor,credentialHash,finalAuth.expiresAt);
+              return repositoryReadJson(summary);
+            }
+            const input=await body<{attemptId?:unknown}>();
+            if(Object.keys(input).some(key=>key!=="attemptId")||typeof input.attemptId!=="string"||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(input.attemptId))return text("An exact saved agent attempt ID is required",400);
+            const result=await project.recoverAgentNativeAttempt(input.attemptId,actor,credentialHash,current.expiresAt);
+            const finalAuth=await currentOwner();if(finalAuth instanceof Response)return finalAuth;
+            await project.agentNativeRecoverySummary(actor,credentialHash,finalAuth.expiresAt);
+            return repositoryReadJson(result,result.stopped&&result.credentialsComplete?200:202);
+          }catch{return repositoryReadJson({error:"Agent runtime cleanup was not confirmed. Saved attempts, credentials, and contribution history remain preserved; refresh the recovery status before retrying."},409);}
+        }
+
         const runtimeInspectionRoute=/^\/candidates\/([a-z0-9_-]{1,128})\/runtime$/.exec(sub);
         if(runtimeInspectionRoute&&method!=="GET")return text("Read-only runtime inspection",405);
         const legacyAbandonRoute=/^\/candidates\/([a-z0-9_-]{1,128})\/rerun\/abandon$/.exec(sub);
