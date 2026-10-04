@@ -1,0 +1,7 @@
+import {expect,test} from "bun:test";
+import {restoreTaskCreationRequest} from "../src/web/task-creation-recovery";
+import {contributionCreationIntent} from "../src/web/contribution-target-selection";
+test("saved creation restores exact original identity, purpose and branch tuple after reload",()=>{
+ const input={goal:"Original purpose",dependsOn:"parent-one",issue:7,expectedTarget:{ref:"refs/heads/release",acceptedCommit:"a".repeat(40),acceptedVersion:3,policyVersion:2}};const restored=restoreTaskCreationRequest("saved-change",input);expect(restored.intent.payload).toEqual({taskId:"saved-change",goal:input.goal,dependsOn:input.dependsOn,issue:7,expectedTarget:input.expectedTarget});const replay=contributionCreationIntent(restored.intent,{goal:restored.goal,dependsOn:restored.dependsOn,issue:restored.issue,target:{...restored.target!,acceptedCommit:"b".repeat(40)},signatureOverride:restored.intent.signature},()=>{throw Error("Must not refork under a new identity");});expect(replay).toBe(restored.intent);expect(replay.payload.expectedTarget).toEqual(input.expectedTarget);
+});
+test("legacy saved creation keeps omitted target and nullable relationships without inventing primary metadata",()=>{const restored=restoreTaskCreationRequest("saved-legacy",{goal:"Purpose",dependsOn:null,issue:null});expect(restored.target).toBeNull();expect(restored.intent.payload).toEqual({taskId:"saved-legacy",goal:"Purpose"});expect(JSON.stringify(restored)).not.toContain("main");expect(JSON.stringify(restored)).not.toContain("useAgent");});

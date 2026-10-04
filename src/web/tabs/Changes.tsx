@@ -1,7 +1,12 @@
+import {PendingTaskCreations} from "../components/PendingTaskCreations";
+import {readTaskCreationRecovery,restoreTaskCreationRequest,type TaskCreationRecoveryRow,type PendingTaskCreation} from "../task-creation-recovery";
+import {ContributionTargetChoices} from "../components/ContributionTargetChoices";
+import {parseContributionTargets,contributionCreationIntent,type ContributionTarget,type ContributionCreationIntent} from "../contribution-target-selection";
+import {effectiveTaskAcceptedTarget} from "@/core/accepted-target";
 import {hasOlderAcceptedBase} from "../change-base-state";
 import {GitCredential} from "../components/GitCredential";
 import {separateGitCommands} from "../git-command-display";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback,useEffect, useRef, useState } from "react";
 import { useAuth } from "@clerk/clerk-react";
 import { Input } from "@/components/ui/input";
 import { changeCreationFollowup, type ChangeCreationResponse } from "../change-creation-followup";
@@ -83,11 +88,11 @@ export function ChangesTab(props: ChangesProps) {
 }
 function ChangesPanel({ projectId, state, reload }: ChangesProps) {
   const [goal, setGoal] = useState("");
-  const creationIntent = useRef<{ signature: string; taskId: string } | null>(null);
+  const creationIntent = useRef<ContributionCreationIntent | null>(null);
   const [relationships, setRelationships] = useState(false);
   const [dependsOn, setDependsOn] = useState<string | null>(null);
   const [issue, setIssue] = useState<{ number: number; title: string } | null>(null);
-  const [picker, setPicker] = useState<"change" | "issue" | null>(null);
+  const [picker, setPicker] = useState<"change" | "issue" | "target" | null>(null);
   const [search, setSearch] = useState("");
   const [issues, setIssues] = useState<Array<{ number: number; title: string }> | null>(null);
   const [issuesError, setIssuesError] = useState<string | null>(null);
@@ -105,6 +110,14 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
       if (request === issueRequest.current) setIssuesError(cause instanceof Error ? cause.message : "Could not load issues");
     } finally { if (request === issueRequest.current) setIssuesLoading(false); }
   };
+  const [targets,setTargets]=useState<ContributionTarget[]|null>(null),[selectedTarget,setSelectedTarget]=useState<ContributionTarget|null>(null),[targetError,setTargetError]=useState<string|null>(null),[targetsTruncated,setTargetsTruncated]=useState(false);
+  const targetRequest=useRef(0);
+  const loadTargets=useCallback(async()=>{const current=++targetRequest.current;try{const result=parseContributionTargets(await apiJson<unknown>(`/p/${projectId}/contribution-targets`,{signal:AbortSignal.timeout(15000)}));if(current===targetRequest.current){setTargets(result.targets);setTargetsTruncated(result.truncated);setTargetError(null);}}catch{if(current===targetRequest.current)setTargetError("Accepted branch choices are unavailable. Refresh the recorded choices before selecting another branch.");}},[projectId]);
+  useEffect(()=>{void loadTargets();return()=>{targetRequest.current++;};},[loadTargets]);
+  const [creations,setCreations]=useState<TaskCreationRecoveryRow[]>([]),[creationError,setCreationError]=useState<string|null>(null),[creationReading,setCreationReading]=useState(false),[creationCursor,setCreationCursor]=useState<string|null>(null);
+  const creationRead=useRef(0);
+  const loadCreations=useCallback(async(cursor?:string)=>{const current=++creationRead.current;setCreationReading(true);try{const report=await readTaskCreationRecovery(projectId,AbortSignal.timeout(15000),cursor);if(current===creationRead.current){setCreations(report.creations);setCreationCursor(report.nextCursor);setCreationError(null);}}catch{if(current===creationRead.current)setCreationError("Saved creation status is unavailable. No allocation is assumed stopped or safe to retry.");}finally{if(current===creationRead.current)setCreationReading(false);}},[projectId]);
+  useEffect(()=>{void loadCreations();return()=>{creationRead.current++;};},[loadCreations]);
   const [useAgent, setUseAgent] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -140,14 +153,19 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
     }
   };
 
+  const restoreCreation=(record:PendingTaskCreation)=>{const authoritative=creations.find(item=>item.taskId===record.taskId);if(!authoritative?.canRestore||!authoritative.canRetryOriginal)return;const restored=restoreTaskCreationRequest(authoritative.taskId,authoritative.input);creationIntent.current=restored.intent;setGoal(restored.goal);setDependsOn(restored.dependsOn);setIssue(restored.issue===null?null:{number:restored.issue,title:""});setSelectedTarget(restored.target);setUseAgent(false);setRelationships(restored.dependsOn!==null||restored.issue!==null);setError(null);setNotice("Original creation request restored. Submit unchanged fields to retry the same identity; no replacement fork is requested.");};
   const create = () =>
     run("create", async () => {
       const generation = lifetime.current;
-      if (dependsOn && (!state.tasks[dependsOn] || state.tasks[dependsOn]?.status === "cancelled")) throw new Error("The selected base change is no longer available. Choose another change or clear it.");
-      const signature = JSON.stringify({ goal, dependsOn, issue: issue?.number ?? null });
-      if (creationIntent.current?.signature !== signature) creationIntent.current = { signature, taskId: `${slug(goal)}-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}` };
-      const taskId = creationIntent.current.taskId;
-      const created = await apiJson<ChangeCreationResponse>(`/p/${projectId}/tasks`, { method: "POST", json: { taskId, goal, ...(dependsOn ? { dependsOn } : {}), ...(issue ? { issue: issue.number } : {}) } });
+      const formSignature=JSON.stringify({goal,dependsOn,issue:issue?.number??null,target:selectedTarget});
+      const replay=creationIntent.current?.signature===formSignature;
+      if (!replay&&dependsOn && (!state.tasks[dependsOn] || state.tasks[dependsOn]?.status === "cancelled")) throw new Error("The selected base change is no longer available. Choose another change or clear it.");
+      let target=selectedTarget;
+      if(!replay&&dependsOn){const parent=state.tasks[dependsOn]!;const bound=effectiveTaskAcceptedTarget(parent);if(bound){const current=targets?.find(item=>item.ref===bound.ref);if(!current)throw new Error("The selected parent accepted branch is unavailable. Refresh its recorded target before creating this change.");if(parent.status!=="accepted"&&(current.acceptedCommit!==bound.acceptedCommit||current.acceptedVersion!==bound.acceptedVersion||current.policyVersion!==bound.policyVersion))throw new Error("The unaccepted parent target changed. Preserve its context and refresh before continuing.");target=current;}}
+      if(!replay)creationIntent.current=contributionCreationIntent(null,{goal,dependsOn,issue:issue?.number??null,target,signatureOverride:formSignature},()=>`${slug(goal)}-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`);
+      const intent=creationIntent.current;if(!intent)throw new Error("Saved creation intent is unavailable");
+      const taskId=intent.taskId;
+      const created = await apiJson<ChangeCreationResponse>(`/p/${projectId}/tasks`, { method: "POST", json:intent.payload });
       if (generation !== lifetime.current) return;
       const followup = changeCreationFollowup(created, useAgent);
       creationIntent.current = null;
@@ -169,7 +187,7 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
       } else {
         setInstructions({ ...separateGitCommands(created.commands,created.token), task: taskId });
       }
-      setGoal(""); setDependsOn(null); setIssue(null); setRelationships(false);
+      void loadCreations();setGoal("");setSelectedTarget(null); setDependsOn(null); setIssue(null); setRelationships(false);
     });
 
   const act = (task: Task, action: "ready" | "cancel" | "agent") =>
@@ -210,6 +228,7 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
       </section>
       <Card>
         <CardContent className="py-4 space-y-3">
+          <PendingTaskCreations records={creations.map(record=>({...record,canRetry:record.canRetryOriginal}))} busy={creationReading||busy!==null} error={creationError} onRefresh={()=>void loadCreations()} onRestore={restoreCreation} hasMore={creationCursor!==null} onNext={()=>{if(creationCursor)void loadCreations(creationCursor);}}/>
           <h2 className="text-sm font-semibold"><label htmlFor="new-change-goal">Start a change</label></h2>
           <textarea
             id="new-change-goal"
@@ -221,11 +240,13 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
             placeholder="Describe what should change, e.g. “Add input validation to the signup form”"
             className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
+          {!dependsOn&&((targets?.length??0)>1||targets?.some(item=>!state.defaultBranch||item.branch!==state.defaultBranch)||selectedTarget!==null)&&<div className="flex flex-wrap items-center gap-2"><Button size="sm" variant="outline" disabled={busy!==null} onClick={()=>{setSearch("");setPicker("target");}}>{selectedTarget?selectedTarget.ref:"Default accepted branch"}</Button>{selectedTarget&&<span className="break-all font-mono text-xs text-muted-foreground">{selectedTarget.acceptedCommit} · accepted {selectedTarget.acceptedVersion} · policy {selectedTarget.policyVersion}</span>}</div>}
+          {selectedTarget&&targets&&!targets.some(item=>JSON.stringify(item)===JSON.stringify(selectedTarget))&&<p role="status" className="text-xs text-muted-foreground">The saved branch selection changed or is unavailable. Retry preserves its original request; choose a current recorded target to start different work.</p>}
           <Button size="sm" variant="ghost" aria-expanded={relationships} aria-controls="change-relationships" disabled={busy !== null} onClick={() => setRelationships(value => !value)}>{relationships ? "Hide relationships" : dependsOn || issue ? "Edit relationships" : "Add relationships"}</Button>
           {relationships && <div id="change-relationships" className="space-y-3 border-t border-border pt-3">
             <p className="text-xs text-muted-foreground">Build on an existing change or link an issue this change will resolve.</p>
             <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busy !== null} onClick={() => { setSearch(""); setPicker("change"); }}>{dependsOn ? `Builds on: ${state.tasks[dependsOn]?.goal ?? dependsOn}` : "Choose base change"}</Button>{dependsOn && <Button variant="ghost" size="sm" disabled={busy !== null} onClick={() => { creationIntent.current = null; setDependsOn(null); }}>Clear base</Button>}</div>
-            <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busy !== null} onClick={() => { setSearch(""); setPicker("issue"); void loadIssues(); }}>{issue ? `Resolves #${issue.number}: ${issue.title}` : "Choose issue"}</Button>{issue && <Button variant="ghost" size="sm" disabled={busy !== null} onClick={() => { creationIntent.current = null; setIssue(null); }}>Clear issue</Button>}</div>
+            <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busy !== null} onClick={() => { setSearch(""); setPicker("issue"); void loadIssues(); }}>{issue ? `Resolves #${issue.number}${issue.title?`: ${issue.title}`:""}` : "Choose issue"}</Button>{issue && <Button variant="ghost" size="sm" disabled={busy !== null} onClick={() => { creationIntent.current = null; setIssue(null); }}>Clear issue</Button>}</div>
           </div>}
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <label className="flex items-center gap-2 text-sm">
@@ -324,10 +345,11 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
       </Card>
 
       <Dialog open={picker !== null} onOpenChange={open => { if (!open) setPicker(null); }}>
-        <DialogHeader><DialogTitle>{picker === "change" ? "Build on a change" : "Link an issue"}</DialogTitle><DialogDescription>{picker === "change" ? "The new workspace starts from this change’s saved Git state." : "The issue closes when this change is accepted."}</DialogDescription></DialogHeader>
-        <Input aria-label={picker === "change" ? "Find a base change" : "Find an issue"} placeholder="Search" value={search} onChange={event => setSearch(event.target.value)} />
+        <DialogHeader><DialogTitle>{picker==="target"?"Choose accepted branch":picker === "change" ? "Build on a change" : "Link an issue"}</DialogTitle><DialogDescription>{picker==="target"?"Select a recorded accepted root. This change stays bound to its exact commit and policy.":picker === "change" ? "The new workspace starts from this change’s saved Git state." : "The issue closes when this change is accepted."}</DialogDescription></DialogHeader>
+        <Input aria-label={picker==="target"?"Find accepted branch":picker === "change" ? "Find a base change" : "Find an issue"} placeholder="Search" value={search} onChange={event => setSearch(event.target.value)} />
         <div className="mt-3 max-h-72 overflow-auto space-y-1">
-          {picker === "change" && tasks.filter(task => task.status !== "cancelled" && `${task.goal} ${task.id}`.toLowerCase().includes(search.toLowerCase())).map(task => <Button key={task.id} variant="ghost" className="w-full h-auto justify-start whitespace-normal text-left" onClick={() => { if (dependsOn !== task.id) creationIntent.current = null; setDependsOn(task.id); setPicker(null); }}>{task.goal} · {STATUS[task.status].label}</Button>)}
+          {picker==="target"&&<ContributionTargetChoices targets={targets} search={search} error={targetError} truncated={targetsTruncated} disabled={busy!==null} onRefresh={()=>void loadTargets()} onDefault={()=>{creationIntent.current=null;setSelectedTarget(null);setPicker(null);}} onSelect={item=>{creationIntent.current=null;setSelectedTarget(item);setPicker(null);}}/>}
+          {picker === "change" && tasks.filter(task => task.status !== "cancelled" && `${task.goal} ${task.id}`.toLowerCase().includes(search.toLowerCase())).map(task => <Button key={task.id} variant="ghost" className="w-full h-auto justify-start whitespace-normal text-left" onClick={() => { if (dependsOn !== task.id) creationIntent.current = null; setDependsOn(task.id);setSelectedTarget(null); setPicker(null); }}>{task.goal} · {STATUS[task.status].label}</Button>)}
           {picker === "change" && !tasks.some(task => task.status !== "cancelled" && `${task.goal} ${task.id}`.toLowerCase().includes(search.toLowerCase())) && <p className="text-sm text-muted-foreground">No matching changes.</p>}
           {picker === "issue" && issuesLoading && <p role="status" className="text-sm text-muted-foreground">Loading open issues…</p>}
           {picker === "issue" && issuesError && <div role="alert" className="text-sm text-destructive"><p>{issuesError}</p><Button variant="outline" size="sm" onClick={() => void loadIssues()}>Retry</Button></div>}

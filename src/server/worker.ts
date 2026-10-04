@@ -61,7 +61,7 @@ import { lookupTxt, normalizeDomain, txtHost, txtValue } from "./dns.js";
 import { isSafeRef } from "../core/sanitize.js";
 import { diffTrees, listCommits, listDirectory, readBlobByHash, readFileText, resolveCommit } from "./browse.js";
 import { validateWebhookUrl } from "./webhooks.js";
-import { PROJECT_ID, accountKeyFor, accountOf, admitRun, adoptLegacyProject, canonicalNameFor, globalOf, managedSpendStatus, newProjectId, projectOf, taskRepoName } from "./projects.js";
+import { PROJECT_ID, accountKeyFor, accountOf, admitRun, adoptLegacyProject, canonicalNameFor, globalOf, managedSpendStatus, newProjectId, projectOf } from "./projects.js";
 import type { Env, QueueMessage } from "./env.js";
 import type { Task } from "../core/types.js";
 import { assertAgentWrites, redactSecrets } from "../agents/prompt.js";
@@ -1304,23 +1304,40 @@ export default {
           return json({ remote, token, expiresInSeconds: 3600, command: gitCloneCommand(remote,undefined,{branch:/^[a-f0-9]{40}$/.test(state.acceptedState.currentCommit)&&!/^0{40}$/.test(state.acceptedState.currentCommit)?state.defaultBranch??"main":undefined}) });
         }
 
+        const creationStatusRoute=/^\/task-creations(?:\/([a-z0-9-]+))?$/.exec(sub);
+        if(creationStatusRoute){
+          if(method!=="GET")return text("Saved creation inspection is read-only",405);
+          const fields=[...url.searchParams.keys()],taskId=creationStatusRoute[1];if(fields.some(key=>!['limit','cursor'].includes(key))||new Set(fields).size!==fields.length||taskId&&fields.length)return text("Invalid saved creation query",400);
+          const rawLimit=url.searchParams.get("limit"),cursor=url.searchParams.get("cursor");if(rawLimit!==null&&(!/^[1-9][0-9]?$/.test(rawLimit)||Number(rawLimit)>20)||cursor!==null&&(!/^[1-9][0-9]{0,15}$/.test(cursor)||!Number.isSafeInteger(Number(cursor))))return text("Invalid saved creation page",400);
+          const currentCreator=async()=>{const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||(current.viaToken&&current.tokenRepo&&current.tokenRepo!==projectId))return text("Saved creation access changed",403);return{viaToken:current.viaToken===true,credentialHash:current.viaToken?await gitParentTokenHash(request):undefined,sessionExpiresAt:current.viaToken?undefined:current.expiresAt};};
+          const credential=await currentCreator();if(credential instanceof Response)return credential;const options={...(rawLimit!==null?{limit:Number(rawLimit)}:{}),...(cursor!==null?{cursor}:{})};
+          try{if(taskId)await project.creationIntentStatus(taskId,userId,credential);else await project.creationIntentStatuses(userId,credential,options);const fresh=await currentCreator();if(fresh instanceof Response)return fresh;const report=taskId?await project.creationIntentStatus(taskId,userId,fresh):await project.creationIntentStatuses(userId,fresh,options);if(!fresh.viaToken&&(!fresh.sessionExpiresAt||fresh.sessionExpiresAt<=Date.now()))return text("Saved creation session expired",401);if(report===null)return text("Saved creation unavailable",404);return repositoryReadJson(report);}catch{return repositoryReadJson({error:"Saved creation status is unavailable. Original creation and credential holds remain preserved."},409);}
+        }
+
+        if(sub==="/contribution-targets"&&method==="GET"){
+          if([...url.searchParams.keys()].length)return text("Invalid contribution target query",400);
+          try{const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true))return text("Contribution target access changed",403);await project.contributionTargets(userId);const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;if(fresh.id!==userId||(fresh.viaToken===true)!==(auth.viaToken===true)||(fresh.viaToken&&fresh.tokenRepo&&fresh.tokenRepo!==projectId))return text("Contribution target access changed",403);await project.roleOf(userId);const targets=await project.contributionTargets(userId);if(!fresh.viaToken&&(!fresh.expiresAt||fresh.expiresAt<=Date.now()))return text("Contribution target session expired",401);return repositoryReadJson(targets);}catch{return repositoryReadJson({error:"Accepted contribution targets are unavailable; no observed branch was substituted."},409);}
+        }
+
         // ----- changes (tasks) -----
         if (sub === "/tasks" && method === "POST") {
-          const b = await body<{ taskId?: string; goal?: string; name?: string; dependsOn?: string; issue?: number }>();
+          const b = await body<{ taskId?: string; goal?: string; name?: string; dependsOn?: string; issue?: number;expectedTarget?:unknown }>();
           const goal = clean(b.goal, 300);
           if (!b.taskId || !TASK_ID.test(b.taskId) || !goal) return text("taskId (3-101 chars: a-z, 0-9, -) and goal are required", 400);
-          if(Object.keys(b).some(key=>!["taskId","goal","name","dependsOn","issue"].includes(key)))return text("Invalid change creation input",400);
-          const input=taskCreationInputSchema.safeParse({goal,dependsOn:b.dependsOn??null,issue:b.issue??null});
+          if(Object.keys(b).some(key=>!["taskId","goal","name","dependsOn","issue","expectedTarget"].includes(key)))return text("Invalid change creation input",400);
+          const input=taskCreationInputSchema.safeParse({goal,dependsOn:b.dependsOn??null,issue:b.issue??null,...(b.expectedTarget!==undefined?{expectedTarget:b.expectedTarget}:{})});
           if(!input.success)return text("Invalid change goal, dependency or issue",400);
+          const requestedTarget=input.data.expectedTarget?{acceptedTargetRef:input.data.expectedTarget.ref}:undefined;
+          let creationCredential={viaToken:auth.viaToken===true,...(auth.viaToken?{credentialHash:await gitParentTokenHash(request)}:{sessionExpiresAt:auth.expiresAt})};
           let replay;
-          try{replay=await project.taskCreationReplay(b.taskId,userId,input.data);}catch{return text("Existing change cannot be recovered with this creator and input. No workspace was allocated.",409);}
+          try{replay=await project.taskCreationReplay(b.taskId,userId,input.data,requestedTarget,creationCredential);}catch{return text("Existing change cannot be recovered with this creator and input. No workspace was allocated.",409);}
           if(replay){
             const terminal=replay.status==="accepted"||replay.status==="cancelled";
             const remote=gitRemote(url.origin,projectId,replay.id);
             if(terminal)return json({task:replay.id,remote,branch:replay.workspace.branch,replayed:true,terminal:true,status:replay.status,agentRunId:replay.agentRunId??null,commands:[]});
             try{
               const {token}=await project.mintGitCapability(userId,replay.id,true,await gitParentTokenHash(request));
-              const current=await project.taskCreationReplay(replay.id,userId,input.data);
+              const current=await project.taskCreationReplay(replay.id,userId,input.data,requestedTarget,creationCredential);
               if(!current||current.status==="accepted"||current.status==="cancelled")return text("Saved change state changed during recovery; retry to read its current state",409);
               return json({task:current.id,remote,branch:current.workspace.branch,token,expiresInSeconds:3600,replayed:true,terminal:false,status:current.status,agentRunId:current.agentRunId??null,commands:taskGitCommands({remote,taskId:current.id,branch:current.workspace.branch,commit:current.currentCommit,stacked:!!current.dependsOn,replayed:true})});
             }catch{return text("Saved change was found, but current Git access was not confirmed. No new workspace was allocated.",409);}
@@ -1328,35 +1345,63 @@ export default {
           if (input.data.issue !== null && !(await project.getIssue(input.data.issue))) return text("Unknown issue", 400);
           const parent = b.dependsOn ? state.tasks[b.dependsOn] : undefined;
           if (b.dependsOn && (!parent || parent.status === "cancelled")) return text("dependsOn must name an existing, uncancelled change", 400);
-          const source = await env.ARTIFACTS.get(parent ? parent.workspace.repoName : state.canonicalRepoName);
-          const repoName = taskRepoName(projectId, b.taskId);
-          const fork = await allocateArtifact(env,{name:repoName,projectId,userId,kind:"workspace"},()=>source.fork(repoName,{description:goal,defaultBranchOnly:false}));
+          let intent:Awaited<ReturnType<typeof project.prepareTaskCreationIntent>>;
+          try{intent=await project.prepareTaskCreationIntent(b.taskId,userId,input.data,creationCredential);}catch{return text("The accepted creation target or original request changed; inspect the saved change before creating work",409);}
+          const selection=intent.selection;
+          const assertCreation=async()=>{const current=await authenticate(request,env);if(current instanceof Response||current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||!await project.assertTaskCreationTarget(userId,input.data,selection,creationCredential)||(!current.viaToken&&(!current.expiresAt||current.expiresAt<=Date.now())))throw Error("Task creation authority or target changed");creationCredential={viaToken:current.viaToken===true,...(current.viaToken?{credentialHash:await gitParentTokenHash(request)}:{sessionExpiresAt:current.expiresAt})};};
+          try{await assertCreation();
+          const repoName=intent.workspaceRepoName;
+          if(intent.phase==="prepared"){
+            using source=await env.ARTIFACTS.get(selection.sourceRepoName);await assertCreation();
+            try{await allocateArtifact(env,{name:repoName,projectId,userId,kind:"workspace",operationId:intent.allocationId},async()=>{
+              await assertCreation();intent=await project.beginTaskCreationFork(intent.eventId,userId,creationCredential);
+              const fork=await source.fork(repoName,{description:`FlareGit creation ${intent.eventId}/${intent.allocationId}`,defaultBranchOnly:false});
+              // Preserve the returned cleanup capability even if later scope validation fails.
+              const cleanupKnownFork=async()=>{try{
+                const marker=`FlareGit creation ${intent.eventId}/${intent.allocationId}`;if(fork.name!==repoName||fork.description!==marker||!fork.id)return false;
+                const fund=async()=>{const result=await globalOf(env).reserveCoreGitOperation(`initial-fork-cleanup-${crypto.randomUUID()}`,intent.accountKey,{accountUsdMicros:null,globalUsdMicros:null});if(!result.allowed)throw Error("Fork cleanup funding unavailable");};
+                await fund();using known=await env.ARTIFACTS.get(repoName);const observed=await known.info();if(observed.id!==fork.id||observed.name!==fork.name||observed.description!==fork.description)return false;
+                await fund();if(!await known.revokeToken(fork.token))return false;
+                return await project.confirmTaskCreationForkTokenRevoked(intent.eventId,{providerRepoId:fork.id,name:fork.name,description:fork.description},fork.token);
+              }catch{return false;}};
+              try{await project.recordTaskCreationForkToken(intent.eventId,fork.token);}catch{try{await project.recordTaskCreationForkToken(intent.eventId,fork.token);}catch{try{await project.recordTaskCreationForkAcknowledgement(intent.eventId,{providerRepoId:fork.id,name:fork.name,description:fork.description},fork.token);}catch{/* Immutable ACK or credential receipt may remain uncertain; never infer success. */}await cleanupKnownFork();throw Error("Initial fork credential receipt acknowledgement remains uncertain; known capability cleanup was attempted");}}
+              try{await project.recordTaskCreationForkAcknowledgement(intent.eventId,{providerRepoId:fork.id,name:fork.name,description:fork.description},fork.token);}catch{if(!await project.revokeTaskCreationForkToken(intent.eventId).catch(()=>false))await cleanupKnownFork();throw Error("Fork acknowledgement does not match the saved creation scope");}
+              if(!await project.revokeTaskCreationForkToken(intent.eventId))throw Error("Initial fork credential cleanup remains unconfirmed");
+              return {known:true};
+            });}catch{await project.markTaskCreationForkUnknown(intent.eventId);throw Error("Fork outcome is preserved but unconfirmed");}
+          }else if(!await project.revokeTaskCreationForkToken(intent.eventId))throw Error("Saved fork acknowledgement or credential cleanup remains unconfirmed; no replacement fork was started");
+          await assertCreation();using destination=await env.ARTIFACTS.get(repoName);const fork=await destination.info();await assertCreation();const copied=await destination.readCommit(selection.baseCommit);await assertCreation();if(!copied||copied.hash!==selection.baseCommit)throw Error("Original accepted source commit is unavailable in the saved fork");
+          intent=await project.confirmTaskCreationFork(intent.eventId,{allocationId:intent.allocationId,workspaceRepoName:repoName,sourceRepoName:selection.sourceRepoName,sourceCommit:selection.baseCommit,providerRepoId:fork.id,nativeState:"not_allocated",credentialsComplete:true},userId,creationCredential);
+          await project.settleArtifactAllocation(repoName,intent.allocationId);await account.settleArtifactAllocation(repoName,intent.allocationId);
           const remote=gitRemote(url.origin,projectId,b.taskId);
+          const creationSettings=selection.acceptedTarget?settingsFor(selection.acceptedTarget.policy):settings;
           const now = new Date().toISOString();
           const task: Task = {
             id: b.taskId,
             goal,
             contributor: { id: userId.slice(-12), name: (await account.getProfile()).displayName || clean(b.name, 60) || `member-${userId.slice(-6)}`, type: "human" },
-            baseCommit: parent ? parent.currentCommit : state.acceptedState.currentCommit,
+            baseCommit: selection.baseCommit,
             ...(parent ? { dependsOn: parent.id } : {}),
             ...(input.data.issue !== null ? { issue: input.data.issue } : {}),
-            allowedScope: settings.allowedScope,
+            allowedScope: creationSettings.allowedScope,
             status: "working",
             requirements: [],
             workspace: { repoName, remote: fork.remote, branch: `task/${b.taskId}` },
             checkpoints: [],
-            currentCommit: parent ? parent.currentCommit : state.acceptedState.currentCommit,
+            currentCommit: selection.baseCommit,
             createdAt: now,
             updatedAt: now,
           };
-          const saved=await project.createTask(task,userId,input.data);
-          const existing=await project.taskCreationReplay(saved.id,userId,input.data);
+          await assertCreation();
+          const saved=await project.commitTaskCreationIntent(intent.eventId,task,userId,creationCredential);
+          const existing=await project.taskCreationReplay(saved.id,userId,input.data,requestedTarget,creationCredential);
           if(!existing)return text("Saved change could not be confirmed; retry the same creation request",409);
           if(existing.status==="accepted"||existing.status==="cancelled")return json({task:existing.id,remote,branch:existing.workspace.branch,replayed:true,terminal:true,status:existing.status,agentRunId:existing.agentRunId??null,commands:[]});
           const {token}=await project.mintGitCapability(userId,b.taskId,true,await gitParentTokenHash(request));
-          const current=await project.taskCreationReplay(saved.id,userId,input.data);
+          const current=await project.taskCreationReplay(saved.id,userId,input.data,requestedTarget,creationCredential);
           if(!current)return text("Saved change state changed; retry the same creation request",409);
           if(current.status==="accepted"||current.status==="cancelled")return json({task:current.id,remote,branch:current.workspace.branch,replayed:true,terminal:true,status:current.status,agentRunId:current.agentRunId??null,commands:[]});
+          const finalAuth=await authenticate(request,env);if(finalAuth instanceof Response)return finalAuth;if(finalAuth.id!==userId)return text("Change creator authentication changed",403);
           return json({
             task: b.taskId,
             replayed:saved.creationReplayed===true,terminal:false,status:current.status,agentRunId:current.agentRunId??null,
@@ -1366,6 +1411,7 @@ export default {
             expiresInSeconds: 3600,
             commands: taskGitCommands({remote,taskId:b.taskId,branch:existing.workspace.branch,commit:existing.baseCommit,stacked:!!existing.dependsOn,replayed:false}),
           }, 201);
+          }catch{return text("Change creation was not confirmed. Saved allocation and contribution context remain preserved; retry the same change identity after inspecting its status",409);}
         }
 
         const gitRecoveryRoute=/^\/tasks\/([a-z0-9-]+)\/git-recovery$/.exec(sub);

@@ -1,3 +1,4 @@
+import {z} from "zod";
 import type { Env } from "./env.js";
 import { globalOf, accountKeyFor, accountOf, projectOf } from "./projects.js";
 import type { ArtifactKind } from "./storage-admission.js";
@@ -23,13 +24,14 @@ export async function reserveArtifactAllocation(env:Env,args:{name:string;projec
 
 /** Account and project lifecycle fences remain pending across lost responses.
  * A failed admission before dispatch is settled; provider ambiguity is preserved. */
-export async function allocateArtifact<T>(env:Env,args:{name:string;projectId:string;userId:string;kind:ArtifactKind},operation:()=>Promise<T>):Promise<T>{
- const accountKey=await accountKeyFor(args.userId),account=accountOf(env,accountKey),project=projectOf(env,args.projectId),operationId=crypto.randomUUID();
- const input={name:args.name,projectId:args.projectId,accountKey,operationId};let dispatched=false;
+export async function allocateArtifact<T>(env:Env,args:{name:string;projectId:string;userId:string;kind:ArtifactKind;operationId?:string},operation:()=>Promise<T>):Promise<T>{
+ const operationId=args.operationId??crypto.randomUUID();if(!z.uuid().safeParse(operationId).success)throw new Error("Invalid artifact allocation operation identity");
+ const accountKey=await accountKeyFor(args.userId),account=accountOf(env,accountKey),project=projectOf(env,args.projectId);
+ const input={name:args.name,projectId:args.projectId,accountKey,operationId};let dispatched=false,accountAcquired=false,projectAcquired=false;
  const settle=async()=>{await project.settleArtifactAllocation(args.name,operationId);await account.settleArtifactAllocation(args.name,operationId);};
  try{
-  await account.beginArtifactAllocation(input,"account");
-  await project.beginArtifactAllocation(input,"project");
+  await account.beginArtifactAllocation(input,"account");accountAcquired=true;
+  await project.beginArtifactAllocation(input,"project");projectAcquired=true;
   await reserveArtifactAllocation(env,args);
   await account.activateArtifactAllocation(args.name,operationId,"account");
   await project.activateArtifactAllocation(args.name,operationId,"project");
@@ -37,5 +39,10 @@ export async function allocateArtifact<T>(env:Env,args:{name:string;projectId:st
   let timer:ReturnType<typeof setTimeout>|undefined;
   try{await Promise.race([(async()=>{using repo=await env.ARTIFACTS.get(args.name);await repo.info();})(),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error("Provider allocation readiness unknown")),5000);})]);await settle();}catch{/* Retain exact pending provider outcome for explicit reconciliation. */}finally{if(timer)clearTimeout(timer);}
   return result;
- }catch(error){if(!dispatched)await settle().catch(()=>undefined);throw error;}
+ }catch(error){
+  // A reused operation ID identifies the original intent, not this request.
+  // Failed or lost begin replies never grant ownership of an existing hold.
+  // Preserve partial acquisition when the other begin outcome is unknown.
+  if(!dispatched&&accountAcquired&&projectAcquired)await settle().catch(()=>undefined);throw error;
+ }
 }

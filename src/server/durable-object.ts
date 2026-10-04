@@ -1,3 +1,5 @@
+import {TaskCreationIntents,taskCreationIntentSchema,type TaskCreationIntentRecord,type TaskForkCompletionProof} from "./task-creation-intents";
+import {InitialForkCredentials,type InitialForkCredentialScope} from "./initial-fork-credentials";
 import {PreviewMonthlyReadAdmission,previewReadAttemptCap,type PreviewReadAdmission} from "./preview-monthly-read-admission";
 import {selectAcceptedDeploymentJournal,confirmAcceptedDeploymentSelection,type AcceptedDeploymentSelection,type CommittedDeploymentPin} from "./accepted-deployment-selection";
 import {inspectGitGatewayRecovery} from "./git-gateway-recovery";
@@ -36,10 +38,10 @@ import {RetainedCredentialIncidents} from "./retained-credential-incidents.js";
 import {RetainedInputs,retainedInputSchema,type RetainedInput,type RetainedInputReceipt,type RebaseApplication} from "./retained-inputs.js";
 import {ImportHistoryInspection,type HistorySide,type HistoryInspectionActor,type HistoryChunk,type HistoryInspectionSnapshot,type HistoryInspectionBatch} from "./import-history-inspection.js";
 import {ImportHistoryAttempts,type ImportHistoryAttempt} from "./import-history-attempts.js";
-import { bindTaskAcceptedTarget, boundTaskCreationPayload, assertTaskTargetRetry, type InternalTaskTargetOptions } from "./accepted-task-target.js";
+import { bindTaskAcceptedTarget,resolveNewTaskAcceptedTarget, boundTaskCreationPayload, assertTaskTargetRetry, type InternalTaskTargetOptions,type TaskCreationSelection,type TaskCreationCredential } from "./accepted-task-target.js";
 import { freezeAcceptedTarget } from "./accepted-target-binding.js";
 import { assertCompatibleAcceptedTargetBatch,effectiveTaskAcceptedTarget,acceptedTargetSchema, type FrozenAcceptedTarget } from "../core/accepted-target.js";
-import type {TaskCreationInput} from "./task-creation.js";
+import {taskCreationPayload,type TaskCreationInput} from "./task-creation.js";
 import {ownerStorageContext,copyReportPage,privateRecoveryReportPage,type OwnerStorageContext,type CopyReportPage} from "./storage-reconciliation-ledger.js";
 import {PreviewCredentialIncidents,type PreviewCredentialIncidentStatus} from "./preview-credential-incidents.js";
 import {RepositoryPreviewGenerations,type PreviewGenerationRecord} from "./preview-generations.js";
@@ -606,8 +608,8 @@ export interface Ledger {
   repositoryArtifactDeleted(name: string): Promise<boolean>;
   recordRepositoryArtifactDeleted(name: string): Promise<void>;
   initialize(init: { projectId: string; projectName: string; canonicalRepoName: string; head: string; tree?: string; verificationPolicy: Record<string, unknown>; kind?: "demo" | "import" | "empty"; defaultBranch?: string; ownerId?: string; source?: string }): Promise<FlareGitProjectState>;
-  createTask(task: Task, actorId?: string,creationInput?:TaskCreationInput,internalTarget?:InternalTaskTargetOptions): Promise<Task & {creationReplayed?:boolean}>;
-  taskCreationReplay(taskId:string,actorId:string,input:TaskCreationInput,internalTarget?:InternalTaskTargetOptions):Promise<Task|null>;
+  createTask(task: Task, actorId?: string,creationInput?:TaskCreationInput,internalTarget?:InternalTaskTargetOptions,credential?:TaskCreationCredential): Promise<Task & {creationReplayed?:boolean}>;
+  taskCreationReplay(taskId:string,actorId:string,input:TaskCreationInput,internalTarget?:InternalTaskTargetOptions,credential?:TaskCreationCredential):Promise<Task|null>;
   mintGitCapability(userId: string, taskId: string | null, write: boolean, parentTokenHash?: string): Promise<{token: string; expiresInSeconds: number}>;
   verifyGitCapability(secret: string, taskId: string | null, write: boolean): Promise<{userId:string;parentTokenHash:string|null}|null>;
   canGitAccess(userId: string, taskId: string | null, write: boolean): Promise<boolean>;
@@ -629,6 +631,20 @@ export interface Ledger {
   revokeGitCapabilities(userId: string): Promise<void>;
   resolveDecision(decisionId: string, selectedOptionId: string, actor: HumanDecisionActor, credentialHash?: string, sessionExpiresAt?:number): Promise<{ taskIds: string[];legacyRerunId?:string;continuationWorkflowId?:string }>;
   getState(): Promise<FlareGitProjectState>;
+  contributionTargets(actorId:string):ReturnType<RepositoryController["contributionTargets"]>;
+  prepareTaskCreationIntent(taskId:string,actorId:string,input:TaskCreationInput,credential:TaskCreationCredential):Promise<TaskCreationIntentRecord>;
+  creationIntentStatus(taskId:string,actorId:string,credential:TaskCreationCredential):ReturnType<RepositoryController["creationIntentStatus"]>;
+  creationIntentStatuses(actorId:string,credential:TaskCreationCredential,options?:{limit?:number;cursor?:string}):ReturnType<RepositoryController["creationIntentStatuses"]>;
+  beginTaskCreationFork(eventId:string,actorId:string,credential:TaskCreationCredential):Promise<TaskCreationIntentRecord>;
+  markTaskCreationForkUnknown(eventId:string):Promise<void>;
+  recordTaskCreationForkToken(eventId:string,token:string):Promise<void>;
+  recordTaskCreationForkAcknowledgement(eventId:string,ack:{providerRepoId:string;name:string;description:string|null},token:string):Promise<void>;
+  confirmTaskCreationForkTokenRevoked(eventId:string,ack:{providerRepoId:string;name:string;description:string|null},token:string):Promise<boolean>;
+  revokeTaskCreationForkToken(eventId:string):Promise<boolean>;
+  confirmTaskCreationFork(eventId:string,proof:TaskForkCompletionProof,actorId:string,credential:TaskCreationCredential):Promise<TaskCreationIntentRecord>;
+  commitTaskCreationIntent(eventId:string,task:Task,actorId:string,credential:TaskCreationCredential):Promise<Task & {creationReplayed?:boolean}>;
+  resolveTaskCreationTarget(actorId:string,input:TaskCreationInput,credential?:TaskCreationCredential):Promise<TaskCreationSelection>;
+  assertTaskCreationTarget(actorId:string,input:TaskCreationInput,selection:TaskCreationSelection,credential?:TaskCreationCredential):Promise<boolean>;
   admitPreviewRead():Promise<PreviewReadAdmission>;
   admitOwnerPreviewRead(ownerKey:string):Promise<PreviewReadAdmission>;
   agentTaskView(taskId:string):ReturnType<RepositoryController["agentTaskView"]>;
@@ -827,6 +843,7 @@ export class RepositoryController extends DurableObject<Env> {
     await this.ensureRecoveryAlarm();
   }
   async previewGenerationCredentialSummary(g:string){const incidents=new PreviewCredentialIncidents(this.ctx.storage);incidents.pendingBatch();return incidents.summary(g);}
+  private async retryInitialForkCredentials():Promise<void>{const ledger=new InitialForkCredentials(this.ctx.storage);for(const pending of ledger.pendingBatch())if(ledger.markAutomaticSweep(pending.scope.eventId))await this.revokeTaskCreationForkToken(pending.scope.eventId);const wake=ledger.nextWake();if(wake!==null)await this.ensureRecoveryAlarm(Math.max(1,wake-Date.now()));}
   private async retryPreviewCredentialIncidents(){
     const incidents=new PreviewCredentialIncidents(this.ctx.storage),pending=incidents.pendingBatch();
     for(const incident of pending){
@@ -1948,6 +1965,67 @@ export class RepositoryController extends DurableObject<Env> {
     if (current === null || current > deadline) await this.ctx.storage.setAlarm(deadline);
   }
 
+  private taskCreationStatusView(record:TaskCreationIntentRecord,actorId:string){
+    const hasCredentialTable=this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='initial_fork_credentials'").toArray().length>0,credentialRow=hasCredentialTable?this.ctx.storage.sql.exec<{status:string}>("SELECT status FROM initial_fork_credentials WHERE event_id=?",record.eventId).toArray()[0]:undefined;
+    const credentialState=credentialRow?.status==="revoked"?"revoked" as const:credentialRow?.status==="pending"?"cleanup_pending" as const:record.phase==="prepared"&&!credentialRow?"not_requested" as const:"issuance_unknown" as const;
+    const acknowledgementKnown=!!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='task_fork_acknowledgements'").toArray().length&&!!this.ctx.storage.sql.exec("SELECT event_id FROM task_fork_acknowledgements WHERE event_id=?",record.eventId).toArray().length;
+    let sourceCurrent=false;try{sourceCurrent=this.captureTaskCreationTarget(record.actor.userId,record.input).scope===record.selection.scope;}catch{/* An unavailable target remains a saved hold. */}
+    const isCreator=record.actor.userId===actorId,hasTask=!!this.load().tasks[record.taskId],canRetryOriginal=isCreator&&(record.phase==="committed"&&hasTask||sourceCurrent&&(record.phase==="prepared"||acknowledgementKnown&&["dispatching","fork_unknown","fork_confirmed"].includes(record.phase)));
+    return{taskId:record.taskId,eventId:record.eventId,input:structuredClone(record.input),phase:record.phase,credentialState,providerAcknowledgementKnown:acknowledgementKnown,isCreator,hasTask,sourceCurrent,canRetryOriginal,canRestore:canRetryOriginal,createdAt:record.createdAt,updatedAt:record.updatedAt};
+  }
+  async creationIntentStatus(taskId:string,actorId:string,credential:TaskCreationCredential){const assert=await this.taskCreationCredentialFence(actorId,credential);assert();if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='task_creation_intents'").toArray().length)return null;const row=this.ctx.storage.sql.exec<{doc:string|null}>("SELECT CASE WHEN LENGTH(CAST(doc AS BLOB))<=262144 THEN doc ELSE NULL END AS doc FROM task_creation_intents WHERE task_id=?",taskId).toArray()[0];if(!row)return null;if(row.doc===null)throw Error("Creation status exceeds supported read bounds");const record=JSON.parse(row.doc) as TaskCreationIntentRecord;if(record.actor.userId!==actorId&&this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId).toArray()[0]?.role!=="owner")throw Error("Only the creator or owner may inspect saved creation");const state=this.load();if(record.projectId!==state.projectId||record.incarnation!==this.readRepositoryIncarnation()||record.canonicalRepoName!==state.canonicalRepoName)throw Error("Saved creation repository scope changed");const result=this.taskCreationStatusView(record,actorId);assert();return result;}
+  async creationIntentStatuses(actorId:string,credential:TaskCreationCredential,options?:{limit?:number;cursor?:string}){
+    const assert=await this.taskCreationCredentialFence(actorId,credential);assert();const limit=options?.limit??20,cursor=options?.cursor===undefined?Number.MAX_SAFE_INTEGER:Number(options.cursor);if(!Number.isSafeInteger(limit)||limit<1||limit>20||!Number.isSafeInteger(cursor)||cursor<1||options?.cursor!==undefined&&!/^[1-9][0-9]{0,15}$/.test(options.cursor))throw Error("Invalid creation status page");if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='task_creation_intents'").toArray().length)return{creations:[],nextCursor:null,complete:true};const state=this.load(),isOwner=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId).toArray()[0]?.role==="owner";
+    const rows=this.ctx.storage.sql.exec<{rowid:number;doc:string|null}>("SELECT rowid,CASE WHEN LENGTH(CAST(doc AS BLOB))<=262144 THEN doc ELSE NULL END AS doc FROM task_creation_intents WHERE rowid<? AND json_extract(doc,'$.phase')!='committed' AND json_extract(doc,'$.projectId')=? AND json_extract(doc,'$.incarnation')=? AND json_extract(doc,'$.canonicalRepoName')=? AND (?=1 OR json_extract(doc,'$.actor.userId')=?) ORDER BY rowid DESC LIMIT ?",cursor,state.projectId,this.readRepositoryIncarnation()??"",state.canonicalRepoName,isOwner?1:0,actorId,limit+1).toArray();if(rows.some(row=>row.doc===null))throw Error("Saved creation page exceeds supported read bounds");const page=rows.slice(0,limit),creations=page.map(row=>this.taskCreationStatusView(JSON.parse(row.doc!) as TaskCreationIntentRecord,actorId));assert();return{creations,nextCursor:rows.length>limit&&page.length?String(page.at(-1)!.rowid):null,complete:rows.length<=limit};
+  }
+
+  private initialForkScope(record:TaskCreationIntentRecord):InitialForkCredentialScope{return{eventId:record.eventId,allocationId:record.allocationId,taskId:record.taskId,projectId:record.projectId,incarnation:record.incarnation,canonicalRepoName:record.canonicalRepoName,workspaceRepoName:record.workspaceRepoName,accountKey:record.accountKey,actorId:record.actor.userId};}
+  private assertTaskCreationIntentLocal(record:TaskCreationIntentRecord,actorId:string):void{const state=this.load();if(this.repositoryDeleting()||record.actor.userId!==actorId||state.projectId!==record.projectId||state.canonicalRepoName!==record.canonicalRepoName||this.readRepositoryIncarnation()!==record.incarnation||!this.ctx.storage.sql.exec("SELECT user_id FROM members WHERE user_id=?",actorId).toArray().length)throw Error("Saved task creation scope changed");if(record.phase!=="committed"&&this.captureTaskCreationTarget(actorId,record.input).scope!==record.selection.scope)throw Error("Original task creation source changed");}
+  async prepareTaskCreationIntent(taskId:string,actorId:string,input:TaskCreationInput,credential:TaskCreationCredential):Promise<TaskCreationIntentRecord>{
+    const assert=await this.taskCreationCredentialFence(actorId,credential);assert();const ledger=new TaskCreationIntents(this.ctx.storage),old=ledger.forTask(taskId);if(old){this.assertTaskCreationIntentLocal(old,actorId);if(taskCreationPayload(old.input)!==taskCreationPayload(input))throw Error("Saved task creation request changed");return old;}
+    if(this.load().tasks[taskId])throw Error("Saved task must be recovered through its creation receipt");const incarnation=new PrivateRecoveryOperations(this.ctx.storage).incarnation(),selection=await this.resolveTaskCreationTarget(actorId,input,credential),accountKey=await accountKeyFor(actorId);assert();const state=this.load();const intent=taskCreationIntentSchema.parse({eventId:crypto.randomUUID(),allocationId:crypto.randomUUID(),nativeProtocol:"sdk-only",taskId,actor:{userId:actorId,viaToken:credential.viaToken,credentialHash:credential.credentialHash??null,sessionExpiresAt:credential.sessionExpiresAt??null},accountKey,projectId:state.projectId,incarnation,canonicalRepoName:state.canonicalRepoName,workspaceRepoName:`t-${state.projectId}-${taskId}`,input,selection});return ledger.prepare(intent,()=>{assert();this.assertTaskCreationIntentLocal({...intent,phase:"prepared",createdAt:0,updatedAt:0},actorId);});
+  }
+  async beginTaskCreationFork(eventId:string,actorId:string,credential:TaskCreationCredential):Promise<TaskCreationIntentRecord>{
+    const assert=await this.taskCreationCredentialFence(actorId,credential),ledger=new TaskCreationIntents(this.ctx.storage),record=ledger.get(eventId);if(!record)throw Error("Saved creation intent unavailable");await this.ensureRecoveryAlarm();assert();this.taskForkAcknowledgementTable();this.assertTaskCreationIntentLocal(record,actorId);if(!await this.assertTaskCreationTarget(actorId,record.input,record.selection,credential))throw Error("Captured creation target changed before allocation");assert();return this.ctx.storage.transactionSync(()=>{const result=ledger.beginFork(eventId,saved=>{assert();this.assertTaskCreationIntentLocal(saved,actorId);});new InitialForkCredentials(this.ctx.storage).begin(this.initialForkScope(result),()=>{assert();this.assertTaskCreationIntentLocal(result,actorId);});return result;});
+  }
+  async markTaskCreationForkUnknown(eventId:string):Promise<void>{new TaskCreationIntents(this.ctx.storage).markForkUnknown(eventId);}
+  private taskForkAcknowledgementTable():void{this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS task_fork_acknowledgements(event_id TEXT PRIMARY KEY,payload TEXT NOT NULL)");}
+  private taskCreationMarker(record:TaskCreationIntentRecord):string{return`FlareGit creation ${record.eventId}/${record.allocationId}`;}
+  async recordTaskCreationForkAcknowledgement(eventId:string,ack:{providerRepoId:string;name:string;description:string|null},token:string):Promise<void>{
+    const record=new TaskCreationIntents(this.ctx.storage).get(eventId);if(!record||!["dispatching","fork_unknown","fork_confirmed","committed"].includes(record.phase)||ack.name!==record.workspaceRepoName||ack.description!==this.taskCreationMarker(record)||!ack.providerRepoId||ack.providerRepoId.length>200||!/^[A-Za-z0-9_-]+$/.test(ack.providerRepoId))throw Error("Initial fork acknowledgement differs from the original intent");
+    this.taskForkAcknowledgementTable();const payload=JSON.stringify({providerRepoId:ack.providerRepoId,name:ack.name,description:ack.description,allocationId:record.allocationId,sourceRepoName:record.selection.sourceRepoName,sourceCommit:record.selection.baseCommit}),old=this.ctx.storage.sql.exec<{payload:string}>("SELECT payload FROM task_fork_acknowledgements WHERE event_id=?",eventId).toArray()[0];if(old&&old.payload!==payload)throw Error("Saved fork acknowledgement cannot be replaced");if(!old)this.ctx.storage.sql.exec("INSERT INTO task_fork_acknowledgements VALUES(?,?)",eventId,payload);
+    await this.recordTaskCreationForkToken(eventId,token);
+  }
+  /** Trusted Worker calls only after exact known SDK credential revocation. */
+  async confirmTaskCreationForkTokenRevoked(eventId:string,ack:{providerRepoId:string;name:string;description:string|null},token:string):Promise<boolean>{
+    await this.recordTaskCreationForkAcknowledgement(eventId,ack,token);const record=new TaskCreationIntents(this.ctx.storage).get(eventId);if(!record)throw Error("Saved fork credential intent unavailable");return new InitialForkCredentials(this.ctx.storage).markRevoked(this.initialForkScope(record),token,{repoName:ack.name,revoked:true});
+  }
+  async recordTaskCreationForkToken(eventId:string,token:string):Promise<void>{const record=new TaskCreationIntents(this.ctx.storage).get(eventId);if(!record)throw Error("Saved fork issuance scope unavailable");await new InitialForkCredentials(this.ctx.storage).record(this.initialForkScope(record),token);await this.ensureRecoveryAlarm();}
+  async revokeTaskCreationForkToken(eventId:string):Promise<boolean>{const ledger=new InitialForkCredentials(this.ctx.storage),record=new TaskCreationIntents(this.ctx.storage).get(eventId);if(!record)return false;const scope=this.initialForkScope(record);if(ledger.settled(scope))return true;const pending=ledger.credentialForRevocation(eventId);if(!pending)return false;const funding=await globalOf(this.env).reserveCoreGitOperation(`initial-fork-cleanup-${crypto.randomUUID()}`,scope.accountKey,this.currentGitBudget()).catch(()=>null);if(!funding?.allowed||!ledger.markAttempt(eventId))return false;try{using repository=await this.env.ARTIFACTS.get(scope.workspaceRepoName);this.taskForkAcknowledgementTable();const ack=this.ctx.storage.sql.exec<{payload:string}>("SELECT payload FROM task_fork_acknowledgements WHERE event_id=?",eventId).toArray()[0];if(ack){const expected=JSON.parse(ack.payload) as {providerRepoId:string;name:string;description:string};const actual=await repository.info();if(actual.id!==expected.providerRepoId||actual.name!==expected.name||actual.description!==expected.description)return false;}if(!await repository.revokeToken(pending.token))return false;return await ledger.markRevoked(scope,pending.token,{repoName:scope.workspaceRepoName,revoked:true});}catch{return false;}}
+  async confirmTaskCreationFork(eventId:string,proof:TaskForkCompletionProof,actorId:string,credential:TaskCreationCredential):Promise<TaskCreationIntentRecord>{
+    const assert=await this.taskCreationCredentialFence(actorId,credential),ledger=new TaskCreationIntents(this.ctx.storage),record=ledger.get(eventId);if(!record)throw Error("Saved task creation intent unavailable");if(!await this.assertTaskCreationTarget(actorId,record.input,record.selection,credential))throw Error("Captured creation target changed after allocation");assert();return ledger.confirmFork(eventId,proof,saved=>{assert();this.assertTaskCreationIntentLocal(saved,actorId);const ack=this.ctx.storage.sql.exec<{payload:string}>("SELECT payload FROM task_fork_acknowledgements WHERE event_id=?",eventId).toArray()[0];if(!ack||(JSON.parse(ack.payload) as {providerRepoId:string}).providerRepoId!==proof.providerRepoId)throw Error("Original successful fork acknowledgement is unavailable");if(!new InitialForkCredentials(this.ctx.storage).settled(this.initialForkScope(saved)))throw Error("Initial fork credential cleanup remains unconfirmed");});
+  }
+
+  private async taskCreationCredentialFence(actorId:string,credential?:TaskCreationCredential):Promise<()=>void>{
+    await this.requireTaskCreationActor(actorId);if(credential?.viaToken){if(!credential.credentialHash||!await accountOf(this.env,await accountKeyFor(actorId)).apiTokenHashActive(credential.credentialHash))throw Error("Task creation credential unavailable");}else if(credential&&(!Number.isFinite(credential.sessionExpiresAt)||Date.now()>=credential.sessionExpiresAt!))throw Error("Task creation session expired");
+    if(credential)new PrivateRecoveryOperations(this.ctx.storage).incarnation();const repositoryContext=credential?await this.repositoryReadContext(actorId):null;
+    const assert=()=>{if(repositoryContext&&(this.load().projectId!==repositoryContext.projectId||this.load().canonicalRepoName!==repositoryContext.canonicalRepoName||this.readRepositoryIncarnation()!==repositoryContext.incarnation||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==repositoryContext.ownerId))throw Error("Task creation repository owner changed");if(this.repositoryDeleting()||!this.ctx.storage.sql.exec("SELECT user_id FROM members WHERE user_id=?",actorId).toArray().length||(!credential?.viaToken&&credential&&(!Number.isFinite(credential.sessionExpiresAt)||Date.now()>=credential.sessionExpiresAt!)))throw Error("Task creation authority changed");};assert();return assert;
+  }
+  async contributionTargets(actorId:string):Promise<{targets:Array<{ref:string;branch:string;acceptedCommit:string;acceptedVersion:number;policyVersion:number}>;truncated:boolean}>{
+    const context=await this.repositoryReadContext(actorId);this.synchronizePrimaryAcceptedRegistry(this.load());const state=this.load(),incarnation=this.readRepositoryIncarnation();if(!incarnation)return{targets:[],truncated:false};
+    const rows=this.ctx.storage.sql.exec<{ref:string}>("SELECT ref FROM accepted_branch_roots WHERE project_id=? AND incarnation=? AND repo_name=? AND json_extract(doc,'$.status')='ready' ORDER BY ref LIMIT 101",state.projectId,incarnation,state.canonicalRepoName).toArray(),targets:Array<{ref:string;branch:string;acceptedCommit:string;acceptedVersion:number;policyVersion:number}>=[];for(const row of rows.slice(0,100)){const target=freezeAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),state,incarnation,row.ref);targets.push({ref:target.ref,branch:target.branch,acceptedCommit:target.acceptedCommit,acceptedVersion:target.acceptedVersion,policyVersion:target.policyVersion});}if(!await this.assertRepositoryReadContext(context,actorId))throw Error("Contribution target authority changed");return{targets,truncated:rows.length>100};
+  }
+  private captureTaskCreationTarget(actorId:string,input:TaskCreationInput):TaskCreationSelection{
+    const state=this.load(),parent=input.dependsOn?state.tasks[input.dependsOn]:undefined;if(input.dependsOn&&(!parent||parent.status==="cancelled"))throw Error("Contribution parent unavailable");
+    if(!input.expectedTarget&&parent&&effectiveTaskAcceptedTarget(this.projectedTask(parent)))throw Error("A bound parent requires its exact accepted target selection");
+    let acceptedTarget:FrozenAcceptedTarget|null=null;if(input.expectedTarget){this.synchronizePrimaryAcceptedRegistry(state);const incarnation=this.readRepositoryIncarnation();if(!incarnation)throw Error("Recorded accepted target unavailable");acceptedTarget=freezeAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),state,incarnation,input.expectedTarget.ref);const expected=input.expectedTarget;if(acceptedTarget.acceptedCommit!==expected.acceptedCommit||acceptedTarget.acceptedVersion!==expected.acceptedVersion||acceptedTarget.policyVersion!==expected.policyVersion)throw Error("Selected accepted branch, base or policy changed");}
+    const baseCommit=parent?.currentCommit??acceptedTarget?.acceptedCommit??state.acceptedState.currentCommit,sourceRepoName=parent?.workspace.repoName??state.canonicalRepoName;
+    if(acceptedTarget)resolveNewTaskAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),{...state,tasks:Object.fromEntries(Object.entries(state.tasks).map(([id,task])=>[id,this.projectedTask(task)]))},acceptedTarget.incarnation,input.dependsOn??undefined,{acceptedTargetRef:acceptedTarget.ref,expectedTarget:acceptedTarget});
+    const scope=JSON.stringify({actorId,projectId:state.projectId,incarnation:this.readRepositoryIncarnation(),canonicalRepoName:state.canonicalRepoName,input,acceptedTarget,baseCommit,sourceRepoName,...(!acceptedTarget?{policyVersion:state.policyVersion,verificationPolicy:state.verificationPolicy}:{}),...(parent?{parent:{id:parent.id,goal:parent.goal,status:parent.status,baseCommit:parent.baseCommit,currentCommit:parent.currentCommit,workspaceRepoName:parent.workspace.repoName,workspaceBranch:parent.workspace.branch,dependsOn:parent.dependsOn??null,requirements:parent.requirements,contributor:parent.contributor,initiatedBy:parent.initiatedBy??null,activeCandidateId:parent.activeCandidateId??null,agentRunId:parent.agentRunId??null,agentWorkflowInstanceId:parent.agentWorkflowInstanceId??null,target:effectiveTaskAcceptedTarget(this.projectedTask(parent))??null,targetGeneration:this.projectedTask(parent).targetGeneration??null}}:{})});return{acceptedTarget,baseCommit,sourceRepoName,scope};
+  }
+  async resolveTaskCreationTarget(actorId:string,input:TaskCreationInput,credential?:TaskCreationCredential):Promise<TaskCreationSelection>{const assert=await this.taskCreationCredentialFence(actorId,credential);assert();const selection=this.captureTaskCreationTarget(actorId,input);assert();return selection;}
+  async assertTaskCreationTarget(actorId:string,input:TaskCreationInput,selection:TaskCreationSelection,credential?:TaskCreationCredential):Promise<boolean>{try{const current=await this.resolveTaskCreationTarget(actorId,input,credential);return current.scope===selection.scope&&current.baseCommit===selection.baseCommit&&current.sourceRepoName===selection.sourceRepoName;}catch{return false;}}
+
   private async requireTaskCreationActor(actorId:string):Promise<void>{
     if(!actorId||!await this.roleOf(actorId)||this.repositoryDeleting())throw new Error("Task creation access changed");
     const accountKey=await accountKeyFor(actorId);
@@ -1955,8 +2033,8 @@ export class RepositoryController extends DurableObject<Env> {
     const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId).toArray()[0]?.role;
     if(this.repositoryDeleting()||(role!=="owner"&&role!=="member"))throw new Error("Task creation access changed");
   }
-  async taskCreationReplay(taskId:string,actorId:string,input:TaskCreationInput,internalTarget?:InternalTaskTargetOptions):Promise<Task|null>{
-    await this.requireTaskCreationActor(actorId);
+  async taskCreationReplay(taskId:string,actorId:string,input:TaskCreationInput,internalTarget?:InternalTaskTargetOptions,credential?:TaskCreationCredential):Promise<Task|null>{
+    const assertCredential=await this.taskCreationCredentialFence(actorId,credential);assertCredential();
     const state=this.load(),task=state.tasks[taskId];if(!task)return null;
     if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='task_creation_receipts'").toArray().length)throw new Error("Legacy task has no creation receipt");
     const receipt=this.ctx.storage.sql.exec<{actor_id:string;payload:string}>("SELECT actor_id,payload FROM task_creation_receipts WHERE task_id=?",taskId).toArray()[0];
@@ -1965,18 +2043,12 @@ export class RepositoryController extends DurableObject<Env> {
     assertTaskTargetRetry(task,internalTarget,input.dependsOn?state.tasks[input.dependsOn]?.acceptedTarget?.ref:undefined);
     return task;
   }
-  async createTask(task: Task, actorId?: string,creationInput?:TaskCreationInput,internalTarget?:InternalTaskTargetOptions): Promise<Task & {creationReplayed?:boolean}> {
-    if(creationInput&&(!actorId||task.goal!==creationInput.goal||(task.dependsOn??null)!==creationInput.dependsOn||(task.issue??null)!==creationInput.issue))throw new Error("Task creation input or authority changed");
-    if(task.targetGeneration)throw Error("Task target generation views are server-derived, not creation inputs");
-    const boundIntent=internalTarget!==undefined||task.acceptedTarget!==undefined||Boolean(task.dependsOn&&this.load().tasks[task.dependsOn]?.acceptedTarget);
-    if((creationInput||boundIntent)&&!actorId)throw Error("An authenticated task creator is required");
-    if(creationInput||boundIntent)await this.requireTaskCreationActor(actorId!);
-    const s = this.load();
-    if (s.tasks[task.id]) {if(creationInput){const existing=await this.taskCreationReplay(task.id,actorId!,creationInput,internalTarget);if(!existing)throw new Error("Saved task changed during creation retry");return {...existing,creationReplayed:true};}const existing=s.tasks[task.id]!;assertTaskTargetRetry(existing,internalTarget,task.dependsOn?s.tasks[task.dependsOn]?.acceptedTarget?.ref:undefined);if(task.acceptedTarget&&existing.acceptedTarget)assertCompatibleAcceptedTargetBatch([task.acceptedTarget,existing.acceptedTarget]);return existing;}
-    if(boundIntent){this.synchronizePrimaryAcceptedRegistry(s);task=bindTaskAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),{...s,tasks:Object.fromEntries(Object.entries(s.tasks).map(([id,value])=>[id,this.projectedTask(value)]))},new PrivateRecoveryOperations(this.ctx.storage).incarnation(),task,internalTarget);}
+  private persistCreatedTask(task:Task,actorId:string|undefined,creationInput:TaskCreationInput|undefined,assertCredential:()=>void):FlareGitProjectState{
+    const s=this.load(),boundIntent=task.acceptedTarget!==undefined;if(s.tasks[task.id])throw Error("Task creation is already committed");
     const payload=creationInput?boundTaskCreationPayload(creationInput,task.acceptedTarget):null;
     const next={...s,tasks:{...s.tasks,[task.id]:task}};
     this.ctx.storage.transactionSync(() => {
+      assertCredential();
       if((creationInput||boundIntent)&&this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId!).toArray()[0]?.role===undefined)throw new Error("Task creation access changed");
       if(task.acceptedTarget){const current=freezeAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),this.load(),new PrivateRecoveryOperations(this.ctx.storage).incarnation(),task.acceptedTarget.ref);assertCompatibleAcceptedTargetBatch([task.acceptedTarget,current]);}
       if(actorId) { this.gitTables(); this.ctx.storage.sql.exec("INSERT INTO git_task_writers(task_id,user_id) VALUES (?,?)",task.id,actorId); }
@@ -1985,6 +2057,27 @@ export class RepositoryController extends DurableObject<Env> {
       if(this.repositoryDeleting())throw new Error("Repository deletion is in progress");
       this.ctx.storage.sql.exec("INSERT INTO project (id, doc) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET doc=excluded.doc",JSON.stringify(next));
     });
+    return next;
+  }
+  async commitTaskCreationIntent(eventId:string,task:Task,actorId:string,credential:TaskCreationCredential):Promise<Task & {creationReplayed?:boolean}>{
+    const assert=await this.taskCreationCredentialFence(actorId,credential),ledger=new TaskCreationIntents(this.ctx.storage),record=ledger.get(eventId);if(!record)throw Error("Saved creation intent unavailable");this.assertTaskCreationIntentLocal(record,actorId);
+    if(record.phase==="committed"){const saved=await this.taskCreationReplay(record.taskId,actorId,record.input,record.selection.acceptedTarget?{acceptedTargetRef:record.selection.acceptedTarget.ref,expectedTarget:record.selection.acceptedTarget}:undefined,credential);if(!saved)throw Error("Committed task receipt unavailable");return{...saved,creationReplayed:true};}
+    if(!await this.assertTaskCreationTarget(actorId,record.input,record.selection,credential))throw Error("Captured creation source changed before persistence");assert();if(task.id!==record.taskId||task.workspace.repoName!==record.workspaceRepoName||task.workspace.branch!==`task/${record.taskId}`||task.baseCommit!==record.selection.baseCommit||task.currentCommit!==record.selection.baseCommit||task.goal!==record.input.goal||(task.dependsOn??null)!==record.input.dependsOn||(task.issue??null)!==record.input.issue||task.targetGeneration)throw Error("Created task does not match its original fork intent");
+    const state=this.load();if(record.selection.acceptedTarget)task=bindTaskAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),{...state,tasks:Object.fromEntries(Object.entries(state.tasks).map(([id,value])=>[id,this.projectedTask(value)]))},record.incarnation,task,{acceptedTargetRef:record.selection.acceptedTarget.ref,expectedTarget:record.selection.acceptedTarget});let next:FlareGitProjectState|undefined;
+    try{ledger.commit(eventId,saved=>{assert();this.assertTaskCreationIntentLocal(saved,actorId);if(!new InitialForkCredentials(this.ctx.storage).settled(this.initialForkScope(saved)))throw Error("Original fork credential cleanup remains unconfirmed");},()=>{next=this.persistCreatedTask(task,actorId,record.input,assert);});if(next)this.state=next;}catch(error){this.state=null;throw error;}
+    await this.logActivity(task.contributor.name,"task.created",`Change started: ${task.goal}`);return{...task,creationReplayed:false};
+  }
+
+  async createTask(task: Task, actorId?: string,creationInput?:TaskCreationInput,internalTarget?:InternalTaskTargetOptions,credential?:TaskCreationCredential): Promise<Task & {creationReplayed?:boolean}> {
+    if(creationInput&&(!actorId||task.goal!==creationInput.goal||(task.dependsOn??null)!==creationInput.dependsOn||(task.issue??null)!==creationInput.issue))throw new Error("Task creation input or authority changed");
+    if(task.targetGeneration)throw Error("Task target generation views are server-derived, not creation inputs");
+    const boundIntent=internalTarget!==undefined||task.acceptedTarget!==undefined||Boolean(task.dependsOn&&this.load().tasks[task.dependsOn]?.acceptedTarget);
+    if((creationInput||boundIntent)&&!actorId)throw Error("An authenticated task creator is required");
+    const assertCredential=(creationInput||boundIntent)?await this.taskCreationCredentialFence(actorId!,credential):()=>{};assertCredential();
+    const s = this.load();
+    if (s.tasks[task.id]) {if(creationInput){const existing=await this.taskCreationReplay(task.id,actorId!,creationInput,internalTarget,credential);if(!existing)throw new Error("Saved task changed during creation retry");return {...existing,creationReplayed:true};}const existing=s.tasks[task.id]!;assertTaskTargetRetry(existing,internalTarget,task.dependsOn?s.tasks[task.dependsOn]?.acceptedTarget?.ref:undefined);if(task.acceptedTarget&&existing.acceptedTarget)assertCompatibleAcceptedTargetBatch([task.acceptedTarget,existing.acceptedTarget]);return existing;}
+    if(boundIntent){this.synchronizePrimaryAcceptedRegistry(s);task=bindTaskAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),{...s,tasks:Object.fromEntries(Object.entries(s.tasks).map(([id,value])=>[id,this.projectedTask(value)]))},new PrivateRecoveryOperations(this.ctx.storage).incarnation(),task,internalTarget);}
+    const next=this.persistCreatedTask(task,actorId,creationInput,assertCredential);
     this.state=next;
     await this.logActivity(task.contributor.name, "task.created", `Change started: ${task.goal}`);
     return creationInput?{...task,creationReplayed:false}:task;
@@ -2576,6 +2669,7 @@ export class RepositoryController extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     await this.reconcileLegacyPublicationReadbacks();
     await this.retryRefReadCredentials();
+    await this.retryInitialForkCredentials();
     await this.retryRetainedCredentialIncidents();
     await this.retryAgentCredentialIncidents();
     await this.retryBranchCredentials();
@@ -3279,6 +3373,7 @@ export class RepositoryController extends DurableObject<Env> {
   async destroy(): Promise<void> {
     this.repositoryDeleting();
     new RebaseResumeAttempts(this.ctx.storage);
+    new InitialForkCredentials(this.ctx.storage);if(this.ctx.storage.sql.exec("SELECT event_id FROM initial_fork_credentials WHERE status!='revoked' LIMIT 1").toArray().length)throw Error("Initial workspace credential cleanup remains unconfirmed; creation history preserved");
     if(new RefReadCredentialIncidents(this.ctx.storage).hasPending())throw new Error("Read credential cleanup remains unconfirmed; recovery records preserved");
     if(this.ctx.storage.sql.exec("SELECT 1 FROM rebase_resume_attempts a WHERE rowid=(SELECT MAX(rowid) FROM rebase_resume_attempts b WHERE b.application_id=a.application_id) AND (json_extract(doc,'$.nativeState')!='stopped' OR json_extract(doc,'$.terminal') IS NULL OR json_extract(doc,'$.dispatch')='unknown') LIMIT 1").toArray().length||new SavedRebaseResumeCredentials(this.ctx.storage).hasPending())throw new Error("Saved recovery cleanup is unconfirmed; durable attempts and credentials were preserved");
     if(new BranchNativeAttempts(this.ctx.storage).hasUnconfirmed()||new BranchCredentialIncidents(this.ctx.storage).hasPending())throw Error("Branch native or credential cleanup remains unconfirmed; metadata preserved");

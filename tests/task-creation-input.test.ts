@@ -8,3 +8,5 @@ test("stacked creation preserves long saved dependency identities without changi
  expect(taskCreationInputSchema.safeParse({...input,dependsOn:"a".repeat(101)}).success).toBe(true);
  for(const id of ["ab","a".repeat(102),"-bad","bad_name","bad/name","bad..name"])expect(taskCreationInputSchema.safeParse({...input,dependsOn:id}).success).toBe(false);
 });
+
+test("explicit accepted creation tuple is strict and preserves legacy payload bytes",()=>{const legacy={goal:"Work",dependsOn:null,issue:null},expectedTarget={ref:"refs/heads/release",acceptedCommit:"a".repeat(40),acceptedVersion:0,policyVersion:1};expect(taskCreationPayload(legacy)).toBe(JSON.stringify(legacy));expect(JSON.parse(taskCreationPayload({...legacy,expectedTarget}))).toEqual({...legacy,expectedTarget});for(const invalid of [{...expectedTarget,policy:{}},{...expectedTarget,requirements:[]},{...expectedTarget,ref:"release"},{...expectedTarget,acceptedCommit:"0".repeat(40)},{...expectedTarget,acceptedVersion:-1}])expect(taskCreationInputSchema.safeParse({...legacy,expectedTarget:invalid}).success).toBe(false);});

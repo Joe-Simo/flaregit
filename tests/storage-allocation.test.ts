@@ -1,0 +1,28 @@
+import {Database} from "bun:sqlite";
+import {expect,test} from "bun:test";
+import {ArtifactAllocationFence} from "../src/server/allocation-fence";
+import {allocateArtifact} from "../src/server/storage-allocation";
+import type {Env} from "../src/server/env";
+function fixture(){const databases:Database[]=[],fences=new Map<string,ArtifactAllocationFence>();let lookups=0;
+ const fence=(name:string)=>{let value=fences.get(name);if(!value){const db=new Database(":memory:");databases.push(db);const storage={sql:{exec(query:string,...bindings:Array<string|number>){const rows=db.query(query).all(...bindings);return{toArray:()=>rows};}},transactionSync<T>(fn:()=>T){return db.transaction(fn)();}};value=new ArtifactAllocationFence(storage as unknown as DurableObjectStorage);fences.set(name,value);}return value;};
+ const env={ARTIFACT_STORAGE_NAMESPACE:"synthetic-allocation",ARTIFACT_STORAGE_GLOBAL_SLOTS:"32",ARTIFACT_STORAGE_ACCOUNT_SLOTS:"8",ARTIFACTS:{list:async()=>({repos:[]}),get:async()=>({info:async()=>({name:"workspace"}),[Symbol.dispose]:()=>{}})},REPOSITORY_CONTROLLER:{idFromName:(name:string)=>name,get:(name:string)=>{lookups++;if(name==="global")return {reconcileArtifactInventory:async()=>{},reserveArtifactStorage:async()=>({allowed:true,existing:false})};const ledger=fence(name);return {beginArtifactAllocation:async(input:Parameters<ArtifactAllocationFence["begin"]>[0])=>ledger.begin(input,()=>true),activateArtifactAllocation:async(repo:string,id:string)=>ledger.activate(repo,id,()=>true),settleArtifactAllocation:async(repo:string,id:string)=>ledger.settle(repo,id)};}}} as unknown as Env;
+ return{env,fences,databases,lookups:()=>lookups,close:()=>databases.forEach(db=>db.close())};}
+const args={name:"t-p123456789abc-saved-task",projectId:"p123456789abc",userId:"creator",kind:"workspace" as const};
+test("caller allocation UUID spans real account/project SQLite fences and unknown provider holds",async()=>{const f=fixture(),operationId=crypto.randomUUID();try{let calls=0;await expect(allocateArtifact(f.env,{...args,operationId},async()=>{calls++;throw Error("Synthetic lost provider acknowledgment");})).rejects.toThrow("lost provider");expect(calls).toBe(1);expect(f.fences.size).toBe(2);for(const fence of f.fences.values()){expect(fence.pending()).toHaveLength(1);expect(fence.pending()[0]?.operationId).toBe(operationId);expect(fence.pending()[0]?.phase).toBe("allocating");fence.settle(args.name,crypto.randomUUID());expect(fence.pending()).toHaveLength(1);fence.settle(args.name,operationId);expect(fence.pending()).toEqual([]);}}finally{f.close();}});
+test("known completion settles the supplied UUID and legacy callers still receive fresh identities",async()=>{const f=fixture(),operationId=crypto.randomUUID();try{expect(await allocateArtifact(f.env,{...args,operationId},async()=>"known")).toBe("known");for(const fence of f.fences.values())expect(fence.pending()).toEqual([]);await expect(allocateArtifact(f.env,args,async()=>{throw Error("Synthetic unknown");})).rejects.toThrow("unknown");const ids=[...f.fences.values()].map(fence=>fence.pending()[0]?.operationId);expect(ids[0]).toMatch(/^[a-f0-9-]{36}$/);expect(ids[0]).toBe(ids[1]);expect(ids[0]).not.toBe(operationId);}finally{f.close();}});
+test("invalid stable identities fail before lifecycle or provider dispatch",async()=>{const f=fixture();try{let called=false;await expect(allocateArtifact(f.env,{...args,operationId:"invalid"},async()=>{called=true;})).rejects.toThrow("Invalid artifact");expect(called).toBe(false);expect(f.lookups()).toBe(0);}finally{f.close();}});
+test("a concurrent rejected begin cannot settle the original stable-ID live fork",async()=>{
+ const f=fixture(),operationId=crypto.randomUUID();let release:()=>void=()=>{},entered:()=>void=()=>{},calls=0;const pending=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{entered=resolve;});
+ try{const first=allocateArtifact(f.env,{...args,operationId},async()=>{calls++;entered();await pending;return "created";});await started;
+  await expect(allocateArtifact(f.env,{...args,operationId},async()=>{calls++;return "replacement";})).rejects.toThrow("pending");expect(calls).toBe(1);
+  for(const fence of f.fences.values()){expect(fence.pending()).toHaveLength(1);expect(fence.pending()[0]?.operationId).toBe(operationId);expect(fence.pending()[0]?.phase).toBe("allocating");}
+  release();expect(await first).toBe("created");for(const fence of f.fences.values())expect(fence.pending()).toEqual([]);
+ }finally{release();f.close();}
+});
+test("a lost begin acknowledgement conservatively preserves all acquired scope holds",async()=>{
+ const f=fixture(),operationId=crypto.randomUUID(),namespace=f.env.REPOSITORY_CONTROLLER;
+ const originalGet=namespace.get.bind(namespace);let calls=0;
+ const wrapped={...f.env,REPOSITORY_CONTROLLER:{...namespace,get:(id:DurableObjectId)=>{const stub=originalGet(id);if(!String(id).startsWith("project:"))return stub;return {...stub,beginArtifactAllocation:async(input:Parameters<ArtifactAllocationFence["begin"]>[0],scope:"account"|"project")=>{await (stub as unknown as {beginArtifactAllocation:(value:typeof input,kind:typeof scope)=>Promise<void>}).beginArtifactAllocation(input,scope);throw Error("Synthetic lost begin acknowledgment");}};}}} as unknown as Env;
+ try{await expect(allocateArtifact(wrapped,{...args,operationId},async()=>{calls++;})).rejects.toThrow("lost begin");expect(calls).toBe(0);for(const fence of f.fences.values()){expect(fence.pending()).toHaveLength(1);expect(fence.pending()[0]?.operationId).toBe(operationId);expect(fence.pending()[0]?.phase).toBe("reserved");}}
+ finally{f.close();}
+});
