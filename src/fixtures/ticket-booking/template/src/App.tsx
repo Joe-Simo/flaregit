@@ -22,11 +22,11 @@ export function App() {
     <div style={{ fontFamily: "system-ui, -apple-system, sans-serif", padding: "24px", maxWidth: "680px", margin: "0 auto", color: "#0f172a" }}>
       <header style={{ borderBottom: "1px solid #e2e8f0", paddingBottom: "16px", marginBottom: "20px" }}>
         <div style={{ display: "inline-block", background: "#f97316", color: "#fff", padding: "3px 8px", borderRadius: "4px", fontSize: "11px", fontWeight: "bold", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "6px" }}>
-          Live Accepted Application
+          Ticket checkout demo
         </div>
         <h1 style={{ fontSize: "24px", margin: "4px 0", color: "#0f172a" }}>Event Ticket Checkout</h1>
         <p style={{ color: "#64748b", margin: "0", fontSize: "14px" }}>
-          Accepted demo build running in an isolated preview sandbox.
+          Interactive demo fixture. No payment is processed.
         </p>
       </header>
 
