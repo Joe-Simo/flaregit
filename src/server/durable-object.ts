@@ -1,3 +1,4 @@
+import { WebhookBlockedDeferrals, MAX_WEBHOOK_BLOCKED_DEFERRALS } from "./webhook-blocked-deferrals.js";
 import type {ImportReadScope} from "./import-read-lifecycle.js";
 import type {ImportNativeSnapshot} from "./import-native-readiness.js";
 import {isSafeRef} from "../core/sanitize.js";
@@ -109,7 +110,7 @@ export interface DeliveryRow {
   queue_ms: number | null;
   webhook_id: string;
   event: string;
-  status: "pending" | "success" | "failed";
+  status: "pending" | "waiting" | "success" | "failed";
   attempts: number;
   last_status: number | null;
   last_error: string | null;
@@ -503,6 +504,7 @@ export interface Ledger {
   markDelivery(id: string, result: { generation: number; ok: boolean; status?: number; error?: string; latencyMs?: number; final?: boolean }): Promise<number | null>;
   redeliver(id: string): Promise<boolean>;
   isBlocked(id: string): Promise<boolean>;
+  deferBlockedWebhook(id: string, generation: number, sequence: number): Promise<void>;
   beginRetainedCredential(input:RetainedInput,purpose:"workspace"|"canonical",expiresAt:number,scope:"read"|"write"):Promise<boolean>;
   recordRetainedCredential(inputId:string,purpose:"workspace"|"canonical",repoName:string,token:string,expiresAt:number):Promise<void>;
   revokeRetainedCredential(inputId:string,purpose:"workspace"|"canonical"):Promise<boolean>;
@@ -1855,7 +1857,7 @@ export class RepositoryController extends DurableObject<Env> {
     if (!row) throw new Error("Unknown delivery");
     // Replay preserves delivery identity but starts a fresh attempt generation.
     // Completions from old in-flight requests cannot mutate it or schedule retries.
-    if (!Number.isSafeInteger(r.generation) || r.generation !== row.generation || row.status === "success" || (row.status === "failed" && !r.ok)) return null;
+    if (!Number.isSafeInteger(r.generation) || r.generation !== row.generation || row.status === "success" || ((row.status === "failed" || row.status === "waiting") && !r.ok)) return null;
     const attempts = (row?.attempts ?? 0) + 1;
     if (attempts === 1) {
       this.ctx.storage.sql.exec("UPDATE deliveries SET queue_ms = MAX(0, CAST((julianday(?) - julianday(created_at)) * 86400000 AS INTEGER)) WHERE id = ?", new Date().toISOString(), id);
@@ -2259,27 +2261,41 @@ export class RepositoryController extends DurableObject<Env> {
   async isBlocked(id: string): Promise<boolean> {
     const d = this.ctx.storage.sql.exec<{ webhook_id: string; seq: number }>("SELECT webhook_id, seq FROM deliveries WHERE id = ?", id).toArray()[0];
     if (!d || d.seq === 0) return false;
-    return this.ctx.storage.sql.exec("SELECT 1 FROM deliveries WHERE webhook_id = ? AND seq < ? AND status = 'pending' LIMIT 1", d.webhook_id, d.seq).toArray().length > 0;
+    return this.ctx.storage.sql.exec("SELECT 1 FROM deliveries WHERE webhook_id = ? AND seq < ? AND status IN ('pending','waiting') LIMIT 1", d.webhook_id, d.seq).toArray().length > 0;
+  }
+  async deferBlockedWebhook(id:string,generation:number,sequence:number):Promise<void>{
+    const row=this.ctx.storage.sql.exec<{generation:number;status:string;payload:string}>("SELECT generation,status,payload FROM deliveries WHERE id=?",id).toArray()[0];
+    if(!row||row.status!=="pending"||row.generation!==generation)return;
+    let eventId=id;try{const payload:unknown=JSON.parse(row.payload);if(payload&&typeof payload==="object"&&"id" in payload&&typeof payload.id==="string")eventId=payload.id;}catch{/* Legacy payload keeps delivery identity. */}
+    const result=new WebhookBlockedDeferrals(this.ctx.storage).defer(id,eventId,generation,sequence);
+    if(result.kind==="paused"){
+      this.ctx.storage.sql.exec("UPDATE deliveries SET status='waiting',last_error=?,updated_at=? WHERE id=? AND generation=? AND status='pending'","Waiting for an earlier event. Automatic ordering waits are paused; replay this saved delivery after the earlier event settles.",new Date().toISOString(),id,generation);return;
+    }
+    if(result.kind==="duplicate")return;
+    await this.enqueueWebhookDelivery(id,5,result.record.count,generation);
   }
   /** Queue acknowledgement is distinct from a receiver attempt or successful delivery. */
-  protected async enqueueWebhookDelivery(id:string):Promise<boolean>{
+  protected async enqueueWebhookDelivery(id:string,delaySeconds=0,blockedSequence?:number,expectedGeneration?:number):Promise<boolean>{
     await this.ensureRecoveryAlarm();
     const row=this.ctx.storage.sql.exec<{generation:number;dispatch_attempts:number;status:string}>("SELECT generation,dispatch_attempts,status FROM deliveries WHERE id=?",id).toArray()[0];
-    if(!row||row.status!=="pending")return false;
+    if(!row||row.status!=="pending"||(expectedGeneration!==undefined&&row.generation!==expectedGeneration))return false;
+    if(row.dispatch_attempts>=MAX_WEBHOOK_BLOCKED_DEFERRALS+6){this.ctx.storage.sql.exec("UPDATE deliveries SET status='waiting',last_error=? WHERE id=? AND generation=? AND status='pending'","Queue dispatch recovery is paused. Replay the saved delivery to retry.",id,row.generation);return false;}
     const attempt=row.dispatch_attempts+1;
     this.ctx.storage.sql.exec("UPDATE deliveries SET dispatch_state='sending',dispatch_attempts=?,dispatch_error=NULL,dispatch_at=? WHERE id=? AND generation=? AND status='pending'",attempt,new Date().toISOString(),id,row.generation);
     let queued=false;
-    try{await this.env.INTEGRATION_QUEUE.send({type:"webhook.deliver",projectId:this.load().projectId,deliveryId:id});queued=true;}catch{/* Provider diagnostics may include private configuration; persist only a safe category. */}
-    this.ctx.storage.sql.exec("UPDATE deliveries SET dispatch_state=?,dispatch_error=?,dispatch_at=? WHERE id=? AND generation=? AND dispatch_attempts=? AND status='pending' AND dispatch_state='sending'",queued?"queued":"failed",queued?null:"Queue dispatch failed. The saved event remains available for retry.",new Date().toISOString(),id,row.generation,attempt);
+    try{await this.env.INTEGRATION_QUEUE.send({type:"webhook.deliver",projectId:this.load().projectId,deliveryId:id,generation:row.generation,blockedSequence:blockedSequence??new WebhookBlockedDeferrals(this.ctx.storage).current(id)?.count??0},{delaySeconds});queued=true;}catch{/* Provider diagnostics may include private configuration; persist only a safe category. */}
+    this.ctx.storage.sql.exec("UPDATE deliveries SET dispatch_state=?,dispatch_error=?,dispatch_at=? WHERE id=? AND generation=? AND dispatch_attempts=? AND status='pending' AND dispatch_state='sending'",queued?"queued":"unknown",queued?null:"Queue dispatch is unconfirmed. The saved event remains available for recovery.",new Date().toISOString(),id,row.generation,attempt);
     return queued;
   }
   async redeliver(id: string): Promise<boolean> {
     const d = this.ctx.storage.sql.exec<{ id: string; generation:number }>("SELECT id,generation FROM deliveries WHERE id = ?", id).toArray()[0];
     if (!d) return false;
     const generation=d.generation+1;
-    this.ctx.storage.sql.exec("UPDATE deliveries SET status = 'pending', attempts = 0, generation = generation + 1, last_error = NULL, dispatch_state = 'unknown', dispatch_error = NULL, updated_at = ? WHERE id = ?", new Date().toISOString(), id);
+    const waits=new WebhookBlockedDeferrals(this.ctx.storage),previous=waits.current(id);
+    if(previous)waits.replay(id,previous.eventId,d.generation,generation);
+    this.ctx.storage.sql.exec("UPDATE deliveries SET status = 'pending', attempts = 0, generation = generation + 1, last_error = NULL, dispatch_state = 'unknown', dispatch_error = NULL, dispatch_attempts = 0, updated_at = ? WHERE id = ?", new Date().toISOString(), id);
     await this.ensureRecoveryAlarm();
-    if(!await this.enqueueWebhookDelivery(id)){
+    if(!await this.enqueueWebhookDelivery(id,0,0,generation)){
       const current=this.ctx.storage.sql.exec<{generation:number;status:string;dispatch_state:string}>("SELECT generation,status,dispatch_state FROM deliveries WHERE id=?",id).toArray()[0];
       // An existing duplicate message can complete this fresh generation while
       // scheduling awaits. That receiver result is not an enqueue failure.
@@ -2304,7 +2320,7 @@ export class RepositoryController extends DurableObject<Env> {
       ids.push(deliveryId);
     }
     // Retention never touches undelivered events: only finished rows beyond the newest 500 are pruned.
-    this.ctx.storage.sql.exec("DELETE FROM deliveries WHERE status != 'pending' AND id IN (SELECT id FROM deliveries WHERE status != 'pending' ORDER BY created_at DESC LIMIT -1 OFFSET 500)");
+    this.ctx.storage.sql.exec("DELETE FROM deliveries WHERE status IN ('success','failed') AND id IN (SELECT id FROM deliveries WHERE status IN ('success','failed') ORDER BY created_at DESC LIMIT -1 OFFSET 500)");
     return ids;
   }
 
@@ -2321,13 +2337,13 @@ export class RepositoryController extends DurableObject<Env> {
     await this.reconcileContributorRegistrations();
     const now = Date.now();
     const stuck = this.ctx.storage.sql
-      .exec<{ id: string; attempts: number; updated_at: string; created_at: string }>("SELECT id, attempts, updated_at, created_at FROM deliveries WHERE status = 'pending' ORDER BY seq")
+      .exec<{ id: string; generation:number; attempts: number; updated_at: string; created_at: string }>("SELECT id, generation, attempts, updated_at, created_at FROM deliveries WHERE status = 'pending' ORDER BY seq")
       .toArray()
       .filter((d) => (d.attempts === 0 ? now - Date.parse(d.created_at) > 2 * 60_000 : now - Date.parse(d.updated_at) > 70 * 60_000));
     if (stuck.length > 0) {
       for (const d of stuck) {
         this.ctx.storage.sql.exec("UPDATE deliveries SET updated_at = ? WHERE id = ?", new Date().toISOString(), d.id);
-        await this.enqueueWebhookDelivery(d.id);
+        await this.enqueueWebhookDelivery(d.id,0,undefined,d.generation);
       }
     }
     const pending = this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries WHERE status = 'pending'").toArray()[0]?.n ?? 0;

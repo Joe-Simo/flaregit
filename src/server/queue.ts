@@ -1,6 +1,6 @@
 import type { Env, QueueMessage } from "./env.js";
-import { deliverWebhook } from "./webhooks.js";
-import { accountKeyFor, accountOf, globalOf } from "./projects.js";
+import { deliverWebhook, BLOCKED } from "./webhooks.js";
+import { accountKeyFor, accountOf, globalOf, projectOf } from "./projects.js";
 import type { IntegrationParams } from "./workflow.js";
 import { ledgerOf } from "./scenario-workflow.js";
 
@@ -14,9 +14,13 @@ export async function handleQueueBatch(batch: MessageBatch<QueueMessage>, env: E
       } else if (body.type === "probe") {
         await globalOf(env).recordProbe("queue", true, Date.now() - body.sentAt, "consumer received probe");
       } else if (body.type === "webhook.deliver") {
-        const retryAfter = await deliverWebhook(env, body.projectId, body.deliveryId);
-        if (retryAfter !== null) {
-          // Re-enqueue rather than msg.retry(): waiting for an earlier event must not consume the queue's retry budget.
+        const retryAfter = await deliverWebhook(env, body.projectId, body.deliveryId, body.generation??0);
+        if (retryAfter === BLOCKED) {
+          const ledger=projectOf(env,body.projectId);
+          const found=await ledger.getDelivery(body.deliveryId);
+          if(found)await ledger.deferBlockedWebhook(body.deliveryId,body.generation??0,body.blockedSequence??0);
+        } else if (retryAfter !== null) {
+          // Receiver retries are separately bounded by the durable attempt count.
           await env.INTEGRATION_QUEUE.send(body, { delaySeconds: retryAfter });
         }
       } else {

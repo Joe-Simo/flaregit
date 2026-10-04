@@ -31,11 +31,12 @@ async function sign(secret: string, id: string, timestamp: number, payload: stri
 }
 
 /** One delivery attempt. Returns the seconds to wait before retrying, or null when finished (success or out of attempts). */
-export async function deliverWebhook(env: Env, projectId: string, deliveryId: string): Promise<number | null> {
+export async function deliverWebhook(env: Env, projectId: string, deliveryId: string, generation?: number): Promise<number | null> {
   const ledger = projectOf(env, projectId);
   const found = await ledger.getDelivery(deliveryId);
   if (!found) return null;
   const { delivery, webhook } = found;
+  if(generation !== undefined && generation !== delivery.generation)return null;
   // A duplicate queue message cannot restart an exhausted delivery. Explicit replay
   // resets the durable row to pending before enqueueing it again.
   if (delivery.status !== "pending") return null;

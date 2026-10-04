@@ -73,5 +73,5 @@ export interface Env {
 export type QueueMessage =
   | { type: "git.push"; projectId: string; taskId: string; commit: string; ready: boolean; eventId: string }
   | { type: "integration.requested"; projectId: string; taskIds: string[]; eventId: string }
-  | { type: "webhook.deliver"; projectId: string; deliveryId: string }
+  | { type: "webhook.deliver"; projectId: string; deliveryId: string; generation?: number; blockedSequence?: number }
   | { type: "probe"; sentAt: number };

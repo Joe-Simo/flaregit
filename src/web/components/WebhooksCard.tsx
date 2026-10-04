@@ -9,7 +9,7 @@ import { readWebhookView } from "../webhook-view-read";
 import { useVisiblePolling } from "../use-visible-polling";
 
 interface Hook { id: string; url: string; events: string; active: number }
-interface Delivery { dispatch_state?: "unknown"|"sending"|"queued"|"failed"|"consumed"; dispatch_attempts?:number; dispatch_error?:string|null; id: string; seq: number; queue_ms: number | null; webhook_id: string; event: string; status: "pending" | "success" | "failed"; attempts: number; last_status: number | null; last_error: string | null; latency_ms: number | null; updated_at: string }
+interface Delivery { dispatch_state?: "unknown"|"sending"|"queued"|"failed"|"consumed"; dispatch_attempts?:number; dispatch_error?:string|null; id: string; seq: number; queue_ms: number | null; webhook_id: string; event: string; status: "pending" | "waiting" | "success" | "failed"; attempts: number; last_status: number | null; last_error: string | null; latency_ms: number | null; updated_at: string }
 
 type WebhookLoad = { hooks: Hook[] | null; deliveries: Delivery[] };
 class WebhookLoadError extends Error {
@@ -167,7 +167,7 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
                     {d.last_error && d.status !== "success" && <div className="text-destructive break-all">{d.last_error}</div>}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    <Badge variant={d.status === "success" ? "success" : d.status === "failed" ? "destructive" : "warning"}>{d.status === "pending" ? "Pending" : d.status === "success" ? "Delivered" : "Failed"}</Badge>
+                    <Badge variant={d.status === "success" ? "success" : d.status === "failed" ? "destructive" : "warning"}>{d.status === "pending" ? "Pending" : d.status === "waiting" ? "Waiting" : d.status === "success" ? "Delivered" : "Failed"}</Badge>
                     {isOwner && (
                       <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => guard(`re:${d.id}`, "Replay recorded with the same delivery ID. Check the log for its delivery outcome.", async () => { await apiJson(`/p/${projectId}/deliveries/${d.id}/redeliver`, { method: "POST" }); })}>
                         <RotateCw className="h-3 w-3 mr-1" aria-hidden="true" /> {busy === `re:${d.id}` ? "Queuing…" : "Replay"}
