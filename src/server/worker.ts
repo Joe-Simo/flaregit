@@ -1540,6 +1540,21 @@ export default {
           try{return Response.json(await project.ownerRebaseApplications({userId,displayName:clean(profile.displayName,120)||"Repository owner",viaToken:currentAuth.viaToken===true},credentialHash,currentAuth.expiresAt),{headers:{"Cache-Control":"no-store"}});}catch{return text("Saved rebase inspection requires current owner authority",403);}
         }
 
+        const boundRecoveryCancel=/^\/publication-recovery\/(jrnl_[a-f0-9-]{36})\/cancel-undispatched$/.exec(sub);
+        if(sub==="/publication-recovery/bound"||boundRecoveryCancel){
+          if((sub==="/publication-recovery/bound"?method!=="GET":method!=="POST")||[...url.searchParams.keys()].length)return repositoryReadJson({error:"Invalid publication recovery request"},400);
+          if(!isOwner||(auth.viaToken&&auth.tokenScope!=="full"))return repositoryReadJson({error:"Only the current owner can recover publication"},403);
+          const current=await authenticate(request,env);if(current instanceof Response)return current;
+          if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||(current.viaToken&&(current.tokenScope!=="full"||(current.tokenRepo&&current.tokenRepo!==projectId))))return repositoryReadJson({error:"Owner authentication changed"},403);
+          const profile=await account.getProfile();const actor={userId,displayName:clean(profile.displayName,120)||"Repository owner",viaToken:current.viaToken===true},hash=current.viaToken?await gitParentTokenHash(request):undefined;
+          try{
+            if(!boundRecoveryCancel)return repositoryReadJson(await project.ownerBoundPublicationRecoveries(actor,hash,current.expiresAt));
+            const input=await body<{requestId?:unknown;candidateId?:unknown;expectedRef?:unknown;expectedCommit?:unknown;confirmCancel?:unknown}>();
+            if(Object.keys(input).some(key=>!["requestId","candidateId","expectedRef","expectedCommit","confirmCancel"].includes(key))||typeof input.requestId!=="string"||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(input.requestId)||typeof input.candidateId!=="string"||!/^[A-Za-z0-9_-]{1,128}$/.test(input.candidateId)||typeof input.expectedRef!=="string"||!input.expectedRef.startsWith("refs/heads/")||!isSafeRef(input.expectedRef)||typeof input.expectedCommit!=="string"||!/^[a-f0-9]{40}$/.test(input.expectedCommit)||/^0{40}$/.test(input.expectedCommit)||input.confirmCancel!==true)return repositoryReadJson({error:"Confirm the exact saved undispatched publication and request identity"},400);
+            return repositoryReadJson(await project.cancelOwnerBoundPublication(boundRecoveryCancel[1]!,{candidateId:input.candidateId,ref:input.expectedRef,commit:input.expectedCommit,eventId:input.requestId},actor,hash,current.expiresAt));
+          }catch(error){if(error instanceof RequestBodyError)throw error;return repositoryReadJson({error:"Publication recovery was not confirmed. Its journal and committed history remain preserved."},409);}
+        }
+
         if(sub==="/publication-recovery"&&method==="GET"){
           if(!isOwner||(auth.viaToken&&auth.tokenScope!=="full"))return text("Only the current owner can inspect publication recovery",403);
           const profile=await account.getProfile(),currentAuth=await authenticate(request,env);if(currentAuth instanceof Response)return currentAuth;

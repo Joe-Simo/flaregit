@@ -206,7 +206,32 @@ export interface DecisionOption {
 /** Server-derived identity for consequential human choices. Missing on legacy records. */
 export interface HumanDecisionActor { userId: string; displayName: string; viaToken: boolean }
 
+export interface ProductDecisionParticipant {
+  taskId: string;
+  currentCommit: string;
+  baseCommit: string;
+  workspaceRepoName: string;
+  workspaceBranch: string;
+  dependsOn?: string;
+  activeCandidateId?: string;
+  agentRunId?: string;
+  agentWorkflowInstanceId?: string;
+  contributorId: string;
+  contributorType: ContributorType;
+  initiatedById?: string;
+  writerId?: string | null;
+  conflictingRequirements: Requirement[];
+}
+export interface ProductDecisionScope {
+  projectId: string;
+  incarnation: string;
+  participants: ProductDecisionParticipant[];
+  conflictingRequirements: [Requirement, Requirement];
+  acceptedTarget?: FrozenAcceptedTarget;
+}
 export interface ProductDecision {
+  /** Immutable participants and original inputs for this consequential choice. */
+  readonly scope?: ProductDecisionScope;
   /** Durable legacy rerun lineage; resolution always creates a fresh candidate. */
   legacyRerunId?: string;
   id: string;

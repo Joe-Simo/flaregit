@@ -631,6 +631,9 @@ export interface Ledger {
   preparePublish(candidateId: string): Promise<PrepareResult>;
   authorizeCandidatePublication(candidateId: string, commit: string): Promise<boolean>;
   markCandidatePublicationDispatch(candidateId:string,journalId:string,commit:string):Promise<boolean>;
+  ownerBoundPublicationRecoveries(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["ownerBoundPublicationRecoveries"]>;
+  cancelOwnerBoundPublication(journalId:string,input:{candidateId:string;ref:string;commit:string;eventId:string},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<{journalId:string;candidateId:string;eventId:string;status:"cancelled_undispatched";ref:string;commit:string}>;
+  cancelUndispatchedPublication(candidateId:string,journalId:string,eventId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<{cancelled:true;journalId:string}>;
   authorizeCandidatePublicationReadback(candidateId:string,journalId:string,commit:string):Promise<boolean>;
   observeCandidatePublicationReadback(candidateId:string,journalId:string,commit:string):Promise<{status:"landed"|"not_landed"|"unavailable";ref:string;commit:string;readbackScope?:string}>;
   completePublish(journalId: string,readbackScope?:string): Promise<void>;
@@ -3528,7 +3531,19 @@ export class RepositoryController extends DurableObject<Env> {
     return this.load().journal.filter(journal=>journal.state==="PREPARED"&&this.legacyPreparedPublication(journal.candidateId)).slice(0,50).map(journal=>ledger.report(journal.id,this.publicationReadbackScope(journal))??{journalId:journal.id,reason:"awaiting_readback",checkedAt:journal.timestamp,automaticAttempts:0,canCheck:true});
   }
   async checkOwnerPublicationReadback(journalId:string,requestId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<PublicationReadbackReport>{
-    const authorize=async()=>{const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();};await authorize();return this.checkLegacyPublicationReadback(journalId,"manual",requestId,authorize);
+    const authorize=async()=>{const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();};await authorize();
+    const journal=this.load().journal.find(item=>item.id===journalId);
+    if(!journal?.acceptedTarget)return this.checkLegacyPublicationReadback(journalId,"manual",requestId,authorize);
+    if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(requestId))throw Error("Invalid publication check identity");
+    const scope=this.publicationReadbackScope(journal);this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS bound_publication_checks(request_id TEXT PRIMARY KEY,journal_id TEXT NOT NULL,scope TEXT NOT NULL,doc TEXT NOT NULL)");
+    const prior=this.ctx.storage.sql.exec<{journal_id:string;scope:string;doc:string}>("SELECT journal_id,scope,doc FROM bound_publication_checks WHERE request_id=?",requestId).toArray()[0];if(prior){if(prior.journal_id!==journalId||prior.scope!==scope)throw Error("Publication check identity changed");await authorize();return JSON.parse(prior.doc) as PublicationReadbackReport;}
+    if(journal.state!=="PREPARED")throw Error("Pending publication unavailable");
+    const ledger=new PublicationReadbacks(this.ctx.storage);ledger.claim(journalId,scope,"manual",requestId);
+    const pending=ledger.report(journalId,scope)!;if(this.ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) AS n FROM bound_publication_checks").one().n>=1000)throw Error("Publication check audit capacity reached");this.ctx.storage.sql.exec("INSERT INTO bound_publication_checks VALUES(?,?,?,?)",requestId,journalId,scope,JSON.stringify(pending));
+    const observed=await this.observeCandidatePublicationReadback(journal.candidateId,journalId,journal.newHead);await authorize();
+    if(this.publicationReadbackScope(journal)!==scope)throw Error("Publication check scope changed");
+    if(observed.status==="landed"&&observed.readbackScope===scope)await this.completePublish(journalId,scope);
+    await authorize();const result:PublicationReadbackResult={reason:observed.status==="landed"?"confirmed":observed.status==="not_landed"?"not_observed":"provider_unavailable",checkedAt:new Date().toISOString()};ledger.save(journalId,scope,result);const report=ledger.report(journalId,scope)!;this.ctx.storage.sql.exec("UPDATE bound_publication_checks SET doc=? WHERE request_id=? AND scope=?",JSON.stringify(report),requestId,scope);return report;
   }
   private async checkLegacyPublicationReadback(journalId:string,mode:"automatic"|"manual",requestId?:string,ownerAuthorize?:()=>Promise<void>):Promise<PublicationReadbackReport>{
     const ledger=new PublicationReadbacks(this.ctx.storage),journal=this.load().journal.find(item=>item.id===journalId);
@@ -3655,6 +3670,29 @@ export class RepositoryController extends DurableObject<Env> {
     return { ok: true, journal };
   }
 
+  async ownerBoundPublicationRecoveries(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){
+    const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authorize();this.publicationDispatchTable();new RetainedCredentialIncidents(this.ctx.storage);new RefReadCredentialIncidents(this.ctx.storage);
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS publication_observations(journal_id TEXT PRIMARY KEY,scope TEXT NOT NULL,doc TEXT NOT NULL)");
+    const state=this.load(),pending=state.journal.filter(journal=>journal.state==="PREPARED"&&journal.acceptedTarget),operations=pending.slice(0,20).map(journal=>{
+      const candidate=state.candidates[journal.candidateId],target=journal.acceptedTarget!,scope=this.publicationReadbackScope(journal),marker=this.ctx.storage.sql.exec<{scope:string;state:string}>("SELECT scope,state FROM publication_dispatch_markers WHERE journal_id=?",journal.id).toArray()[0];
+      const dispatchMarker=marker?.scope===scope&&marker.state==="never"?"never" as const:marker?.scope===scope&&marker.state==="possible"?"possible" as const:"unverified" as const;
+      const runtime=IntegrationNativeRuntimeLedger.inspect(this.ctx.storage,{workflowId:candidate?.workflowInstanceId??"",candidateId:journal.candidateId,projectId:state.projectId,incarnation:target.incarnation});
+      const credentialsSettled=!this.ctx.storage.sql.exec("SELECT input_id FROM retained_credential_incidents WHERE json_extract(payload,'$.workflowId')=? AND status!='revoked' LIMIT 1",candidate?.workflowInstanceId??"").toArray().length&&!this.ctx.storage.sql.exec("SELECT id FROM ref_read_credential_incidents WHERE json_extract(context,'$.operationId')=? AND status!='revoked' LIMIT 1",journal.id).toArray().length;
+      const nativeState=runtime.coverage?runtime.status==="stopped"?"stopped" as const:"held" as const:"unverified" as const;
+      const protocolVerified=candidate?.preservationProtocolVersion===1&&this.ctx.storage.sql.exec<{native_protocol:number|null}>("SELECT native_protocol FROM project_workflows WHERE instance_id=? AND kind='integration'",candidate?.workflowInstanceId??"").toArray()[0]?.native_protocol===1;
+      const canRequestCancellation=protocolVerified&&dispatchMarker==="never"&&runtime.coverage&&runtime.sealed===true&&nativeState==="stopped"&&credentialsSettled;
+      const observed=this.ctx.storage.sql.exec<{scope:string;doc:string}>("SELECT scope,doc FROM publication_observations WHERE journal_id=?",journal.id).toArray()[0];const saved=observed?.scope===scope?JSON.parse(observed.doc) as {status:"landed"|"not_landed"|"unavailable";checkedAt:string}:null;
+      return{candidateId:journal.candidateId,journalId:journal.id,ref:target.ref,commit:journal.newHead,state:"PREPARED" as const,dispatchMarker,recoveryStatus:canRequestCancellation?"cancellation_check_available" as const:dispatchMarker==="never"?"cleanup_required" as const:"inspection_required" as const,nativeState,nativeSealed:runtime.sealed,credentialsSettled,canRequestCancellation,observedOutcome:saved?.status??"not_checked" as const,...(saved?{checkedAt:saved.checkedAt}:{})};
+    });authorize();return{operations,truncated:pending.length>20};
+  }
+  private savePublicationObservation(journal:PublicationJournalEntry,scope:string,status:"landed"|"not_landed"|"unavailable"):void{if(journal.state!=="PREPARED"||this.publicationReadbackScope(journal)!==scope)return;this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS publication_observations(journal_id TEXT PRIMARY KEY,scope TEXT NOT NULL,doc TEXT NOT NULL)");this.ctx.storage.sql.exec("INSERT INTO publication_observations VALUES(?,?,?) ON CONFLICT(journal_id) DO UPDATE SET scope=excluded.scope,doc=excluded.doc",journal.id,scope,JSON.stringify({status,checkedAt:new Date().toISOString()}));}
+
+  async cancelOwnerBoundPublication(journalId:string,input:{candidateId:string;ref:string;commit:string;eventId:string},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<{journalId:string;candidateId:string;eventId:string;status:"cancelled_undispatched";ref:string;commit:string}>{
+    const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authorize();const journal=this.load().journal.find(item=>item.id===journalId&&item.candidateId===input.candidateId);
+    if(!journal?.acceptedTarget||journal.acceptedTarget.ref!==input.ref||journal.newHead!==input.commit)throw Error("Exact publication cancellation scope changed");
+    await this.cancelUndispatchedPublication(input.candidateId,journalId,input.eventId,actor,credentialHash,sessionExpiresAt);authorize();return{journalId,candidateId:input.candidateId,eventId:input.eventId,status:"cancelled_undispatched",ref:input.ref,commit:input.commit};
+  }
+
   async cancelUndispatchedPublication(candidateId:string,journalId:string,eventId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<{cancelled:true;journalId:string}> {
     if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(eventId))throw Error("Invalid cancellation identity");
     const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authorize();this.publicationDispatchTable();
@@ -3663,7 +3701,7 @@ export class RepositoryController extends DurableObject<Env> {
     const state=this.load(),candidate=state.candidates[candidateId],journal=state.journal.find(item=>item.id===journalId&&item.candidateId===candidateId);
     if(!candidate?.acceptedTarget||!journal||journal.state!=="PREPARED"||!candidate.workflowInstanceId)throw Error("Bound pending publication unavailable");
     const scope=this.publicationReadbackScope(journal),identity={workflowId:candidate.workflowInstanceId,candidateId,projectId:state.projectId,incarnation:candidate.acceptedTarget.incarnation};
-    const assert=()=>{authorize();const marker=this.ctx.storage.sql.exec<{scope:string;state:string}>("SELECT scope,state FROM publication_dispatch_markers WHERE journal_id=?",journalId).toArray()[0],runtime=IntegrationNativeRuntimeLedger.inspect(this.ctx.storage,identity);if(this.publicationReadbackScope(journal)!==scope||journal.state!=="PREPARED"||marker?.scope!==scope||marker.state!=="never"||!runtime.coverage||runtime.sealed!==true||runtime.status!=="stopped")throw Error("Publication dispatch or native shutdown remains unconfirmed");new RetainedCredentialIncidents(this.ctx.storage);new RefReadCredentialIncidents(this.ctx.storage);if(this.ctx.storage.sql.exec("SELECT input_id FROM retained_credential_incidents WHERE json_extract(payload,'$.workflowId')=? AND status!='revoked' LIMIT 1",identity.workflowId).toArray().length||this.ctx.storage.sql.exec("SELECT id FROM ref_read_credential_incidents WHERE json_extract(context,'$.operationId')=? AND status!='revoked' LIMIT 1",journalId).toArray().length)throw Error("Publication credential cleanup remains unconfirmed");};
+    const assert=()=>{authorize();if(candidate.preservationProtocolVersion!==1||this.ctx.storage.sql.exec<{native_protocol:number|null}>("SELECT native_protocol FROM project_workflows WHERE instance_id=? AND kind='integration'",identity.workflowId).toArray()[0]?.native_protocol!==1)throw Error("Publication native coverage protocol remains unverified");const marker=this.ctx.storage.sql.exec<{scope:string;state:string}>("SELECT scope,state FROM publication_dispatch_markers WHERE journal_id=?",journalId).toArray()[0],runtime=IntegrationNativeRuntimeLedger.inspect(this.ctx.storage,identity);if(this.publicationReadbackScope(journal)!==scope||journal.state!=="PREPARED"||marker?.scope!==scope||marker.state!=="never"||!runtime.coverage||runtime.sealed!==true||runtime.status!=="stopped")throw Error("Publication dispatch or native shutdown remains unconfirmed");new RetainedCredentialIncidents(this.ctx.storage);new RefReadCredentialIncidents(this.ctx.storage);if(this.ctx.storage.sql.exec("SELECT input_id FROM retained_credential_incidents WHERE json_extract(payload,'$.workflowId')=? AND status!='revoked' LIMIT 1",identity.workflowId).toArray().length||this.ctx.storage.sql.exec("SELECT id FROM ref_read_credential_incidents WHERE json_extract(context,'$.operationId')=? AND status!='revoked' LIMIT 1",journalId).toArray().length)throw Error("Publication credential cleanup remains unconfirmed");};
     assert();const runtime=IntegrationNativeRuntimeLedger.inspect(this.ctx.storage,identity);
     for(const allocation of runtime.allocations??[]){const accountKey=await accountKeyFor(actor.userId),funding=await globalOf(this.env).reserveCoreGitOperation(`cancel-publication-${crypto.randomUUID()}`,accountKey,this.currentGitBudget());authorize();if(!funding.allowed)throw Error("Publication cancellation inspection capacity unavailable");const lifetime=await this.env.INTEGRATOR.getByName(`native-${allocation.nativeRunId}`).lifetimeStatus();assert();if(lifetime?.state!=="stopped"||lifetime.sealed!==true)throw Error("Permanent native stop remains unconfirmed");}
     this.ctx.storage.transactionSync(()=>{assert();if(this.ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) AS n FROM publication_cancellations").one().n>=1000)throw Error("Publication cancellation audit capacity reached");const at=new Date().toISOString();if(this.isNonprimaryCandidate(candidate))new AcceptedBranchRoots(this.ctx.storage).cancelUndispatchedPublication(this.admittedTargetPublication(candidate,journal),{id:eventId,actorId:actor.userId,at},{journalId,candidateId,protocol:1,dispatch:"never",nativeSealed:true,nativeStopped:true,credentialsSettled:true},assert);this.ctx.storage.sql.exec("INSERT INTO publication_cancellations VALUES(?,?,?,?,?)",eventId,journalId,actor.userId,scope,at);this.ctx.storage.sql.exec("UPDATE publication_dispatch_markers SET state='cancelled' WHERE journal_id=?",journalId);journal.state="ABORTED";journal.error="Owner cancelled a proven undispatched publication";journal.timestamp=at;candidate.status="stale";this.ctx.storage.sql.exec("DELETE FROM lease WHERE id=1 AND holder=?",candidate.workflowInstanceId!);for(const id of candidate.participatingTaskIds){const task=state.tasks[id];if(task?.activeCandidateId===candidateId&&task.status!=="cancelled")task.status="ready";}this.save();});return{cancelled:true,journalId};
@@ -3737,10 +3775,10 @@ export class RepositoryController extends DurableObject<Env> {
       const head=await this.publicationNativeHead(context,scope,journalId,ref,authorize);
       const result=await inspectPublicationReadback(repository,target.branch,commit,journal.candidateTree??"",head);
       await authorize();
-      if(result.reason==="confirmed")return{status:"landed",ref,commit,readbackScope:scope};
+      if(result.reason==="confirmed"){this.savePublicationObservation(journal,scope,"landed");return{status:"landed",ref,commit,readbackScope:scope};}
       // Missing refs and incomplete inspections never authorize another dispatch.
-      if(result.reason==="not_observed"&&head!==null)return{status:"not_landed",ref,commit,readbackScope:scope};
-      return unavailable;
+      if(result.reason==="not_observed"&&head!==null){this.savePublicationObservation(journal,scope,"not_landed");return{status:"not_landed",ref,commit,readbackScope:scope};}
+      this.savePublicationObservation(journal,scope,"unavailable");return unavailable;
     }catch{return unavailable;}
   }
 
