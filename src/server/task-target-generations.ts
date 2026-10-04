@@ -1,0 +1,56 @@
+import {z} from "zod";
+import {acceptedTargetSchema,type FrozenAcceptedTarget} from "../core/accepted-target";
+import {isSafeRef} from "../core/sanitize";
+const sha=z.string().regex(/^[a-f0-9]{40}$/).refine(value=>!/^0{40}$/.test(value),"Committed task input is required"),digest=z.string().regex(/^[a-f0-9]{64}$/),identifier=z.string().min(1).max(200),generation=z.number().int().nonnegative().safe();
+export const taskTargetGenerationIntentSchema=z.object({eventId:z.uuid(),expectedGeneration:generation,projectId:identifier,incarnation:z.uuid(),canonicalRepoName:identifier,ownerId:z.string().min(1).max(256),actor:z.object({userId:z.string().min(1).max(256),displayName:z.string().min(1).max(200),viaToken:z.boolean()}).strict(),source:z.object({taskId:identifier,goal:z.string().min(1).max(1000),contributorId:z.string().min(1).max(256),workspaceRepoName:identifier,branch:z.string().refine(isSafeRef),baseCommit:sha,currentCommit:sha,requirements:acceptedTargetSchema.shape.requirements,snapshotDigest:digest,originalAcceptedTarget:acceptedTargetSchema}).strict(),target:acceptedTargetSchema,change:z.discriminatedUnion("kind",[z.object({kind:z.literal("policy-refresh")}).strict(),z.object({kind:z.literal("rebase"),receiptId:z.uuid()}).strict()])}).strict();
+export type TaskTargetGenerationIntent=Omit<z.infer<typeof taskTargetGenerationIntentSchema>,"target"|"source">&{target:FrozenAcceptedTarget;source:Omit<z.infer<typeof taskTargetGenerationIntentSchema>["source"],"originalAcceptedTarget">&{originalAcceptedTarget:FrozenAcceptedTarget}};
+export interface TaskTargetGeneration extends TaskTargetGenerationIntent{generation:number;phase:"prepared"|"activated";createdAt:number;activation?:{baseCommit:string;currentCommit:string;activatedAt:number;git:"unchanged"|"rebased";receiptId?:string}}
+const settlementSchema=z.object({eventId:z.uuid(),taskId:identifier,previousGeneration:generation,sourceSnapshotDigest:digest,coverage:z.literal("complete"),native:z.enum(["unallocated","stopped"]),proposals:z.enum(["none","settled"]),git:z.discriminatedUnion("kind",[z.object({kind:z.literal("unchanged"),baseCommit:sha,currentCommit:sha}).strict(),z.object({kind:z.literal("rebased"),receiptId:z.uuid(),oldBase:sha,oldCommit:sha,newBase:sha,newCommit:sha,remoteVerified:z.literal(true)}).strict()])}).strict();
+export type TaskTargetGenerationSettlement=z.infer<typeof settlementSchema>;
+function stableTarget(target:FrozenAcceptedTarget){return JSON.stringify({projectId:target.projectId,incarnation:target.incarnation,canonicalRepoName:target.canonicalRepoName,ref:target.ref,branch:target.branch});}
+function creationBinding(intent:TaskTargetGenerationIntent){return JSON.stringify({projectId:intent.projectId,incarnation:intent.incarnation,canonicalRepoName:intent.canonicalRepoName,ownerId:intent.ownerId,taskId:intent.source.taskId,contributorId:intent.source.contributorId,workspaceRepoName:intent.source.workspaceRepoName,branch:intent.source.branch,originalAcceptedTarget:intent.source.originalAcceptedTarget});}
+/** Trusted backend ledger: callbacks must prove current owner/root authority and
+ * positively settled prior native/proposal coverage from authoritative records.
+ * Neither expiry, missing refs nor client metadata provides settlement evidence.
+ * Original Task/creation receipts are never updated by this ledger.
+ */
+export class TaskTargetGenerations{
+ constructor(private storage:DurableObjectStorage){storage.sql.exec("CREATE TABLE IF NOT EXISTS task_target_generations(event_id TEXT PRIMARY KEY,task_id TEXT NOT NULL,generation INTEGER NOT NULL,payload TEXT NOT NULL,doc TEXT NOT NULL);CREATE TABLE IF NOT EXISTS task_target_generation_heads(task_id TEXT PRIMARY KEY,creation_binding TEXT NOT NULL,generation INTEGER NOT NULL,event_id TEXT)");}
+ get(eventId:string):TaskTargetGeneration|null{z.uuid().parse(eventId);const row=this.storage.sql.exec<{doc:string}>("SELECT doc FROM task_target_generations WHERE event_id=?",eventId).toArray()[0];return row?JSON.parse(row.doc) as TaskTargetGeneration:null;}
+ current(taskId:string):TaskTargetGeneration|null{identifier.parse(taskId);const head=this.head(taskId);return head?.event_id?this.get(head.event_id):null;}
+ private head(taskId:string){return this.storage.sql.exec<{creation_binding:string;generation:number;event_id:string|null}>("SELECT creation_binding,generation,event_id FROM task_target_generation_heads WHERE task_id=?",taskId).toArray()[0];}
+ prepare(input:TaskTargetGenerationIntent,validate:()=>void,now=Date.now()):TaskTargetGeneration{
+  const intent=taskTargetGenerationIntentSchema.parse(input);if(!Number.isSafeInteger(now)||now<0||intent.expectedGeneration>=Number.MAX_SAFE_INTEGER||intent.actor.userId!==intent.ownerId)throw new Error("Explicit owner generation intent required");
+  const target=intent.target,original=intent.source.originalAcceptedTarget;if(stableTarget(target)!==stableTarget(original)||target.projectId!==intent.projectId||target.incarnation!==intent.incarnation||target.canonicalRepoName!==intent.canonicalRepoName)throw new Error("Task target identity changed");
+  return this.storage.transactionSync(()=>{validate();const payload=JSON.stringify(intent),existing=this.storage.sql.exec<{payload:string;doc:string}>("SELECT payload,doc FROM task_target_generations WHERE event_id=?",intent.eventId).toArray()[0];if(existing){if(existing.payload!==payload)throw new Error("Generation event was replayed with different frozen inputs");return JSON.parse(existing.doc) as TaskTargetGeneration;}
+   const head=this.head(intent.source.taskId),binding=creationBinding(intent);if(head&&head.creation_binding!==binding)throw new Error("Original task creation binding changed");if((head?.generation??0)!==intent.expectedGeneration)throw new Error("Task target generation changed");const previous=head?.event_id?this.get(head.event_id):null;if(head&&head.generation>0&&(!previous||previous.phase!=="activated"))throw new Error("Current accepted target generation is unavailable");
+   // Stacked work may retain a historical parent checkpoint as its Git base.
+   // Policy refresh compares accepted-root history, not that workspace base.
+   const previousTarget=previous?.target??original;
+   if(intent.change.kind==="policy-refresh"&&target.acceptedCommit!==previousTarget.acceptedCommit)throw new Error("Policy refresh cannot advance accepted target history; actual rebase proof is required");if(this.storage.sql.exec<{n:number}>("SELECT COUNT(*) AS n FROM task_target_generations").one().n>=10000)throw new Error("Task target generation audit capacity reached");
+   if(!head)this.storage.sql.exec("INSERT INTO task_target_generation_heads VALUES(?,?,0,NULL)",intent.source.taskId,binding);
+   const record:TaskTargetGeneration={...intent,generation:intent.expectedGeneration+1,phase:"prepared",createdAt:now};this.storage.sql.exec("INSERT INTO task_target_generations VALUES(?,?,?,?,?)",intent.eventId,intent.source.taskId,record.generation,payload,JSON.stringify(record));return record;
+  });
+ }
+ /** proveSettled runs at the synchronous commit boundary, independently of any
+  * earlier asynchronous provider checks. Git receipt fields must come from a real
+  * verified rebase receipt; metadata refresh explicitly records no Git rewrite.
+  */
+ activate(eventId:string,proveSettled:(record:TaskTargetGeneration)=>TaskTargetGenerationSettlement,validate:(record:TaskTargetGeneration)=>void,now=Date.now()):TaskTargetGeneration{
+  if(!Number.isSafeInteger(now)||now<0)throw new Error("Invalid generation activation clock");
+  return this.storage.transactionSync(()=>{const record=this.get(eventId);if(!record)throw new Error("Saved generation intent required");validate(record);if(record.phase==="activated")return record;
+   const head=this.head(record.source.taskId);if(!head||head.creation_binding!==creationBinding(record)||head.generation!==record.expectedGeneration)throw new Error("Task target generation changed before activation");
+   const proof=settlementSchema.parse(proveSettled(record));if(proof.eventId!==record.eventId||proof.taskId!==record.source.taskId||proof.previousGeneration!==record.expectedGeneration||proof.sourceSnapshotDigest!==record.source.snapshotDigest)throw new Error("Generation settlement proof differs from frozen source");
+   let activation:NonNullable<TaskTargetGeneration["activation"]>;
+   if(record.change.kind==="policy-refresh"){
+    if(proof.git.kind!=="unchanged"||proof.git.baseCommit!==record.source.baseCommit||proof.git.currentCommit!==record.source.currentCommit)throw new Error("Policy refresh cannot imply Git was rebased");
+    activation={baseCommit:record.source.baseCommit,currentCommit:record.source.currentCommit,activatedAt:now,git:"unchanged"};
+   }else{
+    if(proof.git.kind!=="rebased"||proof.git.receiptId!==record.change.receiptId||proof.git.oldBase!==record.source.baseCommit||proof.git.oldCommit!==record.source.currentCommit||proof.git.newBase!==record.target.acceptedCommit||proof.git.newBase===proof.git.oldBase||proof.git.newCommit===proof.git.oldCommit)throw new Error("Exact actual rebase receipt is required for changed Git base");
+    activation={baseCommit:proof.git.newBase,currentCommit:proof.git.newCommit,activatedAt:now,git:"rebased",receiptId:proof.git.receiptId};
+   }
+   validate(record);const fresh=this.head(record.source.taskId);if(!fresh||fresh.creation_binding!==creationBinding(record)||fresh.generation!==record.expectedGeneration)throw new Error("Task target generation changed at activation commit");const activated:TaskTargetGeneration={...record,phase:"activated",activation};this.storage.sql.exec("UPDATE task_target_generations SET doc=? WHERE event_id=?",JSON.stringify(activated),eventId);this.storage.sql.exec("UPDATE task_target_generation_heads SET generation=?,event_id=? WHERE task_id=? AND generation=?",record.generation,eventId,record.source.taskId,record.expectedGeneration);return activated;
+  });
+ }
+ history(taskId:string,limit=20):{generations:TaskTargetGeneration[];truncated:boolean}{identifier.parse(taskId);z.number().int().min(1).max(20).parse(limit);const rows=this.storage.sql.exec<{doc:string}>("SELECT doc FROM task_target_generations WHERE task_id=? ORDER BY generation,event_id LIMIT ?",taskId,limit+1).toArray();return{generations:rows.slice(0,limit).map(row=>JSON.parse(row.doc) as TaskTargetGeneration),truncated:rows.length>limit};}
+}
