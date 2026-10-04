@@ -15,7 +15,7 @@ export interface RetainGitInputOptions {
 }
 const sha = /^[a-f0-9]{40}$/;
 export function retainedGitInputRef(incarnation: string, taskId: string, commit: string): string {
-  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(incarnation) || !/^[a-z0-9][a-z0-9-]{2,40}$/.test(taskId) || !sha.test(commit)) throw new Error("Invalid retained input identity");
+  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(incarnation) || !/^[a-z0-9][a-z0-9-]{2,100}$/.test(taskId) || !sha.test(commit)) throw new Error("Invalid retained input identity");
   return `refs/flaregit/inputs/${incarnation}/${taskId}/${commit}`;
 }
 /** Create-only private canonical pin. Never updates an accepted branch or replaces a pin. */

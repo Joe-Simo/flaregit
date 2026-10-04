@@ -436,6 +436,8 @@ export interface Ledger {
   statusSummary(): Promise<ComponentStatus[]>;
   recordWorkflowOutcome(kind: WorkflowKind, instanceId: string, status: WorkflowOutcome): Promise<void>;
   workflowCounts(sinceMs: number): Promise<WorkflowCount[]>;
+  ownerScenarioRuns(actor:HumanDecisionActor,cursor?:string,credentialHash?:string,sessionExpiresAt?:number):Promise<{runs:Array<{instanceId:string;kind:"scenario";status:"unknown"}>;nextCursor:string|null;incarnation:string|null}>;
+  assertOwnerScenarioScope(actor:HumanDecisionActor,incarnation:string|null,credentialHash?:string,sessionExpiresAt?:number):Promise<void>;
   listRepositoryWorkflows(): Promise<Array<{ instanceId: string; kind: "agent" | "integration" | "scenario" }>>;
   registerWorkflow(instanceId: string, kind: "agent" | "integration" | "scenario", taskId?: string, actorId?: string, nativeRuntimeProtocolVersion?:1): Promise<void>;
   assertWorkflowControlAuthority(context:RepositoryReadContext,userId:string,run:OwnedWorkflow,mutation:boolean,viaToken:boolean,credentialHash?:string,sessionExpiresAt?:number):Promise<boolean>;
@@ -2188,6 +2190,12 @@ export class RepositoryController extends DurableObject<Env> {
   }
   async workflowCounts(sinceMs: number): Promise<WorkflowCount[]> {
     return this.ctx.storage.sql.exec("SELECT kind, status, COUNT(*) AS count FROM workflow_runs WHERE finished_at >= ? OR finished_at IS NULL GROUP BY kind, status", sinceMs).toArray() as unknown as WorkflowCount[];
+  }
+  async assertOwnerScenarioScope(actor:HumanDecisionActor,incarnation:string|null,credentialHash?:string,sessionExpiresAt?:number){const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();if(this.readRepositoryIncarnation()!==incarnation)throw new Error("Scenario repository scope changed");}
+  async ownerScenarioRuns(actor:HumanDecisionActor,cursor?:string,credentialHash?:string,sessionExpiresAt?:number){
+    if(cursor!==undefined&&(!/^[1-9][0-9]{0,15}$/.test(cursor)||!Number.isSafeInteger(Number(cursor))))throw new Error("Invalid scenario cursor");
+    const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();const incarnation=this.readRepositoryIncarnation();
+    const rows=this.ctx.storage.sql.exec<{ordinal:number;instanceId:string}>("SELECT rowid AS ordinal,instance_id AS instanceId FROM project_workflows WHERE kind='scenario' AND rowid<? ORDER BY rowid DESC LIMIT 21",cursor?Number(cursor):Number.MAX_SAFE_INTEGER).toArray();assert();return {runs:rows.slice(0,20).map(row=>({instanceId:row.instanceId,kind:"scenario" as const,status:"unknown" as const})),nextCursor:rows.length>20?String(rows[19]!.ordinal):null,incarnation};
   }
   /** Repository ownership of run IDs is durable and independent of global health telemetry. */
   async listRepositoryWorkflows(): Promise<Array<{ instanceId: string; kind: "agent" | "integration" | "scenario" }>> {

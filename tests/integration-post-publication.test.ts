@@ -19,3 +19,17 @@ test.each(["budget","actor-revoked","mirror-lookup"])("whole Workflow keeps acce
  const result=await workflow.run({instanceId:"workflow",payload:{projectId:"p123456789abc",taskIds:["parent"],accountKey}} as WorkflowEvent<{projectId:string;taskIds:string[];accountKey:string}>,step);
  expect(result.status).toBe("accepted");expect(head).toBe(commit);expect(journal).toBe("ACCEPTED");expect(outcomes).toEqual(["started","awaiting_review","accepted","accepted"]);expect(vmCalls).toBe(0);expect(activities).toContain("stack.rebase_deferred");expect(mirror).toEqual(["deferred"]);
 });
+
+test("thrown integration reconciles only its active candidate before recording failure",async()=>{
+ const outcomes:string[]=[],aborted:Array<{id:string;reason:string}>=[];
+ const candidates={own:{id:"own",workflowInstanceId:"workflow",status:"composing"},other:{id:"other",workflowInstanceId:"other-workflow",status:"composing"},accepted:{id:"accepted",workflowInstanceId:"workflow",status:"accepted"},stale:{id:"stale",workflowInstanceId:"workflow",status:"stale"}};
+ const ledger={admitIntegrationDispatch:async()=>({terminal:false,actorId:"actor"}),recordIntegrationDispatchOutcome:async(_id:string,status:string)=>{outcomes.push(status);},getState:async()=>({candidates}),abortPublish:async(id:string,_journal:undefined,reason:string)=>{aborted.push({id,reason});outcomes.push("candidate-failed");}} as unknown as Ledger;
+ const env={REPOSITORY_CONTROLLER:{idFromName:(name:string)=>name,get:(name:string)=>name.startsWith("project:")?ledger:{recordWorkflowOutcome:async()=>{}}}} as unknown as Env;
+ const workflow=new FlareGitIntegrationWorkflow({} as ExecutionContext,env);
+ Object.assign(workflow,{execute:async()=>{throw new Error("sensitive-provider-detail");}});
+ const step={do:async(_name:string,callback:()=>Promise<unknown>)=>callback()} as unknown as WorkflowStep;
+ await expect(workflow.run({instanceId:"workflow",payload:{projectId:"p123456789abc",taskIds:["change"]}} as WorkflowEvent<{projectId:string;taskIds:string[]}>,step)).rejects.toThrow("sensitive-provider-detail");
+ expect(aborted.map(item=>item.id)).toEqual(["own"]);
+ expect(aborted[0]!.reason).not.toContain("sensitive-provider-detail");
+ expect(outcomes).toEqual(["started","candidate-failed","failed"]);
+});

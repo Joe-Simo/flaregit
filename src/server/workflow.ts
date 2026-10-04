@@ -50,7 +50,21 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     let publicationConfirmed=false;
     const accepted=async()=>{publicationConfirmed=true;await record("accepted");};
     try { result = await this.execute(event, step, accepted); }
-    catch (error) { if(!publicationConfirmed)await record("failed"); throw error; }
+    catch (error) {
+      if (!publicationConfirmed) {
+        await step.do("reconcile-failed-candidate", async () => {
+          const state = await repository.getState();
+          for (const candidate of Object.values(state.candidates)) {
+            if (candidate.workflowInstanceId !== event.instanceId || !["composing", "repairing", "verifying", "verified", "awaiting_review"].includes(candidate.status)) continue;
+            // abortPublish preserves uncertain publication, accepted history, newer
+            // task ownership and native recovery holds. Never persist raw errors.
+            await repository.abortPublish(candidate.id, undefined, "Integration stopped before completion. Saved contributions remain available for recovery.", "failed");
+          }
+        });
+        await record("failed");
+      }
+      throw error;
+    }
     // A receipt delivery failure after successful publication must retry that
     // outcome, rather than overwrite accepted work with a fabricated failure.
     await record(result.status);

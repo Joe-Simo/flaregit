@@ -1,7 +1,9 @@
+import {checkedScenarioDiscovery,checkedScenarioDispatch,checkedScenarioStatus,scenarioFinished,scenarioPreparationBanner,type SavedScenarioRun} from "../scenario-run-state";
+import {WORKFLOW_STATUS_LABELS,type WorkflowStatus} from "../workflow-run-state";
 import { summarizeIntegration } from "../integration-summary";
 import { savedWorkflowDecision, recordedWorkflowCandidates } from "../workflow-run-state";
 import { WorkflowRunControls } from "../components/WorkflowRunControls";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { FileText, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { StatusBanner } from "../components/StatusBanner";
@@ -36,10 +38,47 @@ export function IntegrationTab({
   const [resolving, setResolving] = useState(false);
   const [reviewDecisionId, setReviewDecisionId] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<string | null>(null);
-  const [scenario, setScenario] = useState<string | null>(null);
+  const scenarioScope=projectId;
+  const activeScope=useRef(scenarioScope);activeScope.current=scenarioScope;
+  const [scenario, setScenario] = useState<SavedScenarioRun | null>(null);
+  const [scenarioStatus,setScenarioStatus]=useState<WorkflowStatus|null>(null);
+  const [scenarioChecking,setScenarioChecking]=useState(false);
+  const [scenarioStarting,setScenarioStarting]=useState(false);
+  const [discoveryRevision,setDiscoveryRevision]=useState(0);
+  const [scenarioCheck,setScenarioCheck]=useState(0);
+  const [scenarioDiscoveryPending,setScenarioDiscoveryPending]=useState(kind==='demo');
+  const [scenarioDiscoveryIncomplete,setScenarioDiscoveryIncomplete]=useState(false);
+  const [discoveryCursor,setDiscoveryCursor]=useState<string|null>(null);
+  const [nextDiscoveryCursor,setNextDiscoveryCursor]=useState<string|null>(null);
+  const discoveredRuns=useRef(new Map<string,WorkflowStatus>());
+  useEffect(()=>{discoveredRuns.current.clear();setDiscoveryCursor(null);setNextDiscoveryCursor(null);},[projectId]);
+  const saveScenario=(value:SavedScenarioRun)=>setScenario(value);
+  useEffect(()=>{
+    if(kind!=='demo'||!isOwner)return;
+    let alive=true;const scope=scenarioScope;const abort=new AbortController();setScenarioDiscoveryPending(true);setScenario(null);setScenarioStatus(null);
+    void (async()=>{try{
+      const page=await apiJson<unknown>(`/p/${projectId}/scenarios${discoveryCursor?`?cursor=${encodeURIComponent(discoveryCursor)}`:""}`,{signal:AbortSignal.any([abort.signal,AbortSignal.timeout(15_000)])});
+      const runs=checkedScenarioDiscovery(page,discoveryCursor,new Set(discoveredRuns.current.keys()));const observations=new Map<string,WorkflowStatus>();let cursor=0;
+      await Promise.all(Array.from({length:Math.min(3,runs.runs.length)},async()=>{for(let index=cursor++;index<runs.runs.length;index=cursor++){const id=runs.runs[index]!.instanceId;let status:WorkflowStatus='unknown';try{status=checkedScenarioStatus(await apiJson<unknown>(`/p/${projectId}/workflows/${id}`,{signal:AbortSignal.any([abort.signal,AbortSignal.timeout(15_000)])}),id);}catch{/* Unknown remains pending. */}observations.set(id,status);}}));
+      if(!alive||activeScope.current!==scope)return;
+      setScenarioDiscoveryIncomplete(runs.nextCursor!==null);setNextDiscoveryCursor(runs.nextCursor);
+      for(const [id,status] of observations)discoveredRuns.current.set(id,status);
+      const selected=[...discoveredRuns.current].find(([,status])=>!scenarioFinished(status))??[...discoveredRuns.current][0];
+      if(selected){setScenario({act:'saved',instanceId:selected[0]});setScenarioStatus(selected[1]);}
+      setScenarioDiscoveryPending(false);
+    }catch{if(alive&&activeScope.current===scope){setScenarioDiscoveryIncomplete(true);setScenarioDiscoveryPending(false);setError('Registered scenario runs could not be checked. Refresh before starting another run.');}}})();
+    return()=>{alive=false;abort.abort();};
+  },[projectId,kind,isOwner,discoveryCursor,discoveryRevision]);
+  useEffect(()=>{
+    if(!scenario?.instanceId)return;
+    let alive=true;const scope=scenarioScope,id=scenario.instanceId;const abort=new AbortController();let timer:ReturnType<typeof setTimeout>|undefined;let checks=0;
+    const check=async()=>{setScenarioChecking(true);try{const raw=await apiJson<unknown>(`/p/${projectId}/workflows/${id}`,{signal:AbortSignal.any([abort.signal,AbortSignal.timeout(15_000)])});if(!alive||activeScope.current!==scope)return;const status=checkedScenarioStatus(raw,id);setScenarioStatus(status);if(!scenarioFinished(status)&&++checks<20)timer=setTimeout(()=>void check(),3000);reload();}catch{if(alive&&activeScope.current===scope)setScenarioStatus('unknown');}finally{if(alive&&activeScope.current===scope)setScenarioChecking(false);}};
+    void check();return()=>{alive=false;abort.abort();if(timer)clearTimeout(timer);};
+  },[scenario?.instanceId,scenarioScope,projectId,scenarioCheck]);
   const [error, setError] = useState<string | null>(null);
 
   const summary = useMemo(() => summarizeIntegration(state), [state]);
+  const preparationBanner=summary.stage==="accepted"?scenarioPreparationBanner(scenario,scenarioStatus):null;
   const describe = (c: CandidateGeneration) => c.participatingTaskIds.map((id) => state.tasks[id]?.goal ?? id).join(" + ");
   const all = Object.values(state.candidates);
   const reviewing = all.filter((c) => c.status === "awaiting_review" || (c.review?.approved && c.status === "verified" && !state.journal.some((j) => j.candidateId === c.id)));
@@ -69,29 +108,31 @@ export function IntegrationTab({
   };
 
   const runScenario = async (act: string) => {
-    setScenario(act);
+    const scope=scenarioScope;setScenarioStarting(true);
+    saveScenario({act,instanceId:null});setScenarioStatus(null);
     setError(null);
     try {
-      await apiJson(`/p/${projectId}/scenarios/run`, { method: "POST", json: { act } });
+      const response=await apiJson<unknown>(`/p/${projectId}/scenarios/run`, { method: "POST", json: { act },signal:AbortSignal.timeout(30_000) });
+      if(activeScope.current!==scope)return;
+      saveScenario({act,instanceId:checkedScenarioDispatch(response)});
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Scenario failed");
+      if(activeScope.current===scope)setError(`${e instanceof Error ? e.message : "Scenario start was not confirmed"} Do not start another scenario until the saved dispatch is reconciled.`);
     } finally {
-      setScenario(null);
-      reload();
+      if(activeScope.current===scope){setScenarioStarting(false);reload();}
     }
   };
 
   return (
     <div className="space-y-4">
       <div className="rounded-lg overflow-hidden border border-border">
-        <StatusBanner stage={summary.stage} message={summary.message} detail={summary.detail} lastAcceptedCommit={state.acceptedState.currentCommit} />
+        <StatusBanner stage={preparationBanner?.stage??summary.stage} message={preparationBanner?.message??summary.message} detail={preparationBanner?.detail??summary.detail} lastAcceptedCommit={state.acceptedState.currentCommit} />
       </div>
       <div className="flex gap-2 flex-wrap items-center">
         {kind === "demo" && (
           <>
             {[["act1", "Text conflict"], ["act2", "Clean merge, broken behavior"], ["act3", "Contradiction"]].map(([act, label]) => (
-              <Button key={act} size="sm" variant="outline" disabled={scenario !== null} onClick={() => runScenario(act!)}>
-                <Play className="h-3.5 w-3.5 mr-1.5" aria-hidden="true" /> {scenario === act ? "Starting…" : label}
+              <Button key={act} size="sm" variant="outline" disabled={!isOwner||scenarioDiscoveryPending||scenarioDiscoveryIncomplete||Boolean(scenario&&!scenarioFinished(scenarioStatus))||running.length>0||reviewing.length>0||Object.values(state.tasks).some(task=>["working","integrating","verifying"].includes(task.status))} onClick={() => runScenario(act!)}>
+                <Play className="h-3.5 w-3.5 mr-1.5" aria-hidden="true" /> {scenario?.act === act && !scenarioFinished(scenarioStatus) ? scenario?.instanceId?"Run saved":scenarioStarting?"Starting…":"Start unconfirmed" : label}
               </Button>
             ))}
           </>
@@ -100,6 +141,9 @@ export function IntegrationTab({
           <FileText className="h-3.5 w-3.5 mr-1.5" aria-hidden="true" /> Audit evidence
         </Button>
       </div>
+      {kind==='demo'&&(scenarioDiscoveryPending||scenarioDiscoveryIncomplete)&&<p role="status" className="text-sm text-muted-foreground">{scenarioDiscoveryPending?'Checking registered scenario runs…':'Scenario inventory is incomplete. Existing runs must be checked before another start.'}{nextDiscoveryCursor&&!scenarioDiscoveryPending&&<Button size="sm" variant="ghost" onClick={()=>setDiscoveryCursor(nextDiscoveryCursor)}>Check older scenario runs</Button>}</p>}
+      {scenario&&<section role="status" className="rounded-lg border border-border p-3 text-sm"><p>{scenario.instanceId?`Saved scenario · ${scenarioStatus?WORKFLOW_STATUS_LABELS[scenarioStatus]:"Status not checked"}`:"Scenario start is unconfirmed"}</p>{scenario.instanceId?<><code className="text-xs break-all">{scenario.instanceId}</code><Button size="sm" variant="ghost" disabled={scenarioChecking} onClick={()=>setScenarioCheck(value=>value+1)}>{scenarioChecking?"Checking…":"Check saved scenario"}</Button></>:<p className="text-xs text-muted-foreground">The request may have been dispatched. Inspect registered runs before starting another scenario.</p>}</section>}
+      {kind==='demo'&&isOwner&&<Button size="sm" variant="ghost" disabled={scenarioStarting||scenarioDiscoveryPending} onClick={()=>{discoveredRuns.current.clear();setDiscoveryCursor(null);setNextDiscoveryCursor(null);setError(null);setDiscoveryRevision(value=>value+1);}}>Check registered runs</Button>}
       {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>}
       <RebaseRecovery projectId={projectId} isOwner={isOwner} tasks={state.tasks} onRecovered={reload} />
       {isOwner && savedRuns.length > 0 && <section id="int-saved-runs" tabIndex={-1} aria-labelledby="int-saved-runs-title" className="space-y-3"><h2 id="int-saved-runs-title" className="text-sm font-semibold">Saved integration runs</h2><p className="text-xs text-muted-foreground">Check a saved run, pause it, or continue it after interruption. Review stays available.</p><ul className="space-y-3">{visibleRuns.map(candidate => <li key={`${projectId}:${candidate.workflowInstanceId}`} className="rounded-lg border border-border p-3 min-w-0"><a href={`/#/p/${projectId}/review?candidate=${encodeURIComponent(candidate.id)}`} className="text-sm font-medium break-words hover:underline">{describe(candidate)}</a><p className="mt-1 text-xs text-muted-foreground">Candidate {candidate.status.replaceAll("_", " ")} · {candidate.participatingTaskIds.length} {candidate.participatingTaskIds.length === 1 ? "recorded input" : "recorded inputs"} · base <code>{candidate.expectedAcceptedBase.slice(0, 12)}</code></p><WorkflowRunControls projectId={projectId} instanceId={candidate.workflowInstanceId!} savedDecision={savedWorkflowDecision(candidate, state.journal.some(entry => entry.candidateId === candidate.id))} isOwner={isOwner} onChange={reload} /></li>)}</ul><div className="flex flex-wrap gap-3 items-center"><p className="text-[11px] text-muted-foreground">Showing {currentRunPage * 10 + 1}–{currentRunPage * 10 + visibleRuns.length} of {savedRuns.length} saved runs</p>{savedRuns.length > 10 && <><Button size="sm" variant="outline" disabled={currentRunPage === 0} onClick={() => setRunPage(currentRunPage - 1)}>Newer runs</Button><Button size="sm" variant="outline" disabled={(currentRunPage + 1) * 10 >= savedRuns.length} onClick={() => setRunPage(currentRunPage + 1)}>Older runs</Button></>}</div></section>}

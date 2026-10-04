@@ -1,13 +1,16 @@
 import worker from '../../src/server/worker';
 import {RepositoryController} from '../../src/server/durable-object';
-import {accountKeyFor} from '../../src/server/projects';
+import {accountKeyFor,accountOf} from '../../src/server/projects';
 import type {Env} from '../../src/server/env';
-const id='p123456789abc',calls:string[]=[];let mode='running',status='running',scopeReads=0;
+const id='p123456789abc',calls:string[]=[];let mode='running',status='running',scopeReads=0;let scenarioTokenId='';
 export class WorkflowControlFixture extends RepositoryController {
+ override async ownerScenarioRuns(...args:Parameters<RepositoryController["ownerScenarioRuns"]>){const report=await super.ownerScenarioRuns(...args);if(mode==='scenario-withdraw'){mode='running';await this.addMember('owner','member');}else if(mode==='scenario-delete'){mode='running';await this.beginRepositoryDeletion();}else if(mode==='scenario-incarnation'){mode='running';this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS private_recovery_incarnation (id INTEGER PRIMARY KEY,value TEXT NOT NULL)");this.ctx.storage.sql.exec("INSERT OR REPLACE INTO private_recovery_incarnation (id,value) VALUES (1,?)",crypto.randomUUID());}else if(mode==='scenario-revoke-token'){mode='running';await accountOf(this.env,await accountKeyFor('owner')).revokeApiToken(scenarioTokenId);}return report;}
+
  override async logActivity(actor:string,type:string,summary:string,options?:{exceptUser?:string}){const result=await super.logActivity(actor,type,summary,options);if(mode==="revoke-at-audit"&&type==="workflow.pause"){await this.addMember("owner","member");mode="running";}return result;}
  override async assertRepositoryReadContext(...args:Parameters<RepositoryController["assertRepositoryReadContext"]>){const allowed=await super.assertRepositoryReadContext(...args);if(mode==="multi-owner-revoke"&&++scopeReads===5){await this.addMember("owner","member");mode="running";}return allowed;}
- async seed(){await this.initialize({projectId:id,projectName:'Synthetic workflow control fixture',canonicalRepoName:'synthetic',head:'a'.repeat(40),verificationPolicy:{},ownerId:'owner'});await this.addMember('initiator','member');await this.addMember('member','member');await this.registerWorkflow('agent-owned','agent',undefined,'initiator');await this.registerWorkflow('integration-owned','integration',undefined,'owner');await this.addComment({subject:'change:preserved',author:'Owner',body:'Synthetic saved context'});}
+ async seed(){await this.initialize({projectId:id,projectName:'Synthetic workflow control fixture',canonicalRepoName:'synthetic',head:'a'.repeat(40),verificationPolicy:{},ownerId:'owner'});await this.addMember('initiator','member');await this.addMember('member','member');await this.registerWorkflow('agent-owned','agent',undefined,'initiator');await this.registerWorkflow('integration-owned','integration',undefined,'owner');for(let n=0;n<24;n++)await this.registerWorkflow('scenario-'+n,'scenario',undefined,'owner');await this.addComment({subject:'change:preserved',author:'Owner',body:'Synthetic saved context'});}
  restoreDeletionFence(){this.ctx.storage.sql.exec("DELETE FROM repository_deletion");}
+ async issueScenarioToken(token:string,scope:'read'|'write'|'full',repoId?:string){return this.createApiToken('owner','Synthetic scenario token',token,{scope,...(repoId?{repo:repoId}:{})});}
  async issueSyntheticToken(token:string){const issued=await this.createApiToken("owner","Synthetic workflow token",token,{scope:"full"});await this.ctx.storage.put("syntheticTokenId",issued.id);}
  async revokeSyntheticToken(){const id=await this.ctx.storage.get<string>("syntheticTokenId");if(!id)throw Error("Missing synthetic token");await this.revokeApiToken(id);}
  async snapshot(){return {state:await this.getState(),comments:await this.listComments('change:preserved'),activity:await this.listActivity(60)};}
@@ -15,6 +18,7 @@ export class WorkflowControlFixture extends RepositoryController {
 interface FixtureEnv{REPOSITORY_CONTROLLER:DurableObjectNamespace<WorkflowControlFixture>;FIXTURE_ISSUER:string}
 export default {async fetch(request:Request,env:FixtureEnv,ctx:ExecutionContext){const url=new URL(request.url),repo=env.REPOSITORY_CONTROLLER.getByName('project:'+id);
  if(url.pathname==='/fixture/seed'){await repo.seed();const key=await accountKeyFor('owner'),token='fgt_'+key+'_'+ 'x'.repeat(32);await env.REPOSITORY_CONTROLLER.getByName('account:'+key).issueSyntheticToken(token);return Response.json({token});}
+ if(url.pathname==='/fixture/scenario-token'){const key=await accountKeyFor('owner'),token='fgt_'+key+'_'+crypto.randomUUID().replaceAll('-','');const issued=await env.REPOSITORY_CONTROLLER.getByName('account:'+key).issueScenarioToken(token,url.searchParams.get('scope')==='read'?'read':url.searchParams.get('scope')==='write'?'write':'full',url.searchParams.get('repo')??undefined);scenarioTokenId=issued.id;return Response.json({token});}
  if(url.pathname==='/fixture/mode'){mode=url.searchParams.get('mode')??'running';status=mode==='resume-failed'?'paused':['paused','complete'].includes(mode)?mode:'running';calls.length=0;scopeReads=0;if(mode==='multi-owner-revoke')await repo.addMember('aaa-owner','owner');await repo.addMember('owner','owner');await repo.addMember('member','member');return Response.json({ok:true});}
  if(url.pathname==='/fixture/restore-deletion'){await repo.restoreDeletionFence();return Response.json({ok:true});}
  if(url.pathname==='/fixture/calls')return Response.json(calls);

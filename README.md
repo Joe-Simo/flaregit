@@ -42,7 +42,7 @@ Contributor workspaces remain after acceptance and cancellation, but their branc
 - Notification inbox.
 - API tokens: `full`, `read` or `write` scope, optionally pinned to one repo and expiring. A token can mint narrower tokens (read/write, TTL up to 24 h) via `flaregit auth token`.
 - Signed private previews: builds of accepted commits in R2, opened through HMAC-signed, expiring links on a separate origin.
-- Webhooks: Standard Webhooks signature, ordered per project, retried with backoff, manual replay, `webhook-sequence` and a stable `webhook-id` for de-duplication.
+- Webhooks: Standard Webhooks signature, later events wait while an earlier delivery to the same webhook is pending; failed deliveries remain visible and permit later events, retries with backoff, manual replay, `webhook-sequence` and a stable `webhook-id` for de-duplication.
 - Status page: `/status` and `/status.json`, probed by a 5-minute cron.
 - Workflow outcomes are counted by unique agent and integration instance, with terminal results and unresolved starts separated. Availability checks state their scope; a repository-list probe is not evidence of a successful clone, merge or agent run.
 - Custom domain verification through a DNS TXT record at `_flaregit.<domain>`; a verified claim displaces unverified ones.

@@ -23,7 +23,7 @@ test("native Git clone and workspace push traverse gateway; stale native push pr
   try{
     expect((await run(["init","--bare","--initial-branch=main","repo.git"])).status).toBe(0);
     expect((await run(["--git-dir=repo.git","config","http.receivepack","true"])).status).toBe(0);
-    const remote=`http://127.0.0.1:${server.port}/git/project/tasks/task-one.git`;
+    const remote=`http://127.0.0.1:${server.port}/git/project/tasks/agent-a-discount-197cc1b2-588c-4a7c-bd8a-731e21894ec1.git`;
     expect((await run(["clone",remote,"first"])).status).toBe(0);
     const first=join(root,"first");await Bun.write(join(first,"README.md"),"initial\n");await run(["add","README.md"],first);expect((await run(["-c","user.name=Fixture","-c","user.email=fixture@example.test","commit","-m","Initial"],first)).status).toBe(0);
     expect((await run(["push","origin","main"],first)).status).toBe(0);

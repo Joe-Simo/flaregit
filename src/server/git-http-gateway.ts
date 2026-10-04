@@ -3,7 +3,7 @@ export type GitService = "git-upload-pack" | "git-receive-pack";
 export interface GitHttpRoute { projectId: string; taskId: string | null; endpoint: "info/refs" | GitService; service: GitService; write: boolean }
 export function parseGitHttpRoute(request: Request): GitHttpRoute | null {
   const url = new URL(request.url);
-  const match = /^\/git\/([a-zA-Z0-9_-]+)\/(canonical|tasks\/([a-z0-9-]{3,41}))\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/.exec(url.pathname);
+  const match = /^\/git\/([a-zA-Z0-9_-]+)\/(canonical|tasks\/([a-z0-9][a-z0-9-]{2,100}))\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/.exec(url.pathname);
   if (!match) return null;
   const endpoint = match[4] as GitHttpRoute["endpoint"];
   const service = endpoint === "info/refs" ? url.searchParams.get("service") : endpoint;

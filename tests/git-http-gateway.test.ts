@@ -56,3 +56,10 @@ test("already cancelled requests do not contact the provider",async()=>{
  const response=await proxyGitHttp(request,parseGitHttpRoute(request)!,{remote:"https://provider.test/repo.git",providerOrigin:"https://provider.test",providerToken:"server-only",writeAllowed:false,maxRequestBytes:100,maxResponseBytes:100,timeoutMs:1000,finish:async()=>{ended++;},fetcher:async()=>{called++;return new Response();}});
  expect(response.status).toBe(499);expect(called).toBe(0);expect(ended).toBe(1);
 });
+
+test("Git task routes preserve long saved identities and reject unsafe or out-of-bound names",()=>{
+ const id="agent-a-discount-197cc1b2-588c-4a7c-bd8a-731e21894ec1";
+ const request=(task:string)=>new Request(`https://flaregit.test/git/p123/tasks/${task}.git/info/refs?service=git-upload-pack`);
+ for(const task of [id,"a".repeat(101)])expect(parseGitHttpRoute(request(task))?.taskId).toBe(task);
+ for(const task of ["ab","a".repeat(102),"-bad","bad_name","bad%2Fname","bad..name"])expect(parseGitHttpRoute(request(task))).toBeNull();
+});

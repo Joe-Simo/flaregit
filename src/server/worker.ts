@@ -81,7 +81,7 @@ export class PreviewAssetBroker extends WorkerEntrypoint<Env> {
 export { FlareGitPrivateRecoveryWorkflow, RepositoryController, FlareGitIntegrationWorkflow, FlareGitScenarioWorkflow, FlareGitAgentWorkflow, FlareGitImportHistoryWorkflow };
 export { IntegratorSandbox, AgentSandbox } from "./integrator.js";
 
-const TASK_ID = /^[a-z0-9][a-z0-9-]{2,40}$/;
+const TASK_ID = /^[a-z0-9][a-z0-9-]{2,100}$/;
 const json = (data: unknown, status = 200) => Response.json(data, { status });
 const text = (message: string, status: number) => new Response(message, { status });
 const repositoryReadJson = (data: unknown, status = 200) => Response.json(data, { status, headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
@@ -1187,7 +1187,7 @@ export default {
         if (sub === "/tasks" && method === "POST") {
           const b = await body<{ taskId?: string; goal?: string; name?: string; dependsOn?: string; issue?: number }>();
           const goal = clean(b.goal, 300);
-          if (!b.taskId || !TASK_ID.test(b.taskId) || !goal) return text("taskId (3-41 chars: a-z, 0-9, -) and goal are required", 400);
+          if (!b.taskId || !TASK_ID.test(b.taskId) || !goal) return text("taskId (3-101 chars: a-z, 0-9, -) and goal are required", 400);
           if(Object.keys(b).some(key=>!["taskId","goal","name","dependsOn","issue"].includes(key)))return text("Invalid change creation input",400);
           const input=taskCreationInputSchema.safeParse({goal,dependsOn:b.dependsOn??null,issue:b.issue??null});
           if(!input.success)return text("Invalid change goal, dependency or issue",400);
@@ -1514,6 +1514,14 @@ export default {
           return json({ resolved: true });
         }
 
+        if(sub==="/scenarios"&&method==="GET"){
+          if(!isOwner||(auth.viaToken&&auth.tokenScope!=="full"))return text("Only the repository owner can inspect preparation runs",403);
+          if([...url.searchParams.keys()].some(key=>key!=="cursor")||url.searchParams.getAll("cursor").length>1)return text("Invalid scenario query",400);
+          const cursor=url.searchParams.get("cursor")??undefined;if(cursor!==undefined&&(!/^[1-9][0-9]{0,15}$/.test(cursor)||!Number.isSafeInteger(Number(cursor))))return text("Invalid scenario cursor",400);
+          const credentialHash=auth.viaToken?await gitParentTokenHash(request):undefined,actor={userId,displayName:"Repository owner",viaToken:auth.viaToken===true};
+          try{const report=await project.ownerScenarioRuns(actor,cursor,credentialHash,auth.expiresAt);const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||(current.viaToken&&(current.tokenScope!=="full"||(current.tokenRepo&&current.tokenRepo!==projectId))))return text("Scenario authentication changed",403);await project.assertOwnerScenarioScope(actor,report.incarnation,credentialHash,current.expiresAt);return Response.json({...report,source:"repository-ledger",providerVerified:false},{headers:{"Cache-Control":"no-store"}});}catch{return text("Scenario discovery authority or repository scope changed",403);}
+        }
+
         if (sub === "/scenarios/run" && method === "POST") {
           if (state.kind === "import") return text("Scenarios run only on the demo repository", 400);
           const b = await body<{ act?: string }>();
@@ -1647,7 +1655,7 @@ export default {
         }
 
         // ----- conversations on issues, changes and candidates (optionally anchored to a file line) -----
-        const SUBJECT = /^(issue:\d{1,7}|change:[a-z0-9][a-z0-9-]{2,40}|candidate:[a-z0-9_-]{3,60})$/;
+        const SUBJECT = /^(issue:\d{1,7}|change:[a-z0-9][a-z0-9-]{2,100}|candidate:[a-z0-9_-]{3,60})$/;
         const subjectExists = async (subject: string) => {
           const [kind, id] = subject.split(":") as [string, string];
           if (kind === "issue") return (await project.getIssue(Number(id))) !== null;
