@@ -61,3 +61,30 @@ test("source proof never becomes usable until its read credential and sealed nat
   if(mode==="bad-expiry"){expect(events).toContain("credential-recorded");expect(events).not.toContain("exec");}
  }
 });
+
+test("empty main-default fork is inspected without changing its canonical trunk target",async()=>{
+ const eventId=crypto.randomUUID(),incarnation=crypto.randomUUID(),target={kind:"unborn" as const,projectId:"p123456789abc",incarnation,canonicalRepoName:"canonical",ref:"refs/heads/trunk",branch:"trunk",acceptedCommit:null,acceptedVersion:0 as const,policyVersion:1,policy:{kind:"git-integrity"},requirements:[] as []};
+ const input:UnbornSourceInput={eventId,purpose:"workspace",repositoryName:"workspace",sourceRepoName:"canonical",projectId:target.projectId,incarnation,userId:"owner",acceptedTarget:target,expectedProviderRepoId:"workspace-id",expectedParentProviderRepoId:"canonical-id",expectedForkSource:"artifacts:namespace/canonical",expectedMarker:"frozen-marker"};
+ const metadata={id:"workspace-id",name:"workspace",remote:"https://"+"a".repeat(32)+".artifacts.cloudflare.net/git/default/workspace.git",defaultBranch:"main",source:input.expectedForkSource!,description:input.expectedMarker!};
+ const repository={info:async()=>metadata,createToken:async()=>({id:"read-id",scope:"read",plaintext:"synthetic-read-key",expiresAt:new Date(Date.now()+900000).toISOString()}),revokeToken:async()=>true,[Symbol.dispose]:()=>{}};
+ const parent={info:async()=>({...metadata,id:"canonical-id",name:"canonical",defaultBranch:"trunk",source:null,description:null}),[Symbol.dispose]:()=>{}};
+ const native={exec:async()=>({success:true,stdout:JSON.stringify({version:1,advertisement:"ref: refs/heads/main\tHEAD\n"})}),seal:async()=>{},destroy:async()=>{},lifetimeStatus:async()=>({state:"stopped",sealed:true})};
+ const global={accountLifecycle:async()=>"active",reserveManagedSpend:async()=>({allowed:true}),consumeManagedSpend:async()=>{}};
+ const env={ARTIFACTS:{get:async(name:string)=>name==="workspace"?repository:parent},INTEGRATOR:{getByName:()=>native},REPOSITORY_CONTROLLER:{idFromName:()=>"fixture",get:()=>global}} as unknown as Env;
+ const journal:UnbornSourceJournal={beforeProvider:async()=>{},authorize:async()=>{},bindSource:async(value)=>{expect(value.defaultBranch).toBe("main");},beforeCredential:async()=>{},credentialIssued:async()=>{},nativeIntent:async()=>{},credentialRevoked:async()=>{},nativeStopped:async()=>{},pendingObservation:async()=>{},failedObservation:async()=>{},observed:async()=>{}};
+ const proof=await proveUnbornSource(env,input,journal);expect(proof.defaultRef).toBe("refs/heads/trunk");expect(proof.inspectedDefaultRef).toBe("refs/heads/main");expect(proof.headSymref).toBe("refs/heads/main");expect(metadata.defaultBranch).toBe("main");
+ await expect(proveUnbornSource(env,{...input,purpose:"source",repositoryName:"workspace",sourceRepoName:"workspace",acceptedTarget:{...target,canonicalRepoName:"workspace"}},journal)).rejects.toThrow("default branch");
+});
+
+test("pre-bind metadata interruption leaves native funding untouched for the identical retry",async()=>{
+ const eventId=crypto.randomUUID(),incarnation=crypto.randomUUID(),input:UnbornSourceInput={eventId,purpose:"source",repositoryName:"canonical",sourceRepoName:"canonical",projectId:"p123456789abc",incarnation,userId:"owner",acceptedTarget:{kind:"unborn",projectId:"p123456789abc",incarnation,canonicalRepoName:"canonical",ref:"refs/heads/main",branch:"main",acceptedCommit:null,acceptedVersion:0,policyVersion:1,policy:{kind:"git-integrity"},requirements:[]}};
+ let information=0,reservations=0,issuances=0;
+ const metadata={id:"provider-id",name:"canonical",remote:"https://"+"a".repeat(32)+".artifacts.cloudflare.net/git/default/canonical.git",defaultBranch:"main",source:null,description:null};
+ const repository={info:async()=>{if(information++===0)throw new Error("Metadata transport unavailable");return metadata;},createToken:async()=>{issuances++;return{id:"read-id",plaintext:"synthetic-read-token",scope:"read",expiresAt:new Date(Date.now()+900000).toISOString()};},revokeToken:async()=>true,[Symbol.dispose]:()=>{}};
+ const global={accountLifecycle:async()=>"active",reserveManagedSpend:async()=>({allowed:++reservations===1}),consumeManagedSpend:async()=>{}};
+ const native={exec:async()=>({success:true,stdout:JSON.stringify({version:1,advertisement:""})}),seal:async()=>{},destroy:async()=>{},lifetimeStatus:async()=>({state:"stopped",sealed:true})};
+ const env={ARTIFACTS:{get:async()=>repository},INTEGRATOR:{getByName:()=>native},REPOSITORY_CONTROLLER:{idFromName:()=>"fixture",get:()=>global}} as unknown as Env;
+ const journal:UnbornSourceJournal={beforeProvider:async()=>{},authorize:async()=>{},bindSource:async()=>{},beforeCredential:async()=>{},credentialIssued:async()=>{},nativeIntent:async()=>{},credentialRevoked:async()=>{},nativeStopped:async()=>{},pendingObservation:async()=>{},failedObservation:async()=>{},observed:async()=>{}};
+ await expect(proveUnbornSource(env,input,journal)).rejects.toThrow("Metadata transport");expect(reservations).toBe(0);expect(issuances).toBe(0);
+ expect((await proveUnbornSource(env,input,journal)).expectedHead).toBeNull();expect(reservations).toBe(1);expect(issuances).toBe(1);
+});

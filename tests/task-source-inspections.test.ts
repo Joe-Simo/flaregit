@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { expect,test } from "bun:test";
-import { TaskSourceInspections,type TaskSourceInspectionScope } from "../src/server/task-source-inspections";
+import { TaskSourceInspections,taskSourceInspectionScopeSchema,type TaskSourceInspectionScope } from "../src/server/task-source-inspections";
 import { assertEmptyNativeAdvertisement } from "../src/server/unborn-source-proof";
 
 test("empty-source receipts require exact immutable scope and read/native cleanup before fork use",()=>{
@@ -10,6 +10,7 @@ test("empty-source receipts require exact immutable scope and read/native cleanu
  const ledger=new TaskSourceInspections(storage as unknown as DurableObjectStorage,()=>{if(!authorized)throw new Error("Authority changed");});
  const eventId=crypto.randomUUID(),incarnation=crypto.randomUUID(),scope:TaskSourceInspectionScope={eventId,purpose:"source",projectId:"p123456789abc",incarnation,sourceRepoName:"canonical",repositoryName:"canonical",actorId:"owner",accountKey:"a".repeat(12),acceptedTarget:{kind:"unborn",projectId:"p123456789abc",incarnation,canonicalRepoName:"canonical",ref:"refs/heads/main",branch:"main",acceptedCommit:null,acceptedVersion:0,policyVersion:1,policy:{kind:"git-integrity"},requirements:[]}};
  ledger.prepare(scope);ledger.prepare(scope);expect(()=>ledger.prepare({...scope,actorId:"outsider"})).toThrow("scope changed");
+ expect(taskSourceInspectionScopeSchema.parse(scope)).not.toHaveProperty("protocol");expect(taskSourceInspectionScopeSchema.parse({...scope,protocol:2}).protocol).toBe(2);expect(()=>taskSourceInspectionScopeSchema.parse({...scope,protocol:1})).toThrow();expect(()=>ledger.prepare({...scope,protocol:2})).toThrow("scope changed");
  ledger.bindSource(eventId,"source",{id:"actual-provider-id",name:"canonical",remote:"https://synthetic.artifacts.cloudflare.net/canonical.git",defaultBranch:"main",source:null,description:null});
  expect(ledger.beginCredential(eventId,"source")).toBe(true);expect(ledger.beginCredential(eventId,"source")).toBe(false);
  ledger.recordCredential(eventId,"source","read-id","synthetic-server-only",new Date(Date.now()+900000).toISOString());
@@ -37,4 +38,15 @@ test("complete advertisement distinguishes missing HEAD from a matched unborn sy
  expect(assertEmptyNativeAdvertisement(result(""),"refs/heads/main")).toEqual({headSymref:null});
  expect(assertEmptyNativeAdvertisement(result("ref: refs/heads/main\tHEAD\n"),"refs/heads/main")).toEqual({headSymref:"refs/heads/main"});
  for(const value of [{success:true,stdout:""},{success:false,stdout:JSON.stringify({version:1,advertisement:""})},result("a".repeat(40)+"\trefs/heads/main\n"),result("ref: refs/heads/other\tHEAD\n")])expect(()=>assertEmptyNativeAdvertisement(value,"refs/heads/main")).toThrow();
+});
+
+test("fork workspace freezes its actual default ref independently of the canonical unborn target",()=>{
+ const db=new Database(":memory:"),storage={sql:{exec(query:string,...bindings:Array<string|number|null>){const rows=db.query(query).all(...bindings);return{toArray:()=>rows};}},transactionSync<T>(callback:()=>T){return db.transaction(callback)();}};
+ const ledger=new TaskSourceInspections(storage as unknown as DurableObjectStorage,()=>{}),eventId=crypto.randomUUID(),incarnation=crypto.randomUUID();
+ const scope:TaskSourceInspectionScope={eventId,purpose:"workspace",projectId:"p123456789abc",incarnation,sourceRepoName:"canonical",repositoryName:"workspace",actorId:"owner",accountKey:"a".repeat(12),expectedParentProviderRepoId:"canonical-id",expectedProviderRepoId:"workspace-id",expectedForkSource:"artifacts:namespace/canonical",expectedMarker:"frozen-marker",acceptedTarget:{kind:"unborn",projectId:"p123456789abc",incarnation,canonicalRepoName:"canonical",ref:"refs/heads/trunk",branch:"trunk",acceptedCommit:null,acceptedVersion:0,policyVersion:1,policy:{kind:"git-integrity"},requirements:[]}};
+ ledger.prepare(scope);ledger.bindSource(eventId,"workspace",{id:"workspace-id",name:"workspace",remote:"https://synthetic.artifacts.cloudflare.net/workspace.git",defaultBranch:"main",source:scope.expectedForkSource!,description:scope.expectedMarker!});
+ ledger.beginCredential(eventId,"workspace");ledger.recordCredential(eventId,"workspace","read-id","synthetic-private-token",new Date(Date.now()+900000).toISOString());const nativeName=`unborn-workspace-${eventId}`;ledger.beginNative(eventId,"workspace",nativeName);
+ const proof={providerRepoId:"workspace-id",purpose:"workspace" as const,repositoryName:"workspace",sourceRepoName:"canonical",defaultRef:"refs/heads/trunk",inspectedDefaultRef:"refs/heads/main",headSymref:"refs/heads/main",expectedHead:null,visibleRefs:[] as [],nativeName};
+ expect(()=>ledger.pending(eventId,"workspace",{...proof,inspectedDefaultRef:"refs/heads/trunk"})).toThrow();ledger.pending(eventId,"workspace",proof);ledger.confirmRevoked(eventId,"workspace","read-id");ledger.confirmStopped(eventId,"workspace",{name:nativeName,state:"stopped",sealed:true});ledger.observe(eventId,"workspace",proof);expect(ledger.receipt(eventId,"workspace")).toEqual(proof);
+ const source={...scope,purpose:"source" as const,repositoryName:"canonical",expectedProviderRepoId:"canonical-id"};ledger.prepare(source);expect(()=>ledger.bindSource(eventId,"source",{id:"canonical-id",name:"canonical",remote:"https://synthetic.artifacts.cloudflare.net/canonical.git",defaultBranch:"main",source:null,description:null})).toThrow("identity");
 });
