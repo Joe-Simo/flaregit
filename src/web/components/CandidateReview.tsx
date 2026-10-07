@@ -1,8 +1,13 @@
+import {PreparedPublicationControl} from './PreparedPublicationControl';
+import {preparedPublicationRequest} from '../prepared-publication-recovery';
+import {FrozenAttribution} from './FrozenAttribution';
+import {frozenInputAttribution} from '../frozen-contribution-attribution';
 import {checkedCandidateReviewTarget,ownerReviewPayload,type CandidateReviewTarget} from "../candidate-review-target";
 import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Check, Eye, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import {Collapsible,CollapsibleContent,CollapsibleTrigger} from "@/components/ui/collapsible";
 import { apiJson,apiSessionIdentity } from "../api";
 import {readReviewDraft,saveReviewDraft,clearReviewDraft,type ReviewDraftScope,type OwnerDraftIntent} from "../review-draft-recovery";
 import { useVisiblePolling } from "../use-visible-polling";
@@ -12,21 +17,39 @@ import { externalCheckGate, type ExternalCheckState } from "@/core/external-chec
 import { blocksExternalAcceptance } from "../review-gate";
 import { navigate, timeAgo } from "../router";
 import { abandonLegacyRerun, checkedLegacyInputObservations, legacyRerunDraft, requestLegacyRerun, type LegacyRerunDraft, type LegacyRerunReport } from "../legacy-candidate-rerun";
-import type { CandidateGeneration, Task, VerificationEvidence } from "@/core/types";
+import type { CandidateGeneration, RepairAttempt, Task, VerificationEvidence,PublicationJournalEntry } from "@/core/types";
 
 const DelegatedCandidateReviews=lazy(async()=>({default:(await import("./DelegatedCandidateReviews")).DelegatedCandidateReviews}));
+
+function validRepairCommit(value:string|undefined):value is string{return Boolean(value&&/^[a-f0-9]{40}$/.test(value)&&!/^0{40}$/.test(value));}
+/** The optional controlled state is also used by focused rendered/SSR verification. */
+export function CandidateRepairRecord({repair,open}:{repair:RepairAttempt;open?:boolean}){
+          const marker=repair.protectedRepair;
+          const phase=marker?.status==='requested'?'Requested':marker?.status==='patch_ready'?'Patch recorded':marker?.status==='applied'?validRepairCommit(marker.resultCommit)?'Commit retained':'Result unconfirmed':marker?.status==='unknown'?'Outcome unknown':'Legacy record';
+          const stateCopy=marker?.status==='requested'?'Request saved. Model execution is not confirmed.':marker?.status==='patch_ready'?'Patch recorded. Application and checks are not confirmed.':marker?.status==='applied'?validRepairCommit(marker.resultCommit)?'Result commit retained. Verification and acceptance remain separate.':'An applied marker is recorded, but its result commit is unconfirmed.':marker?.status==='unknown'?'Original repair request retained; recovery is pending.':'Execution state was not recorded for this legacy repair.';
+          return <Collapsible open={open} className="rounded-md border border-border bg-background/60 p-3">
+            <CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="h-auto w-full justify-start gap-2 whitespace-normal px-0 text-left"><span>Repair record {repair.round}</span><span className="text-xs font-normal text-muted-foreground">· {phase}</span></Button></CollapsibleTrigger>
+            <p className="mt-1 text-xs text-muted-foreground">{stateCopy}</p>
+            {marker&&<p className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">{validRepairCommit(marker.sourceCommit)?<span>Source <code title={marker.sourceCommit}>{marker.sourceCommit.slice(0,7)}</code></span>:<span>Source commit unconfirmed</span>}{validRepairCommit(marker.resultCommit)&&<span>Result <code title={marker.resultCommit}>{marker.resultCommit?.slice(0,7)}</code></span>}</p>}
+            <CollapsibleContent className="space-y-2 pt-2">
+              {repair.diagnosticError&&<p className="text-xs text-muted-foreground whitespace-pre-wrap break-words">{repair.diagnosticError}</p>}
+              {repair.affectedContracts.length>0&&<p className="text-xs text-muted-foreground break-words">Affected checks: {repair.affectedContracts.join(', ')}</p>}
+              <pre className="max-h-72 overflow-auto rounded bg-muted/40 p-3 text-xs" aria-label={`Recorded repair patch for round ${repair.round}`}>{repair.patch||'No patch was recorded for this repair record.'}</pre>
+            </CollapsibleContent>
+          </Collapsible>;
+}
 
 /** Requirements and input commits are frozen; legacy task descriptions are current context only. */
 export function CandidatePurpose({ projectId, candidate, tasks }: { projectId: string; candidate: CandidateGeneration; tasks?: Record<string, Task> }) {
   return <section aria-label="Contribution purpose" className="space-y-3 text-sm">
     {candidate.predecessorCandidateId && <a className="text-primary underline-offset-4 hover:underline" href={`#/p/${projectId}/review?candidate=${encodeURIComponent(candidate.predecessorCandidateId)}`}>Original review</a>}
     {candidate.frozenRequirements.length > 0 && <div><h3 className="font-semibold">Requirements for this candidate</h3><ul className="mt-2 space-y-1 list-disc pl-5">{candidate.frozenRequirements.map((requirement) => <li key={requirement.id} className="break-words">{requirement.description}</li>)}</ul></div>}
-    <div><h3 className="font-semibold">Contributions</h3><p className="mt-1 text-xs text-muted-foreground">Input commits belong to this candidate. Descriptions, contributors, and issue/dependency links reflect the current contributions.</p>
+    <div><h3 className="font-semibold">Contributions</h3><p className="mt-1 text-xs text-muted-foreground">Purpose and attribution are captured for these input commits. Older inputs may lack historical attribution.</p>
       <ul className="mt-2 divide-y divide-border">{candidate.participatingTaskIds.map((id) => {
-        const task = tasks?.[id]; const commit = candidate.participatingCommits[id];
+        const task = tasks?.[id]; const commit = candidate.participatingCommits[id],snapshot=frozenInputAttribution(candidate.frozenAttribution,id,commit);
         return <li key={id} className="py-2 space-y-1">
-          <a className="font-medium text-primary underline-offset-4 hover:underline break-words" href={`#/p/${projectId}/review?${commit ? `candidate=${encodeURIComponent(candidate.id)}&input=${encodeURIComponent(id)}` : `task=${encodeURIComponent(id)}`}`}>{task?.goal || id}</a>
-          <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground"><span>{id}</span>{commit && <code title={commit}>{commit.slice(0, 7)}</code>}{task?.contributor && <span>{task.contributor.name} · {task.contributor.type}</span>}{task?.issue && <a className="text-primary hover:underline" href={`#/p/${projectId}/issues?n=${task.issue}`}>Issue #{task.issue}</a>}{task?.dependsOn && <a className="text-primary hover:underline" href={`#/p/${projectId}/review?task=${encodeURIComponent(task.dependsOn)}`}>Builds on {task.dependsOn}</a>}</div>
+          <a className="font-medium text-primary underline-offset-4 hover:underline break-words" href={`#/p/${projectId}/review?${commit ? `candidate=${encodeURIComponent(candidate.id)}&input=${encodeURIComponent(id)}` : `task=${encodeURIComponent(id)}`}`}>{snapshot?.goal || id}</a>
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground"><span>{id}</span>{commit && <code title={commit}>{commit.slice(0, 7)}</code>}<FrozenAttribution snapshot={snapshot}/>{snapshot?.issue && <a className="text-primary hover:underline" href={`#/p/${projectId}/issues?n=${snapshot.issue}`}>Issue #{snapshot.issue}</a>}{snapshot?.dependsOn && <a className="text-primary hover:underline" href={`#/p/${projectId}/review?task=${encodeURIComponent(snapshot.dependsOn)}`}>Builds on {snapshot.dependsOn}</a>}</div>
           {task && commit && task.currentCommit !== commit && <p className="text-xs text-muted-foreground">This contribution has advanced. The link opens its candidate input commit.</p>}
         </li>;
       })}</ul>
@@ -38,7 +61,7 @@ export function CandidatePurpose({ projectId, candidate, tasks }: { projectId: s
  * The explicit human gate: a verified candidate shows what would land, which checks passed, and asks for
  * Accept or Reject. Nothing becomes repository history without this decision on this exact commit.
  */
-export function CandidateReview({ projectId, candidate, evidence, tasks, onDone, showOpen = true, externalChecks, providerNames, onRetryExternalCheck, isOwner = false, reviewReady = true, savedDecisionRecoveryInPanel = false, onRecoverSavedRun }: { projectId: string; candidate: CandidateGeneration; evidence?: VerificationEvidence; tasks?: Record<string, Task>; onDone: () => void; showOpen?: boolean; externalChecks?: ExternalCheckState; providerNames?: Record<string, string>; onRetryExternalCheck?: (checkId: string) => Promise<void>; isOwner?: boolean; reviewReady?: boolean; savedDecisionRecoveryInPanel?: boolean; onRecoverSavedRun?: () => void }) {
+export function CandidateReview({ projectId, candidate, evidence, tasks,journal, onDone, showOpen = true, externalChecks, providerNames, onRetryExternalCheck, isOwner = false, reviewReady = true, savedDecisionRecoveryInPanel = false, onRecoverSavedRun }: { projectId: string; candidate: CandidateGeneration; evidence?: VerificationEvidence; tasks?: Record<string, Task>;journal?:PublicationJournalEntry[]; onDone: () => void; showOpen?: boolean; externalChecks?: ExternalCheckState; providerNames?: Record<string, string>; onRetryExternalCheck?: (checkId: string) => Promise<void>; isOwner?: boolean; reviewReady?: boolean; savedDecisionRecoveryInPanel?: boolean; onRecoverSavedRun?: () => void }) {
   const [delegatedGate,setDelegatedGate]=useState<{scope:string;passed:boolean|null}|null>(null);
   const [rerunReserved, setRerunReserved] = useState(false);
   const [note, setNote] = useState("");
@@ -101,7 +124,9 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
   const identityMismatch = checks && (checks.frozen.repositoryId !== projectId || checks.frozen.candidateId !== candidate.id || checks.frozen.commit !== candidate.candidateCommit || (candidate.frozenExternalChecksPolicy && (checks.frozen.policy.version !== candidate.frozenExternalChecksPolicy.version || checks.frozen.policy.mode !== candidate.frozenExternalChecksPolicy.mode)) || (evidence && (checks.frozen.commit !== evidence.candidateCommit || checks.frozen.tree !== evidence.candidateTree)));
   const declaredRequiredChecks = candidate.frozenExternalChecksPolicy?.checks.some((check) => check.required) ?? false;
   const checkGate = checks ? externalCheckGate(checks) : declaredRequiredChecks ? "pending" : "passed";
-  const acceptanceBlocked = targetInvalid || recoveredTargetMismatch || !delegatedKnown || rerunReserved || candidate.preservationProtocolVersion !== 1 || !reviewReady || !candidate.candidateCommit || blocksExternalAcceptance({ required: declaredRequiredChecks, known: checksKnown, readFailed: checkError !== null, identityMismatch: Boolean(identityMismatch), gate: checkGate, retryingRequired });
+  const protectedRepairs=candidate.repairAttempts.flatMap(repair=>repair.protectedRepair?[repair.protectedRepair]:[]);
+  const repairAcceptancePending=protectedRepairs.length>0&&(protectedRepairs.some(repair=>repair.status!=="applied"||!validRepairCommit(repair.sourceCommit)||!validRepairCommit(repair.resultCommit))||protectedRepairs.at(-1)?.resultCommit!==candidate.candidateCommit);
+  const acceptanceBlocked = repairAcceptancePending || targetInvalid || recoveredTargetMismatch || !delegatedKnown || rerunReserved || candidate.preservationProtocolVersion !== 1 || !reviewReady || !candidate.candidateCommit || blocksExternalAcceptance({ required: declaredRequiredChecks, known: checksKnown, readFailed: checkError !== null, identityMismatch: Boolean(identityMismatch), gate: checkGate, retryingRequired });
   const retryCheck = isOwner ? async (checkId: string) => {
     const sequence = ++requestSequence.current;
     retryInFlight.current = true; setRetryingCheck(true); setRetryingRequired(checks?.frozen.policy.checks.find((check) => check.id === checkId)?.required ?? declaredRequiredChecks);
@@ -138,10 +163,23 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
     }
   };
 
+  const repairHold=repairAcceptancePending&&candidate.status!=="accepted"?<p role="status" className="text-xs text-amber-800 dark:text-amber-200">Protected repair evidence is incomplete or does not match this commit. Acceptance is paused; rejection and the diff remain available.</p>:null;
   const targetSummary=targetInvalid||recoveredTargetMismatch?<p role="alert" className="text-xs text-destructive">Frozen branch target metadata is unavailable or inconsistent. Review decisions are paused; read the diff and refresh before deciding.</p>:reviewTarget?<p className="text-xs text-muted-foreground break-words">Frozen target <strong>{reviewTarget.branch}</strong> · base <code title={reviewTarget.acceptedCommit??undefined}>{reviewTarget.acceptedCommit?.slice(0,12)??"empty accepted history"}</code> · version {reviewTarget.acceptedVersion}</p>:null;
 
-  const delegatedRows=candidate.candidateCommit?<Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Checking reviewer evidence…</p>}><DelegatedCandidateReviews key={scope} projectId={projectId} candidateId={candidate.id} commit={candidate.candidateCommit} base={candidate.expectedAcceptedBase} tree={evidence?.candidateTree} verificationPolicyVersion={candidate.frozenPolicyVersion} reviewReady={reviewReady} editable={["awaiting_review","verified"].includes(candidate.status)} onGate={onDelegatedGate}/></Suspense>:null;
+  const policyDisplayContext=candidate.policyAuthorization&&candidate.policyAuthorization.identity.projectId===projectId&&candidate.policyAuthorization.identity.candidateId===candidate.id&&candidate.policyAuthorization.identity.commit===candidate.candidateCommit&&candidate.policyAuthorization.identity.tree===evidence?.candidateTree&&!candidate.review?.approved&&["verified","accepted"].includes(candidate.status);
+  const delegatedRows=candidate.candidateCommit?<Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Checking reviewer evidence…</p>}><DelegatedCandidateReviews key={scope} projectId={projectId} candidateId={candidate.id} commit={candidate.candidateCommit} base={candidate.expectedAcceptedBase} tree={evidence?.candidateTree} verificationPolicyVersion={candidate.frozenPolicyVersion} reviewReady={reviewReady} editable={["awaiting_review","verified"].includes(candidate.status)} acceptanceContext={candidate.status==="accepted"?"accepted":policyDisplayContext?"policy-authorized":"manual"} onGate={onDelegatedGate}/></Suspense>:null;
 
+  if(candidate.policyAuthorization&&candidate.policyAuthorization.identity.projectId===projectId&&candidate.policyAuthorization.identity.candidateId===candidate.id&&candidate.policyAuthorization.identity.commit===candidate.candidateCommit&&candidate.policyAuthorization.identity.tree===evidence?.candidateTree&&!candidate.review?.approved&&["verified","accepted"].includes(candidate.status)){
+    return <section aria-label="Maintainer policy authorization" className="rounded-lg border border-border p-4 space-y-2 text-sm">
+      <h3 className="font-semibold">{candidate.status==="accepted"?"Accepted under maintainer policy":"Maintainer policy authorization recorded"}</h3>
+      <p>Policy version {candidate.policyAuthorization.policyVersion} authorized exactly <code>{candidate.candidateCommit?.slice(0,12)}</code>. This is a policy decision, separate from human review.</p>
+      {candidate.status!=="accepted"&&<p className="text-muted-foreground">Repository history changes only after exact publication and readback are confirmed.</p>}
+      {targetSummary}{repairHold}{connectedRows}{delegatedRows}
+      <CandidatePurpose projectId={projectId} candidate={candidate} tasks={tasks}/>
+    </section>;
+  }
+
+  const publicationRequest=preparedPublicationRequest(candidate,journal);
   if (candidate.review?.approved && candidate.status === "verified") {
     return (
       <section aria-label="Saved approval awaiting integration" className="rounded-lg border border-border p-4 space-y-2 text-sm">
@@ -153,7 +191,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
         <LegacyCandidateRerun projectId={projectId} candidate={candidate} isOwner={isOwner} onDone={onDone} onReserved={setRerunReserved} />
         {identityMismatch && <p role="alert" className="text-destructive">Connected check evidence belongs to a different candidate or tree. Reload before accepting.</p>}
         {error && <p role="alert" className="text-destructive">{error}</p>}
-        {savedDecisionRecoveryInPanel ? <a href="#int-saved-runs" className="text-xs underline underline-offset-4" onClick={event => { event.preventDefault(); if (onRecoverSavedRun) { onRecoverSavedRun(); return; } const panel = document.getElementById("int-saved-runs"); panel?.scrollIntoView({ block: "start" }); panel?.focus({ preventScroll: true }); }}>Recover this saved run</a> : <Button size="sm" variant="outline" disabled={!isOwner || busy !== null || acceptanceBlocked} onClick={() => decide(true, true)}>{busy ? "Resending…" : "Resend saved approval"}</Button>}
+        {publicationRequest?<PreparedPublicationControl key={`${candidate.id}:${publicationRequest.journalId}`} projectId={projectId} candidateId={candidate.id} request={publicationRequest} isOwner={isOwner} blocked={acceptanceBlocked} onChange={onDone}/>:savedDecisionRecoveryInPanel ? <a href="#int-saved-runs" className="text-xs underline underline-offset-4" onClick={event => { event.preventDefault(); if (onRecoverSavedRun) { onRecoverSavedRun(); return; } const panel = document.getElementById("int-saved-runs"); panel?.scrollIntoView({ block: "start" }); panel?.focus({ preventScroll: true }); }}>Recover this saved run</a> : <Button size="sm" variant="outline" disabled={!isOwner || busy !== null || acceptanceBlocked} onClick={() => decide(true, true)}>{busy ? "Resending…" : "Resend saved approval"}</Button>}
       </section>
     );
   }
@@ -167,19 +205,15 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
       {targetSummary}
       <p className="text-sm text-muted-foreground">
         Combines {candidate.participatingTaskIds.join(" and ")}{candidate.compositionMethod ? ` (${candidate.compositionMethod.replace(/_/g, " ")})` : ""}
-        {candidate.repairAttempts.length > 0 ? `, with ${candidate.repairAttempts.length} AI repair round${candidate.repairAttempts.length === 1 ? "" : "s"} you should read` : ""}.{" "}
+        {candidate.repairAttempts.length > 0 ? `, with ${candidate.repairAttempts.length} repair record${candidate.repairAttempts.length === 1 ? "" : "s"} to review` : ""}.{" "}
         {nativeOnly ? total > 0 ? `${passed} of ${total} native Git integrity checks passed. Application CI is reported by connected providers below.` : "Read the native Git integrity evidence and connected application CI below." : total > 0 ? `${passed} of ${total} protected checks passed.` : "No check totals were recorded; read the verification evidence."} Accepting moves the branch to exactly this commit.
       </p>
       {showOpen && <CandidatePurpose projectId={projectId} candidate={candidate} tasks={tasks} />}
-      {candidate.repairAttempts.length > 0 && <div className="space-y-2">
-        <h4 className="text-sm font-medium text-amber-800 dark:text-amber-200">Conflict repairs are part of this candidate</h4>
-        {candidate.repairAttempts.map((repair, index) => <details key={`${repair.round}-${index}`} className="rounded-md border border-border bg-background/60 p-3">
-          <summary className="cursor-pointer text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Read repair round {repair.round}</summary>
-          <p className="mt-3 text-xs text-muted-foreground whitespace-pre-wrap break-words">{repair.diagnosticError || "Repair proposed during integration."}</p>
-          {repair.affectedContracts.length > 0 && <p className="mt-2 text-xs text-muted-foreground">Affected requirements: {repair.affectedContracts.join(", ")}</p>}
-          <pre className="mt-3 max-h-72 overflow-auto rounded bg-muted/40 p-3 text-xs" aria-label={`Repair patch for round ${repair.round}`}>{repair.patch || "No patch was recorded for this attempt."}</pre>
-        </details>)}
-      </div>}
+      {candidate.repairAttempts.length > 0 && <section aria-label="Repair records" className="space-y-2">
+        <h4 className="text-sm font-medium">Repair records</h4>
+        {candidate.repairAttempts.map((repair,index)=><CandidateRepairRecord key={`${repair.round}-${index}`} repair={repair}/>)}
+      </section>}
+      {repairHold}
       {connectedRows}
       {delegatedRows}
       <LegacyCandidateRerun projectId={projectId} candidate={candidate} isOwner={isOwner} onDone={onDone} onReserved={setRerunReserved} />
@@ -191,7 +225,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks, onDone,
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       <div className="flex flex-wrap gap-2">
         {showOpen && <Button size="sm" variant="outline" onClick={() => navigate(`/p/${projectId}/review?candidate=${candidate.id}`)}><Eye className="h-3.5 w-3.5 mr-1.5" /> Read the diff</Button>}
-        <Button size="sm" variant="orange" disabled={!isOwner || busy !== null || acceptanceBlocked} onClick={() => decide(true)}><Check className="h-3.5 w-3.5 mr-1.5" /> {busy === "approve" ? "Accepting…" : "Accept into history"}</Button>
+        <Button size="sm" variant="orange" disabled={!isOwner || busy !== null || acceptanceBlocked} onClick={() => decide(true)}><Check className="h-3.5 w-3.5 mr-1.5" /> {busy === "approve" ? "Saving approval…" : "Approve commit"}</Button>
         <Button size="sm" variant="outline" disabled={!isOwner || targetInvalid || recoveredTargetMismatch || rerunReserved || busy !== null || !candidate.candidateCommit} onClick={() => decide(false)}><X className="h-3.5 w-3.5 mr-1.5" /> {busy === "reject" ? "Rejecting…" : "Reject"}</Button>
       </div>
     </section>

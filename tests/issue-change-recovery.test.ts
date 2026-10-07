@@ -1,0 +1,11 @@
+import {test,expect} from 'bun:test';
+import {recoverIssueChange,persistIssueChange} from '../src/web/issue-change-recovery';
+import {clearIssueDraftRecovery} from '../src/web/issue-draft-recovery';
+function store(){const rows=new Map<string,string>();return {get length(){return rows.size;},key:(index:number)=>[...rows.keys()][index]??null,getItem:(key:string)=>rows.get(key)??null,setItem:(key:string,value:string)=>{rows.set(key,value);},removeItem:(key:string)=>{rows.delete(key);}};}
+const scope={identity:'owner-session',projectId:'private-project',issue:1},intent={goal:'Preserve original issue purpose',taskId:'preserve-original-123456',issue:1};
+test('lost creation response and reload retain original task and purpose',()=>{const storage=store();persistIssueChange(storage,scope,intent);expect(recoverIssueChange(storage,scope)).toEqual(intent);expect(recoverIssueChange(storage,{...scope,issue:2})).toBeNull();expect(recoverIssueChange(storage,{...scope,projectId:'other'})).toBeNull();expect(recoverIssueChange(storage,{...scope,identity:'other'})).toBeNull();});
+test('verified sign out purges issue change recovery using existing cleanup',()=>{const storage=store();persistIssueChange(storage,scope,intent);clearIssueDraftRecovery(null,storage);expect(recoverIssueChange(storage,scope)).toBeNull();});
+test('storage failure and corrupt saved intent must throw before dispatch',()=>{const storage=store();storage.setItem(storage.key(0)??`flaregit.issue-draft.${JSON.stringify([scope.identity,scope.projectId,scope.issue])}`,'{}');expect(()=>recoverIssueChange(storage,scope)).toThrow();expect(()=>persistIssueChange({...storage,setItem:()=>{throw Error('blocked');}},scope,intent)).toThrow('blocked');});
+
+test('a storage implementation silently dropping writes fails closed',()=>{const storage=store();expect(()=>persistIssueChange({...storage,setItem:()=>{}},scope,intent)).toThrow('did not retain');});
+test('original complete POST body survives reload and cannot move issues',()=>{const storage=store();persistIssueChange(storage,scope,intent);const replay=recoverIssueChange(storage,scope);expect(JSON.stringify(replay)).toBe(JSON.stringify(intent));expect(()=>persistIssueChange(storage,{...scope,issue:2},intent)).toThrow('another issue');});

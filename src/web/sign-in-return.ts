@@ -1,7 +1,7 @@
 import { safeReportTarget } from "./report-target";
 const projectId = /^p?[0-9a-f]{12}$/;
 const topicId = /^forum_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const repositoryTabs = new Set(["code", "commits", "discussions", "issues", "changes", "integration", "people", "activity", "settings", "review", "commit"]);
+const repositoryTabs = new Set(["code", "commits", "discussions", "issues", "changes", "integration", "people", "activity", "settings", "review", "commit", "releases", "tags"]);
 /** Canonical app hashes only. Never use a supplied full URL as a Clerk destination. */
 export function safeSignInReturn(value: string): string | null {
   const input = value.startsWith("#") ? value.slice(1) : value;

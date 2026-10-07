@@ -3,9 +3,13 @@ import type {ImportedConversationOrigin} from "../../server/migration-conversati
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { CircleCheck, CircleDot, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {Input} from "@/components/ui/input";
+import {Textarea} from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { apiJson } from "../api";
+import { apiJson, apiSessionIdentity } from "../api";
+import {readIssueDraft,saveIssueDraft,clearIssueDraft,type IssueDraftScope} from "../issue-draft-recovery";
+import {recoverIssueChange,persistIssueChange,type IssueChangeIntent} from "../issue-change-recovery";
 import { navigate, timeAgo } from "../router";
 import { changeCreationFollowup, type ChangeCreationResponse } from "../change-creation-followup";
 import { Conversation } from "../components/Conversation";
@@ -41,6 +45,11 @@ function IssueList({ projectId }: { projectId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const intent = useRef<{signature:string; key:string} | null>(null), savingLock = useRef(false);
+  const recoveryScope=useRef<IssueDraftScope|null>(null);
+  useEffect(()=>{const identity=apiSessionIdentity();recoveryScope.current=identity?{identity,projectId}:null;const scope=recoveryScope.current;if(!scope)return;try{const draft=readIssueDraft(sessionStorage,scope);if(draft){setTitle(draft.title);setBody(draft.body);intent.current=draft.intent;setComposing(true);}}catch{/* Draft restoration never grants write authority. */}},[projectId]);
+  const persist=(nextTitle:string,nextBody:string,nextIntent:typeof intent.current)=>{const scope=recoveryScope.current;if(!scope||apiSessionIdentity()!==scope.identity)return false;try{return saveIssueDraft(sessionStorage,scope,{title:nextTitle,body:nextBody,intent:nextIntent});}catch{return false;}};
+  const editDraft=(nextTitle:string,nextBody:string)=>{setTitle(nextTitle);setBody(nextBody);const signature=JSON.stringify({title:nextTitle.trim(),body:nextBody.trim()});if(intent.current?.signature!==signature)intent.current=null;if(!persist(nextTitle,nextBody,intent.current))setError("Your draft remains on this page, but browser recovery is unavailable. Saving requires a recoverable request.");else setError(null);};
+  const discard=()=>{if(savingLock.current)return;const scope=recoveryScope.current;if(!scope||apiSessionIdentity()!==scope.identity)return;try{if(!clearIssueDraft(sessionStorage,scope)){setError("The browser draft could not be discarded. Your text is preserved.");return;}}catch{setError("The browser draft could not be discarded. Your text is preserved.");return;}intent.current=null;setTitle("");setBody("");setError(null);setComposing(false);};
   const lifetime = useRef(0), readSequence = useRef(0), readController = useRef<AbortController | null>(null);
   useEffect(() => { lifetime.current++; return () => { lifetime.current++; readSequence.current++; readController.current?.abort(); }; }, [projectId]);
 
@@ -61,12 +70,14 @@ function IssueList({ projectId }: { projectId: string }) {
     if(savingLock.current || !title.trim())return;
     const generation=lifetime.current; const input={title:title.trim(),body:body.trim()};const signature=JSON.stringify(input);
     if(intent.current?.signature!==signature)intent.current={signature,key:crypto.randomUUID()};
+    if(!persist(title,body,intent.current)){setError("Browser recovery is unavailable. No issue request was sent; keep your draft and retry when storage is available.");return;}
     const idempotencyKey=intent.current.key;savingLock.current=true;
     setError(null);
     setSaving(true);
     try {
       const created = await apiJson<Issue>(`/p/${projectId}/issues`, { method: "POST", json: { ...input, idempotencyKey } });
       if(generation!==lifetime.current)return;
+      const scope=recoveryScope.current;if(scope&&apiSessionIdentity()===scope.identity)try{clearIssueDraft(sessionStorage,scope);}catch{/* Confirmed save and original key remain safe to replay. */}
       intent.current=null;navigate(`/p/${projectId}/issues?n=${created.number}`);
     } catch (e) {
       if(generation===lifetime.current)setError(`Issue save could not be confirmed. Your draft is preserved; retrying unchanged content reuses the same request. ${errText(e, "")}`);
@@ -89,13 +100,13 @@ function IssueList({ projectId }: { projectId: string }) {
         <form id="new-issue" className="rounded-lg border border-border p-3 space-y-2" onSubmit={(e) => { e.preventDefault(); if (title.trim() && !saving) void create(); }}>
           <h3 className="text-sm font-semibold">New issue</h3>
           <label className="block text-sm"><span className="font-medium">Title</span>
-            <input className={field} value={title} disabled={saving} maxLength={200} onChange={(e) => setTitle(e.target.value)} />
+            <Input className={field} value={title} disabled={saving} maxLength={200} onChange={(e) => editDraft(e.target.value,body)} />
           </label>
           <label className="block text-sm"><span className="font-medium">Description</span>
-            <textarea className={field} rows={5} maxLength={20000} disabled={saving} value={body} onChange={(e) => setBody(e.target.value)} placeholder="What should change, and why? Agents working on a linked change read this." />
+            <Textarea className={field} rows={5} maxLength={20000} disabled={saving} value={body} onChange={(e) => editDraft(title,e.target.value)} placeholder="What should change, and why? Agents working on a linked change read this." />
           </label>
           {error && <div role="alert" className={alertCls}>{error}</div>}
-          <Button type="submit" size="sm" disabled={saving || !title.trim()}>{saving ? "Opening…" : "Open issue"}</Button>
+          <div className="flex gap-2"><Button type="submit" size="sm" disabled={saving || !title.trim()}>{saving ? "Opening…" : "Open issue"}</Button><Button type="button" size="sm" variant="ghost" disabled={saving} onClick={discard}>Discard draft</Button></div>
         </form>
       )}
       <TabsContent value={state}>
@@ -131,15 +142,23 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
   const [busy, setBusy] = useState<null | "toggle" | "change" | "agent">(null);
 
   const lifetime=useRef(0), readSequence=useRef(0), readController=useRef<AbortController | null>(null), actionLock=useRef(false);
-  const creationIntent=useRef<{signature:string;taskId:string} | null>(null);
+  const creationIntent=useRef<{identity:string;projectId:string;issue:number;payload:IssueChangeIntent} | null>(null);
   const [savedChange,setSavedChange]=useState<string | null>(null);
+  const [originalChange,setOriginalChange]=useState<IssueChangeIntent|null>(null);
   useEffect(()=>{lifetime.current++;return()=>{lifetime.current++;readSequence.current++;readController.current?.abort();};},[projectId,number]);
   const load = useCallback(async () => {
+    const identity=apiSessionIdentity();
     const generation=lifetime.current,sequence=++readSequence.current;readController.current?.abort();const controller=new AbortController();readController.current=controller;
     setLoadError(null);
     try {
       const next=await apiJson<IssueDetail>(`/p/${projectId}/issues/${number}`,{signal:controller.signal});
-      if(generation===lifetime.current && sequence===readSequence.current)setIssue(next);
+      if(generation===lifetime.current && sequence===readSequence.current&&apiSessionIdentity()===identity){
+        setIssue(next);setSavedChange(null);setOriginalChange(null);
+        if(identity)try{
+          const scope={identity,projectId,issue:number},saved=recoverIssueChange(sessionStorage,scope);
+          if(saved){creationIntent.current={...scope,payload:saved};setSavedChange(saved.taskId);setOriginalChange(saved);}
+        }catch{/* Recovery errors must not block reading the issue. Dispatch validates again. */}
+      }
     } catch (e) {
       if(generation===lifetime.current && sequence===readSequence.current && !controller.signal.aborted)setLoadError(errText(e, "Could not load the issue"));
     }
@@ -171,21 +190,33 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
     setError(null);
     setNotice(null);
     try {
-      const signature=JSON.stringify({issue:number,goal:issue.title});
-      if(creationIntent.current?.signature!==signature)creationIntent.current={signature,taskId:slug(issue.title)+"-"+crypto.randomUUID().replaceAll("-","").slice(0,12)};
-      const taskId=creationIntent.current.taskId;
-      const created=await apiJson<ChangeCreationResponse>(`/p/${projectId}/tasks`,{method:"POST",json:{taskId,goal:issue.title,issue:number}});
-      if(generation!==lifetime.current)return;
+      const identity=apiSessionIdentity();
+      if(!identity)throw new Error("Sign in again before starting a change.");
+      const scope={identity,projectId,issue:number};
+      let payload:IssueChangeIntent;
+      try {
+        const recovered=recoverIssueChange(sessionStorage,scope);
+        const held=creationIntent.current;
+        payload=recovered??(held&&held.identity===identity&&held.projectId===projectId&&held.issue===number?held.payload:{taskId:slug(issue.title)+"-"+crypto.randomUUID().replaceAll("-","").slice(0,12),goal:issue.title,issue:number});
+        persistIssueChange(sessionStorage,scope,payload);
+        creationIntent.current={...scope,payload};setOriginalChange(payload);setSavedChange(payload.taskId);
+      } catch(cause) {throw new Error(`No change request was sent. Browser recovery must be available. ${errText(cause,"")}`);}
+      if(apiSessionIdentity()!==identity||generation!==lifetime.current)throw new Error("Your session changed. No change request was sent.");
+      const taskId=payload.taskId;
+      const created=await apiJson<ChangeCreationResponse>(`/p/${projectId}/tasks`,{method:"POST",json:payload});
+      if(generation!==lifetime.current||apiSessionIdentity()!==identity)return;
+      // Keep the original request through agent startup and reload. Replaying it
+      // asks the server for the same task instead of creating a second task.
       const followup=changeCreationFollowup(created,agent);setSavedChange(taskId);
       if(followup==="terminal")setNotice(`Change already ${created.status}. Its saved history is preserved; no agent was started.`);
       else if(followup==="existing-agent")setNotice("Change saved. Its existing agent run and checkpoints are available; no new run was started.");
       else if(followup==="start-agent"){
-        try { await apiJson(`/p/${projectId}/tasks/${taskId}/agent`,{method:"POST"});if(generation!==lifetime.current)return;setNotice("Change saved and agent run requested. Open Changes to inspect its saved progress."); }
-        catch(cause){if(generation!==lifetime.current)return;setError(`Change saved, but agent startup could not be confirmed. Retry this request to inspect the same change, or open Changes for recovery. ${errText(cause,"")}`);}
+        try { if(apiSessionIdentity()!==identity)return;await apiJson(`/p/${projectId}/tasks/${taskId}/agent`,{method:"POST"});if(generation!==lifetime.current||apiSessionIdentity()!==identity)return;setNotice("Change saved and agent run requested. Open Changes to inspect its saved progress."); }
+        catch(cause){if(generation!==lifetime.current||apiSessionIdentity()!==identity)return;setError(`Change saved, but agent startup could not be confirmed. Retry this request to inspect the same change, or open Changes for recovery. ${errText(cause,"")}`);}
       } else setNotice("Change saved. Open Changes for its Git commands, checkpoints and review.");
       await load();
     } catch (e) {
-      if(generation===lifetime.current)setError(`Change save could not be confirmed. Retrying unchanged issue context reuses this request. ${errText(e,"")}`);
+      if(generation===lifetime.current)setError(`Change save could not be confirmed. Retrying reuses the original saved request and issue purpose. ${errText(e,"")}`);
     } finally { actionLock.current=false;if(generation===lifetime.current)setBusy(null); }
   };
 
@@ -203,6 +234,7 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
       </div>
       {issue.body && <p className="text-sm whitespace-pre-wrap break-words rounded-md border border-border p-3">{issue.body}</p>}
       {loadError && <LoadError message={loadError} onRetry={()=>void load()} />}
+      {originalChange && <p role="status" className="text-sm break-words">Saved request for issue #{originalChange.issue}: <code>{originalChange.taskId}</code> · {originalChange.goal}. Checking reuses this original purpose.</p>}
       {savedChange && <Button size="sm" variant="outline" onClick={()=>navigate(`/p/${projectId}/changes`)}>Open saved change</Button>}
       {error && <div role="alert" className={alertCls}>{error}</div>}
       {notice && <div role="status" className={okCls}>{notice}</div>}

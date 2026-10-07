@@ -1,3 +1,7 @@
+import {checkedPreparedPublicationReceipt,clearPreparedPublicationRecovery,type PreparedPublicationRequest} from './prepared-publication-recovery';
+import {checkedCandidateRuntimeInspection} from './candidate-runtime-inspection';
+import {clearIntegrationIntentRecovery} from './integration-intent-recovery';
+import {clearIssueDraftRecovery} from './issue-draft-recovery';
 type SessionBinding = { identity: string; getToken: () => Promise<string | null>; owner: symbol };
 let session: SessionBinding | null = null;
 let identity: string | null = null;
@@ -12,7 +16,7 @@ function invalidateSharedReads() { readRevision++; sharedReads.clear(); }
 
 /** Bind the captured session resource, not Clerk's dynamically active session. */
 export function bindApiSession(principal: string, getToken: () => Promise<string | null>): () => void {
-  if (identity !== principal) { const previousIdentity=identity; if (previousIdentity) { clearSessionConversationDrafts(previousIdentity); clearSessionReviewDrafts(previousIdentity); } clearOtherSessionRecovery(principal); identity = principal; epoch++; }
+  if (identity !== principal) { const previousIdentity=identity; if (previousIdentity) { clearSessionConversationDrafts(previousIdentity); clearSessionReviewDrafts(previousIdentity); } clearOtherSessionRecovery(principal);clearPreparedPublicationRecovery(principal); clearIssueDraftRecovery(principal); clearIntegrationIntentRecovery(principal); identity = principal; epoch++; }
   const owner = Symbol(principal);
   session = { identity: principal, getToken, owner };
   return () => {
@@ -25,7 +29,7 @@ export function bindApiSession(principal: string, getToken: () => Promise<string
 }
 
 /** Invoke only after the authentication SDK confirms a loaded signed-out state. */
-export function clearVerifiedApiSession():void{session=null;identity=null;epoch++;clearVerifiedSessionRecovery();}
+export function clearVerifiedApiSession():void{session=null;identity=null;epoch++;clearVerifiedSessionRecovery();clearPreparedPublicationRecovery(null);clearIssueDraftRecovery(null);clearIntegrationIntentRecovery(null);}
 
 function requestGuard(binding: SessionBinding | null, requestEpoch: number): () => void {
   return () => {
@@ -109,6 +113,10 @@ export function apiRetryAfterSeconds(value: string | null, now = Date.now()): nu
   const seconds=/^[0-9]+$/.test(value) ? Number(value) : (Date.parse(value)-now)/1000;
   return Number.isFinite(seconds) && seconds>=0 && seconds<=Number.MAX_SAFE_INTEGER ? Math.ceil(seconds) : null;
 }
+/** Expected cancellation when a mutation supersedes an otherwise authorized GET. */
+export class StaleRepositoryReadError extends DOMException {
+  constructor(){super("Repository state changed during this read. Refresh to get current state.","AbortError");}
+}
 export class ApiError extends Error {
   constructor(message: string, readonly status: number, readonly retryAfter: number | null) { super(message); this.name="ApiError"; }
 }
@@ -136,7 +144,7 @@ export async function apiJson<T>(path: string, init: RequestInit & { json?: unkn
   try {
     const text = await Promise.race([entry.value, cancelled]);
     requestGuard(binding, requestEpoch)();
-    if (revision !== readRevision) throw new DOMException("Repository state changed during this read. Refresh to get current state.", "AbortError");
+    if (revision !== readRevision) throw new StaleRepositoryReadError();
     return JSON.parse(text) as T;
   } finally {
     if (abort) init.signal?.removeEventListener("abort", abort);
@@ -162,3 +170,12 @@ async function jsonText(path: string, init: RequestInit & { json?: unknown }): P
 import { clearSessionConversationDrafts } from "./conversation-recovery";
 
 import {clearSessionReviewDrafts,clearVerifiedSessionRecovery,clearOtherSessionRecovery} from "./review-draft-recovery";
+
+/** Owner-only recorded runtime metadata; never an implicit provider inspection or recovery write. */
+export async function apiCandidateRuntimeInspection(projectId:string,candidateId:string,workflowId:string,signal?:AbortSignal){const raw=await apiJson<unknown>(`/p/${encodeURIComponent(projectId)}/candidates/${encodeURIComponent(candidateId)}/runtime`,{signal});return checkedCandidateRuntimeInspection(raw,candidateId,workflowId);}
+
+/** Reconciles the existing exact verification locally; no provider or history operation. */
+export async function apiRecoverCandidateVerificationClosure(projectId:string,candidateId:string,input:{workflowId:string;commit:string;evidenceId:string},signal?:AbortSignal){const raw=await apiJson<unknown>(`/p/${encodeURIComponent(projectId)}/candidates/${encodeURIComponent(candidateId)}/verification-closure`,{method:'POST',body:JSON.stringify(input),signal});return checkedCandidateRuntimeInspection(raw,candidateId,input.workflowId);}
+
+/** Publishes only the previously approved exact journal; it never records a new review. */
+export async function apiRequestPreparedPublication(projectId:string,candidateId:string,input:PreparedPublicationRequest,signal?:AbortSignal){const raw=await apiJson<unknown>(`/p/${encodeURIComponent(projectId)}/candidates/${encodeURIComponent(candidateId)}/prepared-publication`,{method:'POST',json:input,signal});return checkedPreparedPublicationReceipt(raw,candidateId,input);}

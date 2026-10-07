@@ -12,7 +12,7 @@ export const browserSessionScopeSchema=z.object({
 export type BrowserSessionScope=z.infer<typeof browserSessionScopeSchema>;
 export interface BrowserSessionFunding {reservationUsdMicros:number|null;budget:ManagedBudget}
 export interface BrowserNeverAcquiredClosure {sessionId:null;observation:"never-acquired";observedAt:number}
-export interface BrowserSessionClosure {sessionId:string;observation:"closed"|"absent";observedAt:number}
+export interface BrowserSessionClosure {sessionId:string;observation:"closed"|"absent";observedAt:number;providerObservation?:"exact-get"|"exact-history";providerStartTime?:number;providerEndTime?:number}
 export interface BrowserSessionBudgetCallbacks {
  /** Server authority binds the current account, accepted base, candidate and policy.
   * Its returned synchronous fence runs inside every consequential transaction. */
@@ -20,13 +20,13 @@ export interface BrowserSessionBudgetCallbacks {
  /** Current operator configuration, never caller supplied prices or allowances. */
  funding(scope:BrowserSessionScope):BrowserSessionFunding;
  /** Trusted native adapter closes and reads back ONLY this stored exact session.
-  * No inventory scan and no caller-provided `closed: true` receipt. */
+  * No inventory absence and no caller-provided `closed: true` receipt. */
  attestClosure(sessionId:string):Promise<BrowserSessionClosure|null>;
 }
 export interface BrowserSessionLease {scope:BrowserSessionScope;phase:"funded"|"acquire_possible"|"acquired"|"cleanup_pending"|"closed";reservationUsdMicros:number;fundingRunId:string;admittedAt:string;deadlineAt:string;sessionId:string|null;closure:BrowserSessionClosure|BrowserNeverAcquiredClosure|null}
 const frozenScope=(input:BrowserSessionScope)=>Object.freeze(browserSessionScopeSchema.parse(input));
 const amount=z.number().int().min(100000).max(1000000);
-const closureSchema=z.object({sessionId:z.uuid(),observation:z.enum(["closed","absent"]),observedAt:z.number().int().positive().safe()}).strict();
+const closureSchema=z.object({sessionId:z.uuid(),observation:z.enum(["closed","absent"]),observedAt:z.number().int().positive().safe(),providerObservation:z.enum(["exact-get","exact-history"]).optional(),providerStartTime:z.number().positive().finite().optional(),providerEndTime:z.number().positive().finite().optional()}).strict().refine(value=>value.providerObservation!=="exact-history"||value.observation==="closed"&&value.providerStartTime!==undefined&&value.providerEndTime!==undefined&&value.providerEndTime>=value.providerStartTime);
 /** One canary browser globally. Admission is bounded and funded, not a promise
  * about Browser Run billing, shared account concurrency or unknown session life.
  * Timeouts NEVER release a lease; uncertain acquisition/cleanup stays held. */

@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 
+export type RepositoryVersionTab="tags"|"releases";
+export function repositoryVersionPath(projectId:string,tab:RepositoryVersionTab):string{return `/p/${encodeURIComponent(projectId)}/${tab}`;}
+
 export type Route =
   | { name: "home" }
   | { name: "new" }

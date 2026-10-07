@@ -1,0 +1,11 @@
+import {expect,test} from "bun:test";
+import {Miniflare,convertV4MiniflareOptions} from "miniflare";
+import {workerdChild} from "./support/workerd-child";
+test("production controller exposes policy to members but only signed-in owners configure exact versioned receipts",async()=>{
+ if(await workerdChild("tests/acceptance-policy-controller.test.ts"))return;
+ const output=`/tmp/acceptance-controller-${crypto.randomUUID()}.js`,built=Bun.spawn([process.execPath,"build","tests/support/acceptance-policy-controller-worker.ts","--target=browser","--external=cloudflare:workers","--external=node:*",`--outfile=${output}`],{stdout:"ignore",stderr:"pipe"});if(await built.exited!==0)throw Error(await new Response(built.stderr).text());const script=await Bun.file(output).text();await Bun.file(output).delete();const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:"acceptance-controller",modules:true,script,compatibilityDate:"2026-10-03",compatibilityFlags:["nodejs_compat"],durableObjects:{REPOSITORY_CONTROLLER:{className:"AcceptanceControllerFixture",useSQLite:true}}}]}));try{
+ const api=await mf.getWorker("acceptance-controller"),call=(path:string)=>api.fetch(`http://test${path}`);expect((await call("/seed")).status).toBe(200);expect(await(await call("/read?actor=member")).json()).toMatchObject({currentPolicy:{mode:"review-required",version:0}});
+ const first=crypto.randomUUID();expect((await call(`/configure?event=${first}&version=0&actor=member`)).status).toBe(409);expect((await call(`/configure?event=${first}&version=0&token`)).status).toBe(409);expect((await call(`/configure?event=${first}&version=0&auto`)).status).toBe(409);
+ expect(await(await call(`/configure?event=${first}&version=0`)).json()).toMatchObject({appliedVersion:1,currentPolicy:{version:1,mode:"review-required",authorizedBy:"owner"}});const second=crypto.randomUUID();expect((await call(`/configure?event=${second}&version=0`)).status).toBe(409);expect((await call(`/configure?event=${second}&version=1`)).status).toBe(200);expect(await(await call(`/configure?event=${first}&version=0`)).json()).toMatchObject({appliedVersion:1,currentPolicy:{version:2}});await call("/remove?actor=member");expect((await call("/read?actor=member")).status).toBe(409);
+ }finally{await mf.dispose();}
+},30000);

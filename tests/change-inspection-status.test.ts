@@ -1,0 +1,6 @@
+import {test,expect} from 'bun:test';
+import {changeInspectionStatus} from '../src/web/change-inspection-status';
+const checkpoint={id:'checkpoint-one',author:'Owned contributor',isReadyForIntegration:false,commitHash:'a'.repeat(40),message:'Observed',timestamp:'2026-10-05',filesChanged:[]};
+test('uninspected active work does not claim zero shared files or absence of pushes',()=>{expect(changeInspectionStatus([{currentCommit:'a'.repeat(40),checkpoints:[]}],0)).toEqual({pending:1,sharedFilesLabel:'—',sharedFilesNote:'1 change awaiting inspection'});});
+test('exact observed current checkpoint can establish known zero; old checkpoint cannot',()=>{expect(changeInspectionStatus([{currentCommit:checkpoint.commitHash,checkpoints:[checkpoint]}],0)).toEqual({pending:0,sharedFilesLabel:'0',sharedFilesNote:null});expect(changeInspectionStatus([{currentCommit:'b'.repeat(40),checkpoints:[checkpoint]}],0).sharedFilesLabel).toBe('—');});
+test('observed overlaps remain visible while other changes await inspection',()=>{expect(changeInspectionStatus([{currentCommit:null,checkpoints:[]},{currentCommit:'b'.repeat(40),checkpoints:[]}],3)).toEqual({pending:2,sharedFilesLabel:'3',sharedFilesNote:'2 changes awaiting inspection'});expect(changeInspectionStatus([],0).sharedFilesLabel).toBe('0');});

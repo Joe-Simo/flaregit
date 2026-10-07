@@ -1,10 +1,21 @@
 import {validateRecoveryRemote} from "./private-recovery-bundle";
 import {gitAuthEnv,q} from "./shell";
 /** A frozen review candidate is retained create-only, then verified through its exact full Git ref. */
-export async function retainCandidateGitPin(options:{candidateId:string;commit:string;directory:string;remote:string;token:string;beforeCommand(phase:"before"|"after"):Promise<void>;exec(command:string,env?:Record<string,string>):Promise<{success:boolean;stdout:string}>}):Promise<{ref:string;observedCommit:string}>{
+export async function retainCandidateGitPin(options:{candidateId:string;commit:string;directory:string;remote:string;token:string;revision?:true;beforeCommand(phase:"before"|"after"):Promise<void>;exec(command:string,env?:Record<string,string>):Promise<{success:boolean;stdout:string}>}):Promise<{ref:string;observedCommit:string}>{
  if(!/^[A-Za-z0-9_-]{1,200}$/.test(options.candidateId)||!/^[a-f0-9]{40}$/.test(options.commit)||/^0{40}$/.test(options.commit))throw Error("Exact frozen candidate identity required");
  validateRecoveryRemote(options.remote);
- const ref=`refs/flaregit/candidates/${options.candidateId}`;
+ const ref=options.revision?`refs/flaregit/candidate-revisions/${options.candidateId}/${options.commit}`:`refs/flaregit/candidates/${options.candidateId}`;
+ return retainPrivateGitPin(options,ref);
+}
+
+/** Unverified frozen conflict input only; this pin grants no candidate or publication success. */
+export async function retainConflictInputGitPin(options:{candidateId:string;attemptId:string;commit:string;directory:string;remote:string;token:string;beforeCommand(phase:'before'|'after'):Promise<void>;exec(command:string,env?:Record<string,string>):Promise<{success:boolean;stdout:string}>}){
+ if(!/^[A-Za-z0-9_-]{1,128}$/.test(options.candidateId)||!/^[a-f0-9]{40}$/.test(options.commit)||/^0{40}$/.test(options.commit)||!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(options.attemptId))throw Error('Exact unverified conflict input identity required');
+ validateRecoveryRemote(options.remote);
+ return retainPrivateGitPin(options,`refs/flaregit/conflict-inputs/${options.candidateId}/${options.attemptId}/head`);
+}
+
+async function retainPrivateGitPin(options:{commit:string;directory:string;remote:string;token:string;beforeCommand(phase:'before'|'after'):Promise<void>;exec(command:string,env?:Record<string,string>):Promise<{success:boolean;stdout:string}>},ref:string):Promise<{ref:string;observedCommit:string}>{
  const run=async(command:string)=>{await options.beforeCommand("before");const result=await options.exec(command,gitAuthEnv(options.token));await options.beforeCommand("after");return result;};
  const inspect=async()=>{const result=await run(`git -C ${q(options.directory)} ls-remote --refs ${q(options.remote)} ${q(ref)}`);if(!result.success)throw Error("Candidate preservation readback unavailable");const rows=result.stdout.trim().split("\n").filter(Boolean);if(rows.length===0)return false;if(rows.length!==1||rows[0]!==`${options.commit}\t${ref}`)throw Error("Protected candidate ref differs from the verified commit");return true;};
  if(!await inspect()){

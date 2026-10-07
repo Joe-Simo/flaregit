@@ -1,3 +1,5 @@
+import {repositoryInitializationProgress} from "../repository-initialization-progress";
+import{repositoryStorageCapacitySchema,storageBlocksNewAllocation,storageCapacityMessage,type RepositoryStorageCapacity}from'../repository-storage-capacity';
 import {readRepositoryCreations,restoreRepositoryCreation,type RepositoryCreationRecovery} from "../repository-creation-recovery";
 import {SavedRepositoryCreations} from "../components/SavedRepositoryCreations";
 import {repositoryCreationRequest,type RepositoryCreationRequest} from "../repository-creation-request";
@@ -21,7 +23,8 @@ interface ImportJob {
 interface CreationResponse { id: string; status?: "ready" | "pending" | "failed"; kind?: "repository" | "import"; import?: ImportJob }
 
 export function NewRepo() {
-  const lifetime = useRef(new AbortController()), readSequence = useRef(0), mutationLock = useRef(false);
+  const [storageCapacity,setStorageCapacity]=useState<RepositoryStorageCapacity|null>(null),[storageError,setStorageError]=useState(false),[storageLoading,setStorageLoading]=useState(false);
+  const lifetime = useRef(new AbortController()), readSequence = useRef(0), capacityReadSequence=useRef(0), mutationLock = useRef(false);
   const [unconfirmed, setUnconfirmed] = useState(false);
   const [mode, setMode] = useState("repository");
   const [initialization,setInitialization]=useState<RepositoryCreationRequest["initialization"]>("readme");
@@ -66,9 +69,12 @@ export function NewRepo() {
     finally { mutationLock.current=false; if(!lifetime.current.signal.aborted){setBusy(false); setCheckingId(null);} }
   };
 
-  const disabled = busy || (unconfirmed&&mode==="import") || activeImport !== null || mode==="repository"&&restoredCreation!==null&&!restoredCreation.canRetryOriginal || !name.trim() || (mode === "import" && (!url || !test || !name));
+  const loadStorageCapacity=useCallback(async()=>{const current=++capacityReadSequence.current;setStorageLoading(true);setStorageError(false);try{const value=repositoryStorageCapacitySchema.parse(await apiJson<unknown>('/account/storage-capacity',{signal:repositoryRequestSignal(lifetime.current.signal)}));if(current===capacityReadSequence.current&&!lifetime.current.signal.aborted)setStorageCapacity(value);}catch{if(current===capacityReadSequence.current&&!lifetime.current.signal.aborted){setStorageError(true);setStorageCapacity(null);}}finally{if(current===capacityReadSequence.current&&!lifetime.current.signal.aborted)setStorageLoading(false);}},[]);
+  useEffect(()=>{void loadStorageCapacity();},[loadStorageCapacity]);
+  const disabled = busy || storageBlocksNewAllocation(storageCapacity,unconfirmed||restoredCreation!==null||activeImport!==null) || (unconfirmed&&mode==="import") || activeImport !== null || mode==="repository"&&restoredCreation!==null&&!restoredCreation.canRetryOriginal || !name.trim() || (mode === "import" && (!url || !test || !name));
 
   const submit = async () => {
+    if(storageBlocksNewAllocation(storageCapacity,unconfirmed||restoredCreation!==null||activeImport!==null))return;
     if(mutationLock.current || unconfirmed&&mode==="import"||mode==="repository"&&restoredCreation&&!restoredCreation.canRetryOriginal)return; mutationLock.current=true;
     let rejectedBeforeAllocation = true;
     setBusy(true);
@@ -123,6 +129,11 @@ export function NewRepo() {
           </Tabs>
         </CardHeader>
         <CardContent className="space-y-4">
+          <section aria-label="Repository storage capacity" className="text-xs space-y-2">
+            <p role="status">{storageLoading?'Checking recorded storage capacity…':storageError?'Storage capacity could not be confirmed. Creation still checks current inventory before allocating.':storageCapacity?storageCapacityMessage(storageCapacity):'Recorded storage capacity is not yet available.'}</p>
+            {storageCapacity&&<p className="text-muted-foreground">Storage allocations today: account {storageCapacity.account.used??'unknown'}/{storageCapacity.account.limit??'not configured'}; shared {storageCapacity.global.used??'unknown'}/{storageCapacity.global.limit??'not configured'}. Includes repository copies and workspaces.{storageCapacity.verifiedAt&&` Inventory recorded ${new Date(storageCapacity.verifiedAt).toLocaleString()}.`}</p>}
+            <Button type="button" size="sm" variant="ghost" disabled={storageLoading} onClick={()=>void loadStorageCapacity()}>Refresh storage capacity</Button>
+          </section>
           <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); if (!disabled) void submit(); }}>
           <label className="block text-sm">
             <span className="font-medium">Repository name</span>
@@ -162,7 +173,7 @@ export function NewRepo() {
             <RepositoryInitializationFields description={description} defaultBranch={defaultBranch} initialization={initialization} allowEmpty onInitialization={setInitialization} disabled={busy||unconfirmed} onDescription={setDescription} onBranch={setDefaultBranch}/>
           )}
           {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>}
-          {busy && <p role="status" className="text-sm text-muted-foreground">{checkingId ? "Checking the saved import. No new import is requested." : mode === "import" ? "Submitting the import request. Repository availability is checked before opening it." : "Initializing the repository and checking its first committed Git state…"}</p>}
+          {busy && <p role="status" className="text-sm text-muted-foreground">{checkingId ? "Checking the saved import. No new import is requested." : mode === "import" ? "Submitting the import request. Repository availability is checked before opening it." : repositoryInitializationProgress(initialization)}</p>}
           <div className="flex flex-wrap gap-2">
             {!activeImport && <Button type="submit" variant="orange" disabled={disabled}>
               {busy ? checkingId ? "Checking import…" : "Creating…" : mode === "import" ? "Import repository" : unconfirmed?"Retry saved repository request":"Create repository"}

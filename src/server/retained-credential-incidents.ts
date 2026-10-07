@@ -95,6 +95,7 @@ export class RetainedCredentialIncidents {
             return this.storage.sql.exec<Row>("SELECT * FROM retained_credential_incidents WHERE status='pending' AND attempts<4 AND automatic_sweeps<4 ORDER BY COALESCE(expires_at,9223372036854775807),input_id,purpose LIMIT 20").toArray().map(row => ({ inputId: row.input_id, purpose: row.purpose, repoName: row.repo_name, accountKey: row.account_key, token: row.token!, expiresAt: row.expires_at, attempts: row.attempts, automaticSweeps: row.automatic_sweeps }));
         });
     }
+    cleanupContext(id:string,purpose:RetainedCredentialPurpose){const row=this.row(id,purpose);return row?{payload:row.payload,scope:row.scope,repoName:row.repo_name,accountKey:row.account_key,intentExpiresAt:row.intent_expires_at}:null;}
     /** Claim an automatic opportunity before funding. Denied funding also consumes
      * this separate cap, without pretending a provider revoke was attempted. */
     markAutomaticSweep(id: string, purpose: RetainedCredentialPurpose): boolean { return this.storage.transactionSync(() => { const row = this.row(id, purpose); if (!row)

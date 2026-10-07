@@ -99,6 +99,18 @@ Edit `wrangler.jsonc`:
 - Explicit repository/account deletion retains metadata and reservations until tracked writes and provider absence are confirmed. Repositories created before dispatch tracking remain pending provider reconciliation; an empty listing alone does not complete their deletion. No automatic history or cache garbage collection is enabled.
 - Keep `PAID_CHECKOUT_ENABLED=false` until the paid offering and provider price have been verified. Existing billing remains manageable; Free collaboration and private repositories do not require checkout.
 
+Exact release receipts also require the `CF_VERSION_METADATA` version-metadata binding and `FLAREGIT_SOURCE_VERSION` set to the deployed source commit.
+
+The supported isolated build/browser path additionally requires `ISOLATED_EXECUTION_IMAGE` pinned by image digest, `ISOLATED_BROWSER_POLICY_DIGEST`, the separate `UNTRUSTED_EXECUTION` namespace, `UNTRUSTED_EGRESS` and `EXECUTION_AUTHORITY` service bindings, and `VERIFICATION_BROWSER`. Browser allocation requires `BROWSER_SESSION_RESERVATION_USD_MICROS`; missing configuration refuses execution. These server bindings are not credentials to put in `.env` or the client bundle. The checked-in application configuration does not provision this complete path automatically; the private security canary is separate evidence, not a working customer deployment. Follow the roadmap for the remaining hosted onboarding gate.
+
+### Preview origin onboarding
+
+In source revision `de0f600`, repository Settings exposes **Prepare isolated preview**, **Resume original preview request**, and **Check preview status**. Preparation is owner-only and completes one bounded origin-provisioning operation; Resume is for interruption recovery. It does not build or publish repository changes. After an uncertain response, check status and resume the recorded request rather than create a replacement. The browser saves the original UUID before dispatch and refuses provisioning if recovery storage is unavailable.
+
+Provisioning defaults off with zero allocation capacity. An operator must explicitly configure `PREVIEW_PROVISIONING_ENABLED=true`, a bounded `PREVIEW_PROVISIONING_GLOBAL_LIMIT`, account ID, Workers subdomain, application origin, broker service, compatibility date, and the supported compiled `src/server/preview-worker.ts` module plus its SHA-256 (`PREVIEW_PROVISIONING_MODULE` / `PREVIEW_PROVISIONING_MODULE_SHA256`). The broker service must expose the `PreviewAssetBroker` entrypoint. Store `PREVIEW_PROVISIONING_API_TOKEN` only as a server-side Worker secret; never place it in frontend configuration. Each repository requires an exclusive origin. The global limit counts lifetime assignments, including retired ones; retirement does not replenish it. Origin provisioning does not replace the isolated execution bindings described above. This source wiring has local verification; customer hosted onboarding remains an acceptance gate in the roadmap.
+
+Webhook replay likewise saves the original UUID and expected delivery generation before dispatch. Following a lost response or reload, the client checks and retries that same recorded replay; it does not silently mint a replacement request.
+
 Secrets:
 
 ```bash
@@ -117,21 +129,41 @@ bun run build && bunx wrangler deploy
 
 Clone the [public Apache-2.0 repository](https://github.com/Joe-Simo/flaregit), then run these commands from its root. Git and Bun are required for the local controller and proof runner. Cloudflare credentials are needed only for the live model demo or hosted deployment.
 
-The hosted prototype source is on `codex/docs-community-and-delivery`. Select that branch when cloning:
+Published source is on `main`. Exact source, deployment, and verification status
+are tracked separately in [docs/ROADMAP.md](docs/ROADMAP.md); unpublished local
+checkpoints are not installed by cloning the public repository.
 
 ```bash
-git clone --branch codex/docs-community-and-delivery https://github.com/Joe-Simo/flaregit.git
+git clone https://github.com/Joe-Simo/flaregit.git
 cd flaregit
 ```
 
 ```bash
 bun install --frozen-lockfile
-bun run typecheck && bun run lint && bun test
+bun run typecheck && bun run lint && bun run test:isolated
 ```
+
+For the complete source gate in this checkout, `bun run test:isolated` runs every
+discovered test file sequentially in a fresh Bun process, preserving its existing
+deadlines and skips. It writes the exact inventory, live logs, and final summary
+outside the checkout and exits nonzero on any failure. This avoids shared-process
+emulator teardown interference; it does not prove hosted behavior. Run
+`bun run build` to verify the production web assets.
 
 UI: `bun run dev` uses Bun HTML imports and `Bun.serve` on loopback port 5173. It proxies the API, auth configuration, status and webhook requests to a real Worker at `FLAREGIT_API` (default `http://127.0.0.1:8787`, i.e. `bunx wrangler dev`; see `src/tooling/dev-web.ts`). `bun run build` emits the production HTML, styles, JavaScript, legal pages, and a separate compiled diff worker into `dist`. Tailwind 3 styling is preserved through PostCSS; client environment inlining is disabled.
 
-Core engine without the cloud: `bun test` runs the integration engine with real Git, verification and CAS, with a scripted stand-in for the model only. `bun run demo` runs the three ticket-booking scenarios (text conflict, clean-but-broken merge, contradiction) against a local runtime with Workers AI as the model; it requires `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (optional `CLOUDFLARE_AI_GATEWAY`, `FLAREGIT_AI_MODEL`) and refuses to run without them. Contributor verification and preview builds additionally require secure Linux UID isolation (the supplied cloud container); the local live-model demo fails closed on an ordinary macOS process. Do not use the trusted test-harness mode for real model output or imported repositories.
+To build the native CLI, use `bun run build:cli`. On macOS, apply a local ad-hoc signature to the generated executable before running it; this does not notarize a distributable release:
+
+```bash
+bun run build:cli
+codesign --force --sign - dist-cli/flaregit
+codesign --verify --verbose dist-cli/flaregit
+./dist-cli/flaregit --help
+```
+
+The source CLI remains available as `bun cli/flaregit.ts --help` without this packaging step.
+
+Core engine without the cloud: `bun test` runs the integration engine with real Git, verification and CAS, with a scripted stand-in for the model only. `bun run demo` runs the three ticket-booking scenarios (text conflict, clean-but-broken merge, contradiction) against a local runtime with Workers AI as the model; it requires `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (optional `CLOUDFLARE_AI_GATEWAY`, `FLAREGIT_AI_MODEL`) and refuses to run without them. That local live-model adapter requires secure Linux UID isolation and fails closed on an ordinary macOS process. The current server preview path instead requires the separately configured isolated execution namespace and pinned image: a trusted reader captures raw Git objects, closes its credential and native workspace, then the isolated runtime builds immutable output. Saved output recovery does not rerun contributor code. This source implementation is not yet hosted-verified; follow `docs/ROADMAP.md` for exact evidence. Do not use the trusted test-harness mode for real model output or imported repositories.
 
 `bun run demo:proof` runs a standalone real-Git protocol illustration with deterministic scripted contributors, no model or cloud credentials, and retained commit/journal receipts. It demonstrates parallel isolated clones, conflict, stale push refusal, and reconstruction after workspace deletion; it does not exercise the hosted product or represent real AI agents.
 
@@ -181,7 +213,15 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for trust boundaries and the la
 
 Apache-2.0. See [LICENSE](LICENSE).
 
-Hosted checks and previews execute contributor code under a separate Linux UID. `NODE_ENV=test` permits same-user execution only for explicitly trusted fixtures; those receipts are not production isolation evidence. Earlier recorded local AI results describe that historical run and do not prove the newer isolation boundary. An authenticated browser can exercise owned repositories without a CLI token; command-line acceptance still requires its own account token.
+The deployed UID-based boundary and the newer separate-container/trusted-browser
+path have distinct evidence. The newer path fails closed until its isolated
+execution image, egress authority, and browser bindings are configured; local
+tests and image audits do not establish Cloudflare isolation. Follow the C02
+hosted gates in [docs/ROADMAP.md](docs/ROADMAP.md) before activating it. Keep paid
+checkout disabled. `NODE_ENV=test` permits same-user execution only for explicitly
+trusted fixtures; never use that mode for customer source or real model output.
+An authenticated browser can exercise owned repositories without a CLI token;
+command-line acceptance still requires its own account token.
 
 Bring-your-own tools can already work through ordinary Git in a FlareGit change workspace created by `flaregit work`; review and integration remain in FlareGit. External provider names are attribution metadata, not evidence that a vendor account was connected or an agent ran. Registered external check/review reporting has an authenticated callback API and CLI; hosted service delivery still requires verification against the deployed API. The built-in `--agent` option runs FlareGit's own agent workflow; it does not log in to an external vendor.
 

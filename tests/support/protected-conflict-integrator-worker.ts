@@ -1,0 +1,14 @@
+import {CommandRepository,CommandIntegrator} from './integration-command-race-worker';
+import type {IntegrationNativeRuntimeScope} from '../../src/server/integration-native-runtime';
+import type {ProtectedConflictContext} from '../../src/server/protected-conflict-source';
+import type {Env} from '../../src/server/env';
+const nativeId='12345678-1234-4234-8234-123456789abc';
+export class ConflictRepository extends CommandRepository {
+ override async integrationProtectedConflictReceiptCurrent(scope:IntegrationNativeRuntimeScope,native:string,command:string,context:ProtectedConflictContext){if(!this.ctx.storage.sql.exec("SELECT user_id FROM members WHERE user_id='owner'").toArray().length||context.projectId!==scope.projectId||context.nativeRunId!==native)throw Error('Fixture current ownership withdrawn');const saved=await this.snapshot(scope);if(!saved.commands.some(row=>row.command_id===command))throw Error('Original native command absent');}
+}
+export class ConflictIntegrator extends CommandIntegrator {
+ private calls=0;
+ override async exec(argv:string[]){this.calls++;if(argv.length!==4||argv[0]!=='bun'||argv[1]!=='-e'||!argv[2]?.includes('MERGE_HEAD'))throw Error('Fixed inspector required');const input=JSON.parse(argv[3]!) as {acceptedBase:string;contributorCommits:Record<string,string>};return {success:true,exitCode:0,stderr:'',stdout:JSON.stringify({head:input.acceptedBase,base:input.acceptedBase,contributors:input.contributorCommits,mergeHeads:[Object.values(input.contributorCommits)[0]],index:[{path:'file.txt',mode:'100644',stage:2,object:'a'.repeat(40)},{path:'file.txt',mode:'100644',stage:3,object:'b'.repeat(40)}],files:[{path:'file.txt',mode:'100644',size:1,digest:'c'.repeat(64)}]})};}
+ async fixedExecutions(){return this.calls;}
+}
+export default {async fetch(request:Request,env:Env){const url=new URL(request.url),repo=env.REPOSITORY_CONTROLLER.getByName('project:p123456789abc') as unknown as ConflictRepository,job=env.INTEGRATOR.getByName(`native-${nativeId}`) as unknown as ConflictIntegrator;try{if(url.pathname==='/seed'){await repo.fixtureSeed(true);return Response.json({ok:true});}if(url.pathname==='/admit')return Response.json(await repo.admitIntegrationNativeCommand('original','legacy',nativeId,url.searchParams.get('id')!));if(url.pathname==='/withdraw'){await repo.fixtureChange('withdraw');return Response.json({ok:true});}if(url.pathname==='/count')return Response.json(await job.fixedExecutions());const input=await request.json() as {scope:IntegrationNativeRuntimeScope;commandId:string;context:ProtectedConflictContext};return Response.json(url.pathname==='/inspect'?await job.integrationInspectProtectedConflict(input.scope,nativeId,input.commandId,input.context):await job.integrationProtectedConflictReceipt(input.scope,nativeId,input.commandId,input.context));}catch(error){return Response.json({error:String(error)},{status:409});}}};

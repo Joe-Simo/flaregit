@@ -12,6 +12,15 @@ function fixture(){
  const ledger=new BrowserSessionBudget(storage as unknown as DurableObjectStorage,callbacks),managed=new ManagedSpendLedger(storage as unknown as DurableObjectStorage);
  return{db,storage,callbacks,ledger,managed,queries,closureIds,setAllowed:(value:boolean)=>{allowed=value;},setReservation:(value:number|null)=>{reservation=value;},setExpected:(value:BrowserSessionScope)=>{expected=value;},setClosure:(value:BrowserSessionClosure|null)=>{closure=value;},fundingCalls:()=>fundingCalls};
 }
+test("attributed history closure requires ordered native timestamps and remains durable",async()=>{
+ const f=fixture(),input=scope(),session=crypto.randomUUID();try{
+  await f.ledger.admit(input,now);await f.ledger.beginAcquire(input,now);f.ledger.recordAcquired(input,session);
+  f.setClosure({sessionId:session,observation:"closed",observedAt:now.getTime(),providerObservation:"exact-history"});expect((await f.ledger.close(input)).phase).toBe("cleanup_pending");
+  f.setClosure({sessionId:session,observation:"closed",observedAt:now.getTime(),providerObservation:"exact-history",providerStartTime:200,providerEndTime:100});expect((await f.ledger.close(input)).phase).toBe("cleanup_pending");
+  const receipt:BrowserSessionClosure={sessionId:session,observation:"closed",observedAt:now.getTime(),providerObservation:"exact-history",providerStartTime:now.getTime()-5000,providerEndTime:now.getTime()-1000};f.setClosure(receipt);expect((await f.ledger.close(input)).closure).toEqual(receipt);
+  expect(new BrowserSessionBudget(f.storage as unknown as DurableObjectStorage,f.callbacks).get(input.leaseId)?.closure).toEqual(receipt);
+ }finally{f.db.close();}
+});
 test("one global browser is funded atomically once and lost acknowledgment uses recorded readback",async()=>{
  const f=fixture(),input=scope();try{
   const first=await f.ledger.admit(input,now);expect(first.phase).toBe("funded");

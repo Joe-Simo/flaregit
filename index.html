@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <script>(()=>{let theme="system";try{theme=localStorage.getItem("flaregit.theme")||"system";}catch{}const dark=theme==="dark"||(theme!=="light"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("dark",dark);document.documentElement.style.colorScheme=dark?"dark":"light";})();</script>
     <script>window.addEventListener('error',event=>{const title=document.getElementById('app-loading-title');if(title&&(event.target instanceof HTMLScriptElement||event instanceof ErrorEvent)){title.textContent='FlareGit could not load';document.getElementById('app-loading-detail').textContent='Reload to get the current application. Saved repository history remains preserved.';document.getElementById('app-loading-reload').hidden=false;}},true);</script>
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23f6821f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='18' cy='18' r='3'/><circle cx='6' cy='6' r='3'/><path d='M13 6h3a2 2 0 0 1 2 2v7'/><path d='M6 9v12'/></svg>" />
+    <link rel="icon" type="image/svg+xml" href="./public/flaregit-icon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>FlareGit | Work in parallel. Review what comes together.</title>
   </head>

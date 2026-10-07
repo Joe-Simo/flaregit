@@ -1,6 +1,7 @@
 import type {FrozenAcceptedTarget,TaskTargetGeneration} from "./accepted-target.js";
 import type { ExternalCheckPolicy } from "./external-checks.js";
 import type { FrozenContributorProof } from "./verification/integrity.js";
+import type {AcceptancePolicy,AutoAcceptanceAuthority} from "../server/acceptance-policy";
 export type ContributorType = "human" | "agent";
 
 export interface Contributor {
@@ -9,6 +10,11 @@ export interface Contributor {
   type: ContributorType;
   avatarUrl?: string;
 }
+
+export type FrozenContributionAttribution={taskId:string;commit:string;goal:string;issue?:number;dependsOn?:string}&(
+ {status:"recorded";contributor:Contributor;initiatedBy:Contributor;externalTool?:{execution:"external";tool:string;sessionId:string;attestedBy:string}}|
+ {status:"unavailable";reason:"legacy_origin_unavailable"}
+);
 
 export type TaskStatus =
   | "working"
@@ -71,6 +77,8 @@ export interface Task {
   contributor: Contributor;
   /** Person who asked an agent to contribute; preserved separately from the agent's authorship. */
   initiatedBy?: Contributor;
+  /** Immutable creator-attested origin; never evidence of a managed runtime. */
+  externalTool?:{execution:"external";tool:string;sessionId:string;attestedBy:string};
   /** Latest real coding-agent Workflow; its durable state can be inspected and paused/resumed. */
   agentWorkflowInstanceId?: string;
   /** Durable execution record, including scenario-owned agent runs. */
@@ -96,6 +104,7 @@ export interface Task {
 export type CompositionMethod = "clean_git_merge" | "repaired_merge" | "rebase_linear";
 
 export interface RepairAttempt {
+  protectedRepair?: { kind?: 'browser' | 'text'; text?: {nativeRunId:string;commandId:string;attemptId:string}; sourceCommit: string; sourceDigest: string; planDigest: string; modelAttemptId?: string; resultCommit?: string; status: 'requested' | 'patch_ready' | 'applied' | 'unknown' };
   round: number;
   prompt: string;
   patch: string;
@@ -124,6 +133,7 @@ export interface CandidateGeneration {
   /** Owner policy and contributor inputs captured before composition; absent on legacy candidates. */
   frozenExternalChecksPolicy?: ExternalCheckPolicy;
   frozenContributorProofs?: FrozenContributorProof[];
+  frozenAttribution?:FrozenContributionAttribution[];
   frozenRequirements: Requirement[];
   compositionMethod?: CompositionMethod;
   candidateCommit?: string;
@@ -143,7 +153,9 @@ export interface CandidateGeneration {
   workflowInstanceId?: string;
   /** A human's decision. It is bound to the commit they saw; any other commit needs a new review. */
   frozenReviewPolicy?: {version:number;policy:{requiredApprovals:number;allowAuthorApproval:boolean};authorIds:string[]};
-  review?: { approved: boolean; by: string; note?: string; at: string; commit: string; actor?: HumanDecisionActor };
+  frozenAcceptancePolicy?: AcceptancePolicy;
+  policyAuthorization?: AutoAcceptanceAuthority;
+  review?: { approved: boolean; by: string; note?: string; at: string; commit: string; actor?: HumanDecisionActor;acceptancePolicyVersion?:number };
   createdAt: string;
   updatedAt: string;
 }
@@ -184,6 +196,7 @@ export interface VerificationEvidence {
 export type JournalState = "PREPARED" | "REF_UPDATED" | "ACCEPTED" | "ABORTED";
 
 export interface PublicationJournalEntry {
+  readonly contributionAttribution?:FrozenContributionAttribution[];
   /** Explicit immutable repository-ledger target; absent on primary compatibility records. */
   readonly acceptedTarget?: FrozenAcceptedTarget;
   id: string;
@@ -196,7 +209,9 @@ export interface PublicationJournalEntry {
   state: JournalState;
   timestamp: string;
   error?: string;
-  publicationAuthority?: { readonly acceptedTarget?: FrozenAcceptedTarget; actor: HumanDecisionActor; reviewedAt: string; commit: string; tree: string; policyVersion: number; authorizedAt: string };
+  publicationAuthority?: { readonly acceptedTarget?: FrozenAcceptedTarget;actor:HumanDecisionActor;commit:string;tree:string;policyVersion:number;authorizedAt:string;acceptancePolicyVersion?:number } & (
+    {kind?:"human-review";reviewedAt:string} | {kind:"maintainer-policy";policyAuthority:AutoAcceptanceAuthority}
+  );
 }
 
 export interface DecisionOption {
@@ -252,6 +267,7 @@ export interface ProductDecision {
 }
 
 export interface AcceptanceRecord {
+  readonly contributionAttribution?:FrozenContributionAttribution[];
   /** Explicit immutable repository-ledger target; absent on primary compatibility records. */
   readonly acceptedTarget?: FrozenAcceptedTarget;
   commit: string;

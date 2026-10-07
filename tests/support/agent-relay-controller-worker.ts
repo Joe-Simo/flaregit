@@ -27,10 +27,15 @@ export class AgentRelayControllerFixture extends RepositoryController{
   if(url.pathname==="/claim"){await this.claimAgentRun({runId:"run",taskId:"task",startingCommit:"a".repeat(40),startingBranchHead:this.branchHead,branch:"task/task",goal:"Improve source",context:{comments:[]},allowedScope:["src/"],protectedPaths:[]});this.props={...this.props,scope:{...this.props.scope,expectedTip:this.branchHead,access:"write"}};return Response.json(await this.agentRelayCurrent(this.props));}
   if(url.pathname==="/issuance-fault"){this.issuanceFault=true;return Response.json({armed:true});}
   if(url.pathname==="/withdraw-on-issue"){this.withdrawOnIssue=true;return Response.json({armed:true});}
+  if(url.pathname==="/proposal")return Response.json({saved:await this.saveAgentProposal("run","task",{"src/feature.ts":"export const value = 1;"})});
+  if(url.pathname==="/mark")return Response.json({marked:await this.markAgentPushed("run","task",url.searchParams.get("commit")??"c".repeat(40))});
+  if(url.pathname==="/unrelated-move"){this.branchHead="d".repeat(40);return Response.json({unrelated:true});}
   if(url.pathname==="/credential"){const id=url.searchParams.get("id")!;await this.agentRelayBeforeCredential(this.props,id,"write");const credential=await this.agentRelayCredential(this.props,id,"write");return Response.json({scope:credential.scope,hasServerToken:Boolean(credential.token),minted:this.minted});}
+  if(url.pathname==="/transfer-own"){await this.agentRelayBeforeTransfer(this.props,url.searchParams.get("id")!,{oldCommit:this.props.scope.expectedTip,newCommit:url.searchParams.get("commit")??"c".repeat(40),ref:`refs/heads/${this.props.scope.branch}`});return Response.json({recorded:true});}
+  if(url.pathname==="/webhook"){const state=await this.getState();state.tasks.task!.currentCommit=this.branchHead;this.ctx.storage.sql.exec("UPDATE project SET doc=? WHERE id=1",JSON.stringify(state));return Response.json({checkpointAdvanced:true});}
   if(url.pathname==="/transfer"){await this.agentRelayBeforeTransfer(this.props,url.searchParams.get("id")!);return Response.json({allowed:true});}
   if(url.pathname==="/move"){this.branchHead="c".repeat(40);return Response.json({moved:true});}
-  if(url.pathname==="/current")return Response.json(await this.agentRelayCurrent(this.props));
+  if(url.pathname==="/current")return Response.json(await this.agentRelayCurrent(this.props,url.searchParams.get("request")??undefined));
   if(url.pathname==="/revoke")return Response.json({revoked:await this.revokeAgentCredential(url.searchParams.get("id")!),count:this.revoked});
   if(url.pathname==="/withdraw"){this.ctx.storage.sql.exec("DELETE FROM members WHERE user_id='owner'");return Response.json({withdrawn:true});}
   if(url.pathname==="/cleanup")return Response.json(await this.cleanupRelayAttempt(this.props));

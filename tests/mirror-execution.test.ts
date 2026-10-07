@@ -1,7 +1,9 @@
 import {test,expect} from 'bun:test';
 import {Database} from 'bun:sqlite';
 import {ManagedSpendLedger} from '../src/server/managed-spend-ledger';
-import {MirrorExecutions,executeMirror,type MirrorExecutionScope,type MirrorExecutionDeps} from '../src/server/mirror-execution';
+import type {AutoAcceptanceAuthority} from '../src/server/acceptance-policy';
+import type {PublicationJournalEntry} from '../src/core/types';
+import {MirrorExecutions,executeMirror,mapPolicyMirrorAuthority,type MirrorExecutionScope,type MirrorExecutionDeps} from '../src/server/mirror-execution';
 function fixture(options:{originalExpired?:boolean;denyBudget?:boolean;withdraw?:boolean;unknownPush?:boolean;cleanupUnknown?:boolean}={}){
  const db=new Database(':memory:');const storage={sql:{exec(query:string,...bindings:Array<string|number>){const rows=db.query(query).all(...bindings);return{toArray:()=>rows};}},transactionSync<T>(fn:()=>T):T{return db.transaction(fn)();}} as unknown as DurableObjectStorage;
  const scope:MirrorExecutionScope={id:crypto.randomUUID(),projectId:'project',incarnation:crypto.randomUUID(),accountKey:'account',actorId:'owner',sessionExpiresAt:Date.now()+(options.originalExpired?-1000:60000),journalId:'accepted',canonicalRepoName:'canonical',acceptedRef:'refs/heads/main',commit:'a'.repeat(40),tree:'b'.repeat(40),target:'https://github.com/owned/repo.git',configDigest:'c'.repeat(64),exportApproved:true};
@@ -32,3 +34,33 @@ test('old original session and changed configuration do not block owner-only rea
 test('completed mirror replay returns original receipt after fresh authority without budget or provider work',async()=>{const f=fixture();try{const first=await executeMirror(f.scope,f.deps);expect(first.status).toBe('complete');const counts=f.counts();let authorization=0;f.deps.authorize=async(mode)=>{expect(mode).toBe('reconcile');authorization++;};f.deps.admit=async()=>{throw Error('exhausted');};expect(await executeMirror(f.scope,f.deps)).toEqual(first);expect(authorization).toBeGreaterThan(0);expect(f.counts()).toEqual(counts);}finally{f.close();}});
 test('owner API token provenance has no invented session expiry and requires its real credential binding',()=>{const f=fixture();try{expect(()=>f.ledger.prepare({...f.scope,id:crypto.randomUUID(),sessionExpiresAt:null},()=>{})).toThrow();const tokenScope={...f.scope,id:crypto.randomUUID(),sessionExpiresAt:null,credentialHash:'d'.repeat(64)};expect(f.ledger.prepare(tokenScope,()=>{}).scope.sessionExpiresAt).toBeNull();}finally{f.close();}});
 test('actual managed spend receipt is reused after paid admission interruption and never consumed on lost ACK reconcile',async()=>{const f=fixture({unknownPush:true}),spend=new ManagedSpendLedger(f.storage),runId=`mirror-${f.scope.id}`;try{const admitted=spend.reserve({resourceKind:'native-optional',runId,accountKey:f.scope.accountKey,usdMicros:43008,maxInputBytes:1,maxOutputTokens:1,maxCalls:1,maxContainerSeconds:1200},{accountUsdMicros:100000,globalUsdMicros:100000});expect(admitted.allowed).toBe(true);expect(f.ledger.beginAdmission(f.scope.id,()=>{})).toBe(true);spend.consume(runId,0,0,1200);let admissionCallbacks=0;f.deps.admit=async()=>{admissionCallbacks++;const paid=spend.get(runId)!;expect(paid.calls).toBe(1);expect(paid.containerSeconds).toBe(1200);f.ledger.admissionGranted(f.scope.id,{nativeRunId:runId,seconds:1200,allowed:true});};expect((await executeMirror(f.scope,f.deps)).status).toBe('held');expect(admissionCallbacks).toBe(1);f.deps.admit=async()=>{throw Error('original paid admission must not repeat');};expect((await executeMirror(f.scope,f.deps)).status).toBe('complete');expect(spend.get(runId)).toMatchObject({calls:1,containerSeconds:1200});expect(f.counts().pushes).toBe(1);}finally{f.close();}});
+
+
+function policyMirrorFixture(scope:MirrorExecutionScope){
+ const receipt:AutoAcceptanceAuthority={id:crypto.randomUUID(),kind:'verified-auto-accept',identity:{projectId:scope.projectId,incarnation:scope.incarnation,canonicalRepoName:scope.canonicalRepoName,candidateId:'policy-candidate',commit:scope.commit,tree:scope.tree,targetRef:scope.acceptedRef,expectedBase:'d'.repeat(40),acceptedTargetVersion:2,verificationPolicyVersion:3,verificationPolicyDigest:'e'.repeat(64),requirementsDigest:'f'.repeat(64),acceptancePolicyVersion:4},policyVersion:4,serviceWorkflowId:'registered-integration',authorizedAt:100000,approvedRequirementIds:[],coveredRequirementIds:[],proofReceipts:{native:'native-proof',source:'source-proof',build:'build-proof',browser:'browser-proof'},proofDigests:{native:'1'.repeat(64),source:'2'.repeat(64),build:'3'.repeat(64),browser:'4'.repeat(64)}};
+ const journal:PublicationJournalEntry={id:scope.journalId,candidateId:receipt.identity.candidateId,candidateCommit:scope.commit,candidateTree:scope.tree,expectedHead:receipt.identity.expectedBase,newHead:scope.commit,outputDigest:'built-output',state:'ACCEPTED',timestamp:'2026-10-04T00:00:00Z',publicationAuthority:{kind:'maintainer-policy',policyAuthority:receipt,actor:{userId:scope.actorId,displayName:'Maintainer policy',viaToken:false},commit:scope.commit,tree:scope.tree,policyVersion:3,acceptancePolicyVersion:4,authorizedAt:'2026-10-04T00:00:00Z'}};
+ return{projectId:scope.projectId,incarnation:scope.incarnation,canonicalRepoName:scope.canonicalRepoName,registeredWorkflowId:receipt.serviceWorkflowId,journal,candidatePolicyAuthority:receipt,historicalAuthority:receipt};
+}
+test('accepted policy source has distinct historical mirror authority without a fabricated human review',()=>{
+ const f=fixture();try{const input=policyMirrorFixture(f.scope),authority=mapPolicyMirrorAuthority(input);expect(authority).toMatchObject({kind:'policy-integration',workflowId:'registered-integration',policyAuthorityId:input.historicalAuthority.id,acceptancePolicyVersion:4,verificationPolicyVersion:3,configuredById:'owner'});expect('reviewActorId' in authority).toBe(false);expect('reviewedAt' in authority).toBe(false);
+ const scope={...f.scope,id:crypto.randomUUID(),sessionExpiresAt:null,authority};expect(f.ledger.prepare(scope,()=>{}).scope.authority).toEqual(authority);
+ expect(()=>f.ledger.prepare({...scope,id:crypto.randomUUID(),actorId:'other-owner'},()=>{})).toThrow('recorded configuring owner');
+ expect(()=>f.ledger.prepare({...scope,id:crypto.randomUUID(),journalId:'another-journal'},()=>{})).toThrow('another accepted journal');
+ expect(()=>f.ledger.prepare({...scope,authority:{...authority,policyAuthorityId:crypto.randomUUID()}},()=>{})).toThrow('scope changed');
+ }finally{f.close();}
+});
+test('policy mirror mapper rejects pending, altered proof, workflow and version scopes without canonical authority',()=>{
+ const f=fixture();try{const input=policyMirrorFixture(f.scope);
+ expect(()=>mapPolicyMirrorAuthority({...input,journal:{...input.journal,state:'PREPARED'}})).toThrow('accepted policy publication');
+ expect(()=>mapPolicyMirrorAuthority({...input,registeredWorkflowId:'other-workflow'})).toThrow('differs from committed source');
+ expect(()=>mapPolicyMirrorAuthority({...input,historicalAuthority:{...input.historicalAuthority,policyVersion:5}})).toThrow('differs from committed source');
+ expect(()=>mapPolicyMirrorAuthority({...input,candidatePolicyAuthority:{...input.candidatePolicyAuthority,proofDigests:{...input.candidatePolicyAuthority.proofDigests,browser:'5'.repeat(64)}}})).toThrow('differs from committed source');
+ const source=mapPolicyMirrorAuthority(input);expect(source.policyAuthorityId).toBe(input.historicalAuthority.id);expect(Object.keys(source)).not.toContain('publishAllowed');
+ // Current policy mode/version is deliberately not a parameter: historical
+ // accepted data remains readable, while new publication uses revalidation.
+ expect(()=>mapPolicyMirrorAuthority({...input,incarnation:crypto.randomUUID()})).toThrow('differs from committed source');
+ }finally{f.close();}
+});
+test('withdrawn mirror export consent still refuses policy-backed source before native or credential work',async()=>{
+ const f=fixture();try{const authority=mapPolicyMirrorAuthority(policyMirrorFixture(f.scope)),scope={...f.scope,id:crypto.randomUUID(),sessionExpiresAt:null,authority};f.ledger.prepare(scope,()=>{});f.deps.authorize=async()=>{throw Error('Current owner mirror consent withdrawn');};expect((await executeMirror(scope,f.deps)).status).toBe('held');expect(f.counts()).toEqual({issued:0,pushes:0,reads:0,revokes:0,stops:0});}finally{f.close();}
+});

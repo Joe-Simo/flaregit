@@ -55,17 +55,21 @@ export async function runIsolatedBuildJob(proposed:IsolatedExecutionContext,sour
     await work(()=>deps.assertSourceProvenance(structuredClone(context),structuredClone(proof)));
   };
   const allowed=async()=>{await current();if(!await work(()=>deps.grants.authorizeIsolatedExecution({scope:structuredClone(context.scope),sourceDigest:context.sourceDigest,image:context.image})))throw new Error("Funded isolated build grant unavailable");await current();};
-  let job:UntrustedExecutionRpc|undefined,artifact:IsolatedBuildArtifact|undefined,grantPreparationAttempted=false;
+  let job:UntrustedExecutionRpc|undefined,artifact:IsolatedBuildArtifact|undefined,dispatchOwned=false;
   try{
-    await current();grantPreparationAttempted=true;
+    await current();
     await work(()=>deps.grants.prepareIsolatedExecutionGrant(structuredClone(context)));
     await allowed();
     const name=await work(()=>untrustedExecutionName(context.scope,manifest.digest));
-    await allowed();job=deps.namespace.getByName(name);
-    await work(()=>job!.prepare(structuredClone(context.scope),structuredClone(manifest),files.map(file=>({...file,bytes:file.bytes.slice()})),context.image));
     await allowed();
+    // The durable one-shot dispatch claim grants invocation ownership before
+    // acquiring or preparing the shared per-attempt job. A losing or unknown
+    // claim ACK cannot stop/seal another invocation's execution.
     const claim=await work(()=>deps.grants.claimIsolatedExecutionDispatch(structuredClone(context)));
     if(claim.phase!=="dispatched"||JSON.stringify(claim.context)!==JSON.stringify(context))throw new Error("Exact one-shot build dispatch not confirmed");
+    dispatchOwned=true;
+    await allowed();job=deps.namespace.getByName(name);
+    await work(()=>job!.prepare(structuredClone(context.scope),structuredClone(manifest),files.map(file=>({...file,bytes:file.bytes.slice()})),context.image));
     await allowed();
     const result=await work(()=>job!.run(structuredClone(context.scope),structuredClone(manifest),files.map(file=>({...file,bytes:file.bytes.slice()}))));
     // RPC buffers are untrusted and mutable too; snapshot before authority awaits.
@@ -76,7 +80,7 @@ export async function runIsolatedBuildJob(proposed:IsolatedExecutionContext,sour
     artifact={identity:{context:structuredClone(context),sourceDigest:manifest.digest,outputDigest:outputManifest.digest,executionName:name},manifest:outputManifest,files:outputFiles,acceptanceEvidence:false};
   }finally{
     // Original saved context authorizes cleanup even after contributor authority is withdrawn.
-    if(grantPreparationAttempted){
+    if(dispatchOwned){
       const cleanup=await Promise.allSettled([boundedCleanup(()=>deps.grants.sealIsolatedExecution(structuredClone(context)),timeout),job?boundedCleanup(()=>job!.stop(),timeout):Promise.resolve({stopped:true})]);
       if(cleanup[0]!.status!=="fulfilled"||cleanup[1]!.status!=="fulfilled"||cleanup[1]!.value.stopped!==true)throw new Error("Isolated build cleanup remains unconfirmed; no artifact was released");
     }

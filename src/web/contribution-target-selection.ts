@@ -5,7 +5,7 @@ export type ContributionTarget=z.infer<typeof targetSchema>;
 export type ContributionTargetExpectation=Omit<ContributionTarget,"branch">;
 export function parseContributionTargets(value:unknown):{targets:ContributionTarget[];truncated:boolean}{return z.object({targets:z.array(targetSchema).max(200),truncated:z.boolean()}).strict().parse(value);}
 export function contributionExpectation(target:ContributionTarget):ContributionTargetExpectation{const {branch:_branch,...expectation}=targetSchema.parse(target);return expectation;}
-export interface ContributionCreationIntent{signature:string;taskId:string;payload:{taskId:string;goal:string;dependsOn?:string;issue?:number;expectedTarget?:ContributionTargetExpectation}}
+export interface ContributionCreationIntent{signature:string;taskId:string;payload:{taskId:string;goal:string;dependsOn?:string;issue?:number;expectedTarget?:ContributionTargetExpectation;externalTool?:{execution:"external";tool:string;sessionId:string}}}
 /** Replay returns the original frozen target tuple, including after root advance.
  * Changing user intent requires a new explicit request; never infer primary.
  */

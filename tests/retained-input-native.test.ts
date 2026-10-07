@@ -87,8 +87,9 @@ test('native SQLite retained input authority, exact rebase replay and post-withd
     const bounded = { ...current, id: crypto.randomUUID() };
     expect((await call('/credential-begin', bounded)).status).toBe(200);
     const beyond = Array.from({ length: 21 }, (_, index) => ({ ...current, id: `${(index + 1).toString(16).padStart(8, '0')}-1234-4234-8234-123456789abc` }));
+    // These are explicitly historical incidents without a prepaid cleanup group.
     for (const entry of beyond)
-        expect((await call('/credential-begin', entry)).status).toBe(200);
+        expect((await call('/credential-begin-legacy', entry)).status).toBe(200);
     await call('/withdraw-owner');
     expect((await call('/credential-record', current)).status).toBe(200);
     const summary = await (await call('/credential-summary', current)).text();

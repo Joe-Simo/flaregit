@@ -4,7 +4,33 @@
   "main": "worker.ts",
   "compatibility_date": "2026-10-02",
   "workers_dev": true,
-  "observability": { "enabled": false },
-  "durable_objects": { "bindings": [{ "name": "RECEIPTS", "class_name": "DeliveryReceipts" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DeliveryReceipts"] }]
+  "observability": {
+    "enabled": false
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RECEIPTS",
+        "class_name": "DeliveryReceipts"
+      },
+      {
+        "name": "NETWORK_RECEIPTS",
+        "class_name": "NetworkReceipts"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "DeliveryReceipts"
+      ]
+    },
+    {
+      "tag": "v2-c02-network",
+      "new_sqlite_classes": [
+        "NetworkReceipts"
+      ]
+    }
+  ]
 }

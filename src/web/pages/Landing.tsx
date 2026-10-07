@@ -1,63 +1,48 @@
+import { FlareGitBrand } from "../components/Brand";
+import { useState } from "react";
 import { CloudflareBadgeFooter } from "../components/CloudflareBadge";
 import { PublicSearchButton } from "../components/SearchDialog";
-import { ArrowRight, ArrowUpRight, GitBranch } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { ArrowRight, ArrowUpRight, Menu, MessageSquare, GitCommitHorizontal, ShieldCheck } from "lucide-react";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { Dialog, DialogClose, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ThemeSelector } from "../ThemeProvider";
+import "./landing.css";
 
-function ContributionGraphic() {
-  const blocks = [
-    [45, 270], [95, 270], [145, 270], [195, 270], [245, 270], [295, 270], [345, 270],
-    [95, 220], [145, 220], [245, 220], [295, 220],
-    [95, 170], [245, 170], [295, 170],
-    [95, 120], [145, 120], [245, 120], [145, 70], [245, 70], [245, 20],
-  ] as const;
-  return <figure className="mx-auto w-full max-w-[470px] lg:self-end lg:translate-y-[100px]">
-    <svg viewBox="0 0 470 320" className="w-full" role="img" aria-labelledby="work-title work-description">
-      <title id="work-title">Parallel work, a shared foundation</title>
-      <desc id="work-description">An original abstract illustration of separate contributions: fine orange, yellow and turquoise strokes form independent modular columns that join a shared lower row. This illustrates the collaboration workflow, not actual repository activity.</desc>
-      {blocks.map(([x, y], index) => {
-        const color = index === 18 ? '#14b8a6' : index === 2 || index === 13 ? '#f3bd22' : '#f36a16';
-        const height = index % 3 === 0 ? 43 : index % 3 === 1 ? 38 : 45;
-        return <g key={index} stroke={color} strokeWidth="1.25">{Array.from({ length: 10 }, (_, stripe) => <line key={stripe} x1={x + stripe * 4.5} x2={x + stripe * 4.5} y1={y} y2={y + height} />)}</g>;
-      })}
+const links = [{ label: "Docs", href: "/docs" }, { label: "Community", href: "/community" }, { label: "Pricing", href: "/pricing" }, { label: "About", href: "/about" }];
+
+function CollaborationIllustration() {
+  return <figure className="landing-collaboration">
+    <div className="landing-illustration-heading"><span>Separate work. Shared history.</span><span>Workflow illustration</span></div>
+    <svg viewBox="0 0 600 440" role="img" aria-labelledby="landing-work-title landing-work-description">
+      <title id="landing-work-title">Independent contributions come together</title>
+      <desc id="landing-work-description">Three isolated workspaces converge through coordination, protected checks, and owner acceptance policy into recoverable Git history. A conceptual workflow illustration, not live repository activity.</desc>
+      <defs><pattern id="landing-grid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r=".8" className="landing-grid-dot" /></pattern></defs>
+      <rect width="600" height="440" fill="url(#landing-grid)" />
+      <g fill="none" strokeWidth="2"><path className="landing-rail-human" d="M105 116V171C105 217 175 189 175 239V274C175 310 235 320 283 320" /><path className="landing-rail-agent" d="M300 116V169C300 199 233 214 233 252V280C233 301 259 320 283 320" /><path className="landing-rail-other" d="M495 116V180C495 222 425 199 425 243V272C425 306 352 320 319 320" /><path className="landing-rail-shared" d="M319 320H520" /></g>
+      {[{ x: 24, title: "Your contribution", role: "Human workspace", mobile: "You" }, { x: 219, title: "Agent contribution", role: "Isolated workspace", mobile: "Agent" }, { x: 414, title: "Another contribution", role: "Isolated workspace", mobile: "Agent" }].map(lane => <g key={lane.x}><rect className="landing-workspace-shadow" x={lane.x + 2} y="32" width="162" height="88" rx="12" /><rect className="landing-workspace" x={lane.x} y="28" width="162" height="88" rx="12" /><circle className="landing-workspace-dot" cx={lane.x + 20} cy="49" r="4" /><text className="landing-diagram-role landing-workspace-role" x={lane.x + 32} y="53">{lane.role}</text><text className="landing-diagram-title landing-workspace-title" x={lane.x + 16} y="78">{lane.title}</text><text className="landing-mobile-diagram-title" x={lane.x + 81} y="82" textAnchor="middle">{lane.mobile}</text><path className="landing-file-stroke" d={"M" + (lane.x + 16) + " 94h48m8 0h24"} strokeWidth="2" strokeLinecap="round" /></g>)}
+      <g className="landing-rail-nodes"><circle cx="105" cy="152" r="5" /><circle cx="175" cy="249" r="5" /><circle cx="300" cy="147" r="5" /><circle cx="233" cy="262" r="5" /><circle cx="495" cy="153" r="5" /><circle cx="425" cy="255" r="5" /></g>
+      <g><rect className="landing-coordination" x="116" y="173" width="373" height="60" rx="10" /><text className="landing-coordination-label" x="139" y="198">COORDINATION</text><text className="landing-diagram-body" x="139" y="218">Shared context · overlapping changes · stale bases</text></g>
+      <g><circle className="landing-integration-ring" cx="301" cy="320" r="26" /><circle className="landing-integration-node" cx="301" cy="320" r="17" /><path d="m294 320 5 5 9-11" fill="none" stroke="white" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round" /><text className="landing-diagram-title" x="301" y="374" textAnchor="middle">Integration</text><text className="landing-diagram-role" x="301" y="396" textAnchor="middle">Checks + owner policy</text></g>
+      <g><rect className="landing-history" x="447" y="296" width="127" height="49" rx="9" /><text className="landing-history-title" x="510" y="316" textAnchor="middle">Git history</text><text className="landing-history-detail" x="510" y="333" textAnchor="middle">Committed. Recoverable.</text></g>
     </svg>
+    <figcaption>Independent paths. One deliberate record of what lands.</figcaption>
   </figure>;
 }
 
 export function Landing({ onSignIn }: { onSignIn: () => void }) {
-  return <div className="min-h-screen bg-background text-foreground" style={{ fontFamily: 'var(--font-sans)' }}>
-    <header className="border-b border-border/60">
-      <div className="mx-auto flex min-h-[60px] max-w-[1100px] flex-wrap items-center justify-between gap-3 px-6 py-2.5 lg:px-0">
-        <a href="#/" className="flex items-center gap-2 text-base font-semibold tracking-tight" aria-label="FlareGit home"><GitBranch className="h-5 w-5 text-[#d04400]" aria-hidden />FlareGit</a>
-        <nav aria-label="Primary" className="flex flex-wrap items-center gap-3 sm:gap-6"><a href="#how-it-works" className="hidden text-xs text-muted-foreground hover:text-foreground sm:block">How it works</a><a href="/docs" className="text-xs text-muted-foreground hover:text-foreground">Docs</a><a href="/community" className="text-xs text-muted-foreground hover:text-foreground">Community</a><a href="/pricing" className="text-xs text-muted-foreground hover:text-foreground">Pricing</a><a href="/about" className="text-xs text-muted-foreground hover:text-foreground">About</a><PublicSearchButton /><ThemeSelector compact /><Button variant="ghost" size="sm" onClick={onSignIn}>Sign in <ArrowUpRight className="ml-1 h-3 w-3" aria-hidden /></Button></nav>
-      </div>
-    </header>
-    <main className="relative">
-      <div className="pointer-events-none absolute inset-0 opacity-20" style={{ backgroundImage: 'radial-gradient(hsl(var(--muted-foreground) / .4) .6px, transparent .6px)', backgroundSize: '12px 12px' }} aria-hidden />
-      <div className="relative mx-auto max-w-[1100px] border-x border-border/50 bg-background">
-        <section className="grid min-h-[520px] items-center gap-9 px-6 py-16 sm:px-12 lg:grid-cols-[1fr_1fr] lg:gap-12 lg:px-14 lg:py-[100px]">
-          <div className="max-w-[355px]">
-            <p className="mb-5 text-[11px] text-muted-foreground">Git collaboration for people and agents</p>
-            <h1 className="text-[32px] font-medium leading-[1.18] tracking-[-.025em] sm:text-[34px]">Git for parallel work.</h1>
-            <p className="mt-5 max-w-[330px] text-base leading-[1.6] text-muted-foreground">Independent workspaces. Visible overlaps. A shared conversation and a human decision about what lands.</p>
-            <Button variant="orange" onClick={onSignIn} className="mt-7 h-10 rounded-full bg-none bg-[#d04400] px-5 text-[13px] font-medium text-white shadow-none hover:bg-[#bb3d00]">Start collaborating <ArrowRight className="ml-3 h-3.5 w-3.5" aria-hidden /></Button>
-            <p className="mt-4 text-[11px] text-muted-foreground">Working prototype · Cloudflare Workers & Artifacts</p>
-          </div>
-          <ContributionGraphic />
-        </section>
-        <section id="how-it-works" className="border-t border-border/60">
-          <div className="px-6 pb-10 pt-12 text-center sm:px-12"><h2 className="text-[28px] font-medium tracking-[-.025em]">One project. Room to contribute.</h2><p className="mx-auto mt-3 max-w-[440px] text-sm leading-6 text-muted-foreground">Keep the people, context and original work behind every change.</p></div>
-          <div className="grid border-t border-border/60 md:grid-cols-3">
-            {[
-              { number: '01', title: 'Work independently', body: 'Each contribution has an isolated Git workspace. Use your own editor or agent while others keep working.' },
-              { number: '02', title: 'See what overlaps', body: 'Follow checkpoints, decisions and conversations. Surface conflicts and stale bases before changes become shared history.' },
-              { number: '03', title: 'Choose what lands', body: 'Review the composed diff and checks. A person accepts the exact commit, with original contributions preserved.' },
-            ].map(({ number, title, body }) => <article key={number} className="border-b border-border/60 px-6 py-9 last:border-b-0 sm:px-9 md:border-b-0 md:border-r md:last:border-r-0"><p className="mb-6 text-[11px] text-muted-foreground">{number}</p><h3 className="mb-3 text-base font-medium">{title}</h3><p className="text-sm leading-6 text-muted-foreground">{body}</p></article>)}
-          </div>
-        </section>
-        <section className="flex flex-col justify-between gap-5 border-t border-border/60 px-6 py-8 sm:px-9 md:flex-row md:items-center"><p className="max-w-[640px] text-xs leading-6 text-muted-foreground">Core collaboration and basic private repositories are free. Bring your own editor and agents. Integrations run in FlareGit containers with daily limits; connected checks supplement repository verification.</p><a href="https://github.com/Joe-Simo/flaregit" className="flex shrink-0 items-center gap-2 text-xs">View source <ArrowUpRight className="h-3.5 w-3.5" aria-hidden /></a></section>
-      </div>
+  const [menuOpen, setMenuOpen] = useState(false);
+  return <div className="flaregit-landing">
+    <a className="landing-skip" href="#landing-main">Skip to content</a>
+    <header className="landing-header"><div className="landing-shell landing-header-inner"><a href="#/" className="landing-wordmark" aria-label="FlareGit home"><FlareGitBrand /></a><nav className="landing-desktop-nav" aria-label="Primary">{links.map(link => <a key={link.href} href={link.href}>{link.label}</a>)}</nav><div className="landing-header-actions"><PublicSearchButton /><div className="landing-desktop-theme"><ThemeSelector compact /></div><Button variant="ghost" size="sm" onClick={onSignIn} className="landing-signin">Sign in <ArrowUpRight aria-hidden="true" /></Button><Button variant="ghost" size="icon" className="landing-menu-button" aria-label="Open navigation" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)}><Menu aria-hidden="true" /></Button></div></div></header>
+    <main id="landing-main">
+      <section className="landing-shell landing-hero"><div className="landing-hero-copy"><p className="landing-eyebrow"><span aria-hidden="true" />Git for people and agents</p><h1>Work in parallel.<br />Integration happens<br /><span>automatically.</span></h1><p className="landing-introduction">Bring your tools. Keep your context. FlareGit brings independent contributions together, with a clear record of what changed and who decides what lands.</p><div className="landing-hero-actions"><Button variant="orange" onClick={onSignIn} className="landing-primary-button">Start collaborating <ArrowRight aria-hidden="true" /></Button><a href="/docs" className={buttonVariants({ variant: "ghost" })}>Explore the workflow <ArrowUpRight className="ml-2 h-4 w-4" aria-hidden="true" /></a></div><p className="landing-capability-note">Owner policy controls acceptance. Automatic acceptance requires a supported protected workflow and owner opt-in; other repositories use review.</p></div><CollaborationIllustration /></section>
+      <section className="landing-principles landing-shell" aria-label="Collaboration principles"><p>Real Git.<br /><strong>Room for everyone.</strong></p><p>Independent workspaces.<br /><strong>Connected context.</strong></p><p>Automatic coordination.<br /><strong>Explicit acceptance.</strong></p></section>
+      <section id="how-it-works" className="landing-shell landing-workflow-section"><div className="landing-section-heading"><p className="landing-eyebrow">From contribution to shared history</p><h2>Keep the work moving.<br />Keep the story intact.</h2></div><div className="landing-workflow-grid">{[{ number: "01", title: "Work on your own path", body: "Use familiar Git workflows, your editor, and your coding agents. Each contribution has an isolated workspace and its own purpose." }, { number: "02", title: "Bring the changes together", body: "Compose an integration candidate, inspect overlapping changes, and resolve consequential conflicts without concealing the decision." }, { number: "03", title: "Know exactly what lands", body: "Review the diff and protected checks. Accepted commits retain their contributions, conversations, and recoverable repository state." }].map(item => <article key={item.number}><span className="landing-step-number">{item.number}</span><h3>{item.title}</h3><p>{item.body}</p></article>)}</div></section>
+      <section className="landing-context-section"><div className="landing-shell landing-context-inner"><div><p className="landing-eyebrow">Collaboration is more than code</p><h2>A project has people.<br />Its history should too.</h2><p className="landing-context-copy">A useful change carries its purpose, the discussion behind it, and the people who shaped it. Keep that context beside the code, through interruptions and into review.</p><a href="/community" className="landing-text-link">Find your community <ArrowRight aria-hidden="true" /></a></div><div className="landing-context-list">{[{ Icon: MessageSquare, title: "Conversations that stay connected", body: "Issues, decisions, and review notes remain part of the contribution." }, { Icon: GitCommitHorizontal, title: "History you can account for", body: "Inspect the exact commit, contribution, and acceptance record." }, { Icon: ShieldCheck, title: "Failures you can see and recover", body: "Unconfirmed delivery or cleanup stays visible. An unknown outcome is never treated as success." }].map(({ Icon, title, body }) => <article key={title}><Icon aria-hidden="true" /><div><h3>{title}</h3><p>{body}</p></div></article>)}</div></div></section>
+      <section className="landing-shell landing-tools-section"><div><p className="landing-eyebrow">An open workflow</p><h2>Your repository.<br />Your way of working.</h2></div><div><p>Core collaboration and basic private repositories are free. Bring your own editor and agents; managed execution has spending limits, and connected checks supplement protected verification.</p><div className="landing-tools-links"><a href="/pricing" className="landing-text-link">See plans <ArrowUpRight aria-hidden="true" /></a><a href="https://github.com/Joe-Simo/flaregit" className="landing-text-link">View source <ArrowUpRight aria-hidden="true" /></a></div></div></section>
+      <section className="landing-shell landing-last-call"><div><p>Less coordination overhead. More shared progress.</p><h2>Build together.<br />Keep the history.</h2></div><Button onClick={onSignIn} variant="secondary" className="landing-last-button">Start collaborating <ArrowRight aria-hidden="true" /></Button></section>
     </main>
-    <footer className="border-t border-border/60"><div className="mx-auto flex max-w-[1100px] flex-wrap justify-between gap-4 px-6 py-6 text-[11px] text-muted-foreground lg:px-0"><span>FlareGit</span><div className="flex flex-wrap gap-5"><a href="/status">Status</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="mailto:support@flaregit.com">Support</a></div><CloudflareBadgeFooter /></div></footer>
+    <footer className="landing-footer"><div className="landing-shell"><div className="landing-footer-main"><a href="#/" className="landing-wordmark"><FlareGitBrand /></a><nav aria-label="Footer"><a href="/docs">Docs</a><a href="/community">Community</a><a href="/pricing">Pricing</a><a href="/about">About</a><a href="/status">Status</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="mailto:support@flaregit.com">Support</a></nav></div><CloudflareBadgeFooter /></div></footer>
+    <Dialog open={menuOpen} onOpenChange={setMenuOpen}><DialogClose onClick={() => setMenuOpen(false)} /><DialogHeader><DialogTitle>Explore FlareGit</DialogTitle></DialogHeader><nav className="landing-mobile-navigation" aria-label="Mobile primary">{links.map(link => <a key={link.href} href={link.href}>{link.label}<ArrowUpRight aria-hidden="true" /></a>)}</nav><div className="landing-mobile-appearance"><ThemeSelector /></div><Button variant="orange" className="w-full" onClick={() => { setMenuOpen(false); onSignIn(); }}>Sign in</Button></Dialog>
   </div>;
 }

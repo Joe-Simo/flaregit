@@ -1,10 +1,14 @@
 import { DurableObject } from 'cloudflare:workers';
 import { z } from 'zod';
+import {C02NetworkReceiverLedger,C02NetworkReceiverSqlStore} from '../../src/server/c02-network-receiver';
+import {createC02NetworkReceiverHttpHandler} from '../../src/server/c02-network-receiver-http';
 
 interface ReceiverEnv {
   RECEIPTS: DurableObjectNamespace<DeliveryReceipts>;
+  NETWORK_RECEIPTS?: DurableObjectNamespace<NetworkReceipts>;
   WEBHOOK_SECRET: string;
   CONTROL_SECRET: string;
+  C02_RECEIVER_CONTROL_SECRET?:string;
   EXPECTED_PROJECT: string;
 }
 const sha = z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/);
@@ -84,9 +88,23 @@ export class DeliveryReceipts extends DurableObject<ReceiverEnv> {
     return { evidence: 'owned-receiver-only', deploymentExecuted: false, deliveries: this.ctx.storage.sql.exec('SELECT id,event_id,payload_hash,sequence,receipts FROM deliveries ORDER BY id').toArray(), actions: this.ctx.storage.sql.exec('SELECT event_id,commit_sha,tree_sha,ref FROM actions ORDER BY event_id').toArray() };
   }
 }
+/** Separate fixed C02 ledger; it never reads or changes webhook delivery state. */
+export class NetworkReceipts extends DurableObject<ReceiverEnv> {
+  override async fetch(request:Request){
+    const ledger=new C02NetworkReceiverLedger(new C02NetworkReceiverSqlStore({
+      transactionSync:operation=>this.ctx.storage.transactionSync(operation),
+      exec:(query,...bindings)=>this.ctx.storage.sql.exec(query,...bindings),
+    }));
+    return createC02NetworkReceiverHttpHandler({ledger,receiverId:'flaregit-owned-network-v1',authorizeOperator:request=>controlAllowed(request,{...this.env,CONTROL_SECRET:this.env.C02_RECEIVER_CONTROL_SECRET??''})})(request);
+  }
+}
 export default {
   async fetch(request: Request, env: ReceiverEnv) {
     const route = new URL(request.url).pathname;
+    if(route.startsWith('/c02-network/')){
+      if(!env.NETWORK_RECEIPTS)return new Response('Network receiver not configured',{status:503,headers:{'Cache-Control':'no-store'}});
+      return env.NETWORK_RECEIPTS.getByName('fixed-c02-network-v1').fetch(request);
+    }
     if (!/^[a-z0-9]{12,16}$/.test(env.EXPECTED_PROJECT ?? '')) return new Response('Receiver not configured', { status: 503 });
     if (route === '/report' || route === '/mode') {
       if (!await controlAllowed(request, env)) return new Response('Unauthorized', { status: 401 });

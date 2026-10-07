@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { apiJson } from "../api";
 import { navigate, timeAgo } from "../router";
+import {Button} from "@/components/ui/button";
+import {inboxDestination,inboxShortcutAllowed,INBOX_INTERACTIVE_TARGETS} from "../inbox-navigation";
 
 interface Item { id: number; project_id: string; project_name: string; kind: "direct" | "activity"; type: string; title: string; created_at: string }
 type Filter = "direct" | "activity" | "snoozed" | "archived";
@@ -29,14 +31,14 @@ export function Inbox({ onCount }: { onCount: (n: number) => void }) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey || e.altKey || (e.target as HTMLElement).closest("input,textarea")) return;
+      if (!inboxShortcutAllowed(e,e.target instanceof Element&&!!e.target.closest(INBOX_INTERACTIVE_TARGETS))) return;
       const item = items[cursor];
-      if (e.key === "j") setCursor((c) => Math.min(c + 1, items.length - 1));
+      if (e.key === "j") setCursor((c) => Math.min(c + 1, Math.max(0,items.length - 1)));
       else if (e.key === "k") setCursor((c) => Math.max(c - 1, 0));
       else if (e.key === "e") void act(item, "archived");
       else if (e.key === "s") void act(item, "snoozed");
       else if (e.key === "u") void act(item, "unread");
-      else if (e.key === "Enter" && item) { void act(item, "archived"); navigate(`/p/${item.project_id}/${item.type.startsWith("integration") || item.type.startsWith("stack") || item.type === "task.ready" ? "changes" : "activity"}`); }
+      else if (e.key === "Enter" && item) { e.preventDefault(); navigate(inboxDestination(item)); }
       else if (e.key >= "1" && e.key <= "4") { setFilter(FILTERS[Number(e.key) - 1]![0]); setCursor(0); }
     };
     window.addEventListener("keydown", onKey);
@@ -63,6 +65,7 @@ export function Inbox({ onCount }: { onCount: (n: number) => void }) {
               <div className="text-xs text-muted-foreground">{it.project_name} · {timeAgo(it.created_at)}</div>
             </div>
             <div className="flex gap-1 shrink-0">
+              <Button size="sm" variant="ghost" onClick={(e)=>{e.stopPropagation();navigate(inboxDestination(it));}} aria-label={`Open ${it.title}`}>Open</Button>
               <button className="px-2 py-1 rounded border border-border text-xs hover:bg-muted" onClick={(e) => { e.stopPropagation(); void act(it, "archived"); }}>Archive</button>
               {filter !== "snoozed" && <button className="px-2 py-1 rounded border border-border text-xs hover:bg-muted" onClick={(e) => { e.stopPropagation(); void act(it, "snoozed"); }}>Snooze</button>}
             </div>

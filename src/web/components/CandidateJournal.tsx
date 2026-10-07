@@ -1,3 +1,5 @@
+import {FrozenAttribution} from './FrozenAttribution';
+import {frozenInputAttribution} from '../frozen-contribution-attribution';
 import {preservedCandidateSuccessors} from "../candidate-lineage";
 import React from "react";
 import { GitMerge, Cpu, ShieldCheck } from "lucide-react";
@@ -48,6 +50,7 @@ export function CandidateJournal({
           <ul className="space-y-3">
             {candidateList.map((cand) => {
               const isSelected = selectedCandidateId === cand.id;
+              const historical=cand.status==='accepted'?journal.find(entry=>entry.candidateId===cand.id&&entry.state==='ACCEPTED')?.contributionAttribution:cand.frozenAttribution;
               const hasRepairs = cand.repairAttempts && cand.repairAttempts.length > 0;
               const cls = `block w-full text-left p-3.5 rounded-lg border transition-all ${
                 isSelected
@@ -87,6 +90,7 @@ export function CandidateJournal({
                     </span>
                   </span>
 
+                  <div className="space-y-1 mb-2 text-xs">{cand.participatingTaskIds.map(taskId=><div key={taskId}><FrozenAttribution snapshot={frozenInputAttribution(historical,taskId,cand.participatingCommits[taskId])}/></div>)}</div>
                   {hasRepairs && (
                     <span className="block mb-2 p-2 rounded bg-amber-950/20 border border-amber-500/20 text-[11px] text-amber-200">
                       <span className="flex items-center gap-1 font-semibold mb-1">

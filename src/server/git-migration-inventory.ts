@@ -89,6 +89,18 @@ export async function captureGitMigrationInventory(executor: GitMigrationInvento
         inventory.objects[object] = type as GitMigrationObjectType;
       }
     }
+    // Commit-reachable trees can retain submodule pointers after a later commit
+    // removes them. Inspect each captured tree once without acquiring externals.
+    const trees = sorted.filter(object => inventory.objects[object] === "tree");
+    for (let index = 0; index < trees.length; index += 256) {
+      const batch = trees.slice(index, index + 256);
+      const entries = await run(`for tree in ${batch.map(q).join(" ")}; do git --git-dir ${q(directory)} ls-tree --format=${q("%(objectmode)\t%(objectname)")} "$tree" || exit 1; done`);
+      for (const row of entries.split("\n").filter(Boolean)) {
+        const [mode, object, extra] = row.split("\t");
+        if (!mode || !object || !sha.test(object) || /^0{40}$/.test(object) || extra !== undefined || !["040000", "100644", "100755", "120000", "160000"].includes(mode)) throw new InventoryUnavailable();
+        if (mode === "160000") externalGitlinks.add(object);
+      }
+    }
     await git("fsck --full --no-reflogs --no-dangling");
     inventory.refs.sort((first, second) => first.ref.localeCompare(second.ref)); inventory.observedExternalGitlinks = [...externalGitlinks].sort(); inventory.status = "complete";
   } catch (error) { if (error instanceof InventoryCallbackFailure) throw error.original; inventory.reason = error instanceof Error && error.message === "object_capacity" ? "object_capacity" : "metadata_unavailable"; }

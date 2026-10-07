@@ -61,9 +61,17 @@ test("durable inspection resumes real 1103-commit Git history and compares both 
     // The selected branch can advance while the persisted inspection remains pinned.
     const advanced = await git(["commit-tree", tree, "-p", head, "-m", "Later branch commit"]);
     await git(["update-ref", "refs/heads/main", advanced]);
+    // Capture actual immutable objects once; the synthetic SDK still reads every
+    // requested object while avoiding one operating-system process per commit.
+    const records = new Map((await git(["log", "--format=%H %T %P", head])).split("\n").map(line => {
+      const [hash, treeHash, ...parents] = line.split(" ");
+      if (!hash || !treeHash) throw new Error("Malformed native Git metadata");
+      return [hash, { hash, treeHash, parents }] as const;
+    }));
     const binding = { get: async () => ({ [Symbol.dispose]() {}, log: async () => [], readCommit: async (hash: string) => {
-      const [returned, treeHash, ...parents] = (await git(["show", "-s", "--format=%H %T %P", hash])).split(" ");
-      return { hash: returned!, treeHash: treeHash!, parents };
+      const record = records.get(hash);
+      if (!record) return null;
+      return { ...record, parents: [...record.parents] };
     } }) };
     let destinationBatches = 0;
     while (true) {

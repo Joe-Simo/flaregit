@@ -26,22 +26,22 @@ function reviewButtonDisabled(label: string, isOwner: boolean, reviewReady = tru
   return /\bdisabled=/.test(button[1]!);
 }
 test("initial review fails closed for unknown delegated evidence while preserving owner rejection", () => {
-  expect(reviewButtonDisabled("Accept into history", false)).toBe(true);
+  expect(reviewButtonDisabled("Approve commit", false)).toBe(true);
   expect(reviewButtonDisabled("Reject", false)).toBe(true);
-  expect(reviewButtonDisabled("Accept into history", true)).toBe(true);
+  expect(reviewButtonDisabled("Approve commit", true)).toBe(true);
   expect(reviewButtonDisabled("Reject", true)).toBe(false);
   const html=renderToStaticMarkup(createElement(CandidateReview,{projectId:"synthetic-repository",candidate,onDone:()=>{},isOwner:true,reviewReady:true}));
   expect(html).toContain("Checking reviewer evidence");
 });
 test("legacy review remains inspectable but cannot accept without a fresh protected candidate",()=>{
- expect(reviewButtonDisabled("Accept into history",true,true,{...candidate,preservationProtocolVersion:undefined})).toBe(true);
+ expect(reviewButtonDisabled("Approve commit",true,true,{...candidate,preservationProtocolVersion:undefined})).toBe(true);
  const html=renderToStaticMarkup(createElement(CandidateReview,{projectId:"synthetic-repository",candidate:{...candidate,preservationProtocolVersion:undefined},onDone:()=>{},isOwner:true,reviewReady:true}));
  expect(html).toContain("Rebuild candidate");
 });
 test("approval waits for current diff while rejection remains available on the exact commit", () => {
-  expect(reviewButtonDisabled("Accept into history", true, false)).toBe(true);
+  expect(reviewButtonDisabled("Approve commit", true, false)).toBe(true);
   expect(reviewButtonDisabled("Reject", true, false)).toBe(false);
-  expect(reviewButtonDisabled("Accept into history", true, true, { ...candidate, candidateCommit: undefined })).toBe(true);
+  expect(reviewButtonDisabled("Approve commit", true, true, { ...candidate, candidateCommit: undefined })).toBe(true);
   expect(reviewButtonDisabled("Reject", true, true, { ...candidate, candidateCommit: undefined })).toBe(true);
 });
 

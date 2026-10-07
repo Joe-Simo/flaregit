@@ -1,14 +1,31 @@
+import {GitCredential} from '../components/GitCredential';
 import { ProfileDiscoverySettings } from "./CommunityPeople";
 import { StorageReconciliation } from "../components/StorageReconciliation";
-import React, { useCallback, useEffect, useState } from "react";
-import { Copy, Trash2 } from "lucide-react";
+import React, { useCallback, useEffect, useState, useRef } from "react";
+import { Trash2 } from "lucide-react";
 import { useUser } from "@clerk/clerk-react";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { RadioGroup,RadioGroupItem } from "@/components/ui/radio-group";
+import { Field,FieldGroup,FieldLabel,FieldSet,FieldLegend } from "@/components/ui/field";
+import { Select,SelectTrigger,SelectValue,SelectContent,SelectGroup,SelectItem } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
+import { z } from "zod";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiJson } from "../api";
 import { timeAgo } from "../router";
 
+export const accountTokenRequestSchema=z.object({label:z.string().trim().min(1).max(60),scope:z.enum(['read','write','full']),repo:z.string().regex(/^[a-z0-9]{12,16}$/).optional(),ttlSeconds:z.union([z.literal(1800),z.literal(86400),z.literal(604800),z.literal(2592000)]).optional()}).strict();
+export function checkedAccountTokenReceipt(value:unknown,input:z.infer<typeof accountTokenRequestSchema>,now:number){
+ const r=z.object({token:z.string().regex(/^fgt_[a-f0-9]{12}_[a-f0-9]{48}$/),scope:z.enum(['read','write','full']),repo:z.string().nullable(),expiresAt:z.iso.datetime().nullable()}).parse(value);
+ if(r.scope!==input.scope||r.repo!==(input.repo??null)||!Number.isSafeInteger(now)||input.ttlSeconds===undefined&&r.expiresAt!==null||input.ttlSeconds!==undefined&&(r.expiresAt===null||Date.parse(r.expiresAt)<=now||Date.parse(r.expiresAt)>now+input.ttlSeconds*1000))throw Error('Token scope or expiry was not confirmed');return r;
+}
+export function CreatedAccountCredential({token}:{token:string}){
+ const [error,setError]=useState<string|null>(null);
+ const download=()=>{let url:string|undefined;try{url=URL.createObjectURL(new Blob([token],{type:'text/plain;charset=utf-8'}));const link=document.createElement('a');link.href=url;link.download='flaregit-credential.txt';document.body.appendChild(link);link.click();link.remove();const saved=url;setTimeout(()=>URL.revokeObjectURL(saved),1000);setError(null);}catch{if(url)URL.revokeObjectURL(url);setError('Credential download could not start. Copy it to your secret manager instead.');}};
+ return <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 space-y-2"><p className="text-xs font-semibold">Save your credential now — it is not shown again</p><GitCredential token={token}/><Button variant="outline" size="sm" onClick={download}>Download credential</Button><p className="text-xs text-muted-foreground">The downloaded file contains a secret. Keep it privately in your secret manager.</p>{error&&<p role="alert" className="text-xs text-destructive">{error}</p>}</div>;
+}
 interface Token { id: string; label: string; created_at: string; last_used: string | null; scope: string; repo: string | null; expires_at: number | null }
 interface Billing { plan: "free" | "pro"; runsToday: number; runsPerDay: number }
 interface Profile { handle: string; displayName: string; bio: string; visibility: "private" | "public"; version: number; moderation?: { suppressed: boolean; reason: string; reportId: string; version: number } }
@@ -39,8 +56,11 @@ export function Account() {
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileSave, setProfileSave] = useState<{ ok: boolean; text: string } | null>(null);
   const [label, setLabel] = useState("");
+  const [tokenScope,setTokenScope]=useState<'read'|'write'|'full'>('read');
+  const [tokenRepo,setTokenRepo]=useState('');const [tokenRepositories,setTokenRepositories]=useState<{id:string;name:string}[]|null>(null),[repositoryLoadError,setRepositoryLoadError]=useState<string|null>(null);const [allRepositories,setAllRepositories]=useState(false);
+  const [tokenExpiry,setTokenExpiry]=useState<1800|86400|604800|2592000|0>(604800);
+  const [mintUnknown,setMintUnknown]=useState(false);const mintLock=useRef(false);
   const [created, setCreated] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const [tokenError, setTokenError] = useState<string | null>(null);
   const [tokenNotice, setTokenNotice] = useState<string | null>(null);
   const [deletionStarted, setDeletionStarted] = useState(false);
@@ -49,7 +69,8 @@ export function Account() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
-  const { user } = useUser();
+  const { user } = useUser();const currentTokenUser=useRef(user?.id);currentTokenUser.current=user?.id;
+  useEffect(()=>{setCreated(null);if(!user?.id)return;try{setMintUnknown(sessionStorage.getItem(`flaregit.token-mint.${user.id}`)==='pending');}catch{setMintUnknown(true);}},[user?.id]);
   useEffect(() => {
     if (!user?.id) return;
     try {
@@ -70,6 +91,7 @@ export function Account() {
     setTokensError(null);
     try { setTokens(await apiJson<Token[]>("/tokens")); } catch (e) { setTokensError(errText(e, "Could not load tokens")); }
   }, []);
+  const loadTokenRepositories=useCallback(async()=>{setRepositoryLoadError(null);try{const rows=z.object({projects:z.array(z.object({id:z.string().regex(/^[a-z0-9]{12,16}$/),name:z.string(),kind:z.string()}))}).parse(await apiJson<unknown>('/account'));setTokenRepositories(rows.projects.filter(p=>p.kind==='repository').map(({id,name})=>({id,name})));}catch{setRepositoryLoadError('Repository choices could not be confirmed. Refresh before issuing restricted access.');}},[]);
   const loadBilling = useCallback(async () => {
     setBillingError(null);
     try { setBilling(await apiJson<Billing>("/billing")); } catch (e) { setBillingError(errText(e, "Could not load your plan")); }
@@ -84,9 +106,10 @@ export function Account() {
   }, []);
   useEffect(() => {
     void loadTokens();
+    void loadTokenRepositories();
     void loadBilling();
     void loadProfile();
-  }, [loadTokens, loadBilling, loadProfile]);
+  }, [loadTokens, loadBilling, loadProfile,loadTokenRepositories]);
 
   const saveProfile = async () => {
     if (!profile) return;
@@ -179,23 +202,10 @@ export function Account() {
       <Card>
         <CardHeader className="pb-2"><CardTitle className="text-sm">API tokens</CardTitle></CardHeader>
         <CardContent className="space-y-3">
-          <p className="text-xs text-muted-foreground">For the <code>flaregit</code> CLI and scripts. A token acts as you; it cannot create or list other tokens. Revoke it at any time.</p>
+          <p className="text-xs text-muted-foreground">For the <code>flaregit</code> CLI and scripts. Choose the least access needed. Full access can administer repositories and create narrower tokens. Revoke access at any time.</p>
           {tokenError && <div role="alert" className={alertCls}>{tokenError}</div>}
           {tokenNotice && <div role="status" className={okCls}>{tokenNotice}</div>}
-          {created && (
-            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 space-y-2">
-              <div className="text-xs font-semibold">Copy your token now — it is not shown again</div>
-              <div className="flex gap-2">
-                <label className="sr-only" htmlFor="new-token">New token</label>
-                <input id="new-token" readOnly className={field} value={created} onFocus={(e) => e.currentTarget.select()} />
-                <Button variant="outline" size="icon" aria-label="Copy token" onClick={() => {
-                  navigator.clipboard.writeText(created).then(() => setCopied(true), () => setTokenError("Could not copy to the clipboard. Select the token and copy it manually."));
-                }}><Copy className="h-4 w-4" /></Button>
-              </div>
-              {copied && <p role="status" className="text-xs text-emerald-300">Token copied.</p>}
-              <code className="block text-xs break-all">flaregit auth login {created}</code>
-            </div>
-          )}
+          {created && <CreatedAccountCredential key={created} token={created}/>}
           {tokensError && <LoadError message={tokensError} onRetry={() => void loadTokens()} />}
           {!tokens && !tokensError && <p role="status" className="text-sm text-muted-foreground">Loading tokens…</p>}
           {tokens && (
@@ -205,8 +215,7 @@ export function Account() {
                 <div key={t.id} className="px-3 py-2 flex items-center justify-between gap-2 text-sm">
                   <div className="min-w-0 break-words">
                     {t.label}
-                    {t.scope !== "full" && <Badge variant="outline" className="ml-2">{t.scope}{t.repo ? " · 1 repo" : ""}</Badge>}
-                    <span className="block sm:inline text-xs text-muted-foreground sm:ml-2">created {timeAgo(t.created_at)} · {t.last_used ? `used ${timeAgo(t.last_used)}` : "never used"}</span>
+                    <span className="block sm:inline text-xs text-muted-foreground sm:ml-2">{t.scope} · {t.repo??'all repositories'} · {t.expires_at?`expires ${new Date(t.expires_at).toLocaleString()}`:'no expiry'} · created {timeAgo(t.created_at)} · {t.last_used ? `used ${timeAgo(t.last_used)}` : "never used"}</span>
                   </div>
                   <Button size="sm" variant="ghost" aria-label={`Revoke ${t.label}`} disabled={busy !== null} onClick={() => void tokenAction(`revoke:${t.id}`, async () => {
                     await apiJson(`/tokens/${t.id}`, { method: "DELETE" });
@@ -216,18 +225,18 @@ export function Account() {
               ))}
             </div>
           )}
-          <form className="flex gap-2" onSubmit={(e) => {
-            e.preventDefault();
-            void tokenAction("create", async () => {
-              const r = await apiJson<{ token: string }>("/tokens", { method: "POST", json: { label } });
-              setCreated(r.token);
-              setCopied(false);
-              setLabel("");
-              return "Token created.";
-            });
+          {mintUnknown&&<div role="alert" className={alertCls}>{created?'Token creation is confirmed, but its browser hold remains.':'The mint response was not confirmed.'} Inspect the token list and revoke any unwanted token before creating another. Its secret cannot be recovered.<Button variant="outline" size="sm" className="mt-2" onClick={()=>{void loadTokens();}}>Refresh token metadata</Button><Button variant="outline" size="sm" className="mt-2 ml-2" onClick={()=>{if(user?.id)try{sessionStorage.removeItem(`flaregit.token-mint.${user.id}`);}catch{setTokenError('This browser cannot clear the saved mint hold.');return;}setMintUnknown(false);setTokenNotice('Previous outcome acknowledged. Creating another token will issue separate access.');}}>I inspected the previous outcome</Button></div>}
+          <form className="flex flex-col gap-3" onSubmit={(e)=>{
+            e.preventDefault();if(mintLock.current||mintUnknown)return;let input:z.infer<typeof accountTokenRequestSchema>;try{if(!allRepositories&&!tokenRepositories?.some(p=>p.id===tokenRepo))throw Error('Repository selection required');input=accountTokenRequestSchema.parse({label,scope:tokenScope,...(!allRepositories?{repo:tokenRepo}:{}),...(tokenExpiry?{ttlSeconds:tokenExpiry}:{})});}catch{setTokenError('Enter a label and select a repository, or explicitly choose all repositories.');return;}
+            if(!user?.id)return;try{if(sessionStorage.getItem(`flaregit.token-mint.${user.id}`)==='pending'){setMintUnknown(true);return;}sessionStorage.setItem(`flaregit.token-mint.${user.id}`,'pending');}catch{setTokenError('This browser could not preserve the mint outcome. No request was sent.');return;}const mintUser=user.id;mintLock.current=true;setBusy('create');setTokenError(null);setTokenNotice(null);
+            void(async()=>{try{const response=checkedAccountTokenReceipt(await apiJson<unknown>('/tokens',{method:'POST',json:input,signal:AbortSignal.timeout(15000)}),input,Date.now());if(currentTokenUser.current!==mintUser)return;setCreated(response.token);setLabel('');setTokenNotice('Token scope and expiry confirmed.');try{sessionStorage.removeItem(`flaregit.token-mint.${mintUser}`);}catch{setTokenNotice('Token created and confirmed. The browser mint hold could not be cleared; inspect this access before issuing another token.');setMintUnknown(true);}await loadTokens();}catch{if(currentTokenUser.current!==mintUser)return;setMintUnknown(true);setTokenError('Token creation outcome is uncertain. No automatic retry was sent.');}finally{mintLock.current=false;setBusy(null);}})();
           }}>
-            <input className={field} value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Label, e.g. laptop" maxLength={60} aria-label="Token label" />
-            <Button type="submit" variant="orange" className="shrink-0" disabled={busy !== null}>{busy === "create" ? "Creating…" : "Create token"}</Button>
+            <FieldGroup><fieldset disabled={busy!==null} className="contents"><Field><FieldLabel htmlFor="token-label">Label</FieldLabel><Input id="token-label" value={label} onChange={e=>setLabel(e.target.value)} placeholder="Laptop or CI" maxLength={60} required/></Field>
+            <FieldSet><FieldLegend>Access</FieldLegend><RadioGroup value={tokenScope} onValueChange={v=>setTokenScope(z.enum(["read","write","full"]).parse(v))} className="flex flex-wrap gap-4">{(['read','write','full'] as const).map(scope=><Field key={scope} orientation="horizontal"><RadioGroupItem value={scope} id={`token-scope-${scope}`}/><FieldLabel htmlFor={`token-scope-${scope}`}>{scope==='full'?'Full administration':scope==='write'?'Read and contribute':'Read only'}</FieldLabel></Field>)}</RadioGroup></FieldSet>
+            <Field orientation="horizontal"><Checkbox id="token-all-repositories" checked={allRepositories} onCheckedChange={v=>setAllRepositories(v===true)}/><FieldLabel htmlFor="token-all-repositories">All my repositories</FieldLabel></Field>
+            {!allRepositories&&<Field><FieldLabel htmlFor="token-repository">Repository</FieldLabel>{repositoryLoadError&&<LoadError message={repositoryLoadError} onRetry={()=>void loadTokenRepositories()}/>}<Select value={tokenRepo} onValueChange={setTokenRepo} disabled={!tokenRepositories?.length}><SelectTrigger id="token-repository"><SelectValue placeholder={tokenRepositories===null?'Loading repositories…':'Select a repository'}/></SelectTrigger><SelectContent><SelectGroup>{tokenRepositories?.map(p=><SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectGroup></SelectContent></Select>{tokenRepositories?.length===0&&<p className="text-xs text-muted-foreground">No repositories available.</p>}</Field>}
+            <FieldSet><FieldLegend>Expires after</FieldLegend><RadioGroup value={String(tokenExpiry)} onValueChange={v=>setTokenExpiry(z.union([z.literal(1800),z.literal(86400),z.literal(604800),z.literal(2592000),z.literal(0)]).parse(Number(v)))} className="flex flex-wrap gap-4">{([{value:1800,label:'30 minutes'},{value:86400,label:'1 day'},{value:604800,label:'7 days'},{value:2592000,label:'30 days'},{value:0,label:'No expiry'}] as const).map(option=><Field key={option.value} orientation="horizontal"><RadioGroupItem value={String(option.value)} id={`token-expiry-${option.value}`}/><FieldLabel htmlFor={`token-expiry-${option.value}`}>{option.label}</FieldLabel></Field>)}</RadioGroup></FieldSet></fieldset></FieldGroup>
+            <Button type="submit" variant="orange" disabled={busy!==null||mintUnknown}>{busy==='create'?'Creating…':'Create token'}</Button>
           </form>
         </CardContent>
       </Card>

@@ -24,6 +24,8 @@ export class ContainerLifetime{
  /** Synchronous check directly before each native provisioning/dispatch call. */
  assertWorkAllowed():void{if(this.sealed())throw new Error("Managed container attempt is permanently sealed; use a new attempt identity");}
  private save(state:ContainerLifetimeState){this.storage.sql.exec("INSERT INTO managed_container_lifetime VALUES(1,?) ON CONFLICT(id) DO UPDATE SET doc=excluded.doc",JSON.stringify(state));}
+ /** A trusted phase can only shorten the durable lifetime, never reset it. */
+ async constrainDeadline(deadline:number):Promise<void>{if(!Number.isSafeInteger(deadline)||deadline<=this.now())throw Error('Native phase hard deadline expired');let state=this.status();if(!state){const now=this.now();state={firstStartedAt:now,deadline:Math.min(deadline,now+this.lifetimeMs),state:'armed'};}else state={...state,deadline:Math.min(state.deadline,deadline)};this.save(state);await this.storage.setAlarm(state.deadline);}
  async beforeWork():Promise<void>{
   this.assertWorkAllowed();
   let state=this.status();const container=this.container();if(!container)throw new Error("Container binding is not configured");

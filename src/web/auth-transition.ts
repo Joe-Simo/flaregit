@@ -7,7 +7,10 @@ export function authTransition(snapshot:AuthTransitionSnapshot):'pending'|'signe
  return 'pending';
 }
 /** One continuous pending attempt keeps its deadline while SDK identity fields settle. */
-export function authRecoveryPending(snapshot:AuthTransitionSnapshot,signingIn:boolean):boolean{return authTransition(snapshot)==="pending"&&(signingIn||snapshot.signedIn===true||Boolean(snapshot.userId)||Boolean(snapshot.sessionId));}
+export function authRecoveryPending(snapshot:AuthTransitionSnapshot,signingIn:boolean,workspaceIntent=false):boolean{return authTransition(snapshot)==="pending"&&(workspaceIntent||signingIn||snapshot.signedIn===true||Boolean(snapshot.userId)||Boolean(snapshot.sessionId));}
 export function signInRecoveryUrl(destination:string):string{const safe=safeSignInReturn(destination)??'/';return `/#${safe}${safe.includes('?')?'&':'?'}signin=1`;}
 
 export function recoverSignIn(destination:string,browser:{replace:(url:string)=>void;reload:()=>void}):void{browser.replace(signInRecoveryUrl(destination));browser.reload();}
+
+/** A private deep link waits for session hydration; anonymous marketing entry stays independent. */
+export function authWorkspaceIntent(hash:string):boolean{const destination=safeSignInReturn(hash);return destination!==null&&destination!=="/"&&!destination.startsWith("/join-resume?");}

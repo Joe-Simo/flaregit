@@ -1,0 +1,6 @@
+.flaregit-brand{display:inline-flex;align-items:center;gap:.5rem;white-space:nowrap;color:inherit;font-family:var(--font-sans,Inter,system-ui,sans-serif)}
+.flaregit-brand .flaregit-brand-name{font-weight:600;font-size:inherit;letter-spacing:-.04em;line-height:1}
+.flaregit-brand svg.flaregit-mark{width:auto;height:1.65em;flex-shrink:0;overflow:visible;fill:#f65a20}
+svg.flaregit-mark{fill:#f65a20;flex-shrink:0}
+svg.flaregit-mark-mono{fill:currentColor}
+.docs-brand .flaregit-brand,.community-brand .flaregit-brand{font-size:16px;letter-spacing:normal}

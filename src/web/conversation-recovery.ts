@@ -6,6 +6,14 @@ const keyFor = (scope: Scope) => `flaregit.conversation.${JSON.stringify([scope.
 export function commentContent(subject: string, body: string, anchor: CommentAnchor | null) {
   return { subject, body: body.trim(), ...(anchor ? { path: anchor.path, line: anchor.line, commit: anchor.commit } : {}) };
 }
+export function reanchorConversationDraft(subject: string, draft: ConversationDraft, anchor: CommentAnchor): ConversationDraft {
+  const payload = JSON.stringify(commentContent(subject, draft.body, anchor));
+  return { ...draft, anchor, intent: draft.intent?.payload === payload ? draft.intent : null };
+}
+export async function dispatchRecoverableComment<T>(persist: () => boolean, dispatch: () => Promise<T>): Promise<T> {
+  if (!persist()) throw new Error("The original comment request could not be saved in this browser session. Restore browser storage and retry; no comment was sent.");
+  return dispatch();
+}
 export function readConversationDraft(storage: Storage, scope: Scope): ConversationDraft | null {
   try {
     const raw = storage.getItem(keyFor(scope));
@@ -23,7 +31,11 @@ export function readConversationDraft(storage: Storage, scope: Scope): Conversat
   } catch { return null; }
 }
 export function saveConversationDraft(storage: Storage, scope: Scope, draft: ConversationDraft): boolean {
-  try { storage.setItem(keyFor(scope), JSON.stringify({ ...scope, ...draft })); return true; } catch { return false; }
+  try {
+    const key=keyFor(scope),raw=JSON.stringify({ ...scope, ...draft });
+    storage.setItem(key,raw);
+    return storage.getItem(key)===raw;
+  } catch { return false; }
 }
 export function clearConversationDraft(storage: Storage, scope: Scope): void {
   try { storage.removeItem(keyFor(scope)); } catch { /* Confirmed server save still succeeds. */ }

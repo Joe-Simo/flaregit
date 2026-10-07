@@ -1,7 +1,8 @@
+import { FlareGitBrand } from "./components/Brand";
 import { InvitationSignIn } from "./pages/InvitationSignIn";
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ClerkProvider, SignIn, UserButton, useAuth, useSession } from "@clerk/clerk-react";
-import { GitBranch, RefreshCw, Sun, ArrowUpRight } from "lucide-react";
+import { RefreshCw, Sun, ArrowUpRight } from "lucide-react";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { bindApiSession,clearVerifiedApiSession } from "./api";
 import { Landing } from "./pages/Landing";
@@ -14,7 +15,7 @@ import { About } from "./pages/About";
 import { Community } from "./pages/Community";
 import { CloudflareBadgeFooter } from "./components/CloudflareBadge";
 import { safeSignInReturn, explicitSignInReturn, initialSignInReturn, isSignInCallback, callbackSignInReturn, initialSignInActive } from "./sign-in-return";
-import { authTransition, authRecoveryPending, recoverSignIn } from "./auth-transition";
+import { authTransition, authRecoveryPending, authWorkspaceIntent, recoverSignIn } from "./auth-transition";
 import { loadAuthConfiguration } from "./auth-configuration";
 import { navigate, useRoute } from "./router";
 
@@ -25,8 +26,8 @@ function SignInReturn({ destination }: { destination: string | null }) {
   useEffect(() => { restoreReturn(destination); }, [destination]);
   return null;
 }
-export function AuthTransitionSurface({snapshot,signingIn,onRetry,signedOut,signedIn,landing}:{snapshot:Parameters<typeof authTransition>[0];signingIn:boolean;onRetry:()=>void;signedOut:React.ReactNode;signedIn:React.ReactNode;landing:React.ReactNode}){
-  const phase=authTransition(snapshot),securePending=authRecoveryPending(snapshot,signingIn);
+export function AuthTransitionSurface({snapshot,signingIn,workspaceIntent=false,onRetry,signedOut,signedIn,landing}:{snapshot:Parameters<typeof authTransition>[0];signingIn:boolean;workspaceIntent?:boolean;onRetry:()=>void;signedOut:React.ReactNode;signedIn:React.ReactNode;landing:React.ReactNode}){
+  const phase=authTransition(snapshot),securePending=authRecoveryPending(snapshot,signingIn,workspaceIntent);
   const [expired,setExpired]=useState(false);
   useEffect(()=>{setExpired(false);if(!securePending)return;const timer=setTimeout(()=>setExpired(true),15_000);return()=>clearTimeout(timer);},[securePending]);
   if(phase==="signed-out")return signedOut;
@@ -34,12 +35,12 @@ export function AuthTransitionSurface({snapshot,signingIn,onRetry,signedOut,sign
   if(!securePending)return landing;
   return <Entry><h2 className="text-xl font-semibold">{expired?"Sign-in needs another try":"Opening your workspace"}</h2><p role={expired?"alert":"status"} className="mt-4 text-sm text-muted-foreground">{expired?"The authentication service has not finished connecting. Your repository history is preserved.":"Waiting for your secure session…"}</p><Button variant="outline" className="mt-5" onClick={onRetry}>Retry sign-in</Button></Entry>;
 }
-function AuthSessionController({signingIn,destination,signedOut,landing,children}:{signingIn:boolean;destination:string;signedOut:React.ReactNode;landing:React.ReactNode;children:React.ReactNode}){
+function AuthSessionController({signingIn,workspaceIntent,destination,signedOut,landing,children}:{signingIn:boolean;workspaceIntent:boolean;destination:string;signedOut:React.ReactNode;landing:React.ReactNode;children:React.ReactNode}){
   const auth=useAuth(),{isLoaded,session}=useSession();
   const snapshot={authLoaded:auth.isLoaded,sessionLoaded:isLoaded,signedIn:auth.isSignedIn,userId:auth.userId,sessionId:session?.id,sessionUserId:session?.user?.id,sessionStatus:session?.status};
   const phase=authTransition(snapshot);
   useLayoutEffect(()=>{if(phase==="signed-out")clearVerifiedApiSession();},[phase]);
-  return <AuthTransitionSurface snapshot={snapshot} signingIn={signingIn} onRetry={()=>recoverSignIn(destination,{replace:url=>window.history.replaceState(null,"",url),reload:()=>window.location.reload()})} signedOut={signedOut} landing={landing} signedIn={session&&auth.userId?<SessionWorkspace key={`${auth.userId}:${session.id}`} principal={`${auth.userId}:${session.id}`} session={session}>{children}</SessionWorkspace>:null}/>;
+  return <AuthTransitionSurface snapshot={snapshot} signingIn={signingIn} workspaceIntent={workspaceIntent} onRetry={()=>recoverSignIn(destination,{replace:url=>window.history.replaceState(null,"",url),reload:()=>window.location.reload()})} signedOut={signedOut} landing={landing} signedIn={session&&auth.userId?<SessionWorkspace key={`${auth.userId}:${session.id}`} principal={`${auth.userId}:${session.id}`} session={session}>{children}</SessionWorkspace>:null}/>;
 }
 function SessionWorkspace({ principal, session, children }: { principal: string; session: NonNullable<ReturnType<typeof useSession>["session"]>; children: React.ReactNode }) {
   useLayoutEffect(() => bindApiSession(principal, () => session.getToken()), [principal, session]);
@@ -51,7 +52,7 @@ function Entry({ children }: { children: React.ReactNode }) {
     <section className="flex min-w-0 flex-col bg-background">
       <header className="flex items-center justify-between px-6 py-7 sm:px-8">
         <a href="/" className="inline-flex items-center gap-2 text-base font-semibold tracking-tight rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-          <GitBranch className="h-7 w-7 text-primary" aria-hidden="true" />FlareGit
+          <FlareGitBrand size={32} />
         </a>
         <a href="/docs" className="rounded text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Documentation</a>
       </header>
@@ -85,6 +86,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const aboutPage = window.location.pathname === "/about";
   const communityPage = window.location.pathname === "/community";
   const route = useRoute();
+  const workspaceIntent = authWorkspaceIntent(window.location.hash);
   const explicitReturn = explicitSignInReturn(window.location.hash);
   const callbackEntry = isSignInCallback(window.location.hash);
   const [signingIn, setSigningIn] = useState(() => initialSignInActive(window.location.hash, rememberedReturn()));
@@ -131,7 +133,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   if (route.name === "profile") return <PublicProfile key={route.handle} handle={route.handle} />;
   if (route.name === "public") return <PublicRepo key={route.projectId} projectId={route.projectId} params={route.params} onSignIn={() => { beginSignIn(`/participate/${route.projectId}`); navigate(`/participate/${route.projectId}`); }} />;
 
-  if (!key && !signingIn) return <Landing onSignIn={() => beginSignIn()} />;
+  if (!key && !signingIn && !workspaceIntent) return <Landing onSignIn={() => beginSignIn()} />;
   if (error) return <Entry><div className="rounded-xl border border-border bg-card p-6 sm:p-8">
     <h2 className="text-xl font-semibold tracking-tight">Sign in to your workspace</h2>
     <p role="alert" className="mt-4 text-sm leading-relaxed text-destructive">{error}</p>
@@ -142,7 +144,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const invitationResumeLanding = route.name === "join-resume" ? <Entry><div className="space-y-4 text-sm"><h1 className="text-2xl font-semibold">Sign in to review your saved invitation</h1><p className="text-muted-foreground">FlareGit will recover this invitation after sign-in. Joining still requires your decision.</p><Button onClick={() => beginSignIn(`/join-resume?context=${route.nonce}`)}>Continue to sign in</Button><Button variant="ghost" onClick={() => navigate("/")}>Go to your repositories</Button></div></Entry> : <Landing onSignIn={() => beginSignIn()} />;
   return (
     <ClerkProvider publishableKey={key}>
-      <AuthSessionController signingIn={signingIn} destination={returnTo} landing={route.name === "join" ? <Entry><InvitationSignIn projectId={route.projectId} token={route.token} onPrepared={beginInvitationSignIn} onCancel={()=>{window.history.replaceState(null,"","/#/");window.dispatchEvent(new HashChangeEvent("hashchange"));}} /></Entry> : invitationResumeLanding} signedOut={
+      <AuthSessionController signingIn={signingIn} workspaceIntent={workspaceIntent} destination={returnTo} landing={route.name === "join" ? <Entry><InvitationSignIn projectId={route.projectId} token={route.token} onPrepared={beginInvitationSignIn} onCancel={()=>{window.history.replaceState(null,"","/#/");window.dispatchEvent(new HashChangeEvent("hashchange"));}} /></Entry> : invitationResumeLanding} signedOut={
         !signingIn ? route.name === "join" ? <Entry><InvitationSignIn projectId={route.projectId} token={route.token} onPrepared={beginInvitationSignIn} onCancel={()=>{window.history.replaceState(null,"","/#/");window.dispatchEvent(new HashChangeEvent("hashchange"));}} /></Entry> : invitationResumeLanding : <Entry>
           <Button variant="ghost" className="mb-6 -ml-3 text-muted-foreground" onClick={() => { try { sessionStorage.removeItem(RETURN_KEY); } catch { /* No stored return. */ } setSigningIn(false); }}>Back to FlareGit</Button>
           <SignIn routing="hash" forceRedirectUrl={`/#${returnTo}`} signUpForceRedirectUrl={`/#${returnTo}`} appearance={{

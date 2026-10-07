@@ -1,3 +1,4 @@
+import {changeInspectionStatus} from '../change-inspection-status';
 import {acceptedCommitLabel} from "../accepted-commit-display";
 import {PendingTaskCreations} from "../components/PendingTaskCreations";
 import {readTaskCreationRecovery,restoreTaskCreationRequest,type TaskCreationRecoveryRow,type PendingTaskCreation} from "../task-creation-recovery";
@@ -17,7 +18,8 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { AgentRecoveryPanel } from "../components/AgentRecoveryPanel";
-import { apiFetch, apiJson } from "../api";
+import {prepareIntegrationIntent,readIntegrationIntents,saveIntegrationIntent,acknowledgeIntegrationIntent,type IntegrationIntent} from "../integration-intent-recovery";
+import { apiFetch, apiJson, apiSessionIdentity } from "../api";
 import { navigate, timeAgo } from "../router";
 import type { FlareGitProjectState, Task, TaskStatus } from "@/core/types";
 
@@ -82,12 +84,15 @@ function AgentRunControls({ projectId, instanceId, canRetry, retrying, onRetry, 
   </div>;
 }
 
-type ChangesProps = { projectId: string; state: FlareGitProjectState; reload: () => void };
+type ChangesProps = { projectId: string; state: FlareGitProjectState; reload: () => void; taskId?:string|null };
 export function ChangesTab(props: ChangesProps) {
   const { userId } = useAuth();
   return <ChangesPanel key={`${props.projectId}:${userId ?? "signed-out"}`} {...props} />;
 }
-function ChangesPanel({ projectId, state, reload }: ChangesProps) {
+function ChangesPanel({ projectId, state, reload,taskId }: ChangesProps) {
+  const linkedTask=taskId?Object.values(state.tasks).find(task=>task.id===taskId):undefined;
+  const linkedTaskElement=useRef<HTMLDivElement|null>(null);
+  useEffect(()=>{if(!linkedTask)return;linkedTaskElement.current?.focus({preventScroll:true});linkedTaskElement.current?.scrollIntoView({block:"center",behavior:"instant"});},[projectId,linkedTask?.id]);
   const [goal, setGoal] = useState("");
   const creationIntent = useRef<ContributionCreationIntent | null>(null);
   const [relationships, setRelationships] = useState(false);
@@ -124,6 +129,10 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
+  const [savedIntegrations,setSavedIntegrations]=useState<IntegrationIntent[]>([]),[integrationRecoveryError,setIntegrationRecoveryError]=useState<string|null>(null);
+  const integrationLock=useRef(false);
+  const [integrationDetails,setIntegrationDetails]=useState<IntegrationIntent|null>(null);
+  useEffect(()=>{const identity=apiSessionIdentity();if(!identity)return;try{const records=readIntegrationIntents(sessionStorage,{identity,projectId});setSavedIntegrations(records);setIntegrationRecoveryError(null);}catch{setIntegrationRecoveryError("Saved integration requests could not be restored. No new request will be sent until recovery storage is available.");}},[projectId]);
   const [instructions, setInstructions] = useState<{ commands: string[]; task: string; token:string|null } | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -137,6 +146,7 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
     }
   }
   const overlaps = [...paths.entries()].filter(([, contributors]) => contributors.length > 1);
+  const inspection=changeInspectionStatus(active,overlaps.length);
   const stale = active.filter((task) => hasOlderAcceptedBase(task,state.acceptedState.currentCommit,state.tasks));
 
 
@@ -197,12 +207,25 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
       if (action === "agent") setNotice("Agent run requested. Check its durable run status below.");
     });
 
-  const integrate = () =>
-    run("integrate", async () => {
-      await apiJson(`/p/${projectId}/integrations`, { method: "POST", json: { taskIds: integrationSelection } });
-      setSelected([]);
-      setNotice("Integration requested. Review the candidate, checks, and any conflict decisions in Integration before accepting repository history.");
-    });
+  const integrate = (saved?:IntegrationIntent) => {
+    if(integrationLock.current)return;
+    integrationLock.current=true;
+    const generation=lifetime.current;
+    void run("integrate",async()=>{
+      const identity=apiSessionIdentity();if(!identity)throw Error("Your verified session is unavailable. Sign in before preparing an integration request.");
+      const scope={identity,projectId};
+      let intent=saved ?? savedIntegrations.find(record=>JSON.stringify(record.request.taskIds)===JSON.stringify(integrationSelection));
+      if(!intent)intent=prepareIntegrationIntent(state,integrationSelection);
+      try{setSavedIntegrations(saveIntegrationIntent(sessionStorage,scope,intent));setIntegrationRecoveryError(null);}catch{setIntegrationRecoveryError("The original integration request could not be saved for recovery. No request was sent.");throw Error("Integration recovery storage is unavailable. Your selection is unchanged; no integration was sent.");}
+      try{
+        const response=await apiJson<{queued:string;replayed:boolean;dispatch:'unknown'|'observed'}>(`/p/${projectId}/integrations`,{method:"POST",json:intent.request});
+        if(generation!==lifetime.current||apiSessionIdentity()!==identity)return;
+        if(typeof response.queued!=="string"||!response.queued||typeof response.replayed!=="boolean"||!["unknown","observed"].includes(response.dispatch))throw Error("The integration acknowledgement could not be verified.");
+        if(response.dispatch==="unknown"){const retained={...intent,phase:'unknown' as const};setSavedIntegrations(saveIntegrationIntent(sessionStorage,scope,retained));setNotice(`Request ${response.queued} is recorded, but delivery is unconfirmed. Retrying its saved request keeps the same identity and revisions.`);}
+        else{try{setSavedIntegrations(acknowledgeIntegrationIntent(sessionStorage,scope,intent.request.idempotencyKey));}catch{setIntegrationRecoveryError("Delivery was confirmed, but the browser could not clear its recovery copy. Retrying that copy remains idempotent.");}setSelected([]);setNotice(`Integration delivery confirmed: ${response.queued}. Review its candidate and checks in Integration before accepting repository history.`);}
+      }catch(cause){if(generation!==lifetime.current||apiSessionIdentity()!==identity)return;try{setSavedIntegrations(saveIntegrationIntent(sessionStorage,scope,{...intent,phase:'unknown'}));}catch{setIntegrationRecoveryError("The original request was saved before dispatch, but its browser recovery status could not be updated.");}throw Error(`${cause instanceof Error?cause.message:"Integration result is unknown"} The original request and revisions are retained; retrying it does not create a replacement integration.`);}
+    }).finally(()=>{integrationLock.current=false;});
+  };
 
   const toggle = (id: string) => setSelected(() => (integrationSelection.includes(id) ? integrationSelection.filter((value) => value !== id) : integrationSelection.length >= 8 ? integrationSelection : [...integrationSelection, id]));
 
@@ -218,7 +241,7 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
           <div className="flex items-center gap-2 text-xs text-muted-foreground"><ShieldCheck className="h-4 w-4 text-emerald-400" aria-hidden="true" /><span>{state.acceptedState.currentCommit?<>Accepted <code>{acceptedCommitLabel(state.acceptedState.currentCommit,8)}</code></>:"No accepted commit yet"}</span></div>
         </div>
         <dl className="mt-5 grid grid-cols-3 gap-3 border-t border-border pt-4">
-          {[["Active changes", active.length], ["Shared files", overlaps.length], ["Older bases", stale.length]].map(([label, count]) => <div key={label}><dt className="text-xs text-muted-foreground">{label}</dt><dd className="mt-1 text-2xl font-semibold tabular-nums">{count}</dd></div>)}
+          {[["Active changes", active.length], ["Shared files", inspection.sharedFilesLabel], ["Older bases", stale.length]].map(([label, count]) => <div key={label}><dt className="text-xs text-muted-foreground">{label}</dt><dd className="mt-1 text-2xl font-semibold tabular-nums">{count}</dd>{label==="Shared files"&&inspection.sharedFilesNote&&<p className="mt-1 text-xs text-muted-foreground">{overlaps.length>0?"Saved checkpoints · ":""}{inspection.sharedFilesNote}</p>}</div>)}
         </dl>
         {overlaps.length > 0 && <div className="mt-4 border-t border-border pt-4">
           <h3 className="text-sm font-medium flex items-center gap-2"><AlertTriangle className="h-4 w-4 text-amber-400" aria-hidden="true" />Overlapping saved changes</h3>
@@ -270,11 +293,15 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
           <h2 className="text-sm font-semibold">Changes ({tasks.length})</h2>
           <p className="text-xs text-muted-foreground">Select up to 8 ready or blocked changes to prepare a review candidate.</p>
         </div>
-        <Button variant="outline" size="sm" disabled={integrationSelection.length < 1 || integrationSelection.length > 8 || busy !== null} onClick={integrate}>
-          <GitPullRequestArrow className="h-4 w-4 mr-1.5" aria-hidden="true" /> {busy === "integrate" ? "Starting…" : integrationSelection.length <= 1 ? "Integrate" : `Integrate ${integrationSelection.length} together`}
+        <Button variant="outline" size="sm" disabled={integrationSelection.length < 1 || integrationSelection.length > 8 || busy !== null} onClick={()=>integrate()}>
+          <GitPullRequestArrow className="h-4 w-4 mr-1.5" aria-hidden="true" /> {busy === "integrate" ? "Starting…" : savedIntegrations.some(record=>JSON.stringify(record.request.taskIds)===JSON.stringify(integrationSelection)) ? "Retry original integration" : savedIntegrations.length>0 ? "Start separate integration" : integrationSelection.length <= 1 ? "Integrate" : `Integrate ${integrationSelection.length} together`}
         </Button>
       </div>
 
+      {taskId&&!linkedTask&&<p role="status" className="text-sm text-muted-foreground">The linked change is unavailable in this repository. Current changes remain below.</p>}
+      {integrationRecoveryError&&<p role="alert" className="text-sm text-destructive">{integrationRecoveryError}</p>}
+      {savedIntegrations.length>0&&<section aria-label="Saved integration requests" className="space-y-3 border-y border-border py-4"><h2 className="text-sm font-semibold">Saved integration requests</h2><p className="text-xs text-muted-foreground">Retries keep the original contributions and revisions. A changed selection starts a separate request.</p>{savedIntegrations.map(record=><div key={record.request.idempotencyKey} className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs">Request <code title={record.request.idempotencyKey}>{record.request.idempotencyKey.slice(0,8)}</code> · {record.request.taskIds.length} {record.request.taskIds.length===1?"contribution":"contributions"} · {record.phase==='unknown'?'Outcome unconfirmed':'Prepared'}</p><div className="flex flex-wrap gap-2"><Button size="sm" variant="ghost" onClick={()=>setIntegrationDetails(record)}>Inspect original request</Button><Button size="sm" variant="outline" disabled={busy!==null} onClick={()=>integrate(record)}>Retry original request</Button></div></div>)}</section>}
+      <Dialog open={integrationDetails!==null} onOpenChange={open=>{if(!open)setIntegrationDetails(null);}} className="max-h-[calc(100dvh-2rem)] overflow-y-auto"><DialogHeader><DialogTitle>Original integration request</DialogTitle><DialogDescription>These saved revisions are sent unchanged when you retry.</DialogDescription></DialogHeader>{integrationDetails&&<div className="space-y-3 text-xs min-w-0"><p className="break-all">Request <code>{integrationDetails.request.idempotencyKey}</code></p><p>Prepared {new Date(integrationDetails.createdAt).toLocaleString()}</p><p className="break-all">Accepted commit <code>{integrationDetails.request.expected.acceptedCommit??"unborn"}</code> · policy {integrationDetails.request.expected.policyVersion}</p><ul className="space-y-4">{integrationDetails.request.expected.contributions.map(input=><li key={input.taskId}><h3 className="font-medium break-all">{input.taskId}</h3><p className="mt-1 break-all">Saved head <code>{input.commit??"unborn"}</code></p><p className="mt-1 break-all">Base <code>{input.base??"unborn"}</code></p>{input.acceptedTarget&&<p className="mt-1 break-all">Target <code>{input.acceptedTarget.ref}</code> · accepted version {input.acceptedTarget.acceptedVersion}</p>}{input.targetGeneration&&<p className="mt-1">Target generation {input.targetGeneration.generation}</p>}</li>)}</ul><Button type="button" size="sm" variant="outline" onClick={()=>setIntegrationDetails(null)}>Close</Button></div>}</Dialog>
       <Card>
         <CardContent className="p-0 divide-y divide-border">
           {tasks.length === 0 && <p className="p-4 text-sm text-muted-foreground">No changes yet. Start one above.</p>}
@@ -283,8 +310,8 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
             const latestCheckpoint = t.checkpoints.at(-1);
             const canSelect = t.status === "ready" || t.status === "blocked";
             return (
-              <div key={t.id} className="px-4 py-4 flex items-start gap-3 flex-wrap sm:flex-nowrap">
-                <input type="checkbox" className="mt-1.5" disabled={!canSelect} checked={integrationSelection.includes(t.id)} onChange={() => toggle(t.id)} aria-label={canSelect ? `Select “${t.goal}” for integration` : `“${t.goal}” is not ready to integrate`} />
+              <div key={t.id} ref={t.id===linkedTask?.id?linkedTaskElement:undefined} tabIndex={t.id===linkedTask?.id?-1:undefined} role={t.id===linkedTask?.id?"group":undefined} aria-label={t.id===linkedTask?.id?`Linked change: ${t.goal}`:undefined} className={`px-4 py-4 flex items-start gap-3 flex-wrap sm:flex-nowrap ${t.id===linkedTask?.id?"bg-primary/5 ring-2 ring-inset ring-primary outline-none scroll-mt-24":""}`}>
+                <input type="checkbox" className="mt-1.5" disabled={!canSelect||busy!==null} checked={integrationSelection.includes(t.id)} onChange={() => toggle(t.id)} aria-label={canSelect ? `Select “${t.goal}” for integration` : `“${t.goal}” is not ready to integrate`} />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
                     <h3 className="text-sm font-medium break-words min-w-0">{t.goal}</h3>
@@ -296,6 +323,7 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
                     ) : (
                       <Badge variant="outline" className="gap-1"><User className="h-3 w-3" aria-hidden="true" />{t.contributor.name}</Badge>
                     )}
+                    {t.externalTool&&t.contributor.type==="human"&&<span title={`External session ${t.externalTool.sessionId}; creator-attested, not vendor verified`}>External agent · {t.externalTool.tool} · reported by {t.initiatedBy?.name??t.contributor.name}</span>}
                     {t.initiatedBy?.type === "human" && t.initiatedBy.id !== t.contributor.id && <span>Requested by {t.initiatedBy.name}</span>}
                     {t.dependsOn && (
                       <span className="inline-flex items-center gap-1 min-w-0">
@@ -311,7 +339,7 @@ function ChangesPanel({ projectId, state, reload }: ChangesProps) {
                   </div>
                   <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
                     <span className="inline-flex items-center gap-1"><GitBranch className="h-3 w-3" aria-hidden="true" />Base <code>{t.baseCommit?acceptedCommitLabel(t.baseCommit,8):"Empty accepted history"}</code></span>
-                    {t.checkpoints.length > 0&&t.currentCommit ? <span>Saved <code>{t.currentCommit?.slice(0, 8)}</code> · {t.checkpoints.length} checkpoint{t.checkpoints.length === 1 ? "" : "s"}</span> : <span>No pushed checkpoint yet</span>}
+                    {t.currentCommit&&t.checkpoints.some(checkpoint=>checkpoint.commitHash===t.currentCommit) ? <span>Saved <code>{t.currentCommit?.slice(0, 8)}</code> · {t.checkpoints.length} checkpoint{t.checkpoints.length === 1 ? "" : "s"}</span> : <span>Checkpoint not verified yet</span>}
                     {stale.some((task) => task.id === t.id) && <span className="text-amber-200">Accepted history advanced · candidate must use the latest base</span>}
                   </div>
                   {latestCheckpoint && <p className="mt-1 text-xs text-muted-foreground break-words">Latest checkpoint: {latestCheckpoint.message} · {timeAgo(latestCheckpoint.timestamp)}</p>}

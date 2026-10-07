@@ -1,0 +1,8 @@
+import {RepositoryController} from '../../src/server/durable-object';
+import worker from '../../src/server/worker';
+import {accountKeyFor} from '../../src/server/projects';
+import type {Env} from '../../src/server/env';
+export class TokenExpiryFixture extends RepositoryController{
+ async exercise(){const realNow=Date.now,base=realNow(),expired='synthetic-expired',boundary='synthetic-boundary',active='synthetic-active';await this.createApiToken('owner','expired',expired,{scope:'write',expiresAt:base+10000});await this.createApiToken('owner','boundary',boundary,{scope:'read',expiresAt:base+20000});await this.createApiToken('owner','active',active,{scope:'read',expiresAt:base+30000});Date.now=()=>base+20000;try{return{active:await this.listApiTokens(),all:await this.listApiTokens(true),expiredVerified:await this.verifyApiToken(expired),boundaryVerified:await this.verifyApiToken(boundary),activeVerified:await this.verifyApiToken(active)};}finally{Date.now=realNow;}}
+}
+export default{async fetch(request:Request,env:Env,ctx:ExecutionContext){const account=env.REPOSITORY_CONTROLLER.getByName('fixture') as unknown as TokenExpiryFixture;if(new URL(request.url).pathname==='/fixture')return Response.json(await account.exercise());if(new URL(request.url).pathname==='/scope'){const key=await accountKeyFor('owner'),token='fgt_'+key+'_'+'a'.repeat(48);await(env.REPOSITORY_CONTROLLER.getByName('account:'+key) as unknown as TokenExpiryFixture).createApiToken('owner','local stored scope',token,{scope:'read'});return worker.fetch(new Request('https://test/api/tokens?includeExpired=true',{headers:{Authorization:'Bearer '+token}}),{...env,API_LIMITER:{limit:async()=>({success:true})}},ctx);}return new Response('Not found',{status:404});}};

@@ -107,8 +107,8 @@ const HELP = `flaregit — JSON by default (--pretty for humans)
   service-candidate <repository-id> <candidate-id> --service ID --commit SHA   signed metadata snapshot; no clone credential
   report <repository-id> --service ID --file report.json [--event stable-id]   signed service report; environment secret only
   changes <repo>
-  change new <repo> "<goal>" [--agent]
-  work <repo> "<goal>" [--dir D] [--on CHANGE] [--issue N]   create a change (stacked on CHANGE if given), clone it and check out its branch
+  change new <repo> "<goal>" [--agent] [--external-tool NAME --external-session ID]
+  work <repo> "<goal>" [--external-tool NAME --external-session ID] [--dir D] [--on CHANGE] [--issue N]   create a change (stacked on CHANGE if given), clone it and check out its branch
   push                                   push the current change branch (fresh credential)
   ready <repo> <change> | cancel <repo> <change>
   integrate <repo> <change> [<change> ...]       compose, verify and queue 1-8 changes for review
@@ -221,11 +221,12 @@ async function main() {
     const state = await api<{ tasks: Record<string, { id: string; goal: string; status: string; contributor: { name: string }; createdAt: string }> }>("GET", `/p/${id}/state`);
     return out(Object.values(state.tasks).map((t) => ({ id: t.id, goal: t.goal, status: t.status, by: t.contributor.name, createdAt: t.createdAt })));
   }
+  const externalTool=()=>{const tool=flag("external-tool"),sessionId=flag("external-session");if(!tool&&!sessionId)return{};if(!tool||!sessionId||flags.has("agent"))fail("External tool provenance requires both flags and cannot request a managed agent");return{externalTool:{execution:"external" as const,tool,sessionId}};};
   if (cmd === "change" && sub === "new") {
     const id = await repo(rest[0]);
     const goal = rest[1] ?? fail('Usage: flaregit change new <repo> "<goal>"');
     const taskId = `${goal.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 24) || "change"}-${Math.random().toString(36).slice(2, 6)}`;
-    const created = await api<{ task: string; remote: string; branch: string; token: string }>("POST", `/p/${id}/tasks`, { taskId, goal });
+    const created = await api<{ task: string; remote: string; branch: string; token: string }>("POST", `/p/${id}/tasks`, { taskId, goal,...externalTool() });
     if (flags.has("agent")) await api("POST", `/p/${id}/tasks/${taskId}/agent`);
     return out({ change: created.task, branch: created.branch, agent: flags.has("agent"), note: flags.has("agent") ? "An AI agent is working on it" : `Run: flaregit work ${rest[0]} "${goal}"  (or push to ${created.branch})` });
   }
@@ -234,7 +235,7 @@ async function main() {
     const goal = rest[0] ?? fail('Usage: flaregit work <repo> "<goal>"');
     const taskId = `${goal.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 24) || "change"}-${Math.random().toString(36).slice(2, 6)}`;
     const on = flag("on");
-    const created = await api<{ task: string; remote: string; branch: string; token: string }>("POST", `/p/${id}/tasks`, { taskId, goal, ...(on ? { dependsOn: on } : {}), ...(flag("issue") ? { issue: Number(flag("issue")) } : {}) });
+    const created = await api<{ task: string; remote: string; branch: string; token: string }>("POST", `/p/${id}/tasks`, { taskId, goal,...externalTool(), ...(on ? { dependsOn: on } : {}), ...(flag("issue") ? { issue: Number(flag("issue")) } : {}) });
     const dir = flag("dir") ?? taskId;
     git(["clone", "--quiet", created.remote, dir], created.token);
     if (on) git(["checkout", "--quiet", `task/${on}`], undefined, dir);

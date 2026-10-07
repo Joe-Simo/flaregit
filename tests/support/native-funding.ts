@@ -24,6 +24,7 @@ export function nativeFunding() {
     reservePreviewStorage:async(manifest:Parameters<PreviewStorageLedger["reserve"]>[0])=>{previews.reserve(manifest,budget);return{allowed:true};},
     reserveEvidenceStorage:async(...args:Parameters<EvidenceStorageLedger["reserve"]> extends [...infer T,unknown]?T:never)=>{evidence.reserve(...args,budget);return{allowed:true};},
     reservePreviewWriter:async(key:string,id:string)=>{writers.registerPreview(key);writers.begin(key,id);},
+    claimPreviewWriter:async(key:string,id:string)=>{writers.registerPreview(key);return writers.claim(key,id);},
     beginPreviewPut:async(key:string,id:string,path:string)=>writers.dispatch(key,id,path?`${key}/${path}`:key),
     finishPreviewPut:async(key:string,id:string,path:string)=>writers.settled(key,id,path?`${key}/${path}`:key),
     finishPreviewWriter:async(key:string,id:string)=>writers.finish(key,id),

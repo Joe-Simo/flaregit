@@ -4,7 +4,7 @@ export type StaticBuildScope=z.infer<typeof scopeSchema>;
 export interface BuildFile{path:string;kind:'file';bytes:Uint8Array}
 export interface BuildManifest{version:1;kind:'source'|'static';scope:StaticBuildScope;files:Array<{path:string;size:number;digest:string}>;totalBytes:number;sourceDigest?:string;digest:string}
 const MAX_FILES=512,MAX_FILE_BYTES=4194304,MAX_TOTAL_BYTES=16777216;
-const staticExtension=/\.(?:html|css|js|mjs|json|svg|png|jpe?g|webp|gif|ico|woff2?|ttf)$/i;
+const staticExtension=/\.(?:html|css|js|mjs|json|svg|png|jpe?g|webp|avif|gif|ico|woff2?|ttf|otf)$/i;
 function pathAllowed(path:string){return path.length>0&&path.length<=256&&!/[\x00-\x20\x7f\\?#%]/.test(path)&&!path.startsWith('/')&&path.split('/').every(part=>part!==''&&part!=='.'&&part!=='..'&&part!=='.git'&&part!=='node_modules'&&!/^\.env(?:\.|$)/i.test(part));}
 async function digest(bytes:Uint8Array){return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new Uint8Array(bytes))),byte=>byte.toString(16).padStart(2,'0')).join('');}
 /** Bytes come from an untrusted job. Worker recomputes all identities; stdout is never a manifest. */

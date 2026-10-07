@@ -1,0 +1,8 @@
+import {test,expect} from 'bun:test';
+import {readPreviewRequest,savePreviewRequest,type PreviewRequestStorage} from '../src/web/preview-onboarding-recovery';
+const request={requestId:'71e09e40-5522-41d1-a6c7-079b676d3a70'};
+const memory=()=>{const data=new Map<string,string>();return {getItem:(key:string)=>data.get(key)??null,setItem:(key:string,value:string)=>{data.set(key,value)}}};
+test('original preview UUID survives reload and stays scoped to actor and repository',()=>{const storage=memory();savePreviewRequest(storage,'owner','repo',request);expect(readPreviewRequest(storage,'owner','repo')).toEqual(request);expect(readPreviewRequest(storage,'other','repo')).toBeNull();expect(readPreviewRequest(storage,'owner','other')).toBeNull();});
+test('a new UUID cannot silently replace original recovery',()=>{const storage=memory();savePreviewRequest(storage,'owner','repo',request);expect(()=>savePreviewRequest(storage,'owner','repo',{requestId:'81e09e40-5522-41d1-a6c7-079b676d3a70'})).toThrow('original');expect(readPreviewRequest(storage,'owner','repo')).toEqual(request);});
+test('storage denial and dropped writes fail before request admission',()=>{const denied:PreviewRequestStorage={getItem:()=>null,setItem:()=>{throw Error('denied')}};expect(()=>savePreviewRequest(denied,'owner','repo',request)).toThrow('denied');expect(()=>savePreviewRequest({getItem:()=>null,setItem:()=>{}},'owner','repo',request)).toThrow('No request was sent');});
+test('corrupt recovery and extra caller-controlled fields fail closed',()=>{expect(()=>readPreviewRequest({getItem:()=>'{',setItem:()=>{}},'owner','repo')).toThrow();const hostile={...request,origin:'https://attacker.invalid'};expect(()=>savePreviewRequest(memory(),'owner','repo',hostile)).toThrow();});

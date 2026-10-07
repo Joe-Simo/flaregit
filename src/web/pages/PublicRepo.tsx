@@ -1,6 +1,7 @@
+import { FlareGitBrand } from "../components/Brand";
 import { CloudflareBadgeFooter } from "../components/CloudflareBadge";
 import React, { useCallback, useEffect, useState } from "react";
-import { GitBranch, Folder, FileText, ArrowLeft } from "lucide-react";
+import { Folder, FileText, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PublicCommunityPosts } from "../components/PublicCommunityPosts";
 import { ThemeSelector } from "../ThemeProvider";
@@ -56,7 +57,7 @@ export function PublicRepo({ projectId, params = new URLSearchParams(), onSignIn
     return (await readPublic<{ file: BlobResult }>(projectId, "file", new URLSearchParams({ commit: ref, path: match.path }))).file;
   }, [changes, from, to, projectId]);
   return <div className="min-h-screen flex flex-col bg-background text-foreground font-sans">
-    <header className="h-14 border-b border-border px-5 sm:px-8 flex items-center justify-between gap-3"><a href="/" className="flex items-center gap-2 font-semibold"><GitBranch className="h-5 w-5 text-primary" aria-hidden="true" />FlareGit</a><div className="flex items-center gap-3"><ThemeSelector compact />{onSignIn ? <Button size="sm" variant="ghost" onClick={onSignIn}>Sign in to contribute</Button> : <a href={`/#/p/${encodeURIComponent(projectId)}`} className="text-sm underline rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Sign in to contribute</a>}</div></header>
+    <header className="h-14 border-b border-border px-5 sm:px-8 flex items-center justify-between gap-3"><a href="/" className="flex items-center gap-2 font-semibold"><FlareGitBrand /></a><div className="flex items-center gap-3"><ThemeSelector compact />{onSignIn ? <Button size="sm" variant="ghost" onClick={onSignIn}>Sign in to contribute</Button> : <a href={`/#/p/${encodeURIComponent(projectId)}`} className="text-sm underline rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Sign in to contribute</a>}</div></header>
     <main className="w-full flex-1 max-w-6xl mx-auto px-5 sm:px-8 py-8 min-w-0">
       <div className="flex flex-wrap items-baseline justify-between gap-3 mb-6"><h1 className="text-xl font-medium break-words">{meta?.name ?? "Public repository"}</h1>{meta && <span className="text-xs text-muted-foreground">Public · accepted <code>{meta.acceptedCommit.slice(0, 12)}</code></span>}</div>
       {meta && <nav aria-label="Public repository sections" className="flex gap-1 border-b border-border mb-5"><Button variant="ghost" aria-current={view === "code" ? "page" : undefined} onClick={() => go({ view: "code", ...(selectedCommit ? { commit: selectedCommit } : {}) })}>Source</Button><Button variant="ghost" aria-current={view === "history" ? "page" : undefined} onClick={() => go({ view: "history" })}>History</Button><Button variant="ghost" aria-current={view === "community" ? "page" : undefined} onClick={() => go({ view: "community" })}>Community</Button></nav>}

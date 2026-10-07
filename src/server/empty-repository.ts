@@ -65,9 +65,8 @@ export async function createEmptyRepository(env: Env, input: EmptyRepositoryInpu
   defaultRef(input.defaultBranch);
   if (!/^[a-f0-9-]{36}$/.test(input.eventId)) throw new Error("Recorded empty repository event required");
   await journal.authorize();
-  if (!await journal.beforeCreate(input)) throw new Error("Saved repository creation requires recovery before another dispatch");
+  const nativeName = `empty-${input.eventId}`;
   const created = await allocateArtifact(env, { name: input.canonicalName, projectId: input.projectId, userId: input.userId, kind: "canonical", operationId: input.operationId }, async () => {
-    await journal.authorize();
     const result = await env.ARTIFACTS.create(input.canonicalName, { description: input.description, setDefaultBranch: input.defaultBranch });
     try { await journal.created({ id: result.id, name: result.name, remote: result.remote, defaultBranch: result.defaultBranch }, result.token); }
     catch {
@@ -75,6 +74,10 @@ export async function createEmptyRepository(env: Env, input: EmptyRepositoryInpu
       throw new Error("Empty repository creation receipt is unconfirmed; saved-operation recovery is required");
     }
     return result;
+  }, async () => {
+    await journal.authorize();
+    await admitNativeCompute(env, await accountKeyFor(input.userId), nativeName, "native-essential");
+    if (!await journal.beforeCreate(input)) throw new Error("Saved repository creation requires recovery before another dispatch");
   });
   using repository = await env.ARTIFACTS.get(input.canonicalName);
   if (!await repository.revokeToken(created.token)) throw new Error("Initial repository credential revocation remains unconfirmed");
@@ -82,10 +85,9 @@ export async function createEmptyRepository(env: Env, input: EmptyRepositoryInpu
   const info = await repository.info();
   const metadata: EmptyRepositoryMetadata = { id: info.id, name: info.name, remote: info.remote, defaultBranch: info.defaultBranch };
   if (metadata.id !== created.id || metadata.name !== input.canonicalName || metadata.remote !== created.remote || metadata.defaultBranch !== input.defaultBranch) throw new Error("Created empty repository identity changed");
-  const nativeName = `empty-${input.eventId}`;
   let allocated = false, readToken: string | undefined, revoked = false, stopped = false, proof: EmptyRepositoryProof | undefined;
   try {
-    await journal.authorize(); await admitNativeCompute(env, await accountKeyFor(input.userId), nativeName, "native-essential"); await journal.nativeIntent(nativeName);
+    await journal.authorize(); await journal.nativeIntent(nativeName);
     const sandbox = env.INTEGRATOR.getByName(nativeName); allocated = true;
     await journal.authorize(); await journal.beforeReadCredential();
     const issued = await repository.createToken("read", 60); readToken = issued.plaintext;

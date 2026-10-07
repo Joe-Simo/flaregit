@@ -1,0 +1,8 @@
+import worker from '../../src/server/worker';
+import {PeopleFixture} from './community-people-worker';
+import {accountKeyFor} from '../../src/server/projects';
+import type {Env} from '../../src/server/env';
+export class PreparedHttpFixture extends PeopleFixture {
+ async prepareFixture(){await this.seed();const state=await this.getState();state.candidates.candidate={id:'candidate',candidateCommit:'b'.repeat(40)} as typeof state.candidates[string];state.journal=[{id:'jrnl_11111111-1111-4111-8111-111111111111',candidateId:'candidate',newHead:'b'.repeat(40),state:'PREPARED'} as typeof state.journal[number]];this.ctx.storage.sql.exec('UPDATE project SET doc=? WHERE id=1',JSON.stringify(state));}
+}
+export default {async fetch(request:Request,env:Env&{FIXTURE_ISSUER:string},ctx:ExecutionContext){const url=new URL(request.url);if(url.pathname==='/fixture/seed'){await(env.REPOSITORY_CONTROLLER.getByName('project:p123456abcdef') as unknown as PreparedHttpFixture).prepareFixture();const key=await accountKeyFor('owner'),account=env.REPOSITORY_CONTROLLER.getByName('account:'+key) as unknown as PreparedHttpFixture;await account.addProject({id:'p123456abcdef',name:'Local',kind:'native',role:'owner'});const token='fgt_'+key+'_'+'r'.repeat(32);await account.createApiToken('owner','Synthetic read',token,{scope:'read',repo:'p123456abcdef'});return Response.json({token});}return worker.fetch(request,{...env,CLERK_ISSUER:env.FIXTURE_ISSUER,CLERK_AUTHORIZED_PARTIES:'https://fixture.example',API_LIMITER:{limit:async()=>({success:true})},LOOKUP_LIMITER:{limit:async()=>({success:true})}} as unknown as Env,ctx);}};

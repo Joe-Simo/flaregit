@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { assignedAgentEgress, assignedAgentPushCommand, installAssignedAgentEgress, type AgentExecutionEgressScope, type AgentExecutionEgressCapabilities } from "../src/server/agent-execution-egress";
+import { assignedAgentEgress, assignedAgentPushCommand, parseAssignedAgentPushCommand, installAssignedAgentEgress, type AgentExecutionEgressScope, type AgentExecutionEgressCapabilities } from "../src/server/agent-execution-egress";
 
 const remote = `https://${"a".repeat(32)}.artifacts.cloudflare.net/assigned-fork.git`, tip = "b".repeat(40), next = "c".repeat(40);
 const scope: AgentExecutionEgressScope = { projectId: "p123456789abc", incarnation: "11111111-1111-4111-8111-111111111111", actorId: "owner", accountKey: "account", taskId: "task-one", runId: "agent-run", workflowId: "workflow", branchGeneration: 2, canonicalRepoName: "canonical-owned", forkRepoName: "assigned-fork", remote, branch: "task/one", expectedTip: tip, access: "write" };
@@ -26,13 +26,17 @@ test("agent relay allows only exact assigned fork smart Git routes and injects c
 test("write packets permit one exact assigned branch CAS and refuse deletion, tags or other branches", async () => {
   const f = fixture();
   expect(assignedAgentPushCommand(packet(), scope.branch, scope.expectedTip)).toBe(true);
+  expect(parseAssignedAgentPushCommand(packet(), scope.branch, scope.expectedTip)).toEqual({ oldCommit: tip, newCommit: next, ref: "refs/heads/task/one" });
+  const recorded: unknown[] = []; f.capabilities.beforeTransfer = async (_scope, push) => { recorded.push(push); };
   expect((await f.handler.fetch(new Request(`${remote}/git-receive-pack`, { method: "POST", body: packet() }))).status).toBe(200);
   for (const body of [packet(tip, "0".repeat(40)), packet(tip, next, "refs/tags/v1"), packet(tip, next, "refs/heads/main"), packet("d".repeat(40)), packet(tip, next, "refs/heads/task/one", "push-options"), new TextEncoder().encode("garbage")]) {
     expect(assignedAgentPushCommand(body, scope.branch, scope.expectedTip)).toBe(false);
     expect((await f.handler.fetch(new Request(`${remote}/git-receive-pack`, { method: "POST", body }))).status).toBe(403);
   }
+  expect(recorded).toEqual([{ oldCommit: tip, newCommit: next, ref: "refs/heads/task/one" }]);
   expect(f.upstream.length).toBe(1); expect(f.upstream[0]?.headers.get("Content-Type")).toBe("application/x-git-receive-pack-request");
   expect(assignedAgentPushCommand(packet("0".repeat(40)), scope.branch, null)).toBe(true);
+  expect(parseAssignedAgentPushCommand(packet("0".repeat(40)), scope.branch, null)?.oldCommit).toBeNull();
 });
 
 test("fresh actor/account/task/generation scope and actual transfer budgets fence every request", async () => {

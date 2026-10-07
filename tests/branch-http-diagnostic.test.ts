@@ -1,0 +1,11 @@
+import{Database}from'bun:sqlite';import{expect,test}from'bun:test';
+import{BranchHttpAttempts}from'../src/server/branch-http-attempts';
+test('bounded categorical inspection diagnostics preserve legacy unknowns and first failure without exposing identities',()=>{
+ const db=new Database(':memory:'),storage={sql:{exec(query:string,...args:Array<string|number>){const rows=db.query(query).all(...args);return{toArray:()=>rows,one:()=>rows[0]};}},transactionSync<T>(callback:()=>T){return db.transaction(callback)();}};
+ try{const ledger=new BranchHttpAttempts(storage as unknown as DurableObjectStorage),identity={attemptId:crypto.randomUUID(),nativeId:crypto.randomUUID(),operationId:crypto.randomUUID(),kind:'inventory' as const,projectId:'project',incarnation:crypto.randomUUID(),canonicalRepoName:'private-repository-name',actorId:'private-owner',accountKey:'private-account',snapshotDigest:'a'.repeat(64)};
+ ledger.begin(identity,()=>{});ledger.end(identity.attemptId);expect(ledger.inspections(identity.projectId,identity.incarnation)[0]).toMatchObject({outcome:'legacy_unknown',stage:null,failureStage:null});
+ const fresh={...identity,attemptId:crypto.randomUUID(),operationId:crypto.randomUUID()};ledger.begin(fresh,()=>{});ledger.stage(fresh.attemptId,'funding');ledger.failed(fresh.attemptId);ledger.stage(fresh.attemptId,'credential_cleanup');ledger.failed(fresh.attemptId);ledger.complete(fresh.attemptId);ledger.end(fresh.attemptId);
+ const rows=ledger.inspections(identity.projectId,identity.incarnation);expect(rows[0]).toMatchObject({outcome:'failed',stage:'credential_cleanup',failureStage:'funding',nativeState:'not_allocated',executionEnded:true});expect(ledger.inspections('foreign',identity.incarnation)).toEqual([]);expect(ledger.inspections(identity.projectId,crypto.randomUUID())).toEqual([]);const serialized=JSON.stringify(rows);for(const secret of [identity.canonicalRepoName,identity.actorId,identity.accountKey,identity.nativeId])expect(serialized).not.toContain(secret);
+ for(let n=0;n<12;n++)ledger.begin({...identity,attemptId:crypto.randomUUID(),operationId:crypto.randomUUID()},()=>{});expect(ledger.inspections(identity.projectId,identity.incarnation)).toHaveLength(10);
+ }finally{db.close();}
+});

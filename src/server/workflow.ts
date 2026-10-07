@@ -1,8 +1,19 @@
+import {z} from 'zod';
+import {selectPublicationNativePhase} from './publication-native-phase';
+import {runtimeRelease} from './runtime-release';
+import {accountKeyFor,accountOf} from './projects';
+import {ensureBuild} from "./build";
+import {previewStorageFromIsolatedArtifact} from "./isolated-preview-storage";
+import type {IsolatedBuildArtifact} from "./isolated-build-job";
+import type {ProtectedConflictContext} from './protected-conflict-source';
+import {captureTrustedGitSource} from './trusted-git-source';
+import {repairDigest,type RepairPatch} from './protected-model-repair';
+import {applyProtectedNativeRepair,applyProtectedNativeConflictRepair,reconstructProtectedNativeConflict} from './protected-native-repair';
 import {runWorkflowMirrorFollowup} from "./workflow-mirror";
 import {deriveTrustedBrowserPolicy} from './isolated-browser-policy';
 import {verifyIsolatedGitCandidate,IsolatedGitVerificationError} from './isolated-git-verification';
 import type { NativeComputeKind } from "./managed-spend-ledger.js";
-import {retainCandidateGitPin} from "./candidate-git-pin";
+import {retainCandidateGitPin,retainConflictInputGitPin} from "./candidate-git-pin";
 import {confirmCompositionBranch} from "./composition-branch";
 import { retainGitInput, retainUnbornGitInput, retainedGitInputRef } from "./retained-git-input.js";
 import type { RetainedInput } from "./retained-inputs.js";
@@ -10,10 +21,11 @@ import { validateRecoveryRemote } from "./private-recovery-bundle.js";
 import { admitGitOperation } from "./core-git-budget.js";
 import {rebaseAcceptedFollowup} from "./accepted-followups.js";
 import { assertPreviewStorageAdmission, PreviewStorageAdmissionError } from "./preview-storage.js";
-import { inspectPreviewStorageManifest, publishPreviewStorageManifest } from "./preview-storage-upload.js";
+import { publishPreviewStorageManifest } from "./preview-storage-upload.js";
 import { admitNativeCompute } from "./native-compute.js";
 import { buildPrefix } from "./preview-access.js";
 import { publicationInHistory } from "./publication.js";
+import {checkpointedNativeRefUpdate} from './c03-native-publication-checkpoint';
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { WorkersAIClient, DEFAULT_CODE_MODEL } from "../ai/workers-ai.js";
 import { buildRepairPrompt, parseRepairResponse, MAX_REPAIR_ROUNDS } from "../core/pipeline/repair.js";
@@ -58,6 +70,7 @@ export async function authorizeIntegrationPublicationDispatch(candidate:Candidat
 }
 
 export interface IntegrationParams {
+  mode?: "integrate";
   nativeRuntimeProtocolVersion?:1;
   projectId: string;
   accountKey?: string;
@@ -65,14 +78,19 @@ export interface IntegrationParams {
   taskIds: string[];
 }
 
+export interface PreparedPublicationParams {mode:'prepared-publication';projectId:string;candidateId:string;journalId:string}
+export type IntegrationWorkflowParams=IntegrationParams|PreparedPublicationParams;
+const preparedPublicationSchema=z.object({mode:z.literal('prepared-publication'),projectId:z.string().regex(/^[a-z0-9]{12,16}$/),candidateId:z.string().regex(/^[a-z0-9_-]{1,128}$/),journalId:z.string().regex(/^jrnl_[a-f0-9-]{36}$/)}).strict();
+
 const WORK = "/workspace/integration";
 
 type Stub = Ledger;
 
-export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, IntegrationParams> {
-  override async run(event: WorkflowEvent<IntegrationParams>, step: WorkflowStep) {
+export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, IntegrationWorkflowParams> {
+  override async run(event: WorkflowEvent<IntegrationWorkflowParams>, step: WorkflowStep) {
+    const params=event.payload;if(params.mode==='prepared-publication')return this.publishPrepared({...event,payload:params},step);
     const repository = ledgerOf(this.env, event.payload.projectId) as Stub;
-    const admitted = await step.do("repository-dispatch-identity", () => repository.admitIntegrationDispatch(event.instanceId,event.payload.taskIds));
+    const admitted = await step.do("repository-dispatch-identity", () => repository.admitIntegrationDispatch(event.instanceId,params.taskIds));
     if (admitted.terminal) return { status: "skipped" as const, duplicate: true };
     const record = async (status: WorkflowOutcome) => {
       await step.do(`repository-outcome-${status}`, () => repository.recordIntegrationDispatchOutcome(event.instanceId,status));
@@ -83,7 +101,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     let result: Awaited<ReturnType<FlareGitIntegrationWorkflow["execute"]>>;
     let publicationConfirmed=false;
     const accepted=async()=>{publicationConfirmed=true;await record("accepted");};
-    try { result = await this.execute(event, step, accepted); }
+    try { result = await this.execute({...event,payload:params}, step, accepted); }
     catch (error) {
       if (!publicationConfirmed) {
         await step.do("reconcile-failed-candidate", async () => {
@@ -107,6 +125,25 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     // outcome, rather than overwrite accepted work with a fabricated failure.
     await record(result.status);
     return result;
+  }
+  private async publishPrepared(event:WorkflowEvent<PreparedPublicationParams>,step:WorkflowStep){
+    const input=preparedPublicationSchema.parse(event.payload);if(event.instanceId!==`pub-${input.journalId}`)throw Error('Exact original publication invocation required');
+    const controller=ledgerOf(this.env,input.projectId),state=await controller.getState(),candidate=state.candidates[input.candidateId],journal=state.journal.find(row=>row.id===input.journalId&&row.candidateId===input.candidateId);
+    if(!candidate?.workflowInstanceId||!candidate.candidateCommit||!candidate.evidenceId||!candidate.acceptedTarget||!journal||journal.newHead!==candidate.candidateCommit||journal.candidateTree!==state.evidence[candidate.evidenceId]?.candidateTree)throw Error('Exact stored publication unavailable');
+    if(journal.state==='ACCEPTED'){const receipt=await controller.acceptedPublicationReceipt(candidate.id,journal.id);if(!receipt||receipt.commit!==journal.newHead||receipt.ref!==candidate.acceptedTarget.ref)throw Error('Accepted publication history is unconfirmed');return{status:'accepted' as const,commit:journal.newHead,duplicate:true};}
+    if(journal.state!=='PREPARED'||journal.publicationAuthority?.kind!=='human-review'||!candidate.review?.approved||candidate.review.commit!==journal.newHead||candidate.review.actor?.userId!==journal.publicationAuthority.actor.userId)throw Error('Exact prepared human review required');
+    const original=await controller.getWorkflowRun(candidate.workflowInstanceId);if(original?.kind!=='integration'||!original.actorId)throw Error('Original registered integration required');
+    const accountKey=await accountKeyFor(original.actorId),phase=selectPublicationNativePhase(this.env,{workflowId:candidate.workflowInstanceId!,candidateId:candidate.id,journalId:journal.id}),release=runtimeRelease(this.env);
+    const derived={projectId:state.projectId,incarnation:candidate.acceptedTarget.incarnation,workflowId:candidate.workflowInstanceId,candidateId:candidate.id,actorId:original.actorId,accountKey,journalId:journal.id,commit:journal.newHead,tree:journal.candidateTree,evidenceId:candidate.evidenceId,reviewActorId:candidate.review.actor!.userId};
+    for(const key of Object.keys(derived) as (keyof typeof derived)[])if(phase[key]!==derived[key])throw Error('Publication grant differs from recorded authority');
+    if(!release.releaseIdentified||phase.sourceVersion!==release.sourceVersion||Date.now()<phase.activatedAt||Date.now()>=phase.admissionExpiresAt||await accountOf(this.env,accountKey).accountLifecycle()!=='active'||!await controller.authorizeCandidatePublication(candidate.id,journal.newHead))throw Error('Current publication authority unavailable');
+    const fresh=await controller.getState();if(JSON.stringify(fresh.candidates[candidate.id])!==JSON.stringify(candidate)||JSON.stringify(fresh.journal.find(row=>row.id===journal.id))!==JSON.stringify(journal))throw Error('Prepared publication changed during admission');
+    this.projectId=state.projectId;this.computeWorkflowId=candidate.workflowInstanceId;this.computeAccountKey=accountKey;this.nativeRuntimeCandidateId=candidate.id;
+    const published=await step.do('publish-original-prepared-candidate',{retries:{limit:0,delay:'1 second'},timeout:'20 minutes'},()=>this.casPush(candidate,journal.newHead,controller,candidate.acceptedTarget!.branch,journal));
+    if(!published.ok)return{status:'blocked' as const,publicationPending:true,journalId:journal.id,error:published.error};
+    await step.do('complete-original-publication',()=>controller.completePublish(journal.id,published.readbackScope));
+    await step.do('record-original-publication-outcome',()=>controller.recordIntegrationDispatchOutcome(candidate.workflowInstanceId!,'accepted'));
+    return{status:'accepted' as const,commit:journal.newHead,journalId:journal.id};
   }
   private async execute(event: WorkflowEvent<IntegrationParams>, step: WorkflowStep, recordAccepted:()=>Promise<void>) {
     const stub = ledgerOf(this.env, event.payload.projectId) as Stub;
@@ -141,8 +178,16 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       return { status: "blocked" as const, error: integrated.error };
     }
 
-    // Human control over history: the verified candidate waits until a person accepts this exact commit.
+    if (event.payload.nativeRuntimeProtocolVersion === 1 || 'trustedBrowserFixture' in candidate.frozenVerificationPolicy || 'trustedBrowserPolicyDigest' in candidate.frozenVerificationPolicy) {
+      await step.do("close-verification-native-phase", () => stub.closeIntegrationVerification(event.instanceId, candidate.id, integrated.commit, integrated.evidenceId));
+    }
+    // Freeze external checks before choosing the current maintainer acceptance policy.
     await step.do("await-review", async () => stub.awaitReview(candidate.id, integrated.commit, event.instanceId));
+    const acceptance = await step.do("candidate-acceptance", async () => {
+      const decision = await stub.candidateAcceptance(candidate.id, integrated.commit, event.instanceId);
+      return {mode: decision.mode};
+    });
+    if (acceptance.mode === "human-review-required") {
     await step.do("repository-outcome-awaiting-review", () => stub.recordIntegrationDispatchOutcome(event.instanceId,"awaiting_review"));
     await step.do("outcome-awaiting-review", async () => globalOf(this.env).recordWorkflowOutcome("integration", event.instanceId, "awaiting_review"));
     let review: { approved: boolean; by: string; note?: string };
@@ -155,6 +200,10 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     if (!review.approved) {
       await step.do("abort-rejected", async () => stub.abortPublish(candidate.id, undefined, `Rejected in review by ${review.by}${review.note ? `: ${review.note}` : ""}`, "failed"));
       return { status: "rejected" as const, by: review.by };
+    }
+
+    } else if (acceptance.mode !== "maintainer-policy") {
+      throw new Error("Unknown candidate acceptance mode");
     }
 
     const prepared = (await step.do("prepare-publish", async () => (await stub.preparePublish(candidate.id)) as never)) as PrepareResult;
@@ -301,14 +350,16 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     const repository=ledgerOf(this.env,this.projectId);
     await assertManagedInitiator(this.env,repository,this.computeWorkflowId,this.computeAccountKey);
     const nativeId=crypto.randomUUID(),allocationId=`native-${nativeId}`;
-    await admitNativeCompute(this.env,this.computeAccountKey!,allocationId,resourceKind);
     if(this.nativeRuntimeCandidateId)await repository.reserveIntegrationNativeRuntime(this.computeWorkflowId!,this.nativeRuntimeCandidateId,nativeId,id);
+    await admitNativeCompute(this.env,this.computeAccountKey!,allocationId,resourceKind);
     const sb = this.env.INTEGRATOR.getByName(allocationId);
     const command=async()=>{const commandId=crypto.randomUUID(),scope=await repository.admitIntegrationNativeCommand(this.computeWorkflowId!,this.nativeRuntimeCandidateId!,nativeId,commandId);return {commandId,scope};};
     return {
+      nativeRunId:nativeId,
       exec: async(cmd:string,env?:Record<string,string>,beforeDispatch?:()=>Promise<void>)=>{if(!this.nativeRuntimeCandidateId){await beforeDispatch?.();return sb.exec(["sh","-c",cmd],{env});}const permit=await command();try{await beforeDispatch?.();}catch(error){await repository.finishIntegrationNativeCommand(permit.scope,nativeId,permit.commandId,"refused");throw error;}return sb.integrationExec(permit.scope,nativeId,permit.commandId,["sh","-c",cmd],{env});},
       readFile: async(p:string)=>{if(!this.nativeRuntimeCandidateId)return {content:await sb.readFile(p)};const permit=await command();return {content:await sb.integrationReadFile(permit.scope,nativeId,permit.commandId,p)};},
       readFileBytes: async(p:string)=>{if(!this.nativeRuntimeCandidateId)return sb.readFileBytes(p);const permit=await command();return sb.integrationReadFileBytes(permit.scope,nativeId,permit.commandId,p);},
+      inspectProtectedConflict:async(context:ProtectedConflictContext)=>{if(!this.nativeRuntimeCandidateId)throw Error('Scoped fixed conflict inspector required');const permit=await command();return sb.integrationInspectProtectedConflict(permit.scope,nativeId,permit.commandId,context);},
       readGitObject: async(kind:'commit'|'tree'|'blob',hash:string,maxBytes:number)=>{if(!this.nativeRuntimeCandidateId)throw Error('Scoped native Git reader required');const permit=await command();return sb.integrationReadGitObject(permit.scope,nativeId,permit.commandId,kind,hash,maxBytes);},
       writeFile: async(p:string,c:string)=>{if(!this.nativeRuntimeCandidateId)return sb.writeFile(p,c);const permit=await command();return sb.integrationWriteFile(permit.scope,nativeId,permit.commandId,p,c);},
       destroy: async () => {
@@ -356,8 +407,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
         try {
           // Revocation is restrictive cleanup and may continue after actor withdrawal,
           // but its provider call still requires a funded conservative envelope.
-          const cleanup = await globalOf(this.env).reserveCoreGitOperation(`retained-cleanup-${crypto.randomUUID()}`,input.accountKey,{accountUsdMicros:null,globalUsdMicros:null});
-          if (cleanup.allowed && await repo.revokeToken(issued.plaintext)) await stub.markRetainedCredentialRevoked(input.id,purpose,issued.plaintext);
+          await stub.revokeKnownRetainedCredential(input.id,purpose,repoName,issued.plaintext,expiresAt);
         } catch { /* The saved issuance intent remains uncertain. */ }
         throw new Error("Credential cleanup receipt is unavailable; no Git command used the credential");
       }
@@ -402,11 +452,25 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     const nativeOnly=externalOnly||isGitIntegrityPolicy(candidate.frozenVerificationPolicy);
     const isolatedBrowser='trustedBrowserFixture' in candidate.frozenVerificationPolicy||'trustedBrowserPolicyDigest' in candidate.frozenVerificationPolicy;
     if(isolatedBrowser){
-      try{await deriveTrustedBrowserPolicy(candidate.frozenVerificationPolicy);}catch{return{ok:false,error:'Frozen isolated browser policy is invalid; saved contributions remain preserved'};}
+      try{await deriveTrustedBrowserPolicy(candidate.frozenVerificationPolicy,candidate.frozenRequirements.filter(requirement=>requirement.status==="approved").map(requirement=>requirement.id));}catch{return{ok:false,error:'Frozen isolated browser policy is invalid; saved contributions remain preserved'};}
       if(!this.env.UNTRUSTED_EXECUTION||!this.env.ISOLATED_EXECUTION_IMAGE||!this.env.VERIFICATION_BROWSER)return{ok:false,error:'Isolated execution resources are not configured; no application code was executed'};
     }
     if(candidate.expectedAcceptedBase===null && (!nativeOnly||candidate.acceptedTarget?.kind!=="unborn"||settings.landing!=="merge"))return{ok:false,error:"First publication requires an explicit unborn target and native merge verification preserving contributor roots"};
     if (externalOnly && ((settings.fixture !== "custom"&&settings.fixture!=="git-integrity") || !candidate.frozenExternalChecksPolicy?.checks.some((check) => check.required) || !candidate.frozenContributorProofs?.length)) return { ok: false, error: "External CI requires a custom repository, frozen contributor proofs and at least one required check" };
+    candidate.repairAttempts=structuredClone(state.candidates[candidate.id]?.repairAttempts??candidate.repairAttempts);
+    const savedRepair=isolatedBrowser?[...candidate.repairAttempts].reverse().find(attempt=>attempt.protectedRepair):undefined;
+    const recoveryIdentity=savedRepair?.protectedRepair?{sourceCommit:savedRepair.protectedRepair.sourceCommit,sourceDigest:savedRepair.protectedRepair.sourceDigest,planDigest:savedRepair.protectedRepair.planDigest,...(savedRepair.protectedRepair.modelAttemptId?{modelAttemptId:savedRepair.protectedRepair.modelAttemptId}:{})}:undefined;
+    let recovery:Awaited<ReturnType<Stub['protectedRepairRecovery']>>|undefined;
+    let textRecovery:Awaited<ReturnType<Stub['protectedConflictRepairRecovery']>>|undefined;
+    const textIdentity=savedRepair?.protectedRepair?.kind==='text'&&savedRepair.protectedRepair.text&&recoveryIdentity?{...recoveryIdentity,text:structuredClone(savedRepair.protectedRepair.text)}:undefined;
+    if(savedRepair&&textIdentity){
+      try{textRecovery=await stub.protectedConflictRepairRecovery(candidate.id,parentWorkflowId,savedRepair.round,textIdentity);}catch{return{ok:false,error:'Original text conflict source pin, owner or native shutdown remains unconfirmed; no allocation or model redispatch occurred'};}
+      if(textRecovery.outcome.phase!=='completed'||!textRecovery.outcome.patch||textRecovery.outcome.attemptId!==textRecovery.outcome.patch.attemptId)return{ok:false,error:'Original text model outcome remains prepared or unknown; no successor dispatch is permitted'};
+    }
+    if(savedRepair&&recoveryIdentity&&!textIdentity){
+      try{recovery=await stub.protectedRepairRecovery(candidate.id,parentWorkflowId,savedRepair.round,recoveryIdentity);}catch{return{ok:false,error:'Original protected repair/native ownership or shutdown is unconfirmed; no resource allocation or successor model request was made'};}
+      if(recovery.outcome.phase!=='completed'||!recovery.outcome.patch||recovery.outcome.attemptId!==recovery.outcome.patch.attemptId)return{ok:false,error:'Original protected model outcome remains prepared or unknown; the same round is held without redispatch'};
+    }
     const spendRunId = `repair-${candidate.id}`;
     let spending: Awaited<ReturnType<typeof reserveManagedAgent>> | null = null;
     try {
@@ -464,8 +528,9 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       await globalOf(this.env).consumeManagedSpend(spendRunId, inputBytes, maxOutputTokens, 0);
     } });
     let round = 0;
-    candidate.repairAttempts = [];
-    await stub.recordComposition(candidate.id, []);
+    candidate.repairAttempts = structuredClone(state.candidates[candidate.id]?.repairAttempts ?? candidate.repairAttempts);
+    round = Math.max(0, ...candidate.repairAttempts.map(attempt => attempt.round));
+    await stub.recordComposition(candidate.id, candidate.repairAttempts);
     const repair = async (type: "text_conflict" | "behavior_failure", files: string[], evidence?: VerificationEvidence): Promise<boolean> => {
       if (nativeOnly) return false; // Native integrity never grants implicit model repair authority.
       const started = Date.now();
@@ -503,7 +568,104 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       return committed.success;
     };
 
+    let protectedRepairCommit: string | undefined;
+    let protectedRepairNeedsRevision=Boolean(recovery);
+    let recoveredNativeEvidence: VerificationEvidence | undefined;
+    const protectedRepair = async (): Promise<boolean> => {
+      const result = await stub.protectedBrowserRepairPlan(candidate.id,parentWorkflowId);
+      if (!result.eligible || result.plan.source.kind !== 'committed-browser-failure') return false;
+      if (++round > MAX_REPAIR_ROUNDS) return false;
+      const sourceContext = structuredClone(result.sourceContext), plan = structuredClone(result.plan), planDigest = await repairDigest(JSON.stringify(plan));
+      const marker: NonNullable<CandidateGeneration['repairAttempts'][number]['protectedRepair']> = {kind:'browser',sourceCommit:sourceContext.scope.commit,sourceDigest:sourceContext.sourceDigest,planDigest,status:'requested'};
+      const attempt: CandidateGeneration['repairAttempts'][number] = {round,prompt:'Repair the frozen protected browser contract',patch:'',affectedContracts:[...plan.failedCaseIds],diagnosticError:'Protected model dispatch acknowledgement pending',durationMs:0,timestamp:new Date().toISOString(),protectedRepair:marker};
+      candidate.repairAttempts.push(attempt); await stub.recordComposition(candidate.id,candidate.repairAttempts);
+      const started = Date.now();
+      const authorize = async () => { await this.retainedAuthority(inputs[0]!,stub); const current=await stub.protectedBrowserRepairPlan(candidate.id,parentWorkflowId); if(!current.eligible || JSON.stringify(current.plan)!==JSON.stringify(plan) || JSON.stringify(current.sourceContext)!==JSON.stringify(sourceContext))throw Error('Frozen protected repair authority changed'); };
+      try {
+        await authorize(); const provider=await stub.isolatedSourceProvider(sourceContext); await authorize();
+        const source=await captureTrustedGitSource({scope:sourceContext.scope,provider,authorize,reader:{readObject:async(kind,hash,maxBytes,signal)=>{signal.throwIfAborted();return sb.readGitObject(kind,hash,maxBytes);}}});
+        if(source.sourceManifest.digest!==sourceContext.sourceDigest)throw Error('Original protected repair source digest differs');
+        let patch: RepairPatch;
+        try{patch=await stub.executeProtectedBrowserRepair(candidate.id,parentWorkflowId,round,source);}catch{
+          const outcome=await stub.protectedRepairOutcome(candidate.id,parentWorkflowId,round,sourceContext);
+          if(outcome.phase!=='completed'||!outcome.patch||outcome.attemptId!==outcome.patch.attemptId)throw Error('Original model dispatch remains unconfirmed');
+          patch=outcome.patch; // Read-only recovery of the same durable patch; no successor model request.
+        }
+        await authorize(); marker.modelAttemptId=patch.attemptId; marker.status='patch_ready'; attempt.diagnosticError='Protected native application acknowledgement pending'; await stub.recordComposition(candidate.id,candidate.repairAttempts);
+        const applied=await applyProtectedNativeRepair(plan,source,patch,{directory:WORK,authorize,exec:run,readFileBytes:path=>sb.readFileBytes(path),writeFile:(path,content)=>sb.writeFile(path,content),readGitObject:(kind,hash,maxBytes)=>sb.readGitObject(kind,hash,maxBytes)},settings.landing==='squash'?{kind:'squash',acceptedBase:sourceContext.expectedBase??''}:{kind:'merge'});
+        protectedRepairCommit=applied.commit;protectedRepairNeedsRevision=true; marker.resultCommit=applied.commit;
+        attempt.patch=redactSecrets((await run(`git -C ${WORK} diff --no-ext-diff --no-textconv ${q(sourceContext.scope.commit)} ${q(applied.commit)} -- ${patch.changes.map(change=>q(change.path)).join(' ')}`)).stdout);
+        attempt.durationMs=Date.now()-started; attempt.diagnosticError='New exact repair commit awaits independent native/build/browser verification'; await stub.recordComposition(candidate.id,candidate.repairAttempts);
+        return true;
+      } catch {
+        marker.status='unknown'; attempt.durationMs=Date.now()-started; attempt.diagnosticError='Original protected repair dispatch or native acknowledgement is unconfirmed; saved source, failure and model receipt require reconciliation';
+        await stub.recordComposition(candidate.id,candidate.repairAttempts); return false;
+      }
+    };
+
+    const protectedConflictRepair=async():Promise<boolean>=>{
+      try{
+      if(candidate.expectedAcceptedBase===null||++round>MAX_REPAIR_ROUNDS)return false;
+      const derived=await stub.protectedConflictContext(candidate.id,parentWorkflowId,sb.nativeRunId,crypto.randomUUID());
+      const receipt=await sb.inspectProtectedConflict(derived.context),result=await stub.protectedConflictRepairPlan(candidate.id,parentWorkflowId,sb.nativeRunId,receipt.commandId,derived.context.attemptId);
+      if(!result.eligible||result.plan.source.kind!=='uncommitted-conflict-input')return false;
+      const plan=structuredClone(result.plan),context=structuredClone(result.context),snapshot=structuredClone(receipt.snapshot),planDigest=await repairDigest(JSON.stringify(plan));
+      if(plan.source.kind!=='uncommitted-conflict-input')return false;
+      const marker:NonNullable<CandidateGeneration['repairAttempts'][number]['protectedRepair']>={kind:'text',text:{nativeRunId:sb.nativeRunId,commandId:receipt.commandId,attemptId:context.attemptId},sourceCommit:snapshot.head,sourceDigest:plan.source.sourceDigest,planDigest,status:'requested'};
+      const attempt:CandidateGeneration['repairAttempts'][number]={round,prompt:'Repair the frozen native text conflict',patch:'',affectedContracts:[...plan.textConflictPaths],diagnosticError:'Original protected conflict model acknowledgement pending',durationMs:0,timestamp:new Date().toISOString(),protectedRepair:marker};candidate.repairAttempts.push(attempt);await stub.recordComposition(candidate.id,candidate.repairAttempts);
+      const inputPin=await retainConflictInputGitPin({candidateId:candidate.id,attemptId:context.attemptId,commit:snapshot.head,directory:WORK,remote:activeCanonical.remote,token:activeCanonical.token,exec:run,beforeCommand:async phase=>{if(phase==='before')await this.fundedRetainedCommand(inputs[0]!,stub);else await this.retainedAuthority(inputs[0]!,stub);}});
+      await stub.recordProtectedConflictInputPin(candidate.id,parentWorkflowId,sb.nativeRunId,receipt.commandId,context.attemptId,round,inputPin);
+      const started=Date.now(),authorize=async()=>{await this.retainedAuthority(inputs[0]!,stub);const current=await stub.protectedConflictRepairPlan(candidate.id,parentWorkflowId,sb.nativeRunId,receipt.commandId,context.attemptId);if(!current.eligible||JSON.stringify(current.plan)!==JSON.stringify(plan)||JSON.stringify(current.context)!==JSON.stringify(context))throw Error('Frozen native conflict authority changed');};
+      try{
+        const files=[];for(const file of plan.files){await authorize();const bytes=await sb.readFileBytes(`${WORK}/${file.path}`);await authorize();files.push({path:file.path,kind:'file' as const,bytes});}
+        let patch:RepairPatch;try{patch=await stub.executeProtectedConflictRepair(candidate.id,parentWorkflowId,sb.nativeRunId,receipt.commandId,context.attemptId,round,files);}catch{const outcome=await stub.protectedConflictRepairOutcome(candidate.id,parentWorkflowId,sb.nativeRunId,receipt.commandId,context.attemptId,round);if(outcome.phase!=='completed'||!outcome.patch||outcome.attemptId!==outcome.patch.attemptId)throw Error('Original conflict model remains unknown');patch=outcome.patch;}
+        await authorize();marker.modelAttemptId=patch.attemptId;marker.status='patch_ready';await stub.recordComposition(candidate.id,candidate.repairAttempts);
+        const applied=await applyProtectedNativeConflictRepair(plan,context,snapshot,patch,{directory:WORK,authorize,exec:run,readFileBytes:path=>sb.readFileBytes(path),writeFile:(path,content)=>sb.writeFile(path,content),readGitObject:(kind,hash,maxBytes)=>sb.readGitObject(kind,hash,maxBytes)},settings.landing==='squash'?{kind:'squash',acceptedBase:context.acceptedBase,coauthors:tasks.map(task=>`Co-authored-by: ${task.contributor.name} <${task.contributor.id}@users.flaregit.com>`)}:{kind:'merge'});
+        protectedRepairCommit=applied.commit;protectedRepairNeedsRevision=false;marker.resultCommit=applied.commit;attempt.patch=redactSecrets((await run(`git -C ${WORK} diff --no-ext-diff --no-textconv ${q(snapshot.head)} ${q(applied.commit)} -- ${patch.changes.map(file=>q(file.path)).join(' ')}`)).stdout);attempt.durationMs=Date.now()-started;attempt.diagnosticError='Native conflict repaired to a new exact commit; independent verification remains required';await stub.recordComposition(candidate.id,candidate.repairAttempts);return true;
+      }catch{marker.status='unknown';attempt.durationMs=Date.now()-started;attempt.diagnosticError='Original native conflict model or command acknowledgement requires reconciliation; no successor model request permitted';await stub.recordComposition(candidate.id,candidate.repairAttempts);return false;}
+      }catch{return false;} // Unsupported native shape or an unknown inspector receipt never grants repair.
+    };
+
+    if(textRecovery&&savedRepair&&textIdentity){
+      const original=structuredClone(textRecovery),patch=original.outcome.patch;if(!patch)throw Error('Original completed text patch unavailable');
+      const binding=(value:typeof original)=>JSON.stringify({plan:value.plan,context:value.context,scope:value.scope,snapshot:value.snapshot,provider:value.provider,pinRef:value.pinRef,outcome:value.outcome}),expectedBinding=binding(original);
+      const authorize=async()=>{await this.retainedAuthority(inputs[0]!,stub);const current=await stub.protectedConflictRepairRecovery(candidate.id,parentWorkflowId,savedRepair.round,textIdentity,sb.nativeRunId);if(binding(current)!==expectedBinding)throw Error('Original text source or model receipt changed');};
+      await authorize();await this.fundedRetainedCommand(inputs[0]!,stub);const fetched=await run(`git -C ${WORK} fetch --quiet ${q(activeCanonical.remote)} ${q(`+${original.pinRef}:${original.pinRef}`)}`,gitAuthEnv(activeCanonical.token));await authorize();
+      if(!fetched.success||(await run(`git -C ${WORK} rev-parse ${q(original.pinRef)}`)).stdout.trim()!==original.snapshot.head)throw Error('Unverified original conflict input pin readback differs');
+      if(!(await run(`git -c core.hooksPath=/dev/null -C ${WORK} checkout --quiet --detach ${q(original.snapshot.head)}`)).success)throw Error('Original conflict HEAD checkout unconfirmed');
+      const ports={directory:WORK,authorize,exec:run,readFileBytes:(path:string)=>sb.readFileBytes(path),writeFile:(path:string,content:string)=>sb.writeFile(path,content),readGitObject:(kind:'commit'|'tree'|'blob',hash:string,max:number)=>sb.readGitObject(kind,hash,max)};
+      await reconstructProtectedNativeConflict(original.context,original.snapshot,{...ports,inspectConflict:async()=>{const current=await stub.protectedConflictContext(candidate.id,parentWorkflowId,sb.nativeRunId,original.context.attemptId);const inspected=await sb.inspectProtectedConflict(current.context);return inspected.snapshot;}});
+      const applied=await applyProtectedNativeConflictRepair(original.plan,original.context,original.snapshot,patch,ports,settings.landing==='squash'?{kind:'squash',acceptedBase:original.context.acceptedBase,coauthors:tasks.map(task=>`Co-authored-by: ${task.contributor.name} <${task.contributor.id}@users.flaregit.com>`)}:{kind:'merge'});
+      const attempt=candidate.repairAttempts.find(value=>value.round===savedRepair.round),marker=attempt?.protectedRepair;if(!attempt||!marker||marker.resultCommit&&marker.resultCommit!==applied.commit)throw Error('Recorded deterministic text repair result differs');
+      marker.modelAttemptId=patch.attemptId;marker.resultCommit=applied.commit;marker.status='patch_ready';attempt.patch=redactSecrets((await run(`git -C ${WORK} diff --no-ext-diff --no-textconv ${q(original.snapshot.head)} ${q(applied.commit)} -- ${patch.changes.map(file=>q(file.path)).join(' ')}`)).stdout);attempt.diagnosticError='Original text patch reconstructed; exact native verification and candidate pin remain required';await stub.recordComposition(candidate.id,candidate.repairAttempts);
+      protectedRepairCommit=applied.commit;protectedRepairNeedsRevision=false;
+      const saved=state.candidates[candidate.id],native=saved?.evidenceId?state.evidence[saved.evidenceId]:undefined;if(native?.status==='passed'&&native.candidateCommit===applied.commit&&native.candidateTree===applied.tree)recoveredNativeEvidence=native;
+    }
+
+    if(recovery&&savedRepair&&recoveryIdentity){
+      const original=structuredClone(recovery),patch=original.outcome.patch;
+      if(!patch)throw Error('Completed historical patch unavailable');
+      const binding=(value:typeof original)=>JSON.stringify({plan:value.plan,sourceContext:value.sourceContext,provider:value.provider,pinRef:value.pinRef,outcome:value.outcome});
+      const expectedBinding=binding(original);
+      const authorize=async()=>{await this.retainedAuthority(inputs[0]!,stub);const current=await stub.protectedRepairRecovery(candidate.id,parentWorkflowId,savedRepair.round,recoveryIdentity,sb.nativeRunId);if(binding(current)!==expectedBinding)throw Error('Original historical repair binding changed');};
+      await authorize();await this.fundedRetainedCommand(inputs[0]!,stub);
+      const fetched=await run(`git -C ${WORK} fetch --quiet ${q(activeCanonical.remote)} ${q(`+${original.pinRef}:${original.pinRef}`)}`,gitAuthEnv(activeCanonical.token));await authorize();
+      if(!fetched.success||(await run(`git -C ${WORK} rev-parse ${q(original.pinRef)}`)).stdout.trim()!==original.sourceContext.scope.commit)return{ok:false,error:'Immutable original repair source pin readback differs; no new model request was made'};
+      if(!(await run(`git -c core.hooksPath=/dev/null -C ${WORK} checkout --quiet --detach ${q(original.sourceContext.scope.commit)}`)).success)throw Error('Original repair source checkout unconfirmed');
+      const source=await captureTrustedGitSource({scope:original.sourceContext.scope,provider:original.provider,authorize,reader:{readObject:async(kind,hash,maxBytes,signal)=>{signal.throwIfAborted();return sb.readGitObject(kind,hash,maxBytes);}}});
+      if(source.sourceManifest.digest!==original.sourceContext.sourceDigest)throw Error('Historical repair source digest differs');
+      const result=await applyProtectedNativeRepair(original.plan,source,patch,{directory:WORK,authorize,exec:run,readFileBytes:path=>sb.readFileBytes(path),writeFile:(path,content)=>sb.writeFile(path,content),readGitObject:(kind,hash,maxBytes)=>sb.readGitObject(kind,hash,maxBytes)},settings.landing==='squash'?{kind:'squash',acceptedBase:original.sourceContext.expectedBase??''}:{kind:'merge'});
+      const attempt=candidate.repairAttempts.find(value=>value.round===savedRepair.round),marker=attempt?.protectedRepair;
+      if(!attempt||!marker||marker.resultCommit&&marker.resultCommit!==result.commit)throw Error('Historical deterministic repair commit differs from saved result');
+      marker.modelAttemptId=patch.attemptId;marker.resultCommit=result.commit;marker.status='patch_ready';attempt.diagnosticError='Historical exact repair commit reconstructed; independent verification and revision pin remain required';
+      attempt.patch=redactSecrets((await run(`git -C ${WORK} diff --no-ext-diff --no-textconv ${q(original.sourceContext.scope.commit)} ${q(result.commit)} -- ${patch.changes.map(file=>q(file.path)).join(' ')}`)).stdout);
+      await stub.recordComposition(candidate.id,candidate.repairAttempts);protectedRepairCommit=result.commit;
+      const saved=state.candidates[candidate.id],native=saved?.evidenceId?state.evidence[saved.evidenceId]:undefined;
+      if(native?.status==='passed'&&native.candidateCommit===result.commit&&native.candidateTree===result.tree)recoveredNativeEvidence=native;
+    }
+
     for (const [index, t] of tasks.entries()) {
+      if(recovery||textRecovery)break;
       if (candidate.expectedAcceptedBase === null && index === 0) {
         const first = await run(`git -C ${WORK} checkout --quiet --detach ${q(candidate.participatingCommits[t.id]!)}`);
         if (!first.success) return { ok: false, error: "First contributor checkpoint is unavailable" };
@@ -512,6 +674,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       const m = await run(`git -C ${WORK} merge ${candidate.expectedAcceptedBase === null ? "--allow-unrelated-histories " : ""}--no-ff -m ${q(`FlareGit candidate ${candidate.id}: ${t.id}`)} refs/flaregit/tasks/${t.id}`);
       if (m.success) continue;
       const files = (await run(`git -C ${WORK} diff --name-only --diff-filter=U`)).stdout.split("\n").filter(Boolean);
+      if(isolatedBrowser){if(await protectedConflictRepair())continue;return{ok:false,error:'Protected text conflict could not be safely repaired; unsupported delete/mode/unborn conflicts or pending product decisions require explicit resolution, and original source/model acknowledgements remain preserved'};}
       if (nativeOnly) return { ok: false, error: "Native Git conflict requires explicit contributor resolution; saved branches are preserved" };
       if (files.length === 0 || !(await repair("text_conflict", files))) return { ok: false, error: "Conflict repair failed" };
     }
@@ -530,7 +693,8 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     };
 
     for (;;) {
-      if (!(await squash())) return { ok: false, error: "Could not create the squashed commit" };
+      let verifiedOutput:IsolatedBuildArtifact|undefined;
+      if (!protectedRepairCommit && !(await squash())) return { ok: false, error: "Could not create the squashed commit" };
       const commit = (await run(`git -C ${WORK} rev-parse HEAD`)).stdout.trim();
       const tree = nativeOnly ? (await run(`git -C ${WORK} rev-parse ${q(`${commit}^{tree}`)}`)).stdout.trim() : undefined;
       const nativeInput = { repoDir: WORK, candidateCommit: commit, candidateTree: tree, expectedBase: candidate.expectedAcceptedBase, acceptedTarget: candidate.acceptedTarget, requirementsVersion: candidate.frozenPolicyVersion, policy: candidate.frozenVerificationPolicy, protectedPaths: settings.protectedPaths, allowedScope: settings.allowedScope, contributors: candidate.frozenContributorProofs, landing: settings.landing };
@@ -541,42 +705,50 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       if (!v.success) return { ok: false, error: `Verifier crashed: ${v.stderr.slice(-500)}` };
       const parsedEvidence = JSON.parse(v.stdout.trim().split("\n").at(-1)!) as VerificationEvidence;
       const evidence=integrationVerificationEvidence(candidate,parsedEvidence);
+      if(recoveredNativeEvidence){
+        const saved=recoveredNativeEvidence;
+        if(evidence.status!=='passed'||evidence.candidateCommit!==saved.candidateCommit||evidence.candidateTree!==saved.candidateTree||evidence.expectedAcceptedBase!==saved.expectedAcceptedBase||evidence.requirementsVersion!==saved.requirementsVersion||JSON.stringify(evidence.policy)!==JSON.stringify(saved.policy)||evidence.testBundleDigest!==saved.testBundleDigest||evidence.toolchainDigest!==saved.toolchainDigest)return{ok:false,error:'Recovered repair native proof changed; original revision and model receipt remain preserved'};
+        evidence.id=saved.id;evidence.timestamp=saved.timestamp;recoveredNativeEvidence=undefined;
+      }
       await stub.recordVerification(candidate.id, commit, evidence);
       if (evidence.status === "passed") {
         // Retain the verified Git candidate before optional R2 copies.
-        const pin=await retainCandidateGitPin({candidateId:candidate.id,commit,directory:WORK,remote:activeCanonical.remote,token:activeCanonical.token,exec:(command,env)=>sb.exec(command,env,()=>this.retainedAuthority(inputs[0]!,stub)),beforeCommand:async phase=>{if(phase==="before")await this.fundedRetainedCommand(inputs[0]!,stub);else await this.retainedAuthority(inputs[0]!,stub);}});
-        await stub.recordCandidateProtectedPin(candidate.id,commit,{...pin,workflowId:parentWorkflowId});
+        const pin=await retainCandidateGitPin({candidateId:candidate.id,commit,...(protectedRepairCommit===commit&&protectedRepairNeedsRevision?{revision:true as const}:{}),directory:WORK,remote:activeCanonical.remote,token:activeCanonical.token,exec:(command,env)=>sb.exec(command,env,()=>this.retainedAuthority(inputs[0]!,stub)),beforeCommand:async phase=>{if(phase==="before")await this.fundedRetainedCommand(inputs[0]!,stub);else await this.retainedAuthority(inputs[0]!,stub);}});
+        await stub.recordCandidateProtectedPin(candidate.id,commit,{...pin,workflowId:parentWorkflowId,...(protectedRepairCommit===commit&&protectedRepairNeedsRevision?{revision:true as const}:{})});
+        if(protectedRepairCommit===commit){const marker=candidate.repairAttempts.find(attempt=>attempt.protectedRepair?.resultCommit===commit)?.protectedRepair;if(!marker)throw Error('Exact protected repair marker differs');marker.status='applied';await stub.recordComposition(candidate.id,candidate.repairAttempts);}
         if(isolatedBrowser){
           try{
             if(!tree||!this.env.UNTRUSTED_EXECUTION||!this.env.ISOLATED_EXECUTION_IMAGE)throw Error('Exact isolated execution identity unavailable');
-            const policy=await deriveTrustedBrowserPolicy(candidate.frozenVerificationPolicy),input=inputs[0]!;
-            const receipt=await verifyIsolatedGitCandidate({scope:{attemptId:crypto.randomUUID(),projectId:params.projectId,incarnation:input.incarnation,commit,tree,policyDigest:policy.digest},workflowId:parentWorkflowId,candidateId:candidate.id,actorId:input.actorId,accountKey:input.accountKey,sourceDigest:'0'.repeat(64),image:this.env.ISOLATED_EXECUTION_IMAGE,policyVersion:candidate.frozenPolicyVersion,expectedBase:candidate.expectedAcceptedBase,candidateSnapshotDigest:'0'.repeat(64)},{ledger:stub,namespace:this.env.UNTRUSTED_EXECUTION,reader:{readObject:async(kind,hash,maxBytes,signal)=>{signal.throwIfAborted();return sb.readGitObject(kind,hash,maxBytes);}}});
+            const policy=await deriveTrustedBrowserPolicy(candidate.frozenVerificationPolicy,candidate.frozenRequirements.filter(requirement=>requirement.status==="approved").map(requirement=>requirement.id)),input=inputs[0]!;
+            const receipt=await verifyIsolatedGitCandidate({scope:{attemptId:crypto.randomUUID(),projectId:params.projectId,incarnation:input.incarnation,commit,tree,policyDigest:policy.digest},workflowId:parentWorkflowId,candidateId:candidate.id,actorId:input.actorId,accountKey:input.accountKey,sourceDigest:'0'.repeat(64),image:this.env.ISOLATED_EXECUTION_IMAGE,policyVersion:candidate.frozenPolicyVersion,expectedBase:candidate.expectedAcceptedBase,candidateSnapshotDigest:'0'.repeat(64)},{ledger:stub,namespace:this.env.UNTRUSTED_EXECUTION,verifiedOutput:artifact=>{verifiedOutput=artifact;},reader:{readObject:async(kind,hash,maxBytes,signal)=>{signal.throwIfAborted();return sb.readGitObject(kind,hash,maxBytes);}}});
             // Optional durable copies must match the controller's final browser-bound digest.
             evidence.builtOutputDigest=receipt.buildDigest;
           }catch(error){
             const verificationStage=error instanceof IsolatedGitVerificationError?error.stage:'source';
             const reason=verificationStage==='source'?'Committed source or current authority could not be confirmed':verificationStage==='build'?'Isolated build or exact cleanup is unconfirmed':'Trusted browser checks or exact session cleanup did not pass';
             await stub.logActivity('FlareGit',`verification.${verificationStage}_failed`,reason).catch(()=>console.warn('Verification failure activity unavailable'));
-            return {ok:false,error:`${reason}. The candidate Git pin and contributor checkpoints remain preserved; inspect the saved ${verificationStage} attempt before retrying`};
+            if(verificationStage==='browser' && await protectedRepair()) continue;
+            return {ok:false,error:`${reason}. The candidate Git pin, original failure and contributor checkpoints remain preserved; inspect the saved ${verificationStage} and repair attempt before retrying`};
           }
         }
         const previewKey=`build-${params.projectId}-${commit}`;
         try {
-          const hasPage = !nativeOnly && settings.fixture === "ticket-booking" && (await run(`test -f ${WORK}/index.html`)).success;
+          const hasPage = verifiedOutput !== undefined || (!nativeOnly && settings.fixture === "ticket-booking" && (await run(`test -f ${WORK}/index.html`)).success);
           if (hasPage) {
-            if(!spending)throw new Error("Optional preview funding is unavailable");
-            await admitNativeCompute(this.env,spending.accountKey,`preview-${candidate.id}-${commit}`,"native-optional");
-            const built = await run(`bun /opt/flaregit/src/core/verification/build-preview.ts ${q(WORK)} /tmp/build-out`);
-            if (!built.success) throw new Error("Optional preview build failed");
-            const scope=await stub.previewStorageScope(commit,state.canonicalRepoName);
-            const manifest=await inspectPreviewStorageManifest({exec:argv=>sb.exec(argv.map(q).join(" "))},scope);
-            await publishPreviewStorageManifest(manifest,{
-              prefix:buildPrefix(params.projectId,commit),bucket:this.env.EVIDENCE_BUCKET,
-              reserve:async value=>assertPreviewStorageAdmission(await globalOf(this.env).reservePreviewStorage(value)),
-      writer:{begin:id=>globalOf(this.env).reservePreviewWriter(buildPrefix(params.projectId,commit),id),beforePut:(id,path)=>globalOf(this.env).beginPreviewPut(buildPrefix(params.projectId,commit),id,path),settledPut:(id,path)=>globalOf(this.env).finishPreviewPut(buildPrefix(params.projectId,commit),id,path),finish:id=>globalOf(this.env).finishPreviewWriter(buildPrefix(params.projectId,commit),id)},
-              authorize:async()=>{const current=await stub.previewStorageScope(commit,state.canonicalRepoName);if(JSON.stringify(current)!==JSON.stringify(scope))throw new Error("Preview storage owner or incarnation changed");},
-              getFile:path=>sb.readFileBytes(path),
-            });
+            if(verifiedOutput){
+              const scope=await stub.previewStorageScope(commit,state.canonicalRepoName);
+              const output=await previewStorageFromIsolatedArtifact(scope,verifiedOutput);
+              await publishPreviewStorageManifest(output.manifest,{
+                prefix:buildPrefix(params.projectId,commit),bucket:this.env.EVIDENCE_BUCKET,
+                reserve:async value=>assertPreviewStorageAdmission(await globalOf(this.env).reservePreviewStorage(value)),
+                writer:{begin:id=>globalOf(this.env).reservePreviewWriter(buildPrefix(params.projectId,commit),id),beforePut:(id,path)=>globalOf(this.env).beginPreviewPut(buildPrefix(params.projectId,commit),id,path),settledPut:(id,path)=>globalOf(this.env).finishPreviewPut(buildPrefix(params.projectId,commit),id,path),finish:id=>globalOf(this.env).finishPreviewWriter(buildPrefix(params.projectId,commit),id)},
+                authorize:async()=>{await this.retainedAuthority(inputs[0]!,stub);const current=await stub.previewStorageScope(commit,state.canonicalRepoName);if(JSON.stringify(current)!==JSON.stringify(scope))throw new Error("Preview storage owner or incarnation changed");},
+                getFile:output.getFile,
+              });
+            }else{
+              if(!spending)throw new Error("Optional preview funding is unavailable");
+              await ensureBuild(this.env,params.projectId,commit,state.canonicalRepoName,spending.accountKey,{candidateId:candidate.id,workflowId:parentWorkflowId});
+            }
           }
         } catch(error) {
           const unfinished=(await globalOf(this.env).previewStorageWriterState(buildPrefix(params.projectId,commit)).catch(()=>({unfinished:true}))).unfinished;
@@ -661,11 +833,14 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     if (await alreadyLanded()) return { ok: true };
     await this.fundedRetainedCommand(input,stub);
     if (!await stub.authorizeCandidatePublication(candidate.id, commit)) return { ok: false, error: "The approving owner no longer authorizes this exact publication; nothing was pushed" };
-    const res = await sb.exec(
+    const updated = await checkpointedNativeRefUpdate(this.env,{projectId:this.projectId!,workflowId:this.computeWorkflowId!,candidate,journal,commit,ref:targetRef},()=>sb.exec(
       `git -C ${dir} push --quiet --force-with-lease=${q(`${targetRef}:${candidate.expectedAcceptedBase ?? ""}`)} ${q(canonical.remote)} ${q(`${commit}:${targetRef}`)}`,
       gitAuthEnv(canonical.token),
       ()=>authorizeIntegrationPublicationDispatch(candidate,journal,commit,stub)
-    );
+    ));
+    if(updated.kind==='held-before')return{ok:false,error:'Private publication checkpoint held before the actual ref update; the prepared journal and stored Git remain preserved'};
+    if(updated.kind==='held-after')return{ok:false,error:'Private publication checkpoint held after the ref update; exact read-only history reconciliation is required'};
+    const res=updated.result;
     if (res.success) return { ok: true };
     // A retried step may find its own earlier push already landed: that is success, not a conflict.
     if (await alreadyLanded()) return { ok: true };

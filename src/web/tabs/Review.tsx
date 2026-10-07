@@ -1,3 +1,4 @@
+import {preparedPublicationRequest} from '../prepared-publication-recovery';
 import {GitTransferRecovery} from "../components/GitTransferRecovery";
 import React, { useCallback, useEffect, useState } from "react";
 import { ArrowLeft } from "lucide-react";
@@ -15,6 +16,7 @@ interface DiffResponse { repo: string; base: string | null; head: { hash: string
 
 /** Review of one commit (against its parent) or one change (against the commit it started from). */
 export function ReviewTab({ projectId, task, commit, baseCommit, returnTo, input, candidate, evidence, reload, isOwner = false }: { projectId: string; task?: string; commit?: string; baseCommit?: string; returnTo?: "integration"; input?: string; candidate?: CandidateGeneration; evidence?: FlareGitProjectState; reload?: () => void; isOwner?: boolean }) {
+  const savedPublication=candidate?.status==="verified"&&!input&&preparedPublicationRequest(candidate,evidence?.journal);
   const sourceTaskId = input ?? task;
   const taskSnapshot = sourceTaskId ? evidence?.tasks[sourceTaskId] : undefined;
   const frozenInputCommit = input && candidate?.participatingTaskIds.includes(input) ? candidate.participatingCommits[input] : undefined;
@@ -64,6 +66,7 @@ export function ReviewTab({ projectId, task, commit, baseCommit, returnTo, input
       {taskSnapshot && !candidate && <section aria-label="Contribution purpose" className="space-y-1 text-sm"><h2 className="font-semibold break-words">{taskSnapshot.goal}</h2><p className="text-xs text-muted-foreground">{taskSnapshot.contributor.name} · {taskSnapshot.contributor.type}{taskSnapshot.dependsOn ? ` · Builds on ${taskSnapshot.dependsOn}` : ""}{taskSnapshot.issue ? ` · Issue #${taskSnapshot.issue}` : ""}</p></section>}
       {task && !candidate && <GitTransferRecovery key={`${projectId}:${task}`} projectId={projectId} taskId={task} isOwner={isOwner}/>}
       {task && evidence?.tasks[task]?.agentRunId && <AgentRecoveryPanel key={`${projectId}:${task}:${evidence.tasks[task]!.agentRunId}`} projectId={projectId} taskId={task} runId={evidence.tasks[task]!.agentRunId!} canResume={["working", "checkpointed", "blocked", "needs_decision"].includes(evidence.tasks[task]!.status)} onStarted={reload} />}
+      {savedPublication && candidate && <CandidateReview projectId={projectId} isOwner={isOwner} candidate={candidate} journal={evidence?.journal} evidence={candidate.evidenceId ? evidence?.evidence[candidate.evidenceId] : undefined} showOpen={false} reviewReady={true} onDone={() => { reload?.(); navigate(`/p/${projectId}/integration`); }} />}
       {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}<Button size="sm" variant="outline" className="ml-3" onClick={() => setRevision((value) => value + 1)}>Retry diff</Button></div>}
       {!diff && !error && <p className="text-sm text-muted-foreground">Loading changes…</p>}
       {diff && (
@@ -73,7 +76,7 @@ export function ReviewTab({ projectId, task, commit, baseCommit, returnTo, input
             <span className="text-xs text-muted-foreground ml-2">{diff.head.author.name} · <code>{diff.head.hash.slice(0, 7)}</code></span>
           </div>
           {candidate?.status === "awaiting_review" && !input && (
-            <CandidateReview projectId={projectId} isOwner={isOwner} candidate={candidate} evidence={candidate.evidenceId ? evidence?.evidence[candidate.evidenceId] : undefined} showOpen={false} reviewReady={readyDiff?.scope === reviewScope && readyDiff.ready} onDone={() => { reload?.(); navigate(`/p/${projectId}/integration`); }} />
+            <CandidateReview projectId={projectId} isOwner={isOwner} candidate={candidate} journal={evidence?.journal} evidence={candidate.evidenceId ? evidence?.evidence[candidate.evidenceId] : undefined} showOpen={false} reviewReady={readyDiff?.scope === reviewScope && readyDiff.ready} onDone={() => { reload?.(); navigate(`/p/${projectId}/integration`); }} />
           )}
           <DiffViewer key={`${reviewScope}:${diff.head.hash}:${diff.base}`} files={diff.files} loadBlob={loadBlob} onReadyChange={onDiffReady} commented={commented} onLineClick={subject ? (path, line) => { setAnchor({ scope: reviewScope, subject, path, line, commit: diff.head.hash }); document.getElementById("review-conversation")?.scrollIntoView({ behavior: "smooth" }); } : undefined} />
         </>

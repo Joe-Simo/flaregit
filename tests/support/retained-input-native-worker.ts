@@ -1,3 +1,4 @@
+import {RetainedCredentialIncidents} from '../../src/server/retained-credential-incidents';
 import { RepositoryController } from '../../src/server/durable-object';
 import { accountKeyFor } from '../../src/server/projects';
 import type { Env } from '../../src/server/env';
@@ -17,6 +18,7 @@ export class RetainedNativeFixture extends RepositoryController {
         await (this.env.REPOSITORY_CONTROLLER.getByName(`project:${projectId}`) as unknown as RetainedNativeFixture).removeMember(who);
     } return value; }
     async fixtureSeed() { const state = { projectId, projectName: 'Synthetic', canonicalRepoName: 'synthetic-canonical', acceptedState: { currentCommit: base, history: [], activeRequirements: [] }, tasks: { [taskId]: { id: taskId, goal: 'Synthetic source pin', contributor: { id: actor, name: 'Synthetic actor', type: 'human' }, baseCommit: base, currentCommit: head, workspace: { repoName: 'synthetic-workspace', branch: 'task/source' }, status: 'ready', allowedScope: [], requirements: [], checkpoints: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } }, candidates: { [candidate]: { id: candidate, workflowInstanceId: wf, participatingCommits: { [taskId]: head }, participatingTaskIds: [taskId], frozenContributorProofs: [{ id: taskId, commit: head, baseCommit: base, ref: "refs/heads/task", allowedScope: ["src/"] }] } }, evidence: {}, journal: [], decisions: {}, policyVersion: 1, verificationPolicy: {} } as unknown as FlareGitProjectState; this.ctx.storage.sql.exec('INSERT INTO project(id,doc)VALUES(1,?)', JSON.stringify(state)); await this.addMember(owner, 'owner'); await this.addMember(actor, 'member'); await this.registerWorkflow(wf, 'integration', undefined, actor); }
+    async fixtureLegacyCredential(input:RetainedInput){const expected=await this.prepareRetainedInput(input.taskId,input.workflowId,input.candidateId,input.id);if(JSON.stringify(expected)!==JSON.stringify(input))throw Error('Legacy fixture original scope differs');return new RetainedCredentialIncidents(this.ctx.storage).begin(input,'workspace',Date.now()+60000,'read');}
     async fixtureResetCheckpoint() { const state = await this.getState(); state.tasks[taskId]!.currentCommit = head; this.ctx.storage.sql.exec("UPDATE project SET doc=? WHERE id=1", JSON.stringify(state)); }
     async fixtureAdvance() { const state = await this.getState(); state.tasks[taskId]!.currentCommit = 'e'.repeat(40); this.ctx.storage.sql.exec('UPDATE project SET doc=? WHERE id=1', JSON.stringify(state)); }
     async fixtureAlarm() { await this.alarm(); }
@@ -88,6 +90,7 @@ export default { async fetch(request: Request, env: Env) {
                 await project.fixtureResetCheckpoint();
                 return new Response('ok');
             }
+            if(path==='/credential-begin-legacy')return Response.json(await project.fixtureLegacyCredential(body!));
             if (path === '/credential-begin')
                 return Response.json(await project.beginRetainedCredential(body!, 'workspace', Date.now() + 60000, 'read'));
             if (path === '/withdraw-owner') {

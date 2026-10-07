@@ -1,7 +1,7 @@
 import {isolatedExecutionContextSchema,type IsolatedExecutionContext} from "./isolated-execution-grants";
 import type {CandidateBuildAttempt,CandidateBuildSnapshot} from "./candidate-build-attempts";
 import {captureTrustedGitSource,type GitSourceObjectReader,type TrustedGitSource,type TrustedGitSourceProof} from "./trusted-git-source";
-import {runIsolatedBuildJob,type IsolatedBuildGrantRpc} from "./isolated-build-job";
+import {runIsolatedBuildJob,type IsolatedBuildGrantRpc,type IsolatedBuildArtifact} from "./isolated-build-job";
 import type {UntrustedExecutionNamespace} from "./untrusted-execution";
 import type {BuildFile,BuildManifest} from "./static-build-artifact";
 import type {BrowserVerificationReceipt} from "./external-browser-verifier";
@@ -22,6 +22,8 @@ export interface IsolatedGitVerificationDependencies {
  ledger:IsolatedGitVerificationLedger;
  reader:GitSourceObjectReader;
  namespace:UntrustedExecutionNamespace;
+ /** Receives the exact static output only after independent browser verification. */
+ verifiedOutput?(artifact:IsolatedBuildArtifact):void;
 }
 
 /** Complete production orchestration; trusted browser evidence is independent of untrusted build output. */
@@ -44,6 +46,9 @@ export async function verifyIsolatedGitCandidate(proposed:IsolatedExecutionConte
   stage="build";
   const artifact=await runIsolatedBuildJob(context,source,{namespace:deps.namespace,grants:deps.ledger,assertSourceProvenance:(current,proof)=>deps.ledger.assertIsolatedSourceProvenance(current,proof)});
   stage="browser";
-  return await deps.ledger.verifyIsolatedCandidateBrowser(context,source,artifact.manifest,artifact.files);
+  const receipt=await deps.ledger.verifyIsolatedCandidateBrowser(context,source,artifact.manifest,artifact.files);
+  if(receipt.buildDigest!==artifact.manifest.digest)throw new Error("Verified browser output differs");
+  deps.verifiedOutput?.(structuredClone(artifact));
+  return receipt;
  }catch{throw new IsolatedGitVerificationError(stage);}
 }

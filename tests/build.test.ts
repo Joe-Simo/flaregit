@@ -1,65 +1,39 @@
-import { nativeFunding } from "./support/native-funding.js";
-import { expect, test } from "bun:test";
-import { ensureBuild } from "../src/server/build.js";
-import type { Env } from "../src/server/env.js";
-
-function fixture(failAsset = false) {
-  const names: string[] = [], writes: string[] = [], revoked: string[] = [];
-  let destroyed = 0;
-  const env = {
-    ...nativeFunding(),
-    EVIDENCE_BUCKET: {
-      head: async () => null,
-      put: async (key: string) => { if (failAsset && key.endsWith("app.js")) throw new Error("R2 unavailable"); writes.push(key); return {etag:"confirmed-fixture"}; },
-    },
-    ARTIFACTS: { get: async () => ({ info: async () => ({ remote: "https://repo.example/git" }), createToken: async () => ({ plaintext: "read-token" }), revokeToken: async (token: string) => { revoked.push(token); } }) },
-    INTEGRATOR: { getByName: (name: string) => {
-      names.push(name);
-      return {
-        exec: async (argv: string[]) => ({ success: true, stderr: "", stdout: argv[0]==="bun" && argv[1]==="-e" ? JSON.stringify(["index.html","app.js"].map(path=>({path,size:5,sha256:new Bun.CryptoHasher("sha256").update("asset").digest("hex")}))) : "" }),
-        readFile: async () => "asset", readFileBytes: async () => new TextEncoder().encode("asset"), destroy: async () => { destroyed++; }, lifetimeStatus:async()=>({state:"stopped"}),
-      };
-    } },
-  } as unknown as Env;
-  return { env, names, writes, revoked, destroyed: () => destroyed };
+import {expect,test} from 'bun:test';
+import {Database} from 'bun:sqlite';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {ensureBuild} from '../src/server/build';
+import type {Env} from '../src/server/env';
+import {PreviewExecutionAuthority,type PreviewExecutionContext,type PreviewExecutionSnapshot} from '../src/server/preview-execution-authority';
+import type {IsolatedPreviewBuildLedger} from '../src/server/isolated-preview-build';
+import {ManagedSpendLedger} from '../src/server/managed-spend-ledger';
+import {PreviewStorageLedger} from '../src/server/preview-storage';
+import type {PreviewStorageManifest} from '../src/server/preview-storage-upload';
+import {PreviewStorageWriters} from '../src/server/preview-storage-writers';
+import {captureTrustedGitSource,type TrustedGitSource} from '../src/server/trusted-git-source';
+import {bindBuildManifest,type BuildFile,type BuildManifest} from '../src/server/static-build-artifact';
+// Real Git objects and SQLite authority/funding/storage ledgers. Source SDK,
+// isolated runtime and R2 callbacks are local doubles, not hosted proof.
+async function fixture(failAsset=false,holdBuild=false,holdPut=false){
+ const root=await mkdtemp(join(tmpdir(),'ordinary-preview-')),db=new Database(':memory:');
+ const storage={sql:{exec(query:string,...args:Array<string|number|null>){if(query.includes(';')){db.exec(query);return{toArray:()=>[],one:()=>({})};}const rows=db.query(query).all(...args);return{toArray:()=>rows,one:()=>rows[0]};}},transactionSync<T>(fn:()=>T){return db.transaction(fn)();}} as unknown as DurableObjectStorage;
+ const git=(...args:string[])=>{const r=Bun.spawnSync(['git','-C',root,...args]);if(r.exitCode)throw Error('Fixture Git failed');return r.stdout;};git('init','-q');git('config','user.name','Fixture');git('config','user.email','fixture@example.invalid');await Bun.write(join(root,'index.html'),'<main>first</main>');git('add','.');git('commit','-qm','first');const first=git('rev-parse','HEAD').toString().trim();await Bun.write(join(root,'index.html'),'<main>second</main>');git('commit','-qam','second');const second=git('rev-parse','HEAD').toString().trim();
+ const projectId='p123456789abc',incarnation=crypto.randomUUID(),accountKey='b'.repeat(12),canonicalRepoName='canonical';const snapshots=new Map<string,PreviewExecutionSnapshot>();for(const commit of[first,second])snapshots.set(commit,{kind:'preview-execution',projectId,incarnation,commit,tree:git('rev-parse',`${commit}^{tree}`).toString().trim(),policyDigest:'a'.repeat(64),actorId:'owner',accountKey,canonicalRepoName,providerRepoId:'fixture-provider',target:{kind:'accepted',receiptId:crypto.randomUUID(),ref:'refs/heads/trunk',version:1},generation:null,image:`registry.cloudflare.com/${'c'.repeat(32)}/untrusted@sha256:${'d'.repeat(64)}`});
+ const managed=new ManagedSpendLedger(storage),bytesLedger=new PreviewStorageLedger(storage),writers=new PreviewStorageWriters(storage),sources=new Map<string,TrustedGitSource>(),sourceClosed=new Set<string>(),completed=new Map<string,{scope:PreviewExecutionContext['scope'];sourceDigest:string;image:string;manifest:BuildManifest;files:BuildFile[];cleanup:'confirmed';acceptanceEvidence:false}>(),failures=new Map<string,string>(),objects=new Map<string,{bytes:Uint8Array;customMetadata:Record<string,string>}>();let enteredResolve=()=>{},releaseBuild=()=>{};const entered=new Promise<void>(resolve=>{enteredResolve=resolve;}),buildGate=new Promise<void>(resolve=>{releaseBuild=resolve;});let putEnteredResolve=()=>{},releasePut=()=>{};const putEntered=new Promise<void>(resolve=>{putEnteredResolve=resolve;}),putGate=new Promise<void>(resolve=>{releasePut=resolve;});const names:string[]=[],writes:string[]=[],revoked:string[]=[];let stops=0,credentialedGets=0,reserves=0,env:Env;
+ const authority=new PreviewExecutionAuthority(storage,{current:async snapshot=>{const expected=snapshots.get(snapshot.commit);if(!expected)throw Error('Current accepted source absent');return expected;},assertCurrent:snapshot=>{if(JSON.stringify(snapshots.get(snapshot.commit))!==JSON.stringify(snapshot))throw Error('Source changed');},assertSource:async(context,source)=>{if(JSON.stringify(sources.get(context.scope.attemptId)?.proof)!==JSON.stringify(source.proof))throw Error('Independent raw Git provenance differs');},readSourceClosure:async(_context,intent)=>({nativeRunId:intent.nativeRunId,credentialIntentId:intent.credentialIntentId,nativeClosed:sourceClosed.has(intent.credentialIntentId),credentialClosed:sourceClosed.has(intent.credentialIntentId)}),readCompletion:async context=>completed.get(context.scope.attemptId)??null,funding:{read:async id=>managed.get(id),reserve:async envelope=>{reserves++;return managed.reserve(envelope,{globalUsdMicros:1000000,accountUsdMicros:Number(env.MANAGED_ACCOUNT_MONTHLY_USD_MICROS??1000000),essentialGlobalUsdMicros:43008,essentialAccountUsdMicros:0});},consume:async id=>managed.consume(id,0,0,1200)}});
+ const ledger:IsolatedPreviewBuildLedger={preparePreviewExecution:async request=>{const snapshot=snapshots.get(request.commit);if(!snapshot)throw Error('Accepted commit absent');return authority.prepare(snapshot);},previewExecutionSnapshot:context=>authority.snapshot(context),previewExecutionDispatchState:context=>authority.dispatchState(context),claimPreviewExecutionInvocation:(context,id)=>authority.claimInvocation(context,id),finishPreviewExecutionInvocation:async(context,id)=>{await authority.finishInvocation(context,id);},capturePreviewExecutionSource:async(context,id)=>{const cached=sources.get(context.scope.attemptId);if(cached)return cached;const intent=await authority.sourceIntent(context,{nativeRunId:crypto.randomUUID(),credentialIntentId:crypto.randomUUID()},id);await authority.beginSource(context,id);const source=await captureTrustedGitSource({scope:context.scope,provider:{providerRepoId:context.snapshot.providerRepoId,canonicalRepoName},reader:{readObject:async(kind,hash)=>git('cat-file',kind,hash)},authorize:async()=>{await authority.snapshot(context);}});sources.set(context.scope.attemptId,source);revoked.push(intent.credentialIntentId);sourceClosed.add(intent.credentialIntentId);await authority.closeSource(context,id);return source;},bindPreviewExecutionSource:(context,source,id)=>authority.bindSource(context,source,id),assertPreviewExecutionSource:(context,proof)=>authority.assertSourceProof(context,proof),preparePreviewExecutionGrant:(context,id)=>authority.prepareGrant(context,id),authorizePreviewExecution:async value=>{const record=authority.get(value.scope.attemptId);if(!record||record.context.sourceDigest!==value.sourceDigest||record.context.snapshot.image!==value.image)return false;await authority.authorize(record.context);return true;},claimPreviewExecutionDispatch:(context,id)=>authority.claimDispatch(context,id),sealPreviewExecution:async(context,id)=>{authority.seal(context,id);}};
+ const repository={...ledger,previewStorageScope:async(commit:string,repo:string)=>{if(!snapshots.has(commit)||repo!==canonicalRepoName)throw Error('Preview retained scope changed');return{projectId,incarnation,commit,accountKey};}};
+ const global={nativeComputeFailure:async(key:string)=>failures.get(key)??null,setNativeComputeFailureReason:async(key:string,reason:string)=>{failures.set(key,reason);},reservePreviewStorage:async(manifest:PreviewStorageManifest)=>{bytesLedger.reserve(manifest,{globalBytes:1000000,accountBytes:1000000});return{allowed:true};},reservePreviewWriter:async(key:string,id:string)=>{writers.registerPreview(key);writers.begin(key,id);},claimPreviewWriter:async(key:string,id:string)=>{writers.registerPreview(key);return writers.claim(key,id);},beginPreviewPut:async(key:string,id:string,path:string)=>writers.dispatch(key,id,`${key}/${path}`),finishPreviewPut:async(key:string,id:string,path:string)=>writers.settled(key,id,`${key}/${path}`),finishPreviewWriter:async(key:string,id:string)=>writers.finish(key,id),previewStorageWriterState:async(key:string)=>({unfinished:db.query<{closed:number;pending:string},[string]>('SELECT closed,pending FROM preview_copy_writers WHERE physical_key=?').all(key).some(row=>!row.closed||(JSON.parse(row.pending) as string[]).length>0)})};
+ env={REPOSITORY_CONTROLLER:{idFromName:(name:string)=>name,get:(name:string)=>name==='global'?global:repository},EVIDENCE_BUCKET:{head:async(key:string)=>{const object=objects.get(key);return object?{size:object.bytes.length,customMetadata:object.customMetadata}:null;},put:async(key:string,bytes:Uint8Array,options:{customMetadata:Record<string,string>})=>{if(key.endsWith('app.js')&&holdPut){putEnteredResolve();await putGate;}if(failAsset&&key.endsWith('app.js'))throw Error('R2 unavailable');writes.push(key);objects.set(key,{bytes:bytes.slice(),customMetadata:options.customMetadata});return{etag:'confirmed-fixture'};}},INTEGRATOR:{getByName:()=>{credentialedGets++;throw Error('No contributor execution in privileged Integrator');}},UNTRUSTED_EXECUTION:{getByName:(name:string)=>{names.push(name);let context:PreviewExecutionContext|undefined;return{prepare:async(scope:PreviewExecutionContext['scope'])=>{context=authority.get(scope.attemptId)?.context;if(!context)throw Error('Original attempt missing');},run:async(scope:PreviewExecutionContext['scope'],source:BuildManifest)=>{if(!context)throw Error('Job unprepared');enteredResolve();if(holdBuild)await buildGate;const files=[{path:'app.js',kind:'file' as const,bytes:new TextEncoder().encode('asset')},{path:'index.html',kind:'file' as const,bytes:new TextEncoder().encode('asset')}],manifest=await bindBuildManifest('static',scope,files,source.digest);completed.set(scope.attemptId,{scope,sourceDigest:source.digest,image:context.snapshot.image,manifest,files,cleanup:'confirmed',acceptanceEvidence:false});return{manifest,files,acceptanceEvidence:false as const};},stop:async()=>{stops++;return{stopped:true};},outputArtifact:async(scope:PreviewExecutionContext['scope'])=>completed.get(scope.attemptId)??null};}}} as unknown as Env;
+ return{env,projectId,accountKey,canonicalRepoName,first,second,entered,releaseBuild,putEntered,releasePut,names,writes,revoked,failures,managed,writerRows:()=>db.query<{closed:number;pending:string},[]>('SELECT closed,pending FROM preview_copy_writers').all(),counts:()=>({stops,credentialedGets,reserves}),close:async()=>{db.close();await rm(root,{recursive:true,force:true});}};
 }
+test('concurrent different commits use isolated jobs and publish readiness last',async()=>{const f=await fixture();try{await Promise.all([ensureBuild(f.env,f.projectId,f.first,f.canonicalRepoName,f.accountKey),ensureBuild(f.env,f.projectId,f.second,f.canonicalRepoName,f.accountKey)]);expect(new Set(f.names).size).toBe(2);for(const commit of[f.first,f.second])expect(f.writes.filter(key=>key.includes(commit)).map(key=>key.split('/').at(-1))).toEqual(['app.js','index.html']);expect(f.revoked).toHaveLength(2);expect(f.counts()).toEqual({stops:2,credentialedGets:0,reserves:2});}finally{await f.close();}});
+test('failed asset upload leaves preview unready with original key and isolated job positively cleaned',async()=>{const f=await fixture(true);try{await expect(ensureBuild(f.env,f.projectId,f.first,f.canonicalRepoName,f.accountKey)).rejects.toThrow('R2 unavailable');expect(f.writes).toEqual([]);expect([...f.failures.values()]).toEqual(['storage_reconciliation']);expect(f.revoked).toHaveLength(1);expect(f.counts().stops).toBe(1);expect(f.counts().credentialedGets).toBe(0);}finally{await f.close();}});
+test('same committed preview has one paid execution despite simultaneous readers',async()=>{const f=await fixture();try{const settled=await Promise.allSettled([ensureBuild(f.env,f.projectId,f.first,f.canonicalRepoName,f.accountKey),ensureBuild(f.env,f.projectId,f.first,f.canonicalRepoName,f.accountKey)]);expect(settled.filter(result=>result.status==='fulfilled')).toHaveLength(2);expect(f.names).toHaveLength(1);expect(f.counts().stops).toBe(1);expect(f.counts().reserves).toBe(1);expect(f.failures.size).toBe(0);}finally{await f.close();}});
+test('exhausted optional budget refuses before isolated execution allocation',async()=>{const f=await fixture();try{f.env.MANAGED_ACCOUNT_MONTHLY_USD_MICROS='0';await expect(ensureBuild(f.env,f.projectId,f.first,f.canonicalRepoName,f.accountKey)).rejects.toThrow('funding unavailable');expect(f.names).toHaveLength(0);expect(f.counts().credentialedGets).toBe(0);expect(f.counts().reserves).toBe(1);expect([...f.failures.values()]).toEqual(['build_failed']);}finally{await f.close();}});
+test('persisted failed preview is not relaunched by repeated page reads',async()=>{const f=await fixture(true);try{await expect(ensureBuild(f.env,f.projectId,f.first,f.canonicalRepoName,f.accountKey)).rejects.toThrow();await expect(ensureBuild(f.env,f.projectId,f.first,f.canonicalRepoName,f.accountKey)).rejects.toThrow('owner retry');expect(f.names).toHaveLength(1);expect(f.counts().reserves).toBe(1);}finally{await f.close();}});
 
-test("concurrent builds have isolated containers and publish readiness last", async () => {
-  const f = fixture();
-  await Promise.all([ensureBuild(f.env, "p123456789abc", "a".repeat(40), "repo", "b".repeat(12)), ensureBuild(f.env, "p123456789abc", "b".repeat(40), "repo", "b".repeat(12))]);
-  expect(new Set(f.names).size).toBe(2);
-  for (const commit of ["a".repeat(40), "b".repeat(40)]) {
-    const outputs = f.writes.filter((key) => key.includes(commit));
-    expect(outputs.map((key) => key.split("/").at(-1))).toEqual(["app.js", "index.html"]);
-  }
-  expect(f.revoked).toHaveLength(2);
-  expect(f.destroyed()).toBe(2);
-});
+test('late reader during an actual owned dispatch leaves the winning build and its failure flag untouched',async()=>{const f=await fixture(false,true),winner=ensureBuild(f.env,f.projectId,f.first,f.canonicalRepoName,f.accountKey);try{await f.entered;await expect(ensureBuild(f.env,f.projectId,f.first,f.canonicalRepoName,f.accountKey)).resolves.toBeUndefined();expect(f.failures.size).toBe(0);expect(f.names).toHaveLength(1);expect(f.counts().stops).toBe(0);f.releaseBuild();await winner;expect(f.counts().reserves).toBe(1);expect(f.counts().stops).toBe(1);expect(f.writes.map(key=>key.split('/').at(-1))).toEqual(['app.js','index.html']);}finally{f.releaseBuild();await winner.catch(()=>{});await f.close();}});
 
-test("failed asset upload leaves preview unready and cleans credentials and container", async () => {
-  const f = fixture(true);
-  await expect(ensureBuild(f.env, "p123456789abc", "a".repeat(40), "repo", "b".repeat(12))).rejects.toThrow("R2 unavailable");
-  expect(f.writes).toEqual([]);
-  expect(f.revoked).toEqual(["read-token"]);
-  expect(f.destroyed()).toBe(1);
-});
-
-test("same committed preview uses one funded build despite concurrent readers", async () => {
-  const f = fixture();
-  await Promise.all([ensureBuild(f.env,"p123456789abc","a".repeat(40),"repo","b".repeat(12)),ensureBuild(f.env,"p123456789abc","a".repeat(40),"repo","b".repeat(12))]);
-  expect(f.names).toHaveLength(1);
-  expect(f.destroyed()).toBe(1);
-});
-
-test("exhausted native budget refuses build before VM allocation", async () => {
-  const f=fixture(); f.env.MANAGED_ACCOUNT_MONTHLY_USD_MICROS="0";
-  await expect(ensureBuild(f.env,"p123456789abc","a".repeat(40),"repo","b".repeat(12))).rejects.toThrow("budget unavailable");
-  expect(f.names).toHaveLength(0);
-});
-
-test("persisted failed preview cannot be relaunched by repeated page reads", async () => {
-  const f=fixture(true);
-  await expect(ensureBuild(f.env,"p123456789abc","a".repeat(40),"repo","b".repeat(12))).rejects.toThrow();
-  await expect(ensureBuild(f.env,"p123456789abc","a".repeat(40),"repo","b".repeat(12))).rejects.toThrow("owner retry");
-  expect(f.names).toHaveLength(1);
-});
+test('reader during a pending asset PUT leaves the existing writer and shared failure state untouched',async()=>{const f=await fixture(false,false,true),winner=ensureBuild(f.env,f.projectId,f.first,f.canonicalRepoName,f.accountKey);try{await f.putEntered;await expect(ensureBuild(f.env,f.projectId,f.first,f.canonicalRepoName,f.accountKey)).resolves.toBeUndefined();expect(f.failures.size).toBe(0);expect(f.writes).toEqual([]);expect(f.writerRows()).toHaveLength(1);expect(f.writerRows()[0]?.closed).toBe(0);expect(JSON.parse(f.writerRows()[0]!.pending)).toHaveLength(1);expect(f.counts().reserves).toBe(1);f.releasePut();await winner;expect(f.writes.map(key=>key.split('/').at(-1))).toEqual(['app.js','index.html']);expect(f.failures.size).toBe(0);expect(f.writerRows()).toEqual([{closed:1,pending:'[]'}]);}finally{f.releasePut();await winner.catch(()=>{});await f.close();}});

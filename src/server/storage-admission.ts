@@ -54,6 +54,13 @@ export class ArtifactStorageAdmission {
   nameSchema.parse(name);if(confirmed!==true)throw new Error("Provider deletion is unconfirmed");this.day(now);
   this.storage.transactionSync(()=>{this.peak(now);this.storage.sql.exec("UPDATE artifact_storage_reservations SET state='deleted',deleted_at=? WHERE name=? AND state='reserved'",now.toISOString(),name);});
  }
+ capacity(owner:string,namespace:string|undefined,policy:StorageAdmissionPolicy,now=new Date()){
+  ownerSchema.parse(owner);const row=this.storage.sql.exec<{namespace:string;verified_at:string}>("SELECT namespace,verified_at FROM artifact_storage_inventory WHERE id=1").toArray()[0],matches=!!row&&row.namespace===namespace&&Number.isFinite(Date.parse(row.verified_at));
+  const globalUsed=matches?this.dayLiability(now):null,accountUsed=matches?this.dayLiability(now,owner):null;
+  const limits={global:policy.globalSlots===null?null:slotsSchema.parse(policy.globalSlots),account:policy.accountSlots===null?null:slotsSchema.parse(policy.accountSlots)};
+  const availability=limits.global===null||limits.account===null?'unconfigured' as const:limits.global===0||limits.account===0?'full' as const:!matches?'unknown' as const:globalUsed!>=limits.global||accountUsed!>=limits.account?'full' as const:'available' as const;
+  return{source:'recorded-ledger' as const,basis:'daily_named_repository_envelope' as const,reservationCreated:false as const,providerVerified:false as const,inventory:matches?'recorded' as const:'unknown' as const,verifiedAt:matches?row.verified_at:null,checkedAt:now.toISOString(),availability,global:{used:globalUsed,limit:limits.global},account:{used:accountUsed,limit:limits.account}};
+ }
  snapshot(now=new Date()){
   this.peak(now);return {basis:"provider_maximum_per_named_repository" as const,verified:this.storage.sql.exec("SELECT id FROM artifact_storage_inventory WHERE id=1").toArray().length===1,activeSlots:this.active(),maximumGb:this.active()*ARTIFACT_MAX_GB,dailyPeaks:this.storage.sql.exec<{day:string;owner:string;slots:number}>("SELECT day,owner,slots FROM artifact_storage_daily_peak ORDER BY day,owner").toArray(),reservations:this.storage.sql.exec<{name:string;owner:string;kind:ArtifactKind;state:"reserved"|"deleted"}>("SELECT name,owner,kind,state FROM artifact_storage_reservations ORDER BY name").toArray()};
  }

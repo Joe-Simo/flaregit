@@ -15,7 +15,7 @@ export interface AgentExecutionEgressCapabilities {
   current(scope: AgentExecutionEgressScope): Promise<AgentExecutionEgressSnapshot>;
   beforeCredential(scope: AgentExecutionEgressScope, access: "read" | "write"): Promise<void>;
   credential(scope: AgentExecutionEgressScope, access: "read" | "write"): Promise<AgentExecutionGitCredential>;
-  beforeTransfer(scope: AgentExecutionEgressScope): Promise<void>;
+  beforeTransfer(scope: AgentExecutionEgressScope, push?: AgentAssignedPush): Promise<void>;
   fetch: ExecutionEgressFetch;
 }
 
@@ -23,27 +23,33 @@ export interface AgentExecutionEgressCapabilities {
  * pack. One exact assigned branch, old-tip CAS and nondeletion are mandatory.
  * No tag, canonical ref, push-options or multi-ref update can pass this boundary.
  */
-export function assignedAgentPushCommand(body: Uint8Array, branch: string, expectedTip: string | null): boolean {
-  if (!isSafeRef(branch) || branch.startsWith("refs/") || branch === "HEAD" || (expectedTip !== null && (!/^[a-f0-9]{40}$/.test(expectedTip) || /^0{40}$/.test(expectedTip)))) return false;
-  if (body.byteLength < 4 || body.byteLength > 1048576) return false;
+export interface AgentAssignedPush { oldCommit: string | null; newCommit: string; ref: string }
+export function parseAssignedAgentPushCommand(body: Uint8Array, branch: string, expectedTip: string | null): AgentAssignedPush | null {
+  if (!isSafeRef(branch) || branch.startsWith("refs/") || branch === "HEAD" || (expectedTip !== null && (!/^[a-f0-9]{40}$/.test(expectedTip) || /^0{40}$/.test(expectedTip)))) return null;
+  if (body.byteLength < 4 || body.byteLength > 1048576) return null;
   const decoder = new TextDecoder("utf-8", { fatal: true });
-  let offset = 0, commands = 0;
+  let offset = 0, commands = 0, parsed: AgentAssignedPush | null = null;
   try {
     while (offset + 4 <= body.byteLength) {
       const sizeText = decoder.decode(body.subarray(offset, offset + 4));
-      if (!/^[a-f0-9]{4}$/i.test(sizeText)) return false;
+      if (!/^[a-f0-9]{4}$/i.test(sizeText)) return null;
       const size = parseInt(sizeText, 16); offset += 4;
-      if (size === 0) return commands === 1; // Remaining bytes are the bounded opaque pack.
-      if (size < 4 || offset + size - 4 > body.byteLength || ++commands > 1) return false;
+      if (size === 0) return commands === 1 ? parsed : null; // Remaining bytes are the bounded opaque pack.
+      if (size < 4 || offset + size - 4 > body.byteLength || ++commands > 1) return null;
       const line = decoder.decode(body.subarray(offset, offset + size - 4)); offset += size - 4;
       const [command, capabilities, extra] = line.replace(/\n$/, "").split("\0");
-      if (extra !== undefined || capabilities?.split(" ").some(value => value === "push-options")) return false;
+      if (extra !== undefined || capabilities?.split(" ").some(value => value === "push-options")) return null;
       const match = /^([a-f0-9]{40}) ([a-f0-9]{40}) (refs\/heads\/[A-Za-z0-9._/-]+)$/.exec(command ?? "");
-      if (!match || match[1] !== (expectedTip ?? "0".repeat(40)) || /^0{40}$/.test(match[2]!) || match[3] !== `refs/heads/${branch}`) return false;
+      if (!match || match[1] !== (expectedTip ?? "0".repeat(40)) || /^0{40}$/.test(match[2]!) || match[3] !== `refs/heads/${branch}`) return null;
+      parsed = { oldCommit: expectedTip, newCommit: match[2]!, ref: match[3]! };
     }
-  } catch { return false; }
-  return false;
+  } catch { return null; }
+  return null;
 }
+export function assignedAgentPushCommand(body: Uint8Array, branch: string, expectedTip: string | null): boolean {
+  return parseAssignedAgentPushCommand(body, branch, expectedTip) !== null;
+}
+
 function sameScope(first: AgentExecutionEgressScope, second: AgentExecutionEgressScope): boolean {
   return (Object.keys(first) as Array<keyof AgentExecutionEgressScope>).every(key => first[key] === second[key]);
 }
@@ -71,8 +77,13 @@ export function assignedAgentEgress(input: AgentExecutionEgressScope, capabiliti
   const rules = [rule("info/refs", "GET", "read", "?service=git-upload-pack"), rule("git-upload-pack", "POST", "read")];
   if (scope.access === "write") rules.push(rule("info/refs", "GET", "write", "?service=git-receive-pack"), rule("git-receive-pack", "POST", "write"));
   const transfer: ExecutionEgressFetch = async request => {
-    if (new URL(request.url).pathname === `${path}/git-receive-pack` && !assignedAgentPushCommand(new Uint8Array(await request.clone().arrayBuffer()), scope.branch, scope.expectedTip)) return new Response("Assigned branch push refused", { status: 403 });
-    await authorize(); await capabilities.beforeTransfer(scope); await authorize();
+    let push: AgentAssignedPush | undefined;
+    if (new URL(request.url).pathname === `${path}/git-receive-pack`) {
+      const parsed = parseAssignedAgentPushCommand(new Uint8Array(await request.clone().arrayBuffer()), scope.branch, scope.expectedTip);
+      if (!parsed) return new Response("Assigned branch push refused", { status: 403 });
+      push = parsed;
+    }
+    await authorize(); await capabilities.beforeTransfer(scope, push); await authorize();
     const response = await capabilities.fetch(request); await authorize(); return response;
   };
   return executionEgress(rules, transfer, authorize);

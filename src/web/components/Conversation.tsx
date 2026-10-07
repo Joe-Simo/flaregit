@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { apiJson, apiSessionIdentity } from "../api";
-import { clearConversationDraft, commentContent, readConversationDraft, saveConversationDraft, type CommentAnchor } from "../conversation-recovery";
+import { clearConversationDraft, commentContent, dispatchRecoverableComment, readConversationDraft, reanchorConversationDraft, saveConversationDraft, type CommentAnchor } from "../conversation-recovery";
 import { timeAgo } from "../router";
 
 export interface Comment { id: number; author: string; body: string; path: string | null; line: number | null; commit: string | null; created_at: string; importedOrigin?:ImportedConversationOrigin|null }
@@ -58,8 +58,21 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
   const draftId = useId();
   const anchorId = useId();
   const draftInput = useRef<HTMLTextAreaElement>(null);
+  const lastSelectedAnchor = useRef(anchor);
   useEffect(() => {
-    if (anchor) draftInput.current?.focus({ preventScroll: true });
+    const previous = lastSelectedAnchor.current;
+    lastSelectedAnchor.current = anchor;
+    if (anchor) {
+      draftInput.current?.focus({ preventScroll: true });
+      if (previous?.path !== anchor.path || previous?.line !== anchor.line || previous?.commit !== anchor.commit) {
+        const updated = reanchorConversationDraft(subject, { body: draft, anchor: recoveredAnchor, intent: requestIntent.current }, anchor);
+        requestIntent.current = updated.intent;
+        setRecoveredAnchor(anchor);
+        const persisted = preserveDraft(updated.body, anchor, updated.intent);
+        setBrowserSaved(persisted);
+        if (!persisted) setError("This line anchor could not be saved in this browser session. Keep this page open to preserve your draft.");
+      }
+    }
   }, [anchor?.path, anchor?.line, anchor?.commit]);
   const lifetime = useRef(0);
   const readSequence = useRef(0);
@@ -100,7 +113,6 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
     const content = commentContent(subject, draft, activeAnchor);
     const payload = JSON.stringify(content);
     if (requestIntent.current?.payload !== payload) requestIntent.current = { payload, key: crypto.randomUUID() };
-    setBrowserSaved(preserveDraft(draft, activeAnchor));
     const idempotencyKey = requestIntent.current.key; sending.current = true;
     const generation = lifetime.current;
     readSequence.current++;
@@ -108,7 +120,11 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
     setError(null);
     setSaved(false);
     try {
-      await apiJson<Comment>(`/p/${projectId}/comments`, { method: "POST", json: { ...content, idempotencyKey } });
+      await dispatchRecoverableComment(() => {
+        const persisted = preserveDraft(draft, activeAnchor);
+        setBrowserSaved(persisted);
+        return persisted;
+      }, () => apiJson<Comment>(`/p/${projectId}/comments`, { method: "POST", json: { ...content, idempotencyKey } }));
       if (generation !== lifetime.current) return;
       requestIntent.current = null; setDraft("");
       setRecoveredAnchor(null); setBrowserSaved(false);

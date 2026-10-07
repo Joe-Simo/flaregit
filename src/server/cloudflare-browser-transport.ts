@@ -16,7 +16,7 @@ export interface BrowserPagePort extends Pick<Page, 'setBypassCSP' | 'setBypassS
 }
 export interface BrowserContextPort { readonly id: string | undefined; readonly closed: boolean; newPage(): Promise<BrowserPagePort>; close(): Promise<void>; overridePermissions(origin: string, permissions: []): Promise<void> }
 export interface BrowserPort { readonly connected: boolean; version?(): Promise<string>; createBrowserContext(): Promise<BrowserContextPort>; close(): Promise<void> }
-export type BrowserSessionControl = Pick<BrowserRun, 'closeSession' | 'getSession'>;
+export type BrowserSessionControl = Pick<BrowserRun, 'closeSession' | 'getSession'> & Partial<Pick<BrowserRun, 'history'>>;
 /** SDK consumes the callable fetch method only; Bun's global fetch.preconnect is not
  * part of a Worker binding's runtime contract. */
 export interface VerificationBrowserBinding { fetch(...args: Parameters<typeof fetch>): ReturnType<typeof fetch> }
@@ -56,7 +56,7 @@ export class CloudflareBrowserTransport implements BrowserVerificationTransport 
   constructor(private readonly config: CloudflareBrowserTransportOptions) {
     this.sdk = config.sdk ?? cloudflareBrowserSdk;
     const binding = config.binding;
-    this.sessionControl = config.sessionControl ?? (binding.closeSession && binding.getSession ? { closeSession: id => binding.closeSession!(id), getSession: id => binding.getSession!(id) } : undefined);
+    this.sessionControl = config.sessionControl ?? (binding.closeSession && binding.getSession ? { closeSession: id => binding.closeSession!(id), getSession: id => binding.getSession!(id), ...(binding.history ? {history: options => binding.history!(options)} : {}) } : undefined);
     this.cleanupMs = config.cleanupMs ?? 8000;
     if (!Number.isInteger(this.cleanupMs) || this.cleanupMs < 1 || this.cleanupMs > 8000) throw Error('Invalid browser cleanup bound');
   }
@@ -212,8 +212,9 @@ export class CloudflareBrowserTransport implements BrowserVerificationTransport 
   }
 }
 
-export interface BrowserSessionRetirement { sessionId: string; observation: 'closed' | 'absent'; observedAt: number }
-/** Exact-session native retirement truth shared with admission ledgers. No account inventory,
+export interface BrowserSessionRetirement { sessionId: string; observation: 'closed' | 'absent'; observedAt: number; providerObservation?: 'exact-history'; providerStartTime?: number; providerEndTime?: number }
+/** Exact-session native retirement truth shared with admission ledgers. A bounded history page
+ * may prove one known closed session after the exact getter throws; listing absence,
  * caller success booleans, or SDK disconnection report may substitute for provider observation. */
 export async function retireBrowserSession(control: BrowserSessionControl, sessionId: string, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<BrowserSessionRetirement | null> {
   const timeoutMs = options.timeoutMs ?? 8000;
@@ -221,13 +222,39 @@ export async function retireBrowserSession(control: BrowserSessionControl, sessi
   const deadline = AbortSignal.timeout(timeoutMs), signal = options.signal ? AbortSignal.any([deadline, options.signal]) : deadline;
   try {
     signal.throwIfAborted();
-    const closed = await within(control.closeSession(sessionId), signal);
-    if (closed.status !== 'closed' && closed.status !== 'closing') return null;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const observed: Awaited<ReturnType<BrowserSessionControl['getSession']>> = await within(control.getSession(sessionId), signal);
-      if (observed !== null && observed.sessionId !== sessionId) return null;
+    let historyRead = false;
+    const history = async (): Promise<BrowserSessionRetirement | null> => {
+      if (!control.history || historyRead) return null;
+      historyRead = true;
+      const response: unknown = await within(control.history({ limit: 50, offset: 0 }), signal);
+      const page = z.array(z.unknown()).max(50).safeParse(response);
+      if (!page.success) return null;
+      const matches = page.data.filter(value => { const identity = z.object({ sessionId: z.string() }).passthrough().safeParse(value); return identity.success && identity.data.sessionId === sessionId; });
+      if (matches.length !== 1) return null;
+      const closed = z.object({ sessionId: z.uuid(), startTime: z.number().finite().positive().int().safe(), endTime: z.number().finite().positive().int().safe() }).passthrough().safeParse(matches[0]);
+      if (!closed.success || closed.data.endTime < closed.data.startTime) return null;
+      return { sessionId, observation: 'closed', observedAt: Date.now(), providerObservation: 'exact-history', providerStartTime: closed.data.startTime, providerEndTime: closed.data.endTime };
+    };
+    const read = async (): Promise<BrowserSessionRetirement | false | null> => {
+      let observed: unknown;
+      try { observed = await within(control.getSession(sessionId), signal); }
+      catch { return await history() ?? false; }
       if (observed === null) return { sessionId, observation: 'absent', observedAt: Date.now() };
-      if (typeof observed.endTime === 'number' && Number.isFinite(observed.endTime) && observed.endTime > 0) return { sessionId, observation: 'closed', observedAt: Date.now() };
+      const parsed = z.object({ sessionId: z.uuid(), endTime: z.number().finite().nonnegative().optional() }).passthrough().safeParse(observed);
+      if (!parsed.success || parsed.data.sessionId !== sessionId) return null;
+      if (parsed.data.endTime !== undefined && parsed.data.endTime > 0) return { sessionId, observation: 'closed', observedAt: Date.now() };
+      return false;
+    };
+    // CDP Browser.close or another cleanup path may already have retired this exact
+    // session. A repeated close can reject; native exact lookup is the truth source.
+    let first: BrowserSessionRetirement | false | null = false;
+    try { first = await read(); } catch { /* Still attempt containment within the same deadline. */ }
+    if (first) return first;
+    if (first === null) return null;
+    try { await within(control.closeSession(sessionId), signal); } catch { /* A close error is never proof; the exact readback below may independently settle it. */ }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const observed = await read();
+      if (observed !== false) return observed;
       if (attempt < 2) await within(new Promise<void>(resolve => setTimeout(resolve, 50 * (attempt + 1))), signal);
     }
     return null;

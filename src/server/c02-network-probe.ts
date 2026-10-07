@@ -1,0 +1,55 @@
+import {z} from 'zod';
+
+export const c02NetworkTlsTrust={kind:'cloudflare-interception-ca',path:'/etc/cloudflare/certs/cloudflare-containers-ca.crt',maxBytes:65536,rejectUnauthorized:true} as const;
+export const c02NetworkChannels=['http','https','raw-tcp','raw-tls'] as const;
+const channel=z.enum(c02NetworkChannels),nonce=z.string().regex(/^[a-f0-9]{64}$/),identifier=z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/);
+export const c02NetworkProbeScopeSchema=z.object({requestId:z.uuid(),instanceId:identifier,probeId:z.uuid()}).strict();
+export type C02NetworkProbeScope=z.infer<typeof c02NetworkProbeScopeSchema>;
+const endpointSchema=z.object({channel,receiverId:identifier,url:z.url().max(512),controlNonce:nonce,probeNonce:nonce}).strict().superRefine((value,ctx)=>{let url:URL;try{url=new URL(value.url);}catch{ctx.addIssue({code:'custom',message:'Valid owned receiver URL required'});return;}const secure=value.channel==='https'||value.channel==='raw-tls';if(url.protocol!==(secure?'https:':'http:')||url.username||url.password||url.hash||url.search||!url.pathname.startsWith('/c02-network/')||url.hostname!=='flaregit-owned-delivery-verifier.simo-988.workers.dev'||url.port&&url.port!==(secure?'443':'80'))ctx.addIssue({code:'custom',message:'Exact owned network receiver endpoint required'});if(value.controlNonce===value.probeNonce)ctx.addIssue({code:'custom',message:'Control and native probe nonces must differ'});});
+export const c02NetworkProbePlanSchema=z.object({scope:c02NetworkProbeScopeSchema,createdAt:z.number().int().positive().safe(),deadlineAt:z.number().int().positive().safe(),maxContainers:z.literal(1),maxNativeSeconds:z.literal(120),endpoints:z.array(endpointSchema).max(4)}).strict().superRefine((value,ctx)=>{if(value.deadlineAt<=value.createdAt||value.deadlineAt-value.createdAt>120000)ctx.addIssue({code:'custom',message:'Network probe lifetime exceeds bound'});if(new Set(value.endpoints.map(item=>item.channel)).size!==value.endpoints.length||new Set(value.endpoints.flatMap(item=>[item.controlNonce,item.probeNonce])).size!==value.endpoints.length*2)ctx.addIssue({code:'custom',message:'Network probe channels and nonces must be unique'});});
+export type C02NetworkProbePlan=z.infer<typeof c02NetworkProbePlanSchema>;
+const receiverSchema=z.object({scope:c02NetworkProbeScopeSchema,channel,receiverId:identifier,nonce,receivedAt:z.number().int().positive().safe(),kind:z.enum(['control','native-probe']),source:z.literal('owned-receiver')}).strict();
+const denialSchema=z.object({scope:c02NetworkProbeScopeSchema,channel,nonce,receivedAt:z.number().int().positive().safe(),source:z.literal('registered-native-interceptor'),interceptorId:identifier}).strict();
+export type C02NetworkReceiverReceipt=z.infer<typeof receiverSchema>;
+export type C02NetworkDenialReceipt=z.infer<typeof denialSchema>;
+export interface C02NetworkProbeEvidence{
+ /** These receipts are read from trusted receiver/native-hook ledgers. Never
+  * accept this envelope from a native stdout report or an HTTP request body. */
+ receiver:C02NetworkReceiverReceipt[];
+ denials:C02NetworkDenialReceipt[];
+ native:{scope:C02NetworkProbeScope;commandId:string;commandSettled:boolean;stopped:boolean}|null;
+}
+export interface C02NetworkChannelResult{channel:typeof c02NetworkChannels[number];status:'receiver-reached'|'denied-at-native-interceptor'|'unconfirmed';transportCoverage:'http-client'|'https-client'|'raw-tcp-http1.1'|'raw-tls-http1.1';reason:'receiver-observed-native-nonce'|'native-hook-observed-exact-request'|'receiver-control-unconfirmed'|'native-cleanup-unconfirmed'|'no-independent-denial-observation'|'receiver-capability-unconfirmed'}
+const sameScope=(a:C02NetworkProbeScope,b:C02NetworkProbeScope)=>a.requestId===b.requestId&&a.instanceId===b.instanceId&&a.probeId===b.probeId;
+const coverage={http:'http-client',https:'https-client','raw-tcp':'raw-tcp-http1.1','raw-tls':'raw-tls-http1.1'} as const;
+function exactReceiver(plan:C02NetworkProbePlan,endpoint:C02NetworkProbePlan['endpoints'][number],input:C02NetworkReceiverReceipt,kind:'control'|'native-probe'){const receipt=receiverSchema.safeParse(input);return receipt.success&&sameScope(receipt.data.scope,plan.scope)&&receipt.data.channel===endpoint.channel&&receipt.data.receiverId===endpoint.receiverId&&receipt.data.kind===kind&&receipt.data.nonce===(kind==='control'?endpoint.controlNonce:endpoint.probeNonce)&&receipt.data.receivedAt>=plan.createdAt&&receipt.data.receivedAt<=plan.deadlineAt;}
+/** Returns only positive independently attributed observations. A successful
+ * Worker control never proves denial from a VM; DNS/timeout/stdout cannot do so. */
+export function deriveC02NetworkProbeResults(input:C02NetworkProbePlan,evidence:C02NetworkProbeEvidence):C02NetworkChannelResult[]{const plan=c02NetworkProbePlanSchema.parse(structuredClone(input));if(evidence.receiver.length>32||evidence.denials.length>32)throw Error('Network evidence exceeds bound');return c02NetworkChannels.map(value=>{const endpoint=plan.endpoints.find(item=>item.channel===value),base={channel:value,transportCoverage:coverage[value]};if(!endpoint)return{...base,status:'unconfirmed',reason:'receiver-capability-unconfirmed'};if(evidence.receiver.some(item=>exactReceiver(plan,endpoint,item,'native-probe')))return{...base,status:'receiver-reached',reason:'receiver-observed-native-nonce'};if(!evidence.receiver.some(item=>exactReceiver(plan,endpoint,item,'control')))return{...base,status:'unconfirmed',reason:'receiver-control-unconfirmed'};const native=evidence.native;if(!native||!sameScope(native.scope,plan.scope)||!identifier.safeParse(native.commandId).success||native.commandSettled!==true||native.stopped!==true)return{...base,status:'unconfirmed',reason:'native-cleanup-unconfirmed'};const denied=evidence.denials.some(item=>{const receipt=denialSchema.safeParse(item);return receipt.success&&sameScope(receipt.data.scope,plan.scope)&&receipt.data.channel===value&&receipt.data.nonce===endpoint.probeNonce&&receipt.data.receivedAt>=plan.createdAt&&receipt.data.receivedAt<=plan.deadlineAt;});return denied?{...base,status:'denied-at-native-interceptor',reason:'native-hook-observed-exact-request'}:{...base,status:'unconfirmed',reason:'no-independent-denial-observation'};});}
+/** Admit only channels with actual owned receiver controls. HTTP redirects or
+ * unimplemented listeners never become presumed capabilities. */
+export function c02NetworkProbeInput(input:C02NetworkProbePlan,controls:C02NetworkReceiverReceipt[],now=Date.now()){const plan=c02NetworkProbePlanSchema.parse(structuredClone(input));if(!Number.isSafeInteger(now)||now<plan.createdAt||now>=plan.deadlineAt||controls.length>8)throw Error('Network probe admission unavailable');const endpoints=plan.endpoints.filter(endpoint=>controls.some(receipt=>exactReceiver(plan,endpoint,receipt,'control')&&receipt.receivedAt<=now));if(endpoints.length===0)throw Error('No positively controlled receiver capability');return{scope:plan.scope,deadlineAt:plan.deadlineAt,tlsTrust:{...c02NetworkTlsTrust},endpoints:endpoints.map(endpoint=>{const url=new URL(endpoint.url);url.searchParams.set('requestId',plan.scope.requestId);url.searchParams.set('instanceId',plan.scope.instanceId);url.searchParams.set('probeId',plan.scope.probeId);url.searchParams.set('channel',endpoint.channel);url.searchParams.set('nonce',endpoint.probeNonce);return{channel:endpoint.channel,url:url.href};})};}
+/** Fixed native controls establish each actual transport before deny probes.
+ * This creates no receipt: only the independent owned receiver can acknowledge it. */
+export function c02NetworkControlInput(input:C02NetworkProbePlan,now=Date.now()){
+ const plan=c02NetworkProbePlanSchema.parse(structuredClone(input));
+ if(!Number.isSafeInteger(now)||now<plan.createdAt||now>=plan.deadlineAt||plan.endpoints.length===0)throw Error('Native control admission unavailable');
+ return{scope:plan.scope,deadlineAt:plan.deadlineAt,tlsTrust:{...c02NetworkTlsTrust},endpoints:plan.endpoints.map(endpoint=>{const url=new URL(endpoint.url);url.search=new URLSearchParams({...plan.scope,channel:endpoint.channel,nonce:endpoint.controlNonce}).toString();return{channel:endpoint.channel,url:url.href};})};
+}
+/** Fixed trusted native program, run once in the isolated container. Its stdout
+ * is diagnostic only; trusted receiver/hook receipts determine the result.
+ * TCP/TLS use HTTP/1.1 framing, not a claim of arbitrary protocol coverage. */
+export const C02_NETWORK_PROBE_PROGRAM=String.raw`
+const input=JSON.parse(await Bun.stdin.text());
+if(!Array.isArray(input.endpoints)||input.endpoints.length<1||input.endpoints.length>4||Date.now()>=input.deadlineAt)throw Error('Probe unavailable');
+const net=await import('node:net'),tls=await import('node:tls');
+const trust=input.tlsTrust;
+if(!trust||trust.kind!=='cloudflare-interception-ca'||trust.path!=='/etc/cloudflare/certs/cloudflare-containers-ca.crt'||trust.maxBytes!==65536||trust.rejectUnauthorized!==true)throw Error('Probe TLS trust unavailable');
+let trustedCa:string[]|undefined;
+if(input.endpoints.some(endpoint=>endpoint.channel==='https'||endpoint.channel==='raw-tls')){const file=Bun.file('/etc/cloudflare/certs/cloudflare-containers-ca.crt');if(!await file.exists()||file.size<1||file.size>65536)throw Error('Probe interception CA unavailable');const pem=await file.text();if(new TextEncoder().encode(pem).length>65536||!pem.includes('-----BEGIN CERTIFICATE-----')||!pem.includes('-----END CERTIFICATE-----'))throw Error('Probe interception CA invalid');trustedCa=[...tls.rootCertificates,pem];}
+
+for(const endpoint of input.endpoints){const url=new URL(endpoint.url);let outcome='failed';
+try{if(endpoint.channel==='http'||endpoint.channel==='https'){const response=await fetch(url,{redirect:'error',credentials:'omit',...(endpoint.channel==='https'?{tls:{ca:trustedCa,rejectUnauthorized:true}}:{}),signal:AbortSignal.timeout(Math.min(5000,input.deadlineAt-Date.now()))});await response.body?.cancel();outcome='response';}
+else{await new Promise<void>((resolve,reject)=>{let received=0,settled=false;const socket=endpoint.channel==='raw-tls'?tls.connect({host:url.hostname,port:443,servername:url.hostname,rejectUnauthorized:true,ca:trustedCa}):net.connect({host:url.hostname,port:80});const finish=(error?:Error)=>{if(settled)return;settled=true;clearTimeout(timer);socket.destroy();error?reject(error):resolve();};const timer=setTimeout(()=>finish(Error('timeout')),Math.max(1,Math.min(5000,input.deadlineAt-Date.now())));socket.once('close',()=>finish(Error('connection closed')));socket.setTimeout(Math.max(1,Math.min(5000,input.deadlineAt-Date.now())),()=>finish(Error('timeout')));socket.once('error',error=>finish(error));socket.once(endpoint.channel==='raw-tls'?'secureConnect':'connect',()=>socket.write('GET '+url.pathname+url.search+' HTTP/1.1\r\nHost: '+url.hostname+'\r\nConnection: close\r\n\r\n'));socket.on('data',bytes=>{received+=bytes.length;if(received>4096)finish();});socket.once('end',()=>finish());});outcome='response';}
+}catch{}console.log(JSON.stringify({channel:endpoint.channel,outcome,diagnosticOnly:true}));}
+`;

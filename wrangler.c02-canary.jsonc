@@ -3,38 +3,141 @@
   "name": "flaregit-c02-private-canary",
   "main": "src/server/c02-canary-worker.ts",
   "compatibility_date": "2026-10-04",
-  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ],
   "workers_dev": false,
   "preview_urls": false,
   "routes": [],
   "vars": {
     "C02_ENABLED": "false",
     "C02_IMAGE": "",
-    "C02_SOURCE_VERSION": ""
+    "C02_SOURCE_VERSION": "",
+    "C02_NETWORK_ENABLED": "false",
+    "C02_NETWORK_IMAGE": "",
+    "C02_BOUNDARY_ENABLED": "false",
+    "C02_BOUNDARY_IMAGE": ""
   },
-  "version_metadata": { "binding": "CF_VERSION_METADATA" },
+  "version_metadata": {
+    "binding": "CF_VERSION_METADATA"
+  },
   "durable_objects": {
     "bindings": [
-      { "name": "CANARY", "class_name": "C02CanaryBatch" },
-      { "name": "UNTRUSTED_EXECUTION", "class_name": "UntrustedExecutionSandbox" }
+      {
+        "name": "CANARY",
+        "class_name": "C02CanaryBatch"
+      },
+      {
+        "name": "UNTRUSTED_EXECUTION",
+        "class_name": "UntrustedExecutionSandbox"
+      },
+      {
+        "name": "NETWORK_BATCH",
+        "class_name": "C02NetworkBatch"
+      },
+      {
+        "name": "NETWORK_NATIVE",
+        "class_name": "C02NetworkSandbox"
+      },
+      {
+        "name": "BOUNDARY_SUPERVISOR",
+        "class_name": "C02BoundaryBatch"
+      },
+      {
+        "name": "BOUNDARY_NATIVE",
+        "class_name": "C02BoundaryNative"
+      }
     ]
   },
   "exports": {
-    "C02CanaryBatch": { "type": "durable-object", "storage": "sqlite" },
-    "UntrustedExecutionSandbox": { "type": "durable-object", "storage": "sqlite", "container": "c02-canary" }
+    "C02CanaryBatch": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "UntrustedExecutionSandbox": {
+      "type": "durable-object",
+      "storage": "sqlite",
+      "container": "c02-canary"
+    },
+    "C02NetworkBatch": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "C02NetworkSandbox": {
+      "type": "durable-object",
+      "storage": "sqlite",
+      "container": "c02-network"
+    },
+    "C02BoundaryBatch": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "C02BoundaryNative": {
+      "type": "durable-object",
+      "storage": "sqlite",
+      "container": "c02-boundary"
+    }
   },
-  "containers": [{
-    "name": "c02-canary",
-    "class_name": "UntrustedExecutionSandbox",
-    "image": "./Dockerfile.untrusted",
-    "instance_type": "standard-1",
-    "max_instances": 1,
-    "observability": { "logs": { "enabled": false } }
-  }],
-  "browser": { "binding": "BROWSER", "remote": false },
-  "services": [
-    { "binding": "EXECUTION_AUTHORITY", "service": "flaregit-c02-private-canary", "entrypoint": "C02ExecutionAuthority" },
-    { "binding": "UNTRUSTED_EGRESS", "service": "flaregit-c02-private-canary", "entrypoint": "C02DenyEgress" }
+  "containers": [
+    {
+      "name": "c02-canary",
+      "class_name": "UntrustedExecutionSandbox",
+      "image": "./Dockerfile.untrusted",
+      "instance_type": "standard-1",
+      "max_instances": 1,
+      "observability": {
+        "logs": {
+          "enabled": false
+        }
+      }
+    },
+    {
+      "name": "c02-network",
+      "class_name": "C02NetworkSandbox",
+      "image": "./Dockerfile.untrusted",
+      "instance_type": "standard-1",
+      "max_instances": 1,
+      "observability": {
+        "logs": {
+          "enabled": false
+        }
+      }
+    },
+    {
+      "name": "c02-boundary",
+      "class_name": "C02BoundaryNative",
+      "image": "./Dockerfile.untrusted",
+      "instance_type": "standard-1",
+      "max_instances": 2,
+      "observability": {
+        "logs": {
+          "enabled": false
+        }
+      }
+    }
   ],
-  "observability": { "enabled": false }
+  "browser": {
+    "binding": "BROWSER",
+    "remote": false
+  },
+  "services": [
+    {
+      "binding": "EXECUTION_AUTHORITY",
+      "service": "flaregit-c02-private-canary",
+      "entrypoint": "C02ExecutionAuthority"
+    },
+    {
+      "binding": "UNTRUSTED_EGRESS",
+      "service": "flaregit-c02-private-canary",
+      "entrypoint": "C02DenyEgress"
+    },
+    {
+      "binding": "C02_NETWORK_RECEIVER",
+      "service": "flaregit-owned-delivery-verifier"
+    }
+  ],
+  "observability": {
+    "enabled": false
+  }
 }

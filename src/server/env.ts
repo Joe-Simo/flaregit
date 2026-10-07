@@ -2,6 +2,29 @@ import type { ArtifactsBinding } from "../artifacts/cloudflare.js";
 import type { AiBinding } from "../ai/workers-ai.js";
 
 export interface Env {
+  /** Private exact publisher checkpoint binding. Unset in ordinary/public deployments. */
+  C03_PRIVATE_MATRIX_ENABLED?:string;
+  C03_PUBLICATION_CHECKPOINT_GRANT_JSON?:string;
+  C03_PUBLICATION_CHECKPOINT?:Fetcher;
+  /** Resource creation is disabled unless explicitly approved; token stays server-side. */
+  PREVIEW_PROVISIONING_ENABLED?:string;
+  PREVIEW_PROVISIONING_GLOBAL_LIMIT?:string;
+  PREVIEW_PROVISIONING_ACCOUNT_ID?:string;
+  PREVIEW_PROVISIONING_API_TOKEN?:string;
+  PREVIEW_PROVISIONING_SUBDOMAIN?:string;
+  PREVIEW_PROVISIONING_APP_ORIGIN?:string;
+  PREVIEW_PROVISIONING_BROKER_SERVICE?:string;
+  PREVIEW_PROVISIONING_MODULE?:string;
+  PREVIEW_PROVISIONING_MODULE_SHA256?:string;
+  PREVIEW_PROVISIONING_COMPATIBILITY_DATE?:string;
+  /** Server release identity for exact-version acceptance receipts. */
+  CF_VERSION_METADATA?:WorkerVersionMetadata;
+  FLAREGIT_SOURCE_VERSION?:string;
+  /** Optional server-only immutable native integration phase. */
+  INTEGRATION_NATIVE_PHASE_JSON?:string;
+  PUBLICATION_NATIVE_PHASE_JSON?:string;
+  PUBLICATION_NATIVE_PHASES_JSON?:string;
+  C03_PUBLICATION_CHECKPOINT_GRANTS_JSON?:string;
   /** C02 stays unavailable until an operator approves the pinned image/policy. */
   ISOLATED_EXECUTION_IMAGE?: string;
   ISOLATED_BROWSER_POLICY_DIGEST?: string;

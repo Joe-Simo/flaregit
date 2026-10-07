@@ -1,10 +1,20 @@
-import { cp, rm } from "node:fs/promises";
+import { cp, rm, rename } from "node:fs/promises";
 import tailwind from "./tailwind";
+import { retainWebAssets, importVerifiedWebAssetRelease, exportWebAssetRelease } from "./retained-web-assets";
+import { resolve, relative } from "node:path";
 
-await rm("dist", { recursive: true, force: true });
+const args = Bun.argv.slice(2);
+const option = (name: string) => { const index = args.indexOf(name); return index < 0 ? undefined : args[index + 1]; };
+const prior = option("--prior-assets-manifest");
+if (prior) {
+  const manifestSha256 = option("--prior-assets-sha256"), source = option("--prior-assets-source"), assetsDir = option("--prior-assets-dir");
+  if (!manifestSha256 || !source || !assetsDir) throw Error("Prior assets require pinned manifest digest, source and directory");
+  await importVerifiedWebAssetRelease({ manifestPath: resolve(prior), manifestSha256, source, assetsDir: resolve(assetsDir) }, resolve(".cache/web-assets"));
+}
+await rm(".cache/web-build", { recursive: true, force: true });
 const result = await Bun.build({
   entrypoints: ["./index.html", "./src/web/diff.worker.ts"],
-  outdir: "./dist",
+  outdir: "./.cache/web-build",
   target: "browser",
   minify: true,
   splitting: true,
@@ -17,5 +27,14 @@ if (!result.success) {
   for (const log of result.logs) console.error(log);
   process.exit(1);
 }
-await cp("public", "dist", { recursive: true });
-for (const output of result.outputs) console.log(`${output.path} (${output.size} bytes)`);
+const releaseSource = option("--source-sha");
+if (releaseSource) {
+  const receipt = await exportWebAssetRelease(resolve(".cache/web-build"), result.outputs.map(output => output.path), releaseSource, resolve(".cache/web-release.json"));
+  console.log(JSON.stringify(receipt));
+}
+await retainWebAssets(resolve(".cache/web-build"), result.outputs.map(output => output.path), resolve(".cache/web-assets"));
+await cp("public", ".cache/web-build", { recursive: true, force: false, errorOnExist: true });
+const outputs = result.outputs.map(output => ({ path: resolve("dist", relative(resolve(".cache/web-build"), output.path)), size: output.size }));
+await rm("dist", { recursive: true, force: true });
+await rename(".cache/web-build", "dist");
+for (const output of outputs) console.log(`${output.path} (${output.size} bytes)`);

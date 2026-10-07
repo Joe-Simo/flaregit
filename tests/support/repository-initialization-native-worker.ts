@@ -1,3 +1,4 @@
+import type{TaskCreationCredential}from'../../src/server/accepted-task-target';
 import {MirrorExecutions} from "../../src/server/mirror-execution";
 import {TaskSourceInspections} from "../../src/server/task-source-inspections";
 import {RetainedInputs} from '../../src/server/retained-inputs';
@@ -21,7 +22,11 @@ export class RepositoryInitializationFixture extends RepositoryController{
  async fault(on:boolean){this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS repository_initialization_receipts(event_id TEXT PRIMARY KEY,payload TEXT NOT NULL)");if(on)this.ctx.storage.sql.exec("CREATE TRIGGER reject_initialized_receipt BEFORE INSERT ON repository_initialization_receipts BEGIN SELECT RAISE(ABORT,'synthetic initialized receipt failure'); END");else this.ctx.storage.sql.exec('DROP TRIGGER IF EXISTS reject_initialized_receipt');}
  async raw(){return{projects:this.ctx.storage.sql.exec('SELECT id FROM project').toArray().length,members:this.ctx.storage.sql.exec('SELECT user_id FROM members').toArray().length,receipts:this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='repository_initialization_receipts'").toArray().length?this.ctx.storage.sql.exec('SELECT event_id FROM repository_initialization_receipts').toArray().length:0};}
 }
-export default{async fetch(request:Request,env:Env){const url=new URL(request.url),actor='owner',account=accountOf(env,await accountKeyFor(actor)),credential={viaToken:false,sessionExpiresAt:Date.now()+(url.searchParams.get('expired')==='true'?-1000:60000)};try{
+export default{async fetch(request:Request,env:Env){const url=new URL(request.url),actor='owner',account=accountOf(env,await accountKeyFor(actor)),credential:TaskCreationCredential=url.searchParams.has('hash')?{viaToken:true,credentialHash:url.searchParams.get('hash')!}:{viaToken:false,sessionExpiresAt:Date.now()+(url.searchParams.get('expired')==='true'?-1000:60000)};try{
+ if(url.pathname==='/token-fixture'){const secret='synthetic-'+crypto.randomUUID(),expiresAt=Date.now()+(url.searchParams.get('expired')==='true'?-1000:60000),created=await account.createApiToken(actor,'Owned local read',secret,{scope:'read',repo:url.searchParams.get('repo')!,expiresAt});const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(secret))),n=>n.toString(16).padStart(2,'0')).join('');return Response.json({id:created.id,hash});}
+ if(url.pathname==='/revoke-fixture'){await account.revokeApiToken(url.searchParams.get('id')!);return Response.json({revoked:true});}
+ if(url.pathname==='/before-create')return Response.json(await account.beginRepositoryInitializationCreate(url.searchParams.get('event')!,actor,credential));
+ if(url.pathname==='/diagnostic')return Response.json(await account.repositoryInitializationDiagnosticByRequest(url.searchParams.get('request')!,url.searchParams.get('actor')??actor,credential));
  if(url.pathname==='/statuses')return Response.json(await account.repositoryInitializationStatuses(url.searchParams.get('actor')??actor,credential,{limit:1,cursor:url.searchParams.get('cursor')??undefined}));
  if(url.pathname==='/status')return Response.json(await account.repositoryInitializationStatusByRequest(url.searchParams.get('request')!,url.searchParams.get('actor')??actor,credential));
  if(url.pathname==='/prepare')return Response.json(await account.prepareRepositoryInitialization(await request.json() as RepositoryCreationRequest,actor,credential));

@@ -1,6 +1,6 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { z } from "zod";
-import { assignedAgentEgress, agentExecutionEgressScopeSchema, type AgentExecutionEgressSnapshot, type AgentExecutionGitCredential } from "./agent-execution-egress";
+import { assignedAgentEgress, agentExecutionEgressScopeSchema, type AgentExecutionEgressSnapshot, type AgentExecutionGitCredential, type AgentAssignedPush } from "./agent-execution-egress";
 import type { Env } from "./env";
 import { projectOf } from "./projects";
 
@@ -10,10 +10,10 @@ export type AgentEgressWorkerProps = z.infer<typeof agentEgressWorkerPropsSchema
  * issuance intent before the SDK call and its token before returning to the Worker.
  * Pending or lost replies do not grant cancellation or cleanup success. */
 export interface AgentEgressLedger {
-  agentRelayCurrent(props: AgentEgressWorkerProps): Promise<AgentExecutionEgressSnapshot>;
+  agentRelayCurrent(props: AgentEgressWorkerProps, requestId: string): Promise<AgentExecutionEgressSnapshot>;
   agentRelayBeforeCredential(props: AgentEgressWorkerProps, requestId: string, access: "read" | "write"): Promise<void>;
   agentRelayCredential(props: AgentEgressWorkerProps, issuanceId: string, access: "read" | "write"): Promise<AgentExecutionGitCredential>;
-  agentRelayBeforeTransfer(props: AgentEgressWorkerProps, requestId: string): Promise<void>;
+  agentRelayBeforeTransfer(props: AgentEgressWorkerProps, requestId: string, push?: AgentAssignedPush): Promise<void>;
   revokeAgentCredential(issuanceId: string): Promise<boolean>;
 }
 async function deadline<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
@@ -36,7 +36,7 @@ export async function agentEgressWorkerResponse(request: Request, input: AgentEg
     // One request ID binds purpose-specific budget grants and its one credential
     // issuance. Actual retries receive new IDs; callback repetition does not.
     const handler = assignedAgentEgress(props.scope, {
-      current: async () => { assertOpen(); const current = await ledger.agentRelayCurrent(props); assertOpen(); return current; },
+      current: async () => { assertOpen(); const current = await ledger.agentRelayCurrent(props, requestId); assertOpen(); return current; },
       beforeCredential: async (_scope, access) => { assertOpen(); await ledger.agentRelayBeforeCredential(props, requestId, access); assertOpen(); },
       credential: async (_scope, access) => {
         assertOpen(); issued.add(requestId); // Register cleanup before awaiting a possibly lost issuance ACK.
@@ -51,7 +51,7 @@ export async function agentEgressWorkerResponse(request: Request, input: AgentEg
         retainBackground(issuance.then(revokeLate, revokeLate));
         const credential = await issuance; assertOpen(); return credential;
       },
-      beforeTransfer: async () => { assertOpen(); await ledger.agentRelayBeforeTransfer(props, requestId); assertOpen(); },
+      beforeTransfer: async (_scope, push) => { assertOpen(); await ledger.agentRelayBeforeTransfer(props, requestId, push); assertOpen(); },
       fetch: request => { assertOpen(); return fetcher(request); },
     });
     response = await deadline(handler.fetch(request), 11000);

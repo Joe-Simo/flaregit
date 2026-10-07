@@ -52,9 +52,9 @@ export async function sealAndStopInitializer(sandbox: { seal(): Promise<void>; d
 }
 
 export async function createReadmeRepository(env: Env, input: ReadmeRepositoryInput, journal: RepositoryInitializationJournal): Promise<InitialCommitReceipt> {
-  await journal.authorize(); await journal.beforeCreate(input);
+  await journal.authorize();
+  const nativeName = `readme-${input.eventId}`;
   const created = await allocateArtifact(env, { name: input.canonicalName, projectId: input.projectId, userId: input.userId, kind: "canonical", operationId: input.operationId }, async () => {
-    await journal.authorize();
     const result = await env.ARTIFACTS.create(input.canonicalName, { description: input.description, setDefaultBranch: input.defaultBranch });
     try { await journal.created({ id: result.id, name: result.name, remote: result.remote }, result.token); }
     catch {
@@ -62,11 +62,14 @@ export async function createReadmeRepository(env: Env, input: ReadmeRepositoryIn
       throw new Error("Repository creation receipt was not confirmed; retry requires saved-operation recovery");
     }
     return result;
+  }, async () => {
+    await journal.authorize();
+    await admitNativeCompute(env, await accountKeyFor(input.userId), nativeName, "native-essential");
+    await journal.beforeCreate(input);
   });
-  const nativeName = `readme-${input.eventId}`;
   let nativeAllocated = false, receipt: InitialCommitReceipt | undefined, revoked = false, stopped = false;
   try {
-    await journal.authorize(); await admitNativeCompute(env, await accountKeyFor(input.userId), nativeName, "native-essential"); await journal.nativeIntent(nativeName);
+    await journal.authorize(); await journal.nativeIntent(nativeName);
     const sandbox = env.INTEGRATOR.getByName(nativeName); nativeAllocated = true;
     receipt = await initializeReadmeGit({ exec: (command, environment) => sandbox.exec(["sh", "-c", command], { env: environment }) }, input, created.remote, created.token, () => journal.authorize(), value => journal.committed(value), () => journal.beforePush(), value => journal.published(value));
   } finally {

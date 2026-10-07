@@ -1,5 +1,16 @@
 import { afterEach, expect, test } from "bun:test";
-import { generationRecoveryDraft, requestGenerationRecovery } from "../src/web/preview-generation-recovery";
+import { generationRecoveryDraft,readGenerationRecovery,saveGenerationRecovery, requestGenerationRecovery } from "../src/web/preview-generation-recovery";
+
+test('replacement UUID survives reload, stays actor scoped and refuses unsaved requests',()=>{
+ const values=new Map<string,string>(),storage={getItem:(key:string)=>values.get(key)??null,setItem:(key:string,value:string)=>{values.set(key,value);}};
+ const draft=generationRecoveryDraft(null,'project:commit','commit',null);saveGenerationRecovery(storage,'owner',draft);
+ const restored=readGenerationRecovery(storage,'owner',draft.scope);expect(restored).toEqual(draft);
+ expect(generationRecoveryDraft(restored,draft.scope,draft.commit,null).idempotencyKey).toBe(draft.idempotencyKey);
+ expect(readGenerationRecovery(storage,'other',draft.scope)).toBeNull();
+ expect(()=>saveGenerationRecovery(storage,'owner',{...draft,idempotencyKey:crypto.randomUUID()})).toThrow('original');
+ expect(()=>saveGenerationRecovery({getItem:()=>null,setItem:()=>{}},'owner',draft)).toThrow('could not be saved');
+ const next=generationRecoveryDraft(restored,draft.scope,draft.commit,'new-generation');expect(saveGenerationRecovery(storage,'owner',next)).toEqual(next);
+});
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });

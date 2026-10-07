@@ -3,13 +3,14 @@ import { RotateCw, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { apiJson } from "../api";
+import { apiSessionIdentity, apiJson } from "../api";
+import {acknowledgeWebhookReplay,prepareWebhookReplay,readWebhookReplays,saveWebhookReplay,type WebhookReplayIntent} from '../webhook-replay-recovery';
 import { timeAgo } from "../router";
 import { readWebhookView } from "../webhook-view-read";
 import { useVisiblePolling } from "../use-visible-polling";
 
 interface Hook { id: string; url: string; events: string; active: number }
-interface Delivery { dispatch_state?: "unknown"|"sending"|"queued"|"failed"|"consumed"; dispatch_attempts?:number; dispatch_error?:string|null; id: string; seq: number; queue_ms: number | null; webhook_id: string; event: string; status: "pending" | "waiting" | "success" | "failed"; attempts: number; last_status: number | null; last_error: string | null; latency_ms: number | null; updated_at: string }
+interface Delivery { generation?:number; dispatch_state?: "unknown"|"sending"|"queued"|"failed"|"consumed"; dispatch_attempts?:number; dispatch_error?:string|null; id: string; seq: number; queue_ms: number | null; webhook_id: string; event: string; status: "pending" | "waiting" | "success" | "failed"; attempts: number; last_status: number | null; last_error: string | null; latency_ms: number | null; updated_at: string }
 
 type WebhookLoad = { hooks: Hook[] | null; deliveries: Delivery[] };
 class WebhookLoadError extends Error {
@@ -28,7 +29,22 @@ const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3
 const okCls = "rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-200";
 const errText = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback);
 
-export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwner: boolean }) {
+/** Reconcile a saved replay after an unknown acknowledgement; never resend it here. */
+export async function replayWebhookDelivery(projectId: string, deliveryId: string, refresh: () => Promise<void>, request?: WebhookReplayIntent["request"]): Promise<void> {
+  try { await apiJson(`/p/${projectId}/deliveries/${deliveryId}/redeliver`, { method: "POST", ...(request ? {json:request} : {}) }); }
+  catch (error) {
+    // Refresh failure must not replace the original replay outcome.
+    try { await refresh(); } catch { /* The polling callback reports read failures separately. */ }
+    throw error;
+  }
+}
+
+export function WebhooksCard(props: { projectId: string; isOwner: boolean }) {
+  const identity=apiSessionIdentity();
+  return <SessionWebhooksCard key={JSON.stringify([identity,props.projectId,props.isOwner])} {...props} identity={identity}/>;
+}
+export function webhookMutationIsCurrent(generation:number,current:number,identity:string|null){return generation===current&&identity!==null&&apiSessionIdentity()===identity;}
+function SessionWebhooksCard({ projectId, isOwner,identity }: { projectId: string; isOwner: boolean;identity:string|null }) {
   const [hooks, setHooks] = useState<Hook[] | null>(null);
   const [deliveries, setDeliveries] = useState<Delivery[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -37,10 +53,13 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
   const [secret, setSecret] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [replays,setReplays]=useState<WebhookReplayIntent[]>([]);
+  const [recoveryError,setRecoveryError]=useState<string|null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
   const generation = useRef(0);
   const mutationInFlight = useRef(false);
+  const pendingSecret = useRef<string | null>(null);
   const [lastLoadedAt, setLastLoadedAt] = useState<string | null>(null);
   const read = useCallback(async (signal: AbortSignal): Promise<WebhookLoad> => {
     const value = await readWebhookView(isOwner,
@@ -52,6 +71,8 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
   useEffect(() => {
     ++generation.current;
     mutationInFlight.current = false;
+    pendingSecret.current = null;
+    setReplays([]);setRecoveryError(null);const identity=apiSessionIdentity();if(identity)try{setReplays(readWebhookReplays(sessionStorage,{identity,projectId}));}catch{setRecoveryError("Saved replay requests could not be restored. No replay will be sent until recovery storage is available.");}
     setHooks(null); setDeliveries(null); setSecret(null); setUrl(""); setEvents(["change.accepted", "change.blocked"]); setError(null); setNotice(null); setLoadError(null); setBusy(null); setLastLoadedAt(null);
     return () => { generation.current++; };
   }, [projectId, isOwner]);
@@ -72,8 +93,8 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
     mutationInFlight.current = true;
     const current = generation.current;
     setBusy(label); setError(null); setNotice(null);
-    try { await fn(current); if (current !== generation.current) return; setNotice(done); await refresh(); }
-    catch (e) { if (current === generation.current) setError(errText(e, "Something went wrong")); }
+    try { await fn(current); if (!webhookMutationIsCurrent(current,generation.current,identity)) return; setNotice(done); await refresh(); }
+    catch (e) { if (webhookMutationIsCurrent(current,generation.current,identity)) setError(errText(e, "Something went wrong")); }
     finally { if (current === generation.current) { mutationInFlight.current = false; setBusy(null); } }
   };
 
@@ -97,12 +118,13 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
         )}
         {lastLoadedAt && <p className="text-xs text-muted-foreground">{isOwner ? "Settings and deliveries" : "Deliveries"} last loaded {timeAgo(lastLoadedAt)}</p>}
         <Button size="sm" variant="ghost" onClick={() => void refresh()}>{loadError ? "Retry refresh" : "Refresh status"}</Button>
+        {recoveryError && <div role="alert" className={alertCls}>{recoveryError}</div>}
         {error && <div role="alert" className={alertCls}>{error}</div>}
         {notice && <div role="status" className={okCls}>{notice}</div>}
         {isOwner && secret && (
           <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs">
             Signing secret (shown once): <code className="break-all">{secret}</code>
-            <Button size="sm" variant="ghost" className="mt-2" onClick={() => setSecret(null)}>Hide secret</Button>
+            <Button size="sm" variant="ghost" className="mt-2" onClick={() => { pendingSecret.current = null; setSecret(null); }}>I stored the secret · hide</Button>
           </div>
         )}
         {(isOwner ? hooks === null : deliveries === null) && !loadError && <p role="status" className="text-sm text-muted-foreground">{isOwner ? "Loading webhooks…" : "Loading deliveries…"}</p>}
@@ -128,9 +150,11 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
         {isOwner && (
           <form className="space-y-2" onSubmit={(e) => {
             e.preventDefault();
+            if (pendingSecret.current !== null) return;
             void guard("add", "Webhook added.", async (current) => {
               const r = await apiJson<{ secret: string }>(`/p/${projectId}/webhooks`, { method: "POST", json: { url, events } });
-              if (current !== generation.current) return;
+              if (!webhookMutationIsCurrent(current,generation.current,identity)) return;
+              pendingSecret.current = r.secret;
               setSecret(r.secret);
               setUrl("");
             });
@@ -147,7 +171,8 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
                 </label>
               ))}
             </fieldset>
-            <Button type="submit" variant="outline" disabled={busy !== null || !url || events.length === 0}>{busy === "add" ? "Adding…" : "Add webhook"}</Button>
+            {secret !== null && <p className="text-xs text-muted-foreground">Store and hide the signing secret above before adding another webhook.</p>}
+            <Button type="submit" variant="outline" disabled={busy !== null || secret !== null || !url || events.length === 0}>{busy === "add" ? "Adding…" : "Add webhook"}</Button>
           </form>
         )}
         {!isOwner && deliveries?.length === 0 && <p className="text-sm text-muted-foreground">No saved deliveries yet</p>}
@@ -160,7 +185,7 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
                   <div className="min-w-0">
                     <span className="font-medium break-all">{d.event}</span>
                     <span className="text-muted-foreground"> · #{d.seq} · {timeAgo(d.updated_at)} · {d.attempts} attempt{d.attempts === 1 ? "" : "s"}{d.queue_ms !== null ? ` · queued ${d.queue_ms} ms` : ""}{d.latency_ms !== null ? ` · ${d.latency_ms} ms` : ""}{d.last_status ? ` · last HTTP ${d.last_status}` : ""}</span>
-                    <div className="mt-1 text-muted-foreground break-all">Delivery <code>{d.id}</code> · webhook <code>{d.webhook_id}</code></div>
+                    <div className="mt-1 text-muted-foreground break-all">Delivery <code>{d.id}</code> · webhook <code>{d.webhook_id}</code>{d.generation!==undefined?` · replay generation ${d.generation}`:""}</div>
                     {d.status === "pending" && d.dispatch_state === "failed" && <div className="text-destructive">{d.dispatch_error ?? "Queue dispatch failed. The saved event will be retried."}</div>}
                     {d.status === "pending" && d.attempts === 0 && d.dispatch_state === "queued" && <div className="text-muted-foreground">Queue accepted · receiver response not recorded</div>}
                     {d.status === "pending" && d.attempts === 0 && (!d.dispatch_state || d.dispatch_state === "unknown" || d.dispatch_state === "sending") && <div className="text-muted-foreground">Event saved · queue dispatch unconfirmed</div>}
@@ -169,8 +194,8 @@ export function WebhooksCard({ projectId, isOwner }: { projectId: string; isOwne
                   <div className="flex items-center gap-2 shrink-0">
                     <Badge variant={d.status === "success" ? "success" : d.status === "failed" ? "destructive" : "warning"}>{d.status === "pending" ? "Pending" : d.status === "waiting" ? "Waiting" : d.status === "success" ? "Delivered" : "Failed"}</Badge>
                     {isOwner && (
-                      <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => guard(`re:${d.id}`, "Replay recorded with the same delivery ID. Check the log for its delivery outcome.", async () => { await apiJson(`/p/${projectId}/deliveries/${d.id}/redeliver`, { method: "POST" }); })}>
-                        <RotateCw className="h-3 w-3 mr-1" aria-hidden="true" /> {busy === `re:${d.id}` ? "Queuing…" : "Replay"}
+                      <Button size="sm" variant="outline" disabled={busy !== null || recoveryError!==null || (d.generation===undefined&&!replays.some(record=>record.deliveryId===d.id))} onClick={() => guard(`re:${d.id}`, "Replay recorded with the same delivery ID. Check the log for its delivery outcome.", async (current) => {const identity=apiSessionIdentity();if(!identity)throw Error("Sign in before preparing a replay.");const scope={identity,projectId},intent=readWebhookReplays(sessionStorage,scope).find(record=>record.deliveryId===d.id)??prepareWebhookReplay(d.id,d.generation!);setReplays(saveWebhookReplay(sessionStorage,scope,intent));await replayWebhookDelivery(projectId,d.id,refresh,intent.request);if(current!==generation.current||apiSessionIdentity()!==identity)return;setReplays(acknowledgeWebhookReplay(sessionStorage,scope,intent));})}>
+                        <RotateCw className="h-3 w-3 mr-1" aria-hidden="true" /> {busy === `re:${d.id}` ? "Queuing…" : replays.some(record=>record.deliveryId===d.id)?"Retry original replay":"Replay"}
                       </Button>
                     )}
                   </div>

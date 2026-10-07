@@ -1,13 +1,14 @@
 import {acceptedCommitLabel} from "../accepted-commit-display";
 import {GitCredential} from "../components/GitCredential";
 import { StorageReconciliation } from "../components/StorageReconciliation";
+import { repositoryRefreshFailure } from "../repository-refresh-error";
 import { repositoryDeletionNotice } from "../repository-deletion-notice";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Copy, Lock, Globe } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { apiJson, ApiError } from "../api";
+import { apiJson } from "../api";
 import { useVisiblePolling } from "../use-visible-polling";
 import { navigate } from "../router";
 import { CodeTab } from "../tabs/Code";
@@ -22,15 +23,18 @@ import { RepositoryDiscussionsTab } from "./Community";
 import { SettingsTab } from "../tabs/Settings";
 import type { FlareGitProjectState } from "@/core/types";
 
+const AcceptancePolicyPanel=lazy(async()=>({default:(await import("../components/AcceptancePolicyPanel")).AcceptancePolicyPanel}));
+const RepoReleases=lazy(async()=>({default:(await import("../components/RepoReleases")).RepoReleases}));
+const PreviewOnboardingPanel=lazy(async()=>({default:(await import("../components/PreviewOnboardingPanel")).PreviewOnboardingPanel}));
+
 interface Meta { id: string; role: "owner" | "member"; kind: string; name: string; source: string | null; verification: Record<string, unknown>; protectedPaths: string[]; visibility?: "private" | "public" }
 type State = FlareGitProjectState & { role: string };
-function repositoryAccessFailure(cause: unknown): boolean {
-  return (cause instanceof ApiError && [401, 403, 404].includes(cause.status)) || (cause instanceof Error && (cause.name === "AbortError" || repositoryDeletionNotice(cause.message) !== null));
-}
+
 
 const TABS = [
   ["code", "Code", "Files at the accepted version."],
   ["commits", "Commits", "History of accepted versions."],
+  ["releases", "Releases", "Saved version notes and exact Git tag identities."],
   ["discussions", "Discussions", "Repository-member questions and decisions; separate from public conversations."],
   ["issues", "Issues", "Problems and requests; a change can resolve one."],
   ["changes", "Changes", "Work in progress by people and agents, each in its own isolated copy. Mark one ready, then integrate."],
@@ -47,7 +51,6 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
   const [state, setState] = useState<State | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [clone, setClone] = useState<{ token:string; remote: string } | null>(null);
-  const [copied, setCopied] = useState(false);
   const [stateError, setStateError] = useState<string | null>(null);
   const [cloneError, setCloneError] = useState<string | null>(null);
   const [cloning, setCloning] = useState(false);
@@ -65,16 +68,18 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
         apiJson<Meta>(`/p/${projectId}`, { signal: boundedSignal }),
         apiJson<State>(`/p/${projectId}/state`, { signal: boundedSignal }),
       ]);
-      if (metadata.status === "rejected" && repositoryAccessFailure(metadata.reason)) throw metadata.reason;
-      if (snapshot.status === "rejected" && repositoryAccessFailure(snapshot.reason)) throw snapshot.reason;
+      if (metadata.status === "rejected" && repositoryRefreshFailure(metadata.reason)==="access") throw metadata.reason;
+      if (snapshot.status === "rejected" && repositoryRefreshFailure(snapshot.reason)==="access") throw snapshot.reason;
       if (metadata.status === "rejected") throw metadata.reason;
       if (snapshot.status === "rejected") throw snapshot.reason;
       return { meta: metadata.value, state: snapshot.value };
     },
     onValue: (next) => { setMeta(next.meta); setState(next.state); setError(null); setStateError(null); },
     onError: (cause) => {
+      const failure=repositoryRefreshFailure(cause);
+      if(failure==="superseded")return;
       const message = cause instanceof Error ? cause.message : "Could not refresh repository";
-      if (!meta || !state || repositoryAccessFailure(cause)) {
+      if (!meta || !state || failure==="access") {
         setMeta(null); setState(null); setError(message); setStateError(null);
       } else setStateError(message);
     },
@@ -110,7 +115,7 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
       if (generation === lifetime.current) setCloning(false);
     }
   };
-  const current = TABS.find(([key]) => key === tab);
+  const current = TABS.find(([key]) => key === (tab==="tags"?"releases":tab));
   const ownerActionsAvailable = !stateError && state.role === "owner";
   const currentMeta = { ...meta, role: ownerActionsAvailable ? "owner" as const : "member" as const };
 
@@ -136,11 +141,11 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
         {TABS.map(([key, label]) => (
           <button
             key={key}
-            aria-current={tab === key ? "page" : undefined}
+            aria-current={(tab===key||(key==="releases"&&tab==="tags")) ? "page" : undefined}
             id={`tab-${key}`}
             aria-controls="repo-tabpanel"
             onClick={() => navigate(`/p/${projectId}/${key}`)}
-            className={`px-3 py-2 text-sm whitespace-nowrap border-b-2 -mb-px rounded-t focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${tab === key ? "border-primary font-semibold" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+            className={`px-3 py-2 text-sm whitespace-nowrap border-b-2 -mb-px rounded-t focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${(tab===key||(key==="releases"&&tab==="tags")) ? "border-primary font-semibold" : "border-transparent text-muted-foreground hover:text-foreground"}`}
           >
             {label}
           </button>
@@ -152,15 +157,16 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
       <div id="repo-tabpanel" aria-labelledby={current ? `tab-${current[0]}` : undefined} className="min-w-0">
       {tab === "code" && <CodeTab projectId={projectId} acceptedCommit={state.acceptedState.currentCommit} isOwner={ownerActionsAvailable} />}
       {tab === "commits" && <CommitsTab projectId={projectId} />}
-      {tab === "changes" && <ChangesTab projectId={projectId} state={state} reload={reload} />}
-      {tab === "integration" && <IntegrationTab isOwner={ownerActionsAvailable} projectId={projectId} state={state} reload={reload} kind={meta.kind} />}
+      {(tab==="releases"||tab==="tags")&&<Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading tags and releases…</p>}><RepoReleases key={`releases:${projectId}`} projectId={projectId} isOwner={ownerActionsAvailable} tab={tab}/></Suspense>}
+      {tab === "changes" && <ChangesTab projectId={projectId} state={state} reload={reload} taskId={params.get("task")} />}
+      {tab === "integration" && <IntegrationTab decisionId={params.get("decision")} isOwner={ownerActionsAvailable} projectId={projectId} state={state} reload={reload} kind={meta.kind} />}
       {tab === "activity" && <ActivityTab projectId={projectId} />}
       {tab === "discussions" && <RepositoryDiscussionsTab key={`${projectId}:${params.get("topic") ?? "list"}`} projectId={projectId} owner={ownerActionsAvailable} topic={params.get("topic") ?? undefined} />}
       {tab === "issues" && <IssuesTab projectId={projectId} issue={params.get("n") ? Number(params.get("n")) : undefined} />}
       {tab === "people" && <PeopleTab projectId={projectId} />}
       {tab === "review" && <ReviewTab isOwner={ownerActionsAvailable} projectId={projectId} task={params.get("task") ?? undefined} commit={params.get("commit") ?? undefined} baseCommit={params.get("base") ?? undefined} returnTo={params.get("from") === "recovery" ? "integration" : undefined} input={params.get("input") ?? undefined} candidate={params.get("candidate") ? state.candidates[params.get("candidate")!] : undefined} evidence={state} reload={reload} />}
       {tab === "commit" && <ReviewTab isOwner={ownerActionsAvailable} projectId={projectId} commit={params.get("hash") ?? undefined} />}
-      {tab === "settings" && <SettingsTab meta={currentMeta} reload={reload} />}
+      {tab === "settings" && <div className="space-y-4"><SettingsTab meta={currentMeta} reload={reload} /><Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading acceptance policy…</p>}><AcceptancePolicyPanel key={projectId} projectId={projectId} isOwner={ownerActionsAvailable}/></Suspense><Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading preview setup…</p>}><PreviewOnboardingPanel key={`preview:${projectId}`} projectId={projectId} isOwner={ownerActionsAvailable}/></Suspense></div>}
       </div>
 
       <Dialog open={clone !== null} onOpenChange={() => setClone(null)}>
@@ -168,15 +174,29 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
           <DialogTitle>Clone with Git</DialogTitle>
           <DialogDescription>Read-only credential, valid for one hour. To contribute, start a change and push to its own copy.</DialogDescription>
         </DialogHeader>
-        <pre aria-label="Clone command" className="text-xs bg-muted/40 rounded-md p-3 overflow-auto whitespace-pre-wrap break-all">{clone?`git clone ${clone.remote}`:""}</pre>
+        {clone&&<CloneCommand key={clone.token} remote={clone.remote}/>}
         {clone&&<GitCredential key={clone.token} token={clone.token}/>}
         <div className="flex justify-end gap-2 mt-3">
-          <Button variant="outline" onClick={async () => { await navigator.clipboard.writeText(clone?`git clone ${clone.remote}`:""); setCopied(true); setTimeout(() => setCopied(false), 1500); }}>
-            <Copy className="h-4 w-4 mr-1.5" aria-hidden="true" /> <span aria-live="polite">{copied ? "Copied" : "Copy"}</span>
-          </Button>
           <Button variant="orange" onClick={() => setClone(null)}>Done</Button>
         </div>
       </Dialog>
     </div>
   );
+}
+
+function CloneCommand({remote}:{remote:string}) {
+  const [copied,setCopied]=useState(false),[copyError,setCopyError]=useState(false);
+  const command=`git clone ${remote}`;
+  const copy=async()=>{
+    setCopied(false);setCopyError(false);
+    try { await navigator.clipboard.writeText(command);setCopied(true); }
+    catch { setCopyError(true); }
+  };
+  return <div className="space-y-2">
+    <pre aria-label="Clone command" tabIndex={0} className="text-xs bg-muted/40 rounded-md p-3 overflow-auto whitespace-pre-wrap break-all select-text">{command}</pre>
+    <Button variant="outline" onClick={()=>void copy()}>
+      <Copy className="h-4 w-4 mr-1.5" aria-hidden="true"/><span aria-live="polite">{copied?"Copied":"Copy command"}</span>
+    </Button>
+    {copyError&&<p role="alert" className="text-sm text-destructive">Command could not be copied. Select the command above and copy it manually.</p>}
+  </div>;
 }

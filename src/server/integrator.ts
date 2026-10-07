@@ -1,3 +1,4 @@
+import {runtimeRelease} from "./runtime-release";
 import {z} from 'zod';
 import {agentNativeAttemptSchema,type AgentNativeAttemptIdentity} from './agent-runtime-ledger';
 import {agentExecutionEgressScopeSchema,type AgentExecutionEgressScope} from './agent-execution-egress';
@@ -11,6 +12,11 @@ import {ContainerLifetime,MANAGED_CONTAINER_LIFETIME_MS,AGENT_CONTAINER_LIFETIME
 import { fileBytes, MAX_FILE_BYTES } from "./file-bytes.js";
 import { BUNDLE_CHUNK_BYTES, MAX_BUNDLE_BYTES } from "./private-recovery-bundle.js";
 import {READ_GIT_OBJECT} from './git-object-read-command';
+import {PROTECTED_CONFLICT_INSPECTOR,protectedConflictContextSchema,validateProtectedConflictSnapshot,type ProtectedConflictContext,type ProtectedConflictSnapshot} from './protected-conflict-source';
+import {createHash} from 'node:crypto';
+
+export interface IntegrationProtectedConflictReceipt {scope:IntegrationNativeRuntimeScope;nativeId:string;commandId:string;context:ProtectedConflictContext;contextDigest:string;snapshot:ProtectedConflictSnapshot;resultDigest:string}
+function conflictDigest(value:unknown){return createHash('sha256').update(JSON.stringify(value)).digest('hex');}
 
 const DEC = new TextDecoder();
 
@@ -35,18 +41,23 @@ export class IntegratorSandbox extends DurableObject<Env> {
   override async alarm():Promise<void>{await this.lifetime().alarm();}
   protected async startupOptions():Promise<ContainerStartupOptions>{return {entrypoint:['sleep','infinity'],enableInternet:true};}
   protected async assertContainerAccess():Promise<void>{}
+  private nativePhase(){this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS integration_native_phase_local(id INTEGER PRIMARY KEY CHECK(id=1),doc TEXT NOT NULL)');const row=this.ctx.storage.sql.exec<{doc:string}>('SELECT doc FROM integration_native_phase_local WHERE id=1').toArray()[0];return row?JSON.parse(row.doc) as {scope:IntegrationNativeRuntimeScope;nativeId:string;image:string;deadline:number;admissionExpiresAt:number;workerVersion:string;sourceVersion:string;started:boolean}:null;}
+  private saveNativePhase(record:NonNullable<ReturnType<IntegratorSandbox['nativePhase']>>){this.ctx.storage.sql.exec('INSERT INTO integration_native_phase_local VALUES(1,?) ON CONFLICT(id) DO UPDATE SET doc=excluded.doc',JSON.stringify(record));}
+  private assertNativePhase(record:NonNullable<ReturnType<IntegratorSandbox['nativePhase']>>){const release=runtimeRelease(this.env);if(release.workerVersion!==record.workerVersion||release.sourceVersion!==record.sourceVersion||Date.now()>=record.deadline)throw Error('Native phase release or hard deadline changed');}
   private async container() {
     await this.assertContainerAccess();
     const container = this.nativeContainer();
     if (!container) throw new Error("Container binding is not configured");
+    const phase=this.nativePhase();if(phase){if(container.running&&!phase.started)throw Error('Native phase unexpected running container');this.assertNativePhase(phase);await this.lifetime().constrainDeadline(phase.deadline);}
     await this.lifetime().beforeWork();
     this.lifetime().assertWorkAllowed();
     if (!container.running) {
       // Subclasses must establish their own network boundary before startup.
       const options=await this.startupOptions();
       this.lifetime().assertWorkAllowed();
-      container.start(options);
+      if(phase){const start=this.ctx.storage.transactionSync(()=>{const current=this.nativePhase();if(!current||JSON.stringify({...current,started:phase.started})!==JSON.stringify(phase))throw Error('Native phase local start identity changed');this.assertNativePhase(current);if(container.running){if(!current.started)throw Error('Native phase unexpected running container');return false;}if(current.started||Date.now()>=current.admissionExpiresAt)throw Error('Native phase start is consumed or admission expired');this.saveNativePhase({...current,started:true});return true;});if(start)container.start({entrypoint:options.entrypoint,enableInternet:options.enableInternet,env:options.env,instance:options.instance,labels:options.labels,directorySnapshots:options.directorySnapshots,image:phase.image});}else container.start(options);
     }
+    if(phase){const observed=await container.inspect(),current=this.nativePhase();if(!current||JSON.stringify({...current,started:phase.started})!==JSON.stringify(phase))throw Error('Native phase local identity changed during inspection');this.assertNativePhase(current);if(!container.running||!observed||observed.image!==current.image)throw Error('Native phase pinned image is unconfirmed');}
     return container;
   }
 
@@ -57,6 +68,7 @@ export class IntegratorSandbox extends DurableObject<Env> {
       try {
         const container=await this.container();
         this.lifetime().assertWorkAllowed();
+        const phase=this.nativePhase();if(phase)this.assertNativePhase(phase);
         return await container.exec(argv, options);
       } catch (err) {
         lastError = err;
@@ -87,6 +99,7 @@ export class IntegratorSandbox extends DurableObject<Env> {
     if(!allowed){await project.finishIntegrationNativeCommand(scope,nativeId,commandId,"refused");this.ctx.storage.sql.exec("UPDATE integration_command_dispatch SET state='refused' WHERE command_id=?",commandId);throw new Error("Sealed or revoked native command refused");}
     // Completion is stored here, before replying to a possibly interrupted caller.
     // Unknown execution failures retain the admitted permit and block handoff.
+    const existingPhase=this.nativePhase();if(existingPhase){if(JSON.stringify(existingPhase.scope)!==JSON.stringify(scope)||existingPhase.nativeId!==nativeId)throw Error('Native phase local scope differs');this.assertNativePhase(existingPhase);}else{const grant=await project.integrationNativeStart(scope,nativeId);if(grant){const release=runtimeRelease(this.env);if(!release.releaseIdentified)throw Error('Native phase release unavailable');this.ctx.storage.transactionSync(()=>{if(this.nativePhase())throw Error('Native phase was installed concurrently; original state retained');this.saveNativePhase({scope,nativeId,...grant,workerVersion:release.workerVersion!,sourceVersion:release.sourceVersion!,started:false});});}}
     const result=await action();await project.finishIntegrationNativeCommand(scope,nativeId,commandId,"completed");this.ctx.storage.sql.exec("UPDATE integration_command_dispatch SET state='completed' WHERE command_id=?",commandId);return result;
   }
   async integrationExec(scope:IntegrationNativeRuntimeScope,nativeId:string,commandId:string,argv:string[],opts?:{env?:Record<string,string>;timeoutMs?:number}){return this.runIntegrationCommand(scope,nativeId,commandId,{kind:"exec",argv,opts:opts?{timeoutMs:opts.timeoutMs,env:opts.env?Object.fromEntries(Object.entries(opts.env).sort(([a],[b])=>a.localeCompare(b))):undefined}:undefined},()=>this.exec(argv,opts));}
@@ -102,6 +115,40 @@ export class IntegratorSandbox extends DurableObject<Env> {
     });
   }
   async integrationWriteFile(scope:IntegrationNativeRuntimeScope,nativeId:string,commandId:string,path:string,content:string){return this.runIntegrationCommand(scope,nativeId,commandId,{kind:"writeFile",path,content},()=>this.writeFile(path,content));}
+
+  private conflictIdentity(provided:IntegrationNativeRuntimeScope,nativeId:string,commandId:string,freezeContext:ProtectedConflictContext){
+    const context=protectedConflictContextSchema.parse(structuredClone(freezeContext));z.uuid().parse(nativeId);z.uuid().parse(commandId);
+    const scope={workflowId:provided.workflowId,candidateId:provided.candidateId,projectId:provided.projectId,incarnation:provided.incarnation,actorId:provided.actorId,accountKey:provided.accountKey};
+    for(const key of ['workflowId','candidateId','projectId','incarnation','actorId','accountKey'] as const)if(scope[key]!==context[key])throw Error('Protected conflict native ownership differs');
+    if(context.nativeRunId!==nativeId||this.ctx.id.toString()!==this.env.INTEGRATOR.idFromName(`native-${nativeId}`).toString())throw Error('Protected conflict native destination differs');
+    return {scope,nativeId,commandId,context,contextDigest:conflictDigest(context)};
+  }
+  /** Fixed platform inspector only; repository code and caller commands never execute. */
+  async integrationInspectProtectedConflict(scope:IntegrationNativeRuntimeScope,nativeId:string,commandId:string,freezeContext:ProtectedConflictContext):Promise<IntegrationProtectedConflictReceipt>{
+    const identity=this.conflictIdentity(scope,nativeId,commandId,freezeContext),project=projectOf(this.env,identity.scope.projectId);
+    await project.integrationProtectedConflictReceiptCurrent(identity.scope,nativeId,commandId,identity.context,'inspect');
+    const result=await this.runIntegrationCommand(identity.scope,nativeId,commandId,{kind:'protectedConflictInspect',context:identity.context},()=>this.exec(['bun','-e',PROTECTED_CONFLICT_INSPECTOR,JSON.stringify({acceptedBase:identity.context.acceptedBase,contributorCommits:identity.context.contributorCommits})],{timeoutMs:30000}));
+    if(!result.success||result.exitCode!==0||new TextEncoder().encode(result.stdout).length>2000000)throw Error('Protected conflict native inspection failed');
+    const snapshot=validateProtectedConflictSnapshot(identity.context,JSON.parse(result.stdout));
+    const receipt={...identity,snapshot,resultDigest:conflictDigest(snapshot)};
+    await project.integrationProtectedConflictReceiptCurrent(identity.scope,nativeId,commandId,identity.context,'receipt');
+    this.ctx.storage.transactionSync(()=>{
+      const completed=this.ctx.storage.sql.exec<{state:string}>('SELECT state FROM integration_command_dispatch WHERE command_id=?',commandId).toArray()[0];if(completed?.state!=='completed')throw Error('Protected conflict command completion unavailable');
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS integration_protected_conflict_receipts(command_id TEXT PRIMARY KEY,doc TEXT NOT NULL)');
+      const old=this.ctx.storage.sql.exec<{doc:string}>('SELECT doc FROM integration_protected_conflict_receipts WHERE command_id=?',commandId).toArray()[0],doc=JSON.stringify(receipt);if(old&&old.doc!==doc)throw Error('Protected conflict immutable receipt differs');
+      if(!old)this.ctx.storage.sql.exec('INSERT INTO integration_protected_conflict_receipts VALUES(?,?)',commandId,doc);
+    });return structuredClone(receipt);
+  }
+  /** Reads a completed original receipt without dispatching a command or allocating compute. */
+  async integrationProtectedConflictReceipt(scope:IntegrationNativeRuntimeScope,nativeId:string,commandId:string,freezeContext:ProtectedConflictContext):Promise<IntegrationProtectedConflictReceipt|null>{
+    const identity=this.conflictIdentity(scope,nativeId,commandId,freezeContext),project=projectOf(this.env,identity.scope.projectId);
+    await project.integrationProtectedConflictReceiptCurrent(identity.scope,nativeId,commandId,identity.context,'receipt');
+    const read=()=>this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='integration_protected_conflict_receipts'").toArray().length?this.ctx.storage.sql.exec<{doc:string}>('SELECT doc FROM integration_protected_conflict_receipts WHERE command_id=?',commandId).toArray()[0]?.doc:undefined;
+    const doc=read();await project.integrationProtectedConflictReceiptCurrent(identity.scope,nativeId,commandId,identity.context,'receipt');if(read()!==doc)throw Error('Protected conflict receipt changed during read');if(!doc)return null;
+    const receipt=JSON.parse(doc) as IntegrationProtectedConflictReceipt;
+    if(JSON.stringify({...receipt,snapshot:undefined,resultDigest:undefined})!==JSON.stringify({...identity,snapshot:undefined,resultDigest:undefined})||receipt.resultDigest!==conflictDigest(validateProtectedConflictSnapshot(identity.context,receipt.snapshot)))throw Error('Protected conflict saved receipt differs');
+    return structuredClone(receipt);
+  }
 
   async readFile(path: string): Promise<string> {
     const r = await this.exec(["cat", path]);

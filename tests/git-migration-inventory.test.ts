@@ -99,3 +99,19 @@ test("owner or budget fences retain their failure identity rather than producing
   } catch (error) { expect(error).toBe(failure); }
   expect(calls).toBe(0);
 });
+
+test("commit history reports excluded gitlinks even when the current head removed the submodule", async () => {
+  const f = await fixture();
+  try {
+    const external = "d".repeat(40);
+    const linkedTree = await f.git(["mktree"], `100644 blob ${f.blob}\tfile.txt\n160000 commit ${external}\tvendor\n`);
+    const linkedCommit = await f.git(["commit-tree", linkedTree, "-p", f.commit, "-m", "Synthetic submodule pointer"]);
+    const head = await f.git(["commit-tree", f.tree, "-p", linkedCommit, "-m", "Synthetic removal"]);
+    await f.git(["update-ref", "refs/heads/main", head]);
+    const inventory = await captureGitMigrationInventory(f.executor, f.source);
+    expect(inventory.status).toBe("complete");
+    expect(inventory.observedExternalGitlinks).toEqual([external]);
+    expect(inventory.objects[external]).toBeUndefined();
+    expect(inventory.excluded).toContain("submodule-repositories");
+  } finally { await f.cleanup(); }
+});

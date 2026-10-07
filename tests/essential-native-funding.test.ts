@@ -61,3 +61,25 @@ test("essential work borrows unused optional capacity while the aggregate ceilin
   expect(ledger.reserve(native("global-exhausted","c"),caps,now)).toMatchObject({allowed:false,reason:"global_budget"});
  }finally{db.close();}
 });
+
+test("explicit model-only managed agent admission funds no VM and rejects native execution",()=>{
+ const {ledger,db}=fixture();try{
+  const model:ManagedEnvelope={runId:"model-only",accountKey:"a",resourceKind:"managed-agent",usdMicros:56992,maxInputBytes:100,maxOutputTokens:10,maxCalls:1,maxContainerSeconds:0};
+  expect(ledger.reserve(model,caps,now).allowed).toBe(true);
+  expect(ledger.get(model.runId)).toMatchObject({resourceKind:"managed-agent",maxContainerSeconds:0,containerSeconds:0});
+  for(const limits of [{maxCalls:0},{maxInputBytes:0},{maxOutputTokens:0}])expect(()=>ledger.reserve({...model,...limits,runId:"invalid-model-limits"},caps,now)).toThrow();
+  expect(()=>ledger.consume(model.runId,0,0,1,now)).toThrow("envelope exhausted");
+  expect(ledger.get(model.runId)?.calls).toBe(0);
+  expect(ledger.consume(model.runId,100,10,0,now)).toMatchObject({calls:1,containerSeconds:0});
+  expect(()=>ledger.consume(model.runId,1,1,0,now)).toThrow("envelope exhausted");
+  expect(ledger.used("2026-10",undefined,"essential")).toBe(0);
+  expect(ledger.used("2026-10",undefined,"optional")).toBe(56992);
+ }finally{db.close();}
+});
+test("zero container capacity cannot disguise native or unclassified execution",()=>{
+ const {ledger,db}=fixture();try{
+  const model={runId:"invalid-zero",accountKey:"a",usdMicros:43008,maxInputBytes:1,maxOutputTokens:1,maxCalls:1,maxContainerSeconds:0};
+  for(const resourceKind of ["native-essential","native-optional","optional-unclassified"] as const)expect(()=>ledger.reserve({...model,resourceKind},caps,now)).toThrow("model-only");
+  expect(()=>ledger.reserve(model,caps,now)).toThrow("model-only");expect(ledger.used("2026-10")).toBe(0);
+ }finally{db.close();}
+});

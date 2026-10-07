@@ -4,12 +4,12 @@ import { Monitor } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { apiJson } from "../api";
+import { apiJson,apiSessionIdentity } from "../api";
 import { preservePreviewLink } from "../preview-display";
 
 type GenerationRecovery = { canRecover: boolean; expectedGeneration: string | null; detail: string };
-import { generationRecoveryDraft, requestGenerationRecovery, type RecoveryDraft } from "../preview-generation-recovery";
-type PreviewStatus = { ready: true; status: "available"; url: string; expiresAt?: string; generationId?: string; generationRecovery?: GenerationRecovery; replacement?: { generationId: string; status: "requested" | "building" | "failed" | "quarantined" | "ready" } } | { ready: false; status: "failed" | "unavailable" | "pending" | "not_started"; canRetry: boolean; reason?: string; generationRecovery?: GenerationRecovery };
+import { generationRecoveryDraft,readGenerationRecovery,saveGenerationRecovery, requestGenerationRecovery } from "../preview-generation-recovery";
+type PreviewStatus = { ready: true; status: "available"; url: string; expiresAt?: string; generationId?: string; generationRecovery?: GenerationRecovery; replacement?: { generationId: string; status: "requested" | "building" | "failed" | "quarantined" | "ready" } } | { ready: false; status: "failed" | "unavailable" | "pending" | "not_started" | "not_supported"; canRetry: boolean; reason?: string; generationRecovery?: GenerationRecovery };
 interface LivePreviewProps { projectId: string; currentCommit: string|null; isOwner?: boolean }
 
 /** The accepted artifact and its preparation state are separate from repository review. */
@@ -24,7 +24,7 @@ function CommittedLivePreview({ projectId, currentCommit, isOwner = false }: Omi
   const [retrying, setRetrying] = useState(false);
   const refreshLinkRequested = useRef(false);
   const refreshLink = () => { refreshLinkRequested.current = true; setRevision((value) => value + 1); };
-  const recoveryDraft = useRef<RecoveryDraft | null>(null);
+  const recoveryLock = useRef(false);
   const currentScope = useRef(scope);
   currentScope.current = scope;
   const [notice, setNotice] = useState<string | null>(null);
@@ -73,28 +73,27 @@ function CommittedLivePreview({ projectId, currentCommit, isOwner = false }: Omi
   };
   const recoverGeneration = async () => {
     const recovery = preview?.generationRecovery;
-    if (!isOwner || !recovery?.canRecover || retrying) return;
-    const draft = recoveryDraft.current;
-    const request = generationRecoveryDraft(draft, scope, currentCommit, recovery.expectedGeneration);
-    recoveryDraft.current = request;
+    if (!isOwner || !recovery?.canRecover || retrying || recoveryLock.current) return;
+    const identity=apiSessionIdentity();if(!identity)return;
+    recoveryLock.current=true;
     setRetrying(true); setFailure(null); setNotice(null);
     try {
+      const draft=readGenerationRecovery(sessionStorage,identity,scope);
+      const request=saveGenerationRecovery(sessionStorage,identity,generationRecoveryDraft(draft,scope,currentCommit,recovery.expectedGeneration));
       const confirmation = await requestGenerationRecovery(projectId, request);
-      if (currentScope.current !== scope) return;
+      if (currentScope.current !== scope || apiSessionIdentity()!==identity) return;
       if (confirmation.status === "forbidden" || confirmation.status === "conflict") {
-        if (confirmation.status === "forbidden") recoveryDraft.current = null;
         setRevision((value) => value + 1);
         setNotice(confirmation.detail || (confirmation.status === "forbidden" ? "Owner access changed. Preview status is being refreshed." : "Replacement was not confirmed. Review the refreshed preview status."));
         return;
       }
-      recoveryDraft.current = null;
       setNotice(confirmation.status === "requested" || confirmation.status === "building" ? "Replacement preview requested. Waiting for preparation status." : confirmation.status === "ready" ? "Replacement preview is ready. Refreshing its link." : "The saved replacement request is unavailable. Review the refreshed status before creating another replacement.");
       setRevision((value) => value + 1);
     } catch (cause) {
-      if (currentScope.current === scope) setFailure({ scope, reason: cause instanceof Error ? cause.message : "Replacement request was not confirmed. Check status before trying again." });
-    } finally { if (currentScope.current === scope) setRetrying(false); }
+      if (currentScope.current === scope && apiSessionIdentity()===identity) setFailure({ scope, reason: cause instanceof Error ? cause.message : "Replacement request was not confirmed. Check status before trying again." });
+    } finally { recoveryLock.current=false;if (currentScope.current === scope) setRetrying(false); }
   };
-  const title = error ? "Preview status unavailable" : preview?.ready ? "Accepted preview" : preview?.status === "failed" ? "Preview build failed" : preview?.status === "unavailable" ? "Preview unavailable" : preview?.status === "not_started" ? "Preview not started" : "Preview preparation pending";
+  const title = error ? "Preview status unavailable" : preview?.ready ? "Accepted preview" : preview?.status === "failed" ? "Preview build failed" : preview?.status === "unavailable" ? "Preview unavailable" : preview?.status === "not_supported" ? "Preview not supported" : preview?.status === "not_started" ? "Preview not started" : "Preview preparation pending";
   return <Card className="h-full flex flex-col overflow-hidden shadow-none">
     <CardHeader className="py-3 px-5 border-b border-border"><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex items-center gap-2"><Monitor className="h-4 w-4 text-muted-foreground" aria-hidden="true" /><CardTitle className="text-sm font-medium">Accepted application</CardTitle></div><Badge variant={preview?.ready ? "success" : "outline"}>{preview?.ready ? "Built from" : "Accepted"} {currentCommit.slice(0, 7)}</Badge></div></CardHeader>
     <CardContent className="p-0 flex-1">

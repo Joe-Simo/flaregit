@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { workerdChild } from "./support/workerd-child";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,11 @@ import { GIT_INTEGRITY_POLICY } from "../src/core/command-policy";
 import { git, gitOrThrow } from "../src/core/pipeline/git";
 import type { ControllerDeps } from "../src/core/controller";
 import type { UnbornAcceptedTarget } from "../src/core/accepted-target";
+/** Every real-Git case owns its process, temp root and cancellation lifetime.
+ * Exact case markers prevent a skipped child from becoming false verification. */
+function isolatedRootTest(name:string,body:()=>Promise<void>){
+ test(name,async()=>{if(await workerdChild("tests/local-controller-first-root.test.ts",name))return;await body();});
+}
 async function fixture(){
  const directory=await mkdtemp(join(tmpdir(),"flaregit-controller-root-")),artifacts=new LocalGitArtifactsClient(join(directory,"artifacts")),canonical=await artifacts.create("canonical");
  const policy={...GIT_INTEGRITY_POLICY};
@@ -17,7 +23,7 @@ async function fixture(){
  const task=async(id:string,file:string,content:string)=>{const contribution=await controller.createTask({taskId:id,goal:`Create ${file}`,contributorName:id,contributorType:"human"});expect(contribution.currentCommit).toBeNull();await Bun.write(join(contribution.workspace.localPath!,file),content);const checkpoint=controller.recordTaskCheckpoint({taskId:id,isReadyForIntegration:true,message:`Initial ${file}`});if(checkpoint.currentCommit===null)throw Error("Native checkpoint did not produce a commit");return {...checkpoint,currentCommit:checkpoint.currentCommit};};
  return{directory,canonical,controller,deps,task};
 }
-test("parallel genuine first commits require exact review and only one wins missing-ref CAS",async()=>{
+isolatedRootTest("parallel genuine first commits require exact review and only one wins missing-ref CAS",async()=>{
  const f=await fixture();try{
   expect(git(f.canonical.remote,["for-each-ref"],{gitDir:true}).stdout).toBe("");
   const [a,b]=await Promise.all([f.task("alice","README.md","# Alice\n"),f.task("bob","README.md","# Bob\n")]);
@@ -37,7 +43,7 @@ test("parallel genuine first commits require exact review and only one wins miss
   const restored=await FlareGitRepositoryController.restore(f.deps,"root-project");expect(restored?.getState().acceptedState.currentCommit).toBe(a.currentCommit!);
  }finally{await rm(f.directory,{recursive:true,force:true});}
 });
-test("initial batch preserves real root parents and exposes overlapping add/add conflicts",async()=>{
+isolatedRootTest("initial batch preserves real root parents and exposes overlapping add/add conflicts",async()=>{
  const f=await fixture();try{
   const a=await f.task("first","README.md","# First\n"),b=await f.task("second","LICENSE","MIT\n");
   const prepared=await f.controller.prepareFirstRootCandidate([a.id,b.id]);expect(prepared.candidate?.status).toBe("verified");
@@ -51,7 +57,7 @@ test("initial batch preserves real root parents and exposes overlapping add/add 
  }finally{await rm(conflict.directory,{recursive:true,force:true});}
 });
 
-test("independent controllers race create-only publication without overwriting either original root",async()=>{
+isolatedRootTest("independent controllers race create-only publication without overwriting either original root",async()=>{
  const f=await fixture();try{
   const other=new FlareGitRepositoryController({...f.deps,storageDir:join(f.directory,"second-state")},f.controller.getState());
   const first=await f.task("race-a","README.md","First publisher\n");
@@ -67,7 +73,7 @@ test("independent controllers race create-only publication without overwriting e
  }finally{await rm(f.directory,{recursive:true,force:true});}
 });
 
-test("stacked initial child retains actual parent base and requires the same frozen batch parent",async()=>{
+isolatedRootTest("stacked initial child retains actual parent base and requires the same frozen batch parent",async()=>{
  const f=await fixture();try{
   const parent=await f.task("initial-parent","README.md","# Parent contribution\n");
   const child=await f.controller.createTask({taskId:"initial-child",goal:"Add a license on the pending parent",contributorName:"Child",contributorType:"human",dependsOn:parent.id,allowedScope:["LICENSE"]});
@@ -83,7 +89,7 @@ test("stacked initial child retains actual parent base and requires the same fro
  }finally{await rm(f.directory,{recursive:true,force:true});}
 });
 
-test("advancing a pending initial parent does not rewrite or relabel its child's saved base",async()=>{
+isolatedRootTest("advancing a pending initial parent does not rewrite or relabel its child's saved base",async()=>{
  const f=await fixture();try{
   const parent=await f.task("pending-parent","README.md","Original parent\n");
   const child=await f.controller.createTask({taskId:"pending-child",goal:"Add child work",contributorName:"Child",contributorType:"human",dependsOn:parent.id});

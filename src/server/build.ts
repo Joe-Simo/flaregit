@@ -1,54 +1,23 @@
-import { assertPreviewStorageAdmission, PreviewStorageAdmissionError } from "./preview-storage.js";
-import { inspectPreviewStorageManifest, publishPreviewStorageManifest } from "./preview-storage-upload.js";
-import { globalOf, projectOf } from "./projects.js";
-import { admitNativeCompute, claimNativeCompute } from "./native-compute.js";
-import type { Env } from "./env.js";
-import { gitAuthEnv, q } from "./shell.js";
-import { buildPrefix } from "./preview-access.js";
-
-/** Build the exact commit in a disposable unprivileged snapshot, then store its preview assets. */
-export async function ensureBuild(env: Env, projectId: string, commit: string, canonicalRepo: string, accountKey: string): Promise<void> {
-  const prefix = buildPrefix(projectId, commit);
-  if (await env.EVIDENCE_BUCKET.head(`${prefix}/index.html`)) return;
-  const operationKey = `build-${projectId}-${commit}`;
-  if(await globalOf(env).nativeComputeFailure(operationKey))throw new Error("Preview build failed; owner retry is required");
-  const lease = await claimNativeCompute(env, operationKey);
-  if (!lease) return;
-  try { await admitNativeCompute(env, accountKey, `native-${lease}`,"native-optional"); }
-  catch (error) { await globalOf(env).finishNativeCompute(operationKey, lease); throw error; }
-  // Durable single-flight covers the exact repository commit.
-  let repo: Awaited<ReturnType<Env["ARTIFACTS"]["get"]>> | undefined;
-  let token: string | undefined;
-  const sb = env.INTEGRATOR.getByName(`native-${lease}`);
-  const run = (cmd: string, e?: Record<string, string>) => sb.exec(["sh", "-c", cmd], { env: e });
-  const dir = "/workspace/build-src";
-
-  try {
-    repo = await env.ARTIFACTS.get(canonicalRepo);
-    const remote = String((await repo.info()).remote);
-    token = (await repo.createToken("read", 900)).plaintext;
-    const cloned = await run(`git clone --quiet ${q(remote)} ${dir} && git -C ${dir} checkout --quiet --detach ${q(commit)}`, gitAuthEnv(token));
-    if (!cloned.success) throw new Error("Build checkout failed; no preview was published");
-    const built = await run(`bun /opt/flaregit/src/core/verification/build-preview.ts ${q(dir)} /tmp/build-out`);
-    if (!built.success) throw new Error("Build failed; no preview was published");
-    const ledger=projectOf(env,projectId);
-    const scope=await ledger.previewStorageScope(commit,canonicalRepo);
-    const manifest=await inspectPreviewStorageManifest(sb,scope);
-    await publishPreviewStorageManifest(manifest,{
-      prefix, bucket:env.EVIDENCE_BUCKET,
-      reserve:async value=>assertPreviewStorageAdmission(await globalOf(env).reservePreviewStorage(value)),
-      writer:{begin:id=>globalOf(env).reservePreviewWriter(prefix,id),beforePut:(id,path)=>globalOf(env).beginPreviewPut(prefix,id,path),settledPut:(id,path)=>globalOf(env).finishPreviewPut(prefix,id,path),finish:id=>globalOf(env).finishPreviewWriter(prefix,id)},
-      authorize:async()=>{const current=await ledger.previewStorageScope(commit,canonicalRepo);if(JSON.stringify(current)!==JSON.stringify(scope))throw new Error("Preview storage owner or incarnation changed");},
-      getFile:path=>sb.readFileBytes(path),
-    });
-  } catch(error) {
-    const unfinished=(await globalOf(env).previewStorageWriterState(prefix).catch(()=>({unfinished:true}))).unfinished;
-    await globalOf(env).setNativeComputeFailureReason(operationKey,unfinished?"storage_reconciliation":error instanceof PreviewStorageAdmissionError?error.reason:"build_failed");
-    throw error;
-  } finally {
-    if (token && repo) await repo.revokeToken(token).catch(() => false);
-    let stopped = false;
-    try { await sb.destroy(); stopped = (await sb.lifetimeStatus())?.state === "stopped"; } catch { console.error("Preview container stop unconfirmed; build claim retained"); }
-    if (stopped) await globalOf(env).finishNativeCompute(operationKey, lease);
-  }
+import {PreviewStorageAdmissionError,assertPreviewStorageAdmission} from './preview-storage';
+import {publishPreviewStorageManifest} from './preview-storage-upload';
+import {globalOf,projectOf} from './projects';
+import type {Env} from './env';
+import {buildPrefix} from './preview-access';
+import {buildIsolatedPreview,PreviewExecutionBusyError,type PreviewBuildRequest} from './isolated-preview-build';
+import {previewStorageFromIsolatedArtifact} from './isolated-preview-storage';
+import {StaticPreviewNotSupportedError, STATIC_PREVIEW_UNSUPPORTED} from './preview-static-capability';
+class PreviewPublicationBusyError extends Error{constructor(){super('Original preview storage writer remains held');this.name='PreviewPublicationBusyError';}}
+/** Builds exact immutable Git bytes only in the existing isolated execution namespace. */
+export async function ensureBuild(env:Env,projectId:string,commit:string,canonicalRepo:string,accountKey:string,nativeCandidate?:PreviewBuildRequest['nativeCandidate']):Promise<void>{
+ const prefix=buildPrefix(projectId,commit),global=globalOf(env),repository=projectOf(env,projectId),operation=`build-${projectId}-${commit}`;
+ if(await env.EVIDENCE_BUCKET.head(`${prefix}/index.html`))return;
+ if(await global.nativeComputeFailure(operation))throw Error('Preview build failed; owner retry is required');
+ try{
+  const identity=await repository.previewStorageScope(commit,canonicalRepo);if(identity.accountKey!==accountKey)throw Error('Preview storage owner changed');
+  const authorize=async()=>{const fresh=await repository.previewStorageScope(commit,canonicalRepo);if(JSON.stringify(fresh)!==JSON.stringify(identity))throw Error('Preview storage owner or incarnation changed');};
+  if(!env.UNTRUSTED_EXECUTION)throw Error('Isolated preview runtime unavailable');
+  const artifact=await buildIsolatedPreview({projectId,commit,canonicalRepoName:canonicalRepo,...(nativeCandidate?{nativeCandidate}:{})},{ledger:repository,namespace:env.UNTRUSTED_EXECUTION});
+  await authorize();const output=await previewStorageFromIsolatedArtifact(identity,artifact);await authorize();
+  await publishPreviewStorageManifest(output.manifest,{prefix,bucket:env.EVIDENCE_BUCKET,reserve:async value=>assertPreviewStorageAdmission(await global.reservePreviewStorage(value)),writer:{begin:async id=>{const claim=await global.claimPreviewWriter(prefix,id);if(claim.status==='held')throw new PreviewPublicationBusyError();if(claim.status!=='owned')throw Error('Preview writer ownership unconfirmed');},beforePut:(id,path)=>global.beginPreviewPut(prefix,id,path),settledPut:(id,path)=>global.finishPreviewPut(prefix,id,path),finish:id=>global.finishPreviewWriter(prefix,id)},authorize,getFile:output.getFile});
+ }catch(error){if(error instanceof PreviewExecutionBusyError||error instanceof PreviewPublicationBusyError)return;const unfinished=(await global.previewStorageWriterState(prefix).catch(()=>({unfinished:true}))).unfinished;await global.setNativeComputeFailureReason(operation,unfinished?'storage_reconciliation':error instanceof PreviewStorageAdmissionError?error.reason:error instanceof StaticPreviewNotSupportedError?STATIC_PREVIEW_UNSUPPORTED:'build_failed');throw error;}
 }

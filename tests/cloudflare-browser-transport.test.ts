@@ -121,13 +121,13 @@ test('synthetic: production acquisition binds exact native hostname guardrails a
   });
   await transport.allocate(fake.options);
   expect(acquireOptions).toEqual({ guardrails: { allowedDomains: [new URL(fake.options.origin).hostname] } }); expect(connectedId).toBe(sessionId);
-  expect((await transport.close(fake.options.leaseId)).closed).toBe(true); expect(nativeCalls).toEqual([`close:${sessionId}`, `get:${sessionId}`]);
+  expect((await transport.close(fake.options.leaseId)).closed).toBe(true); expect(nativeCalls).toEqual([`get:${sessionId}`]);
 });
 test('synthetic: explicit acquisition retains the session ID across connect failure for scoped cleanup', async () => {
   const fake = synthetic(), sessionId = crypto.randomUUID(); const cleaned: string[] = [];
   const transport = new CloudflareBrowserTransport({ binding: { fetch }, authorize: async () => {}, funding: async () => {},
     sdk: { async acquire() { return { sessionId }; }, async connect() { throw Error('connect failed'); } },
-    sessionControl: { async closeSession(id) { cleaned.push(id); return { status: 'closed' }; }, async getSession() { return null; } },
+    sessionControl: { async closeSession(id) { cleaned.push(id); return { status: 'closed' }; }, async getSession() { return cleaned.length ? null : {sessionId}; } },
   });
   await expect(transport.allocate(fake.options)).rejects.toThrow('connect failed');
   expect((await transport.close(fake.options.leaseId)).closed).toBe(true); expect(cleaned).toEqual([sessionId]);
@@ -168,7 +168,7 @@ test('synthetic: native exact-session close and readback share a finite cleanup 
     const fake = synthetic(), sessionId = crypto.randomUUID();
     const transport = new CloudflareBrowserTransport({ binding: { fetch }, authorize: async () => {}, funding: async () => {}, cleanupMs: 10,
       sdk: { async acquire() { return { sessionId }; }, async connect() { return fake.browser; } },
-      sessionControl: { async closeSession() { if (pending === 'close') return new Promise(() => {}); return { status: 'closed' }; }, async getSession() { return new Promise(() => {}); } },
+      sessionControl: { async closeSession() { if (pending === 'close') return new Promise(() => {}); return { status: 'closed' }; }, async getSession() { return pending === 'close' ? {sessionId} : new Promise(() => {}); } },
     });
     await transport.allocate(fake.options); expect((await transport.close(fake.options.leaseId)).closed).toBe(false);
   }
@@ -234,3 +234,10 @@ test.skipIf(!process.env.FLAREGIT_LOCAL_CHROMIUM_PATH)('local Chromium only: app
     expect(receipt.cases.map(item => item.id)).toEqual(inventory.policy.cases.map(item => item.id)); expect(receipt.cleanup).toBe('confirmed');
   }
 }, 150000);
+
+test('synthetic: exact already-closed native session settles cleanup without a second close acknowledgement',async()=>{const sessionId=crypto.randomUUID(),calls:string[]=[];for(const absent of [false,true]){const proof=await retireBrowserSession({async closeSession(){throw Error('already closed');},async getSession(id){calls.push(id);return absent?null:{sessionId:id,endTime:Date.now()};}},sessionId);expect(proof?.observation).toBe(absent?'absent':'closed');expect(proof?.sessionId).toBe(sessionId);}expect(calls).toEqual([sessionId,sessionId]);});
+test('synthetic: parallel close acknowledgement loss requires independent exact native closure readback',async()=>{const sessionId=crypto.randomUUID();for(const closed of [true,false]){let reads=0,closes=0;const proof=await retireBrowserSession({async closeSession(id){expect(id).toBe(sessionId);closes++;throw Error('repeated close rejected');},async getSession(id){reads++;return reads>1&&closed?{sessionId:id,endTime:Date.now()}:{sessionId:id};}},sessionId,{timeoutMs:500});expect(closes).toBe(1);expect(proof?.observation??null).toBe(closed?'closed':null);}});
+
+test('synthetic: exact getter error accepts only one positive known native history record',async()=>{const sessionId=crypto.randomUUID(),historyOptions:unknown[]=[],getIds:string[]=[];let closes=0;const proof=await retireBrowserSession({async closeSession(){closes++;return{status:'closed'};},async getSession(id){getIds.push(id);throw Error('native exact lookup not found');},async history(options){historyOptions.push(options);return[{sessionId:crypto.randomUUID(),startTime:1,endTime:2},{sessionId,startTime:100,endTime:200}];}},sessionId);expect(proof).toMatchObject({sessionId,observation:'closed',providerObservation:'exact-history',providerStartTime:100,providerEndTime:200});expect(historyOptions).toEqual([{limit:50,offset:0}]);expect(getIds).toEqual([sessionId]);expect(closes).toBe(0);});
+test('synthetic: native history absence, duplicate, active, invalid time or unavailable response cannot retire the known session',async()=>{const sessionId=crypto.randomUUID();for(const records of [[],[{sessionId,startTime:100}],[{sessionId,startTime:100,endTime:99}],[{sessionId,startTime:100,endTime:Infinity}],[{sessionId,startTime:100,endTime:200},{sessionId,startTime:100,endTime:200}],Array.from({length:51},()=>({sessionId,startTime:100,endTime:200}))]){let histories=0;const proof=await retireBrowserSession({async closeSession(){return{status:'closed'};},async getSession(){throw Error('not found');},async history(){histories++;return records;}},sessionId);expect(proof).toBeNull();expect(histories).toBe(1);}expect(await retireBrowserSession({async closeSession(){return{status:'closed'};},async getSession(){throw Error('not found');},async history(){throw Error('unavailable');}},sessionId)).toBeNull();});
+test('synthetic: native history cannot override an exact active or wrong-session observation',async()=>{const sessionId=crypto.randomUUID();for(const id of [sessionId,crypto.randomUUID()]){let histories=0;const proof=await retireBrowserSession({async closeSession(){return{status:'closing'};},async getSession(){return{sessionId:id};},async history(){histories++;return[{sessionId,startTime:100,endTime:200}];}},sessionId,{timeoutMs:500});expect(proof).toBeNull();expect(histories).toBe(0);}});

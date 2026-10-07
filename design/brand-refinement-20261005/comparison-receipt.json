@@ -1,0 +1,21 @@
+{
+  "renderer": "Blender 5.2.1 LTS",
+  "render": "cohesive-comparison.png",
+  "size": [
+    1600,
+    1200
+  ],
+  "proofWidthsPx": [
+    16,
+    24,
+    32,
+    48
+  ],
+  "font": "Inter existing local variable font instantiated to weight 600 optical size 24",
+  "fontLicense": [
+    "This Font Software is licensed under the SIL Open Font License, Version 1.1. This license is available with a FAQ at: https://openfontlicense.org",
+    "https://openfontlicense.org"
+  ],
+  "status": "local original identity comparison only; no public asset replacement or deployment",
+  "judgment": "Shared-channel silhouette has stronger favicon mass and a subtle F-shaped open channel. Distinctiveness and approval remain a visual decision."
+}

@@ -25,5 +25,5 @@ export async function executionAuthorityResponse(request:Request,authorize:(cont
  * Repository authority reads exact current candidate state and the Global budget.
  * A sandbox cannot supply an approval or reservation through this request. */
 export class IsolatedExecutionAuthority extends WorkerEntrypoint<Env>{
- override fetch(request:Request){return executionAuthorityResponse(request,context=>projectOf(this.env,context.scope.projectId).authorizeIsolatedExecution(context));}
+ override fetch(request:Request){return executionAuthorityResponse(request,context=>projectOf(this.env,context.scope.projectId).authorizeExecutionOperation(context));}
 }

@@ -1,23 +1,24 @@
+import {acceptanceRuntimeReleaseSchema,acceptanceReleasePinSchema,pinAcceptanceRelease,acceptanceCloneEnvironment} from './acceptance-release';
 import { chmod, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import { redactSecrets } from "../agents/prompt.js";
-import { gitAuthEnv } from "../server/shell.js";
 
 const sha = z.string().regex(/^[0-9a-f]{40}$/);
 const receiptSchema = z.object({
   version: z.literal(1), exercise: z.enum(["functional-ticket-booking", "comment-only-hosted-diagnostic"]).optional(), origin: z.string().url(), createdAt: z.string(), projectId: z.string().optional(), base: sha.optional(),
+  releasePin: acceptanceReleasePinSchema.optional(),
   issue: z.number().optional(), tasks: z.array(z.string()), agentRuns: z.array(z.object({ taskId: z.string(), instanceId: z.string(), requestedAt: z.string() })),
   contextCommentRequests: z.record(z.string(), z.string().uuid()).optional(),
-  contextComments: z.array(z.object({ subject: z.string(), id: z.number() })).optional(), pendingAction: z.string().optional(), pendingAgents: z.array(z.string()).optional(), integration: z.string().optional(), observations: z.array(z.unknown()), verification: z.object({ commit: sha, cloneHead: sha, verifiedAt: z.string() }).optional(),
+  contextComments: z.array(z.object({ subject: z.string(), id: z.number() })).optional(), pendingAction: z.string().optional(), pendingAgents: z.array(z.string()).optional(), integration: z.string().optional(), observations: z.array(z.unknown()), verification: z.object({ commit: sha, cloneHead: sha, verifiedAt: z.string(), candidateId: z.string().optional(), integration: z.string().optional(), evidenceId: z.string().optional() }).optional(),
 });
 type Receipt = z.infer<typeof receiptSchema>;
 export const acceptanceStateSchema = z.object({
   acceptedState: z.union([z.object({ kind: z.literal("unborn"), currentCommit: z.null() }), z.object({ kind: z.literal("committed").optional(), currentCommit: sha })]),
   tasks: z.record(z.string(), z.object({ status: z.string(), agentWorkflowInstanceId: z.string().optional(), baseCommit: sha.nullable(), currentCommit: sha.nullable(), checkpoints: z.array(z.object({ commitHash: sha, timestamp: z.string(), filesChanged: z.array(z.string()) })) })),
-  candidates: z.record(z.string(), z.object({ status: z.string(), candidateCommit: sha.optional(), expectedAcceptedBase: sha.nullable(), acceptedTarget: z.object({ kind: z.enum(["unborn", "committed"]).optional(), acceptedCommit: sha.nullable(), acceptedVersion: z.number().int(), requirements: z.array(z.unknown()) }).optional(), evidenceId: z.string().optional(), workflowInstanceId: z.string().optional(), compositionMethod: z.string().optional(), repairAttempts: z.array(z.object({ round: z.number(), affectedContracts: z.array(z.string()), timestamp: z.string(), durationMs: z.number() })), review: z.object({ approved: z.boolean(), at: z.string(), commit: sha }).optional() }).refine(candidate => candidate.expectedAcceptedBase !== null || (candidate.acceptedTarget?.kind === "unborn" && candidate.acceptedTarget.acceptedCommit === null && candidate.acceptedTarget.acceptedVersion === 0 && candidate.acceptedTarget.requirements.length === 0), { message: "An unborn candidate requires its explicit frozen unborn target" })),
-  evidence: z.record(z.string(), z.object({ status: z.string() })), decisions: z.record(z.string(), z.unknown()),
+  candidates: z.record(z.string(), z.object({ status: z.string(), candidateCommit: sha.optional(), expectedAcceptedBase: sha.nullable(), acceptedTarget: z.object({ kind: z.enum(["unborn", "committed"]).optional(), acceptedCommit: sha.nullable(), acceptedVersion: z.number().int(), requirements: z.array(z.unknown()) }).optional(), evidenceId: z.string().optional(), workflowInstanceId: z.string().optional(), compositionMethod: z.string().optional(), participatingTaskIds: z.array(z.string()).optional(), repairAttempts: z.array(z.object({ round: z.number(), affectedContracts: z.array(z.string()), timestamp: z.string(), durationMs: z.number() })), review: z.object({ approved: z.boolean(), at: z.string(), commit: sha }).optional() }).refine(candidate => candidate.expectedAcceptedBase !== null || (candidate.acceptedTarget?.kind === "unborn" && candidate.acceptedTarget.acceptedCommit === null && candidate.acceptedTarget.acceptedVersion === 0 && candidate.acceptedTarget.requirements.length === 0), { message: "An unborn candidate requires its explicit frozen unborn target" })),
+  evidence: z.record(z.string(), z.object({ status: z.string(), candidateCommit: sha.optional() })), decisions: z.record(z.string(), z.unknown()),
 });
 
 /** Local receipts contain allowlisted observations, never API/clone credentials or raw responses. */
@@ -34,6 +35,18 @@ class AcceptanceError extends Error {}
 export function requireAcceptedCommit(state: z.infer<typeof acceptanceStateSchema>): string {
   if (state.acceptedState.currentCommit === null) throw new AcceptanceError("This repository has no accepted commit yet. Review and accept its first real contribution before proving durable integration.");
   return state.acceptedState.currentCommit;
+}
+
+/** A native clone is proof for this exercise only when its accepted candidate
+ * belongs to the saved integration and exactly the saved contributions. */
+export function requireReceiptLanding(state: z.infer<typeof acceptanceStateSchema>, receipt: Pick<Receipt, "integration" | "tasks" | "base">) {
+  const accepted = requireAcceptedCommit(state);
+  if (!receipt.integration || receipt.tasks.length !== 2 || new Set(receipt.tasks).size !== 2) throw new AcceptanceError("Saved exercise integration and two distinct contributions are required");
+  const matches = Object.entries(state.candidates).filter(([, candidate]) => candidate.status === "accepted" && candidate.candidateCommit === accepted && candidate.workflowInstanceId === receipt.integration && candidate.review?.approved && candidate.review.commit === accepted && candidate.participatingTaskIds?.length === receipt.tasks.length && new Set(candidate.participatingTaskIds).size === receipt.tasks.length && receipt.tasks.every(task => candidate.participatingTaskIds?.includes(task)));
+  if (matches.length !== 1 || accepted === receipt.base) throw new AcceptanceError("No unique reviewed landing for this saved integration and its contributions; unrelated accepted history is not exercise proof");
+  const [candidateId, candidate] = matches[0]!;
+  if (!candidate.evidenceId || (state.evidence[candidate.evidenceId]?.status !== "passed" || state.evidence[candidate.evidenceId]?.candidateCommit !== accepted)) throw new AcceptanceError("Saved integration has no passed exact candidate evidence");
+  return { accepted, candidateId, integration: receipt.integration, evidenceId: candidate.evidenceId };
 }
 
 export function assertReceiptOrigin(stored: string, configured: string) {
@@ -96,10 +109,16 @@ async function main() {
   assertReceiptOrigin(receipt.origin, configuredOrigin);
   const api = async <T>(path: string, schema: z.ZodType<T>, body?: unknown): Promise<T> => {
     const url = new URL(`/api${path}`, receipt.origin);
-    const response = await fetch(url, { method: body === undefined ? "GET" : "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), redirect: "error", signal: AbortSignal.timeout(120_000) });
+    const response = await fetch(url, { method: body === undefined ? "GET" : "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(receipt.releasePin?{"X-FlareGit-Expected-Worker-Version":receipt.releasePin.workerVersion,"X-FlareGit-Expected-Source-Version":receipt.releasePin.sourceVersion}:{}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), redirect: "error", signal: AbortSignal.timeout(120_000) });
     if (!response.ok) throw new AcceptanceError(`API ${path} answered ${response.status}; saved receipt remains resumable`);
     return schema.parse(await response.json());
   };
+  if(phase!=="status"||receipt.releasePin){
+    if(phase!=="prepare"&&!receipt.releasePin)throw new AcceptanceError("This legacy receipt has no release identity. Status remains available; use a fresh prepare receipt for exact-version acceptance proof.");
+    const runtime=await api("/runtime",acceptanceRuntimeReleaseSchema);
+    receipt.releasePin=pinAcceptanceRelease(runtime,receipt.releasePin);
+    await saveReceipt(file,receipt);
+  }
   if (phase === "prepare") {
     if (receipt.pendingAction || receipt.pendingAgents?.length) throw new AcceptanceError("A previous mutation has an unknown outcome. Inspect the authenticated app and reconcile pendingAction/pendingAgents in the receipt before retrying; no duplicate resource or run will be created.");
     if (!receipt.projectId) {
@@ -189,16 +208,15 @@ async function main() {
     if (Object.values(state.candidates).some((c) => c.status === "awaiting_review")) console.log("Pending human acceptance: inspect the exact candidate diff and checks in the app. This runner never approves review.");
     return;
   }
-  const accepted = requireAcceptedCommit(state);
-  const landed = Object.values(state.candidates).find((c) => c.status === "accepted" && c.candidateCommit === accepted && c.review?.approved && c.review.commit === accepted);
-  if (!landed || accepted === receipt.base) throw new AcceptanceError("No reviewed, accepted landing matching the current committed state. Finish human review in the app, then retry verify.");
+  const landing = requireReceiptLanding(state, receipt);
+  const { accepted } = landing;
   const credential = await api(`${prefix}/clone`, z.object({ remote: z.string().url(), token: z.string().min(1) }), {});
   const remote = new URL(credential.remote);
   if (remote.protocol !== "https:" || remote.username || remote.password || remote.search || remote.hash) throw new AcceptanceError("Clone endpoint returned an unsafe credential-bearing remote");
   const directory = await mkdtemp(join(tmpdir(), "flaregit-acceptance-"));
   await chmod(directory, 0o700);
   const git = async (args: string[]) => {
-    const gitEnv: NodeJS.ProcessEnv = { ...process.env, ...gitAuthEnv(credential.token), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+    const gitEnv: NodeJS.ProcessEnv = { ...process.env, ...acceptanceCloneEnvironment(remote.href,receipt.origin,credential.token,acceptanceReleasePinSchema.parse(receipt.releasePin)), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
     delete gitEnv.FLAREGIT_TOKEN;
     delete gitEnv.CLOUDFLARE_API_TOKEN;
     delete gitEnv.TYPESAFE_API_KEY;
@@ -216,7 +234,9 @@ async function main() {
     await git(["-C", checkout, "fsck", "--no-reflogs", "--full"]);
     const freshState = await api(`${prefix}/state`, acceptanceStateSchema);
     if (freshState.acceptedState.currentCommit !== accepted) throw new AcceptanceError("Accepted state advanced during verification; rerun verify for a consistent receipt");
-    receipt.verification = { commit: accepted, cloneHead: sha.parse(cloneHead), verifiedAt: new Date().toISOString() };
+    const freshLanding = requireReceiptLanding(freshState, receipt);
+    if (freshLanding.candidateId !== landing.candidateId || freshLanding.evidenceId !== landing.evidenceId) throw new AcceptanceError("Accepted candidate identity changed during native verification");
+    receipt.verification = { commit: accepted, cloneHead: sha.parse(cloneHead), verifiedAt: new Date().toISOString(), candidateId: landing.candidateId, integration: landing.integration, evidenceId: landing.evidenceId };
     await saveReceipt(file, receipt);
     console.log(`Verified reviewed accepted commit ${accepted} through a fresh authenticated native Git clone and fsck. Receipt: ${file}`);
     console.log("This proves current recoverable landing state only; interruption, stale-base, conflict, webhook and migration acceptance need their own observed evidence.");

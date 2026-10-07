@@ -1,0 +1,11 @@
+import worker from '../../src/server/worker';
+import {RepositoryController} from '../../src/server/durable-object';
+import {accountKeyFor} from '../../src/server/projects';
+import type {Env} from '../../src/server/env';
+let failQueue=false;
+export class ReplayHttpFixture extends RepositoryController {
+ constructor(ctx:DurableObjectState,env:Env){super(ctx,{...env,INTEGRATION_QUEUE:{send:async()=>{if(failQueue)throw Error('Synthetic queue failure');}}} as unknown as Env);}
+ async seed(){await this.initialize({projectId:'p123456abcdef',projectName:'Synthetic replay',canonicalRepoName:'fixture',head:'a'.repeat(40),verificationPolicy:{},ownerId:'owner'});await this.addMember('member','member');const now=new Date().toISOString();this.ctx.storage.sql.exec("INSERT INTO deliveries(id,webhook_id,event,status,attempts,payload,created_at,updated_at) VALUES('dlv_fixture','wh_fixture','change.accepted','failed',5,?,?,?)",JSON.stringify({id:'evt_fixture',data:{commit:'a'.repeat(40)}}),now,now);}
+ async facts(){return this.ctx.storage.sql.exec<{generation:number;dispatch_state:string}>('SELECT generation,dispatch_state FROM deliveries WHERE id=?','dlv_fixture').toArray()[0];}
+}
+export default {async fetch(request:Request,env:Env&{FIXTURE_ISSUER:string},ctx:ExecutionContext){const url=new URL(request.url),repo=env.REPOSITORY_CONTROLLER.getByName('project:p123456abcdef') as unknown as ReplayHttpFixture;if(url.pathname==='/fixture/seed'){await repo.seed();const key=await accountKeyFor('owner'),account=env.REPOSITORY_CONTROLLER.getByName('account:'+key) as unknown as ReplayHttpFixture;await account.addProject({id:'p123456abcdef',name:'Synthetic replay',kind:'native',role:'owner'});const token='fgt_'+key+'_'+'x'.repeat(32);await account.createApiToken('owner','Synthetic read',token,{scope:'read',repo:'p123456abcdef'});return Response.json({token});}if(url.pathname==='/fixture/facts')return Response.json(await repo.facts());if(url.pathname==='/fixture/fail'){failQueue=true;return new Response('ok');}if(url.pathname==='/fixture/recover'){failQueue=false;return new Response('ok');}return worker.fetch(request,{...env,CLERK_ISSUER:env.FIXTURE_ISSUER,CLERK_AUTHORIZED_PARTIES:'https://fixture.example',API_LIMITER:{limit:async()=>({success:true})},LOOKUP_LIMITER:{limit:async()=>({success:true})}} as unknown as Env,ctx);}};

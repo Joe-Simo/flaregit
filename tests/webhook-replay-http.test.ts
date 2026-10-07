@@ -1,0 +1,16 @@
+import {expect,test} from 'bun:test';
+import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
+import {generateKeyPair,exportJWK,SignJWT} from 'jose';
+import {workerdChild} from './support/workerd-child';
+test('actual replay HTTP preserves original generation through duplicate and failed queue delivery',async()=>{
+ if(await workerdChild('tests/webhook-replay-http.test.ts'))return;
+ const pair=await generateKeyPair('RS256'),jwk={...await exportJWK(pair.publicKey),kid:'replay-local',alg:'RS256',use:'sig'},issuer=Bun.serve({hostname:'127.0.0.1',port:0,fetch:()=>Response.json({keys:[jwk]})});
+ const build=await Bun.build({entrypoints:['tests/support/webhook-replay-http-worker.ts'],target:'browser',external:['cloudflare:workers','node:*']});if(!build.success)throw Error(build.logs.map(String).join('\n'));
+ const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:'replay-http',unsafeDirectSockets:[{host:'127.0.0.1'}],modules:true,script:await build.outputs[0]!.text(),bindings:{FIXTURE_ISSUER:issuer.url.origin},compatibilityDate:'2026-10-02',compatibilityFlags:['nodejs_compat'],durableObjects:{REPOSITORY_CONTROLLER:{className:'ReplayHttpFixture',useSQLite:true}}}]}));
+ try{const direct=await mf.unsafeGetDirectURL('replay-http'),call=(path:string,token?:string,body?:unknown)=>fetch(new URL(path,direct),{method:body===undefined?'GET':'POST',headers:{Connection:'close','CF-Connecting-IP':'198.51.100.82',...(token?{Authorization:'Bearer '+token}:{}),'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),session=async(id:string)=>new SignJWT({azp:'https://fixture.example'}).setProtectedHeader({alg:'RS256',kid:jwk.kid}).setIssuer(issuer.url.origin).setSubject(id).setIssuedAt().setExpirationTime('5m').sign(pair.privateKey),owner=await session('owner'),member=await session('member'),{token}=await(await call('/fixture/seed')).json() as {token:string},path='/api/p/p123456abcdef/deliveries/dlv_fixture/redeliver',facts=async()=>await(await call('/fixture/facts')).json() as {generation:number};
+ for(const input of [{},{idempotencyKey:'bad',expectedGeneration:0}])expect((await call(path,owner,input)).status).toBe(400);expect((await facts()).generation).toBe(0);
+ const original={idempotencyKey:crypto.randomUUID(),expectedGeneration:0};expect((await call(path,member,original)).status).toBe(403);expect((await call(path,token,original)).status).toBe(403);expect((await facts()).generation).toBe(0);
+ {const response=await call(path,owner,original);if(response.status!==200)throw Error(await response.text());expect(response.status).toBe(200);}expect((await call(path,owner,original)).status).toBe(200);expect((await facts()).generation).toBe(1);expect((await call(path,owner,{...original,expectedGeneration:1})).status).toBe(409);expect((await facts()).generation).toBe(1);
+ await call('/fixture/fail');const next={idempotencyKey:crypto.randomUUID(),expectedGeneration:1};expect((await call(path,owner,next)).status).toBe(409);expect((await facts()).generation).toBe(2);await call('/fixture/recover');expect((await call(path,owner,next)).status).toBe(200);expect((await facts()).generation).toBe(2);
+ }finally{await mf.dispose();issuer.stop(true);}
+},30000);

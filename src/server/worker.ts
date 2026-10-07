@@ -1,11 +1,20 @@
+import {dispatchPreparedPublication,preparedPublicationRequestSchema,PreparedPublicationDispatchError} from './prepared-publication-dispatch';
+import {exactHumanContributions,unattributedHumanContributions,type PeopleContribution} from "./repository-people-attribution";
+import {integrationRequestInputSchema} from './integration-request-intents';
+import {webhookReplayRequestSchema} from './webhook-replay-intents';
+import {previewOnboardingViewSchema} from '../core/preview-onboarding-view';
+import {parseApiTokenInput} from './api-token-input';
+import {runtimeRelease,runtimeReleaseRequestMatches} from './runtime-release.js';
 import { invitationReturnHttp } from "./invitation-return-http";
 export {AgentEgressWorker} from './agent-egress-worker';
+import {workspaceAttentionPage,type WorkspaceAttentionSnapshot} from "./workspace-attention";
 import {runMirrorExecution} from "./mirror-runner";
 import {createEmptyRepository} from "./empty-repository";
 import {createReadmeRepository} from "./readme-repository";
 import {repositoryCreationRequestSchema} from "./repository-creation-request";
 import {conversationMigrationFailure,conversationCaptureFailure,ConversationMigrationAuthorityError,ConversationMigrationCapacityError} from "./conversation-migration-failure.js";
 import {readPublicGithubRepositoryIdentity} from "./github-migration-reader.js";
+import {acceptancePolicyConfigSchema} from "./acceptance-policy";
 import {repositoryReviewPolicySchema} from "./repository-review-ledger.js";
 import {importedAllocationReady} from "./import-allocation-readiness.js";
 import {inspectSavedImport} from "./import-read-lifecycle.js";
@@ -54,6 +63,7 @@ import { handleGitGateway } from "./git-gateway-handler.js";
 import { admitGitOperation,configuredGitCap } from "./core-git-budget.js";
 import { gitAuthEnv, q } from "./shell.js";
 import { ensureBuild } from "./build.js";
+import {STATIC_PREVIEW_SUPPORT, STATIC_PREVIEW_UNSUPPORTED, StaticPreviewNotSupportedError} from './preview-static-capability';
 import { buildPrefix, generationBuildPrefix, signPreviewGeneration, signPreview, validPreviewRegistration } from "./preview-access.js";
 import { lookupRepositoryPreviewOrigin } from "./preview-registry.js";
 import { handlePreviewAsset } from "./preview-broker.js";
@@ -108,13 +118,14 @@ class RequestBodyError extends Error {}
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    if(!runtimeReleaseRequestMatches(request,env))return repositoryReadText("Runtime release differs from the pinned request; no operation was admitted",409);
     if (/^\/api\/join-return\/(prepare|confirm|resume|clear)$/.test(url.pathname)) return invitationReturnHttp(request, { master: env.PREVIEW_SIGNING_KEY, allowedOrigins: env.CLERK_AUTHORIZED_PARTIES ?? "", limit: async ip => (await env.API_LIMITER.limit({ key: `invitation-return:${ip}` })).success, authenticate: () => authenticate(request, env), role: (projectId, actorId) => projectOf(env, projectId).roleOf(actorId) });
 
     if(url.pathname.startsWith("/api/")||url.pathname.startsWith("/git/")){const denied=await admitCredentialLookup(request,env);if(denied)return denied;}
 
     if (url.pathname === "/health") return json({ ok: true });
-    if (url.pathname.startsWith("/git/")) return handleGitGateway(request, env, async (_account, userId, _route, operationId) => {
-      const admission = await admitGitOperation(env, userId, operationId);
+    if (url.pathname.startsWith("/git/")) return handleGitGateway(request, env, async (_account, userId, route, operationId) => {
+      const admission = await admitGitOperation(env, userId, operationId, route);
       return admission instanceof Response ? admission : { finish: admission.finish ?? (async () => {}) };
     },true);
     if (url.pathname === "/pricing" && request.method === "GET" && request.headers.get("Accept")?.includes("text/html")) return appAssetResponse(request, env.ASSETS);
@@ -362,6 +373,7 @@ export default {
     const lifecycle=await account.accountLifecycle();
     const storageReportRequest=request.method==="GET"&&/^\/api\/p\/[a-z0-9]{12,16}\/storage-reconciliation$/.test(url.pathname)&&!auth.viaToken;
     if(lifecycle!=="active"&&!(lifecycle==="deleting"&&((url.pathname==="/api/account"&&request.method==="DELETE")||storageReportRequest)))return text(lifecycle==="deleted"?"Account was deleted":"Account deletion is in progress; retry deletion from Account",403);
+    if(url.pathname==="/api/runtime")return request.method==="GET"?repositoryReadJson(runtimeRelease(env)):repositoryReadText("Method not allowed",405);
     const path = url.pathname.slice(4); // strip "/api"
     const method = request.method;
     // Scoped tokens: read-only tokens may only read (and ask for a read-only clone credential); repo-pinned tokens see one repository.
@@ -471,6 +483,30 @@ export default {
       // ---------- account level ----------
       if (path === "/config" && method === "GET") return json({ previewIsolation: "repository-origin" });
 
+      if(path==="/account/work-overview"&&method==="GET"){
+        if([...url.searchParams.keys()].some(key=>key!=="cursor")||url.searchParams.getAll("cursor").length>1||(url.searchParams.get("cursor")?.length??0)>100)return repositoryReadJson({error:"Invalid workspace attention cursor"},400);
+        const references=await account.listProjects(),selected=[...new Map(references.map(row=>[row.id,row])).values()].sort((a,b)=>a.id.localeCompare(b.id)).slice(0,10);
+        const currentActor=async()=>{const fresh=await authenticate(request,env);if(fresh instanceof Response||fresh.id!==userId||(fresh.viaToken===true)!==(auth.viaToken===true)||fresh.viaToken&&fresh.tokenRepo||await account.accountLifecycle()!=="active")throw Error("Workspace account authority changed");return{actor:{userId,displayName:"Workspace contributor",viaToken:fresh.viaToken===true},hash:fresh.viaToken?await gitParentTokenHash(request):undefined,expiry:fresh.expiresAt};};
+        try{
+          let authority=await currentActor();
+          const readCurrent=async(id:string)=>{const project=projectOf(env,id);if(!await project.roleOf(userId))return null;try{return await project.workspaceAttentionSnapshot(authority.actor,authority.hash,authority.expiry);}catch(error){if(!await project.roleOf(userId))return null;throw error;}};
+          const first=await Promise.allSettled(selected.map(row=>readCurrent(row.id)));
+          authority=await currentActor();
+          const latest=await Promise.allSettled(selected.map((row,index)=>first[index]!.status==="fulfilled"?readCurrent(row.id):Promise.reject(Error("Repository attention unavailable"))));
+          const snapshots:WorkspaceAttentionSnapshot[]=[];let incompleteRepositories=Math.max(0,references.length-selected.length);
+          latest.forEach((result,index)=>{if(result.status==="fulfilled"){if(result.value===null)return;if(result.value.projectId===selected[index]!.id){snapshots.push(result.value);return;}}incompleteRepositories++;});
+          await currentActor();const freshReferences=await account.listProjects();if(JSON.stringify(freshReferences.map(row=>row.id).sort())!==JSON.stringify(references.map(row=>row.id).sort()))return repositoryReadJson({error:"Workspace repositories changed; refresh attention"},409);
+          await currentActor();return repositoryReadJson(workspaceAttentionPage(snapshots,incompleteRepositories,url.searchParams.get("cursor")));
+        }catch{return repositoryReadJson({error:"Workspace attention is unavailable or changed. Refresh current work; inbox history remains preserved."},409);}
+      }
+
+      if(path==="/account/storage-capacity"&&method==="GET"){
+        if(auth.viaToken)return repositoryReadJson({error:"Signed-in account owner required"},403);
+        if(await account.accountLifecycle()!=="active")return repositoryReadJson({error:"Account unavailable"},403);
+        const capacity=await globalOf(env).artifactStorageCapacity(accountKey,env.ARTIFACT_STORAGE_NAMESPACE,{globalSlots:artifactStorageSlots(env.ARTIFACT_STORAGE_GLOBAL_SLOTS),accountSlots:artifactStorageSlots(env.ARTIFACT_STORAGE_ACCOUNT_SLOTS)});
+        const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;if(fresh.id!==userId||fresh.viaToken||await account.accountLifecycle()!=="active")return repositoryReadJson({error:"Account authentication changed"},403);
+        return repositoryReadJson(capacity);
+      }
       if (path === "/account" && method === "GET") {
         let projects = await account.listProjects();
         if (projects.length === 0) projects = await adoptLegacyProject(env, account, accountKey, userId);
@@ -721,16 +757,18 @@ export default {
       if (path === "/tokens" || path.startsWith("/tokens/")) {
         // A full-access token may only mint narrower, short-lived tokens; it cannot list or revoke.
         if (auth.viaToken && !(auth.tokenScope === "full" && path === "/tokens" && method === "POST")) return text("Manage tokens from the web app", 403);
-        if (path === "/tokens" && method === "GET") return json(await account.listApiTokens());
+        if (path === "/tokens" && method === "GET") {
+          const keys=[...url.searchParams.keys()];
+          if(keys.some(key=>key!=="includeExpired")||keys.length>1||url.searchParams.has("includeExpired")&&url.searchParams.get("includeExpired")!=="true")return text("Invalid token metadata query",400);
+          return json(await account.listApiTokens(url.searchParams.get("includeExpired")==="true"));
+        }
         if (path === "/tokens" && method === "POST") {
-          const b = await body<{ label?: string; scope?: string; repo?: string; ttlSeconds?: number }>();
-          const scope = b.scope === "read" || b.scope === "write" ? b.scope : "full";
-          const ttl = Number(b.ttlSeconds);
-          if (auth.viaToken && (scope === "full" || !(ttl > 0 && ttl <= 86_400))) return text("Tokens minted from a token must have scope read|write and a ttl of at most 24 hours", 400);
-          if (b.repo && !/^[a-z0-9]{12,16}$/.test(b.repo)) return text("Invalid repo", 400);
+          const parsed = parseApiTokenInput(await body<unknown>(), auth.viaToken === true);
+          if (!parsed.ok) return text(parsed.error, 400);
+          const b = parsed.value, scope = b.scope, ttl = b.ttlSeconds;
           const secret = [...crypto.getRandomValues(new Uint8Array(24))].map((x) => x.toString(16).padStart(2, "0")).join("");
           const token = `fgt_${accountKey}_${secret}`;
-          const expiresAt = ttl > 0 ? Date.now() + Math.min(ttl, 365 * 86_400) * 1000 : undefined;
+          const expiresAt = ttl !== undefined ? Date.now() + ttl * 1000 : undefined;
           const created = await account.createApiToken(userId, clean(b.label, 60) || "CLI", token, { scope, ...(b.repo ? { repo: b.repo } : {}), ...(expiresAt ? { expiresAt } : {}) });
           return json({ id: created.id, token, scope, repo: b.repo ?? null, expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null, note: "Copy this token now; it is not shown again." }, 201);
         }
@@ -891,6 +929,20 @@ export default {
         const canAdminister = !auth.viaToken || auth.tokenScope === "full";
         const isOwner = role === "owner" && canAdminister;
 
+
+        if(sub==="/acceptance-policy"){
+          if([...url.searchParams.keys()].length)return repositoryReadJson({error:"Acceptance policy does not accept query parameters"},400);
+          if(method!=="GET"&&method!=="PUT")return repositoryReadJson({error:"Method not allowed"},405);
+          if(method==="PUT"&&(auth.viaToken||role!=="owner"))return repositoryReadJson({error:"A signed-in repository owner must decide acceptance policy"},403);
+          const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||current.viaToken&&current.tokenRepo&&current.tokenRepo!==projectId||method==="PUT"&&current.viaToken)return repositoryReadJson({error:"Acceptance policy authentication changed"},403);
+          const profile=await account.getProfile(),actor={userId,displayName:clean(profile.displayName,120)||"Contributor",viaToken:current.viaToken===true};
+          try{
+            if(method==="GET")return repositoryReadJson(await project.acceptancePolicyState(actor,current.viaToken?await gitParentTokenHash(request):undefined,current.expiresAt));
+            const parsed=z.object({eventId:z.uuid(),expectedVersion:z.number().int().nonnegative().safe(),config:acceptancePolicyConfigSchema}).strict().safeParse(await body<unknown>());if(!parsed.success)return repositoryReadJson({error:"Confirm the exact acceptance policy, version and request identity"},400);
+            if(!Number.isFinite(current.expiresAt)||current.expiresAt!<=Date.now())return repositoryReadJson({error:"Owner session expired"},403);
+            return repositoryReadJson(await project.configureAcceptancePolicy(actor,parsed.data,current.expiresAt!));
+          }catch(error){if(error instanceof RequestBodyError)throw error;return repositoryReadJson({error:"Acceptance policy was not confirmed. Refresh current policy or retry the original request; repository history remains preserved."},409);}
+        }
 
         if (sub === "/git-sharing" && (method === "GET" || method === "PUT")) {
           if (auth.viaToken || role !== "owner") return text("A signed-in repository owner must decide Git sharing",403);
@@ -1121,11 +1173,12 @@ export default {
           const input=await body<{commit?:unknown;expectedGeneration?:unknown;idempotencyKey?:unknown}>();
           const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
           if(Object.keys(input).some(key=>!["commit","expectedGeneration","idempotencyKey"].includes(key))||typeof input.commit!=="string"||input.commit!==state.acceptedState.currentCommit||typeof input.idempotencyKey!=="string"||!uuid.test(input.idempotencyKey)||(input.expectedGeneration!==null&&(typeof input.expectedGeneration!=="string"||!uuid.test(input.expectedGeneration))))return text("Exact accepted commit, generation and stable request key required",400);
-          if(settings.fixture!=="ticket-booking")return text("This repository uses external preview tooling",409);
+          if(await globalOf(env).nativeComputeFailureReason(`build-${projectId}-${input.commit}`)===STATIC_PREVIEW_UNSUPPORTED)return text(new StaticPreviewNotSupportedError().message,409);
           try{
             await project.previewStorageScope(input.commit,state.canonicalRepoName);
             const previous=input.expectedGeneration===null?null:await project.previewGenerationGet(input.expectedGeneration);
             if(previous&&previous.identity.commit!==input.commit)return text("Preview generation belongs to another commit",409);
+            if(previous?.failureReason===STATIC_PREVIEW_UNSUPPORTED)return text(new StaticPreviewNotSupportedError().message,409);
             const freshIdentity=await project.previewStorageScope(input.commit,state.canonicalRepoName);
             const source=await fundedPreviewSource(env,freshIdentity,previous),sourceKey=source.key;
             const operation=await project.previewGenerationBegin(input.commit,state.canonicalRepoName,userId,input.expectedGeneration,input.idempotencyKey,sourceKey);
@@ -1139,6 +1192,8 @@ export default {
             const oldOperation=previous?`build-generation-${previous.generation}`:`build-${projectId}-${input.commit}`;
             const freshRecoveryScope=await project.previewGenerationScope(record.generation);
             if(JSON.stringify({...record.identity,generation:record.generation})!==JSON.stringify(freshRecoveryScope))throw new Error("Preview recovery owner or incarnation changed");
+            const isolatedRecovery=await project.recoverPreviewExecution(input.commit,previous?.generation);
+            if(isolatedRecovery.status==="held"){await project.previewGenerationFail(record.generation,"previous_compute_stop_unconfirmed");return text("Previous isolated preview execution remains unresolved; replacement was not dispatched",409);}
             try{if((await globalOf(env).nativeComputeStatus(oldOperation))?.active)await recoverNativeCompute(env,oldOperation);}
             catch{await project.previewGenerationFail(record.generation,"previous_compute_stop_unconfirmed");return text("Previous preview workspace stop is unconfirmed; replacement was not dispatched and all storage holds remain reserved",409);}
             await project.previewGenerationScope(record.generation);
@@ -1150,7 +1205,7 @@ export default {
           if(!isOwner)return text("Only the owner can retry preview compute",403);
           const input=await body<{commit?:unknown}>();
           const state=await project.getState(),key=`build-${projectId}-${state.acceptedState.currentCommit}`;
-          if(settingsFor(state.verificationPolicy).fixture!=="ticket-booking")return text("This repository uses external preview tooling",409);
+          if(await globalOf(env).nativeComputeFailureReason(key)===STATIC_PREVIEW_UNSUPPORTED)return text(new StaticPreviewNotSupportedError().message,409);
           if(typeof input.commit!=="string"||input.commit!==state.acceptedState.currentCommit)return text("Preview retry must reference the current accepted commit",409);
           if(await project.roleOf(userId)!=="owner")return text("Owner access was revoked",403);
           const fundingFailure=await globalOf(env).nativeComputeFailureReason(key);
@@ -1163,6 +1218,9 @@ export default {
             if(JSON.stringify(scope)!==JSON.stringify(freshScope))return text("Preview ownership changed; reload before retrying",409);
           }
           try {
+            const isolatedRecovery=await project.recoverPreviewExecution(state.acceptedState.currentCommit);
+            if(isolatedRecovery.status==="held")return text("Previous isolated preview execution remains unresolved; retry was not dispatched",409);
+            if(isolatedRecovery.status==="closed_without_output")return text("Previous preview execution stopped without output; create a replacement preview for this accepted commit",409);
             await recoverNativeCompute(env,key);
             await globalOf(env).setNativeComputeFailure(key,false);
             ctx.waitUntil(ensureBuild(env,projectId,state.acceptedState.currentCommit,state.canonicalRepoName,accountKey).catch(()=>console.error("Explicit preview retry failed")));
@@ -1172,7 +1230,8 @@ export default {
         if(sub==="/preview/recover"&&method==="POST"){
           if(!isOwner)return text("Only the owner can recover preview compute",403);
           const state=await project.getState();
-          try{return json(await recoverNativeCompute(env,`build-${projectId}-${state.acceptedState.currentCommit}`));}
+          if(!state.acceptedState.currentCommit)return text("No accepted commit is available for preview recovery",409);
+          try{const isolated=await project.recoverPreviewExecution(state.acceptedState.currentCommit);if(isolated.status==="held")return text("Isolated preview execution remains unresolved; saved Git state is preserved and retry remains locked",409);const native=await recoverNativeCompute(env,`build-${projectId}-${state.acceptedState.currentCommit}`);return json({...native,isolated:isolated.status});}
           catch{return text("Preview workspace stop remains unconfirmed; saved Git state is preserved and retry remains locked",409);}
         }
         if(sub==="/deployments/recover"&&method==="POST"){
@@ -1388,11 +1447,11 @@ export default {
 
         // ----- changes (tasks) -----
         if (sub === "/tasks" && method === "POST") {
-          const b = await body<{ taskId?: string; goal?: string; name?: string; dependsOn?: string; issue?: number;expectedTarget?:unknown }>();
+          const b = await body<{ taskId?: string; goal?: string; name?: string; dependsOn?: string; issue?: number;expectedTarget?:unknown;externalTool?:unknown }>();
           const goal = clean(b.goal, 300);
           if (!b.taskId || !TASK_ID.test(b.taskId) || !goal) return text("taskId (3-101 chars: a-z, 0-9, -) and goal are required", 400);
-          if(Object.keys(b).some(key=>!["taskId","goal","name","dependsOn","issue","expectedTarget"].includes(key)))return text("Invalid change creation input",400);
-          const input=taskCreationInputSchema.safeParse({goal,dependsOn:b.dependsOn??null,issue:b.issue??null,...(b.expectedTarget!==undefined?{expectedTarget:b.expectedTarget}:{})});
+          if(Object.keys(b).some(key=>!["taskId","goal","name","dependsOn","issue","expectedTarget","externalTool"].includes(key)))return text("Invalid change creation input",400);
+          const input=taskCreationInputSchema.safeParse({goal,dependsOn:b.dependsOn??null,issue:b.issue??null,...(b.expectedTarget!==undefined?{expectedTarget:b.expectedTarget}:{}),...(b.externalTool!==undefined?{externalTool:b.externalTool}:{})});
           if(!input.success)return text("Invalid change goal, dependency or issue",400);
           const requestedTarget=input.data.expectedTarget?{acceptedTargetRef:input.data.expectedTarget.ref}:undefined;
           let creationCredential={viaToken:auth.viaToken===true,...(auth.viaToken?{credentialHash:await gitParentTokenHash(request)}:{sessionExpiresAt:auth.expiresAt})};
@@ -1452,6 +1511,7 @@ export default {
             id: b.taskId,
             goal,
             contributor: { id: userId.slice(-12), name: (await account.getProfile()).displayName || clean(b.name, 60) || `member-${userId.slice(-6)}`, type: "human" },
+            ...(input.data.externalTool?{externalTool:{...input.data.externalTool,attestedBy:userId},initiatedBy:{id:userId,name:(await account.getProfile()).displayName||`member-${userId.slice(-6)}`,type:"human" as const}}:{}),
             baseCommit: selection.baseCommit,
             ...(parent ? { dependsOn: parent.id } : {}),
             ...(input.data.issue !== null ? { issue: input.data.issue } : {}),
@@ -1596,13 +1656,19 @@ export default {
         }
 
         if (sub === "/integrations" && method === "POST") {
-          const b = await body<{ taskIds?: string[] }>();
+          const b = await body<{ taskIds?: string[];idempotencyKey?:unknown;expected?:unknown }>();
+          if(Object.keys(b).some(key=>!["taskIds","idempotencyKey","expected"].includes(key)))return text("Invalid integration request fields",400);
           if (!Array.isArray(b.taskIds) || b.taskIds.length < 1 || b.taskIds.length > 8 || new Set(b.taskIds).size !== b.taskIds.length || !b.taskIds.every((t) => typeof t === "string" && TASK_ID.test(t))) {
             return text("taskIds must list one to eight different changes", 400);
           }
           const { plan } = await account.getBilling();
-          const denied = await admitRun(env, account, planLimits(env)[plan]);
-          if (denied) return denied;
+          if(b.idempotencyKey!==undefined||b.expected!==undefined){
+            const parsed=integrationRequestInputSchema.safeParse(b);if(!parsed.success)return text("Exact request key and observed integration inputs are required",400);
+            const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true))return text("Integration requester authentication changed",403);
+            const actor={userId,displayName:'Integration requester',viaToken:current.viaToken===true},credentialHash=current.viaToken?await gitParentTokenHash(request):undefined;
+            try{const prepared=await project.prepareIntegrationRequest(parsed.data,actor,credentialHash,current.expiresAt);let intent=prepared.intent;if(intent.dispatch!=='observed'){const nativePhase=await project.integrationNativePhaseAdmission(intent.eventId);const denied=nativePhase?null:await admitRun(env,account,planLimits(env)[plan],intent.eventId);if(denied)return denied;intent=await project.markIntegrationRequestDispatch(intent.key,'unknown',actor,credentialHash,current.expiresAt);await env.INTEGRATION_QUEUE.send({type:'integration.requested',projectId,taskIds:intent.input.taskIds,eventId:intent.eventId} satisfies QueueMessage);intent=await project.markIntegrationRequestDispatch(intent.key,'observed',actor,credentialHash,current.expiresAt);}return json({queued:intent.eventId,replayed:prepared.replayed,dispatch:intent.dispatch},202);}catch{return text("Integration request could not be confirmed. Preserve the original key and context; retrying unchanged inputs cannot create another workflow identity.",409);}
+          }
+          const denied=await admitRun(env,account,planLimits(env)[plan]);if(denied)return denied;
           const eventId = `integ-${projectId}-${crypto.randomUUID()}`;
           await project.registerWorkflow(eventId, "integration", undefined, userId,1);
           await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds: b.taskIds as string[], eventId } satisfies QueueMessage);
@@ -1631,16 +1697,19 @@ export default {
           }catch{return repositoryReadJson({error:"Agent runtime cleanup was not confirmed. Saved attempts, credentials, and contribution history remain preserved; refresh the recovery status before retrying."},409);}
         }
 
+        const verificationClosureRoute=/^\/candidates\/([a-z0-9_-]{1,128})\/verification-closure$/.exec(sub);
+        if(verificationClosureRoute&&method!=='POST')return text('Verification recovery requires POST',405);
         const runtimeInspectionRoute=/^\/candidates\/([a-z0-9_-]{1,128})\/runtime$/.exec(sub);
         if(runtimeInspectionRoute&&method!=="GET")return text("Read-only runtime inspection",405);
         const legacyAbandonRoute=/^\/candidates\/([a-z0-9_-]{1,128})\/rerun\/abandon$/.exec(sub);
         const legacyRerunRoute=/^\/candidates\/([a-z0-9_-]{1,128})\/rerun$/.exec(sub);
-        if((legacyRerunRoute||legacyAbandonRoute||runtimeInspectionRoute)&&(method==="GET"||method==="POST")){
-          if(!isOwner||(auth.viaToken&&auth.tokenScope!=="full"))return text("Only the current owner can request a fresh review of saved legacy inputs",403);
+        if((legacyRerunRoute||legacyAbandonRoute||runtimeInspectionRoute||verificationClosureRoute)&&(method==="GET"||method==="POST")){
+          if(!isOwner||(auth.viaToken&&auth.tokenScope!=="full"))return text(runtimeInspectionRoute||verificationClosureRoute?"Only the current repository owner can access runtime recovery":"Only the current owner can request a fresh review of saved legacy inputs",403);
           const profile=await account.getProfile(),currentAuth=await authenticate(request,env);if(currentAuth instanceof Response)return currentAuth;
           if(currentAuth.id!==userId||(currentAuth.viaToken===true)!==(auth.viaToken===true)||(currentAuth.viaToken&&(currentAuth.tokenScope!=="full"||(currentAuth.tokenRepo&&currentAuth.tokenRepo!==projectId))))return text("Owner authentication changed",403);
-          const actor={userId,displayName:clean(profile.displayName,120)||"Repository owner",viaToken:currentAuth.viaToken===true},credentialHash=currentAuth.viaToken?await gitParentTokenHash(request):undefined,candidateId=(legacyRerunRoute??legacyAbandonRoute??runtimeInspectionRoute)![1]!;
+          const actor={userId,displayName:clean(profile.displayName,120)||"Repository owner",viaToken:currentAuth.viaToken===true},credentialHash=currentAuth.viaToken?await gitParentTokenHash(request):undefined,candidateId=(legacyRerunRoute??legacyAbandonRoute??runtimeInspectionRoute??verificationClosureRoute)![1]!;
           try{
+            if(verificationClosureRoute){if(currentAuth.viaToken)return text('Signed-in owner required for verification recovery',403);const parsed=z.object({workflowId:z.string().min(1).max(256),commit:z.string().regex(/^[a-f0-9]{40}$/),evidenceId:z.string().min(1).max(256)}).strict().safeParse(await body<unknown>());if(!parsed.success)return text('Exact saved verification identity required',400);const report=await project.recoverCandidateVerificationClosure(candidateId,parsed.data,actor,undefined,currentAuth.expiresAt),finalAuth=await authenticate(request,env);if(finalAuth instanceof Response)return finalAuth;if(finalAuth.id!==userId||finalAuth.viaToken)return text('Owner authentication changed',403);await project.assertCandidateRuntimeInspection(candidateId,report.workflowId,report.incarnation,report.protocol,actor,finalAuth.expiresAt);return repositoryReadJson({...report,source:'recorded-ledger',providerVerified:false});}
             if(runtimeInspectionRoute){if(currentAuth.viaToken)return text("Signed-in owner required for runtime inspection",403);const report=await project.candidateRuntimeInspection(candidateId,actor,credentialHash,currentAuth.expiresAt),finalAuth=await authenticate(request,env);if(finalAuth instanceof Response)return finalAuth;if(finalAuth.id!==userId||finalAuth.viaToken)return text("Owner authentication changed",403);await project.assertCandidateRuntimeInspection(candidateId,report.workflowId,report.incarnation,report.protocol,actor,finalAuth.expiresAt);return Response.json({...report,source:"recorded-ledger",providerVerified:false},{headers:{"Cache-Control":"no-store"}}); }
             if(method==="GET"){
               await project.legacyCandidateRerunReport(candidateId,actor,credentialHash,currentAuth.expiresAt);
@@ -1785,6 +1854,16 @@ export default {
           }catch{return repositoryReadJson({error:"Review was not confirmed. Refresh the exact candidate and reviewer policy before retrying the same event ID; repository history remains preserved."},409);}
         }
 
+        const preparedPublicationRoute=/^\/candidates\/([a-z0-9_-]{1,128})\/prepared-publication$/.exec(sub);
+        if(preparedPublicationRoute){
+          if(method!=='POST')return text('Prepared publication requires POST',405);
+          if(!isOwner||auth.viaToken)return text('Signed-in repository owner required for publication',403);
+          if(url.search)return text('Publication does not accept query parameters',400);
+          const input=preparedPublicationRequestSchema.safeParse(await body<unknown>());if(!input.success)return text('Use the exact saved journal and reviewed commit',400);
+          const authorize=async()=>{const current=await authenticate(request,env);if(current instanceof Response||current.id!==userId||current.viaToken||!current.expiresAt||current.expiresAt<=Date.now()||await account.accountLifecycle()!=='active'||await project.roleOf(userId)!=='owner'||await project.repositoryDeletionPending())throw new PreparedPublicationDispatchError('Publication owner authority changed',403);return current.expiresAt;};
+          try{const profile=await account.getProfile(),actor={userId,displayName:clean(profile.displayName,120)||'Repository owner',viaToken:false};return repositoryReadJson(await dispatchPreparedPublication(env,project,projectId,preparedPublicationRoute[1]!,input.data,actor,authorize));}catch(error){return repositoryReadJson({error:error instanceof PreparedPublicationDispatchError?error.message:'Publication is unavailable; your saved review and journal remain preserved'},error instanceof PreparedPublicationDispatchError?error.status:409);}
+        }
+
         const reviewRoute = /^\/candidates\/([a-z0-9_-]+)\/review$/.exec(sub);
         if (reviewRoute && method === "POST") {
           if (!isOwner) return text("Only the repository owner with a signed-in session or full-access token can review", 403);
@@ -1898,6 +1977,23 @@ export default {
 
         // ----- collaborators -----
         // ----- previews: a member mints a short-lived link to the build of one commit of this repository -----
+        if(sub==="/preview-onboarding"){
+          if([...url.searchParams.keys()].length)return repositoryReadJson({error:"Preview onboarding does not accept query parameters"},400);
+          if(method!=="GET"&&method!=="POST")return repositoryReadJson({error:"Method not allowed"},405);
+          if(method==="POST"&&!isOwner)return repositoryReadJson({error:"Only the repository owner can prepare its preview origin"},403);
+          const input=method==="POST"?z.object({requestId:z.uuid(),action:z.enum(["prepare","resume"])}).strict().safeParse(await body<unknown>()):null;
+          if(input&&!input.success)return repositoryReadJson({error:"Use the original preview request ID and action"},400);
+          const hash=auth.viaToken?await gitParentTokenHash(request):undefined,current=await authenticate(request,env);
+          if(current instanceof Response)return current;
+          if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||current.viaToken&&(current.tokenRepo&&current.tokenRepo!==projectId||method==="POST"&&current.tokenScope!=="full"))return repositoryReadJson({error:"Preview onboarding authentication changed"},403);
+          const actor={userId,displayName:"Repository contributor",viaToken:current.viaToken===true};
+          try{
+            const result=input?.success?await (input.data.action==="prepare"?project.preparePreviewOnboarding(actor,input.data.requestId,hash,current.expiresAt):project.resumePreviewOnboarding(actor,input.data.requestId,hash,current.expiresAt)):await project.readPreviewOnboarding(actor,hash,current.expiresAt);
+            const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;
+            if(fresh.id!==userId||await account.accountLifecycle()!=="active"||!await project.roleOf(userId))return repositoryReadJson({error:"Preview onboarding access changed"},403);
+            return repositoryReadJson(previewOnboardingViewSchema.parse(result));
+          }catch{return repositoryReadJson({error:"Preview onboarding is unavailable or its authority changed. Check the saved status before retrying."},409);}
+        }
         if (sub === "/preview" && method === "GET") {
           const commit = url.searchParams.get("commit") ?? state.acceptedState.currentCommit;
           if (commit === null) return json({ready:false,status:"unavailable",canRetry:false,reason:"No accepted commit is available for a preview"});
@@ -1909,12 +2005,13 @@ export default {
           const latestGeneration=await project.previewGenerationLatest(commit);
           const replacementPending=latestGeneration?.state==="requested"||latestGeneration?.state==="building";
           const readyRecovery=async()=>{
-            if(!isOwner||commit!==state.acceptedState.currentCommit||settings.fixture!=="ticket-booking")return undefined;
+            if(!isOwner||commit!==state.acceptedState.currentCommit)return undefined;
             let canRecover=false;
             if(!replacementPending)try{const scope=await project.previewStorageScope(commit,state.canonicalRepoName);canRecover=(await fundedPreviewSource(env,scope,latestGeneration)).capacity.allowed;}catch{/* Unknown storage funding never enables a rebuild. */}
             return{canRecover,expectedGeneration:latestGeneration?.generation??null,detail:"Rebuild this accepted commit using a separate storage allowance; existing assets and Git history remain preserved."};
           };
           if(latestGeneration){
+            if(latestGeneration.failureReason===STATIC_PREVIEW_UNSUPPORTED)return json({ready:false,status:'not_supported',canRetry:false,generationId:latestGeneration.generation,generationRecovery:{canRecover:false,expectedGeneration:latestGeneration.generation},capability:STATIC_PREVIEW_SUPPORT,reason:new StaticPreviewNotSupportedError().message});
             const active=await project.previewGenerationActive(commit);
             if(active&&await project.previewGenerationForRead(commit,active.identity.incarnation,active.generation)){
               const origin=previewOrigin;
@@ -1930,7 +2027,7 @@ export default {
             return json({ready:false,status:["requested","building"].includes(latestGeneration.state)?"pending":"unavailable",canRetry:false,generationId:latestGeneration.generation,generationRecovery:{canRecover,expectedGeneration:latestGeneration.generation,detail:"A replacement uses separate storage funding; prior uncertain upload holds remain reserved"}});
           }
           const ready = Boolean(await env.EVIDENCE_BUCKET.head(`${buildPrefix(projectId, commit)}/index.html`));
-          if (!ready && commit === state.acceptedState.currentCommit && settings.fixture === "ticket-booking") ctx.waitUntil(ensureBuild(env, projectId, commit, state.canonicalRepoName, accountKey).catch((e) => console.error("preview build failed", String(e))));
+          if (!ready && commit === state.acceptedState.currentCommit) ctx.waitUntil(ensureBuild(env, projectId, commit, state.canonicalRepoName, accountKey).catch((e) => console.error("preview build failed", String(e))));
           if (!ready) {
             const key=`build-${projectId}-${commit}`;
             const failed=await globalOf(env).nativeComputeFailure(key);
@@ -1945,8 +2042,9 @@ export default {
             const spending=await managedSpendStatus(env,accountKey,false);
             let generationRecovery;
             if(unfinishedWriter&&isOwner&&commit===state.acceptedState.currentCommit){let canRecover=false;try{canRecover=(await globalOf(env).previewGenerationCapacity(buildPrefix(projectId,commit),await project.previewStorageScope(commit,state.canonicalRepoName))).allowed;}catch{/* Preserve unknown holds. */}generationRecovery={canRecover,expectedGeneration:null,detail:"Create a separately funded preview while retaining the unresolved upload reservation"};}
-            const status=storageUnavailable?"unavailable":failed?"failed":spending.status!=="configured"?"unavailable":compute?.active?"pending":"not_started";
-            return json({ready:false,status,generationRecovery,canRetry:!unfinishedWriter&&(!storageUnavailable||fundingRetryEligible)&&isOwner&&commit===state.acceptedState.currentCommit&&settings.fixture==="ticket-booking",reason:(unfinishedWriter&&failed)?"Preview publication has unfinished upload receipts; storage reconciliation is required":storageUnavailable?(fundingRetryEligible?"Preview storage allowance is available again; the owner can retry":"Preview storage allowance requires operator attention; retry cannot restore capacity"):failed?"Build failed; retry requires owner action":status==="unavailable"?"Compute budget unavailable":undefined});
+            const unsupported=failureReason===STATIC_PREVIEW_UNSUPPORTED;
+            const status=unsupported?"not_supported":storageUnavailable?"unavailable":failed?"failed":spending.status!=="configured"?"unavailable":compute?.active?"pending":"not_started";
+            return json({ready:false,status,generationRecovery:unsupported?{canRecover:false,expectedGeneration:null}:generationRecovery,capability:STATIC_PREVIEW_SUPPORT,canRetry:!unsupported&&!unfinishedWriter&&(!storageUnavailable||fundingRetryEligible)&&isOwner&&commit===state.acceptedState.currentCommit,reason:unsupported?new StaticPreviewNotSupportedError().message:(unfinishedWriter&&failed)?"Preview publication has unfinished upload receipts; storage reconciliation is required":storageUnavailable?(fundingRetryEligible?"Preview storage allowance is available again; the owner can retry":"Preview storage allowance requires operator attention; retry cannot restore capacity"):failed?"Build failed; retry requires owner action":status==="unavailable"?"Compute budget unavailable":undefined});
           }
           const { exp, sig } = await signPreview(env, projectId, commit, previewOrigin);
           return Response.json({ ready: true, status:"available", generationRecovery:await readyRecovery(), url: `${previewOrigin}/preview/${commit}/${exp}/${sig}/`, expiresAt: new Date(exp * 1000).toISOString() }, { headers: { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff" } });
@@ -2049,24 +2147,73 @@ export default {
 
         // ----- people: who works here and what they contributed (humans and agents, attributed separately) -----
         if (sub === "/people" && method === "GET") {
-          const tasks = Object.values(state.tasks);
-          const summarize = (mine: typeof tasks) => ({
+          const snapshot=await project.peopleAttributionSnapshot(userId);
+          const tasks=snapshot.tasks;
+          const summarize = (mine: PeopleContribution[]) => ({
             changes: mine.length,
             accepted: mine.filter((t) => t.status === "accepted").length,
             open: mine.filter((t) => !["accepted", "cancelled"].includes(t.status)).length,
-            recent: mine.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 5).map((t) => ({ id: t.id, goal: t.goal, status: t.status, updatedAt: t.updatedAt })),
+            recent: [...mine].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 5).map((t) => ({ id: t.id, goal: t.goal, status: t.status, updatedAt: t.updatedAt })),
           });
-          const members = await project.listMembers();
-          const humans = await Promise.all(
-            members.map(async (m) => {
-              const profile = await accountOf(env, await accountKeyFor(m.user_id)).getProfile().catch(() => null);
-              const suffix = m.user_id.slice(-12);
-              return { kind: "human" as const, role: m.role, joinedAt: m.added_at, handle: profile?.handle || null, name: profile?.displayName || m.label || `member-${m.user_id.slice(-6)}`, bio: profile?.bio || "", ...summarize(tasks.filter((t) => t.contributor.type === "human" && t.contributor.id === suffix)) };
-            })
-          );
-          const agentNames = [...new Set(tasks.filter((t) => t.contributor.type === "agent").map((t) => t.contributor.name))];
-          const agents = agentNames.map((name) => ({ kind: "agent" as const, name, ...summarize(tasks.filter((t) => t.contributor.type === "agent" && t.contributor.name === name)) }));
-          return json({ humans, agents });
+          const humans = await Promise.all(snapshot.members.map(async (member) => {
+            const profile = await accountOf(env, await accountKeyFor(member.user_id)).getProfile().catch(() => null);
+            const identity = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([projectId, member.user_id])));
+            const id = [...new Uint8Array(identity)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+            return { id, kind: "human" as const, role: member.role, joinedAt: member.added_at, handle: profile?.handle || null, name: profile?.displayName || member.label || `member-${member.user_id.slice(-6)}`, bio: profile?.bio || "", ...summarize(exactHumanContributions(tasks,snapshot.writers,member.user_id)),accepted:snapshot.acceptedContributions.reduce((count,record)=>count+(record.attribution??[]).filter(item=>item.status==="recorded"&&item.initiatedBy.id===member.user_id).length,0) };
+          }));
+          const current=await authenticate(request,env);
+          if(current instanceof Response)return current;
+          if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||(current.viaToken&&current.tokenRepo&&current.tokenRepo!==projectId)||await account.accountLifecycle()!=="active")return text("Private people access changed",403);
+          if(!await project.assertPeopleAttributionSnapshot(userId,snapshot.stamp))return text("Private people access or contribution records changed; refresh",403);
+          const agentNames = [...new Set([...tasks.filter((task) => task.contributor.type === "agent").map((task) => task.contributor.name),...snapshot.acceptedContributions.flatMap(record=>(record.attribution??[]).flatMap(item=>item.status==="recorded"&&item.contributor.type==="agent"?[item.contributor.name]:[]))])];
+          const agents = agentNames.map((name) => ({ kind: "agent" as const, name, ...summarize(tasks.filter((task) => task.contributor.type === "agent" && task.contributor.name === name)),accepted:snapshot.acceptedContributions.reduce((count,record)=>count+(record.attribution??[]).filter(item=>item.status==="recorded"&&item.contributor.type==="agent"&&item.contributor.name===name).length,0) }));
+          const unattributed=unattributedHumanContributions(tasks,snapshot.writers,snapshot.members.map(member=>member.user_id)).map(task=>({id:task.id,goal:task.goal,status:task.status,updatedAt:task.updatedAt}));
+          return json({ humans, agents,unattributed,acceptedContributions:snapshot.acceptedContributions });
+        }
+
+        const tagOperationRoute=/^\/tag-operations\/([a-f0-9-]{36})(?:\/(reconcile|cleanup|resume))?$/.exec(sub),releaseRoute=/^\/releases\/([a-f0-9-]{36})(?:\/(publish))?$/.exec(sub);
+        if(["/tags","/tag-targets","/tag-operations","/releases"].includes(sub)||tagOperationRoute||releaseRoute){
+          if([...url.searchParams.keys()].length)return repositoryReadJson({error:"This bounded tag or release endpoint does not accept query parameters"},400);
+          const mutation=method!=="GET",ownerRead=sub==="/tag-targets";
+          if((mutation||ownerRead)&&!isOwner)return repositoryReadJson({error:"Current repository owner authority is required"},403);
+          const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||current.viaToken&&(current.tokenRepo&&current.tokenRepo!==projectId||(mutation||ownerRead)&&current.tokenScope!=="full"))return text("Tag or release authority changed",403);
+          const profile=await account.getProfile(),actor={userId,displayName:clean(profile.displayName,120)||"Contributor",viaToken:current.viaToken===true},hash=current.viaToken?await gitParentTokenHash(request):undefined,expiry=current.expiresAt;
+          const uuid=z.uuid(),sha=z.string().regex(/^[a-f0-9]{40}$/).refine(value=>!/^0{40}$/.test(value)),revision=z.number().int().positive().safe(),content={title:z.string().trim().min(1).max(200),notes:z.string().max(16000).refine(value=>!value.includes("\0"))};
+          try{
+            if(method==="GET"){
+              if(sub==="/tags")return repositoryReadJson(await project.tagInventory(actor,hash,expiry));
+              if(sub==="/tag-targets")return repositoryReadJson(await project.tagAcceptedTargets(actor,hash,expiry));
+              if(sub==="/tag-operations")return repositoryReadJson(await project.tagOperations(actor,hash,expiry));
+              if(sub==="/releases")return repositoryReadJson(await project.releases(actor,hash,expiry));
+              if(tagOperationRoute&&!tagOperationRoute[2])return repositoryReadJson(await project.tagOperation(tagOperationRoute[1]!,actor,hash,expiry));
+              if(releaseRoute&&!releaseRoute[2])return repositoryReadJson(await project.release(releaseRoute[1]!,actor,hash,expiry));
+              return repositoryReadJson({error:"Method not allowed"},405);
+            }
+            if(sub==="/tags"&&method==="POST"){
+              const parsed=z.object({requestId:uuid,name:z.string().min(1).max(200).refine(value=>value!=="HEAD"&&!value.startsWith("refs/")&&isSafeRef(`refs/tags/${value}`)),selected:z.object({journalId:z.union([z.literal("baseline"),uuid,z.string().regex(/^jrnl_[a-f0-9-]{36}$/)]),acceptedRef:z.string().refine(value=>value.startsWith("refs/heads/")&&isSafeRef(value)),acceptedRootVersion:z.number().int().nonnegative().safe()}).strict().refine(value=>value.journalId==="baseline"?value.acceptedRootVersion===0:value.acceptedRootVersion>0),sourceCommit:sha,sourceTree:sha}).strict().safeParse(await body<unknown>());
+              if(!parsed.success)return repositoryReadJson({error:"Confirm the exact committed accepted tag source and stable request identity"},400);
+              return repositoryReadJson(await project.createTag(parsed.data,actor,hash,expiry));
+            }
+            if(tagOperationRoute&&method==="POST"&&tagOperationRoute[2]){
+              const action=tagOperationRoute[2],parsed=(action==="cleanup"?z.object({requestId:uuid,confirmStop:z.literal(true)}).strict():z.object({requestId:uuid}).strict()).safeParse(await body<unknown>());
+              if(!parsed.success)return repositoryReadJson({error:"Confirm the original tag recovery request"},400);
+              if(action==="resume")return repositoryReadJson(await project.resumePreparedTag(tagOperationRoute[1]!,parsed.data.requestId,actor,hash,expiry));
+              return repositoryReadJson(action==="cleanup"?await project.cleanupTagOperation(tagOperationRoute[1]!,actor,hash,expiry):await project.reconcileTag(tagOperationRoute[1]!,actor,hash,expiry));
+            }
+            if(sub==="/releases"&&method==="POST"){
+              const parsed=z.object({id:uuid,tagOperationId:uuid,...content}).strict().safeParse(await body<unknown>());if(!parsed.success)return repositoryReadJson({error:"Confirm the saved native tag and original release request"},400);
+              return repositoryReadJson(await project.createRelease(parsed.data,actor,hash,expiry));
+            }
+            if(releaseRoute&&releaseRoute[2]==="publish"&&method==="POST"){
+              const parsed=z.object({expectedRevision:revision,confirmPublish:z.literal(true)}).strict().safeParse(await body<unknown>());if(!parsed.success)return repositoryReadJson({error:"Confirm publishing the exact saved release revision"},400);
+              return repositoryReadJson(await project.publishRelease(releaseRoute[1]!,parsed.data.expectedRevision,actor,hash,expiry));
+            }
+            if(releaseRoute&&!releaseRoute[2]&&method==="PATCH"){
+              const parsed=z.object({editId:uuid,expectedRevision:revision,...content}).strict().safeParse(await body<unknown>());if(!parsed.success)return repositoryReadJson({error:"Confirm the exact saved release edit and revision"},400);
+              return repositoryReadJson(await project.editRelease(releaseRoute[1]!,parsed.data.editId,parsed.data.expectedRevision,{title:parsed.data.title,notes:parsed.data.notes},actor,hash,expiry));
+            }
+            return repositoryReadJson({error:"Method not allowed"},405);
+          }catch(error){if(error instanceof RequestBodyError)throw error;return repositoryReadJson({error:"Tag or release outcome could not be confirmed. Saved operations, accepted history and original request identities remain preserved."},409);}
         }
         if (sub === "/members" && method === "GET") return json(await project.listMembers());
         const invitationDecision=/^\/invites\/([a-f0-9-]{36}|legacy_[0-9]+)\/(revoke|ratify)$/.exec(sub);
@@ -2211,7 +2358,15 @@ export default {
         const redeliverRoute = /^\/deliveries\/(dlv_[a-z0-9-]+)\/redeliver$/.exec(sub);
         if (redeliverRoute && method === "POST") {
           if (!isOwner) return text("Only the owner can redeliver", 403);
-          return (await project.redeliver(redeliverRoute[1]!)) ? json({ recorded: redeliverRoute[1] }) : text("Unknown delivery", 404);
+          if([...url.searchParams.keys()].length)return text("Replay does not accept query parameters",400);
+          const input=webhookReplayRequestSchema.safeParse(await body<unknown>());
+          if(!input.success)return text("Replay requires its original request ID and expected delivery generation",400);
+          const hash=auth.viaToken?await gitParentTokenHash(request):undefined;
+          const current=await authenticate(request,env);
+          if(current instanceof Response)return current;
+          if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||current.viaToken&&(current.tokenScope!=="full"||current.tokenRepo&&current.tokenRepo!==projectId))return text("Replay owner authentication changed",403);
+          try{return(await project.redeliverOriginal(redeliverRoute[1]!,input.data,{userId,displayName:"Repository owner",viaToken:current.viaToken===true},hash))?json({recorded:redeliverRoute[1],idempotencyKey:input.data.idempotencyKey}):text("Unknown delivery",404);}
+          catch(error){return text(error instanceof Error?error.message:"Replay outcome is unavailable; check the saved delivery before retrying",409);}
         }
 
         // ----- settings -----
