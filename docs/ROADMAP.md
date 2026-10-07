@@ -2488,8 +2488,8 @@ policy does not approve competition terms, identity replacement, or payments.
   (source `34a1e7a`, uploaded 2026-10-04 14:26:50 UTC). Committed `main` `bcd29bf` is not deployed.
 - Uncommitted delta: 149 tracked files (+5,556 / −926) and 235 untracked files. `.playwright-mcp/`
   is untracked and must stay out of source commits; its contents were not inspected.
-- Nothing was committed, pushed, deployed or published. `main` CI stays red until the owner
-  approves committing and pushing the repaired tree.
+- Committed and pushed to `main` as `aa9d529` (fast-forward from `bcd29bf`), approved by the owner.
+  Not deployed or published. Its CI result was pending at push time and is not yet recorded here.
 
 ### C01 owner decision
 
