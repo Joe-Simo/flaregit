@@ -2107,6 +2107,14 @@ No tickets are DONE. Source-tested, deployed, and hosted-verified are separate.
 No deployment, public release, billing activation, spending increase, identity
 migration, destructive action, or legal acceptance is authorized by this tracker.
 
+## Local slices added October 8 (source-tested; no hosted proof)
+
+- F02: `lfs-object-store.ts` (hash/size verified, per-repository quota, no partial storage).
+- F04: `base-branch-change.ts` (retarget marks reviews stale, feeds the merge gate).
+- F05: `issue-milestones.ts`, `issue-bulk.ts` (capped at 100), `issue-relations.ts` (cycles refused), `issue-templates.ts`.
+- F07/F08: `polls.ts`, `snippets.ts`, `follows.ts`, `contribution-visibility.ts`.
+- F10/F13/F14: `workflow-parser.ts`, `dependency-advisories.ts`, `webhook-signature.ts` (5-minute replay window), `oauth-scopes.ts` (exact redirect, PKCE S256).
+
 ## Active ticket ledger
 
 | Ticket | Status | Primary owner | Next acceptance action |
