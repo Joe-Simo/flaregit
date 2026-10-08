@@ -3254,9 +3254,13 @@ code-owner rule. The gate reports every blocker. Lint and typecheck pass.
 4 pass) resolves merge, squash or rebase against the repository policy. An omitted method uses the default; a disabled method
 is refused even when requested explicitly; a policy with no enabled method, or a disabled default, is refused.
 
-**Still open for F04 (local):** drafts, review requests, multiline and inline threads, suggested edits, resolution, base-branch
-changes, fork permissions, stacked changes, merge queues, and explicit revert. These are
-local engineering and are scheduled after this slice. Hosted merge into Artifacts-backed branches needs owner confirmation.
+**Review drafts and threads (source-tested, October 8):** `src/core/review-threads.ts` (`tests/review-threads.test.ts`, 4 pass).
+Drafts stay private to their author until published, and publishing affects only that author's drafts. Threads are anchored to a
+repository-relative path and a line of at least 1 (no traversal or absolute paths). Comments are limited to 65,536 characters.
+Only a participant who has published can resolve a thread, and a resolved thread cannot be resolved again.
+
+**Still open for F04 (local):** review requests, suggested edits, base-branch changes, fork permissions, stacked changes, merge
+queues, and explicit revert. Hosted merge into Artifacts-backed branches needs owner confirmation.
 
 Complete drafts, review requests, required approvals, CODEOWNERS, multiline/inline threads, suggested edits, resolution, stale approvals, base changes, fork permissions, stacked changes, merge queues, merge/squash/rebase policies, and explicit revert. Retain original contributor attribution and verifiable repair intent. Platform policy—not an agent—controls gate satisfaction.
 
