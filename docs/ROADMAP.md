@@ -2923,6 +2923,15 @@ Keep payments disabled for the competition. For authentication, either obtain an
 
 **Pass:** the deployed architecture and its public description match approved reality; fresh login, logout, session expiry, member removal, and denied access pass. A billing provider failure cannot prevent repository reads or reviews. Unresolved approval is BLOCKED, not a fake Cloudflare-only claim.
 
+### C02 local source gate — October 8, 2026 (source-tested only)
+
+- HEAD `c1390b9`: `bun run lint` and `bun run typecheck` exit 0.
+- All 24 `tests/c02-*.test.ts` and `tests/untrusted-execution*.test.ts` files run one at a time: 84 pass, 0 fail,
+  with `FLAREGIT_UNTRUSTED_LOCAL_PROOF_IMAGE=flaregit-untrusted-c02-local` (the local `linux/amd64` image built from
+  `Dockerfile.untrusted` on this commit, 104,598,007 bytes).
+- Status: source-tested and local-image-tested only. No hosted Cloudflare receipt, no synthetic canary run, and no
+  cloud allocation was produced. C02's hosted pass criteria remain open and need an approved spend ceiling.
+
 ### C02 — replace assumed sandbox trust with demonstrated boundaries
 
 **Dependencies:** C00. **Budget:** two days; highest technical priority. **Starting files:** `integrator.ts`, `src/core/verification/execution.ts`, `workflow.ts`, build/verification modules, Dockerfile, Wrangler configuration.
