@@ -2508,26 +2508,26 @@ checkboxes, or submission actions were performed. Demo remains deferred by owner
 
 | Ticket | Status | Owner | Scheduling |
 | --- | --- | --- | --- |
-| F01 — repository lifecycle (R1; after C05) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F02 — Git transport, repository size and object integrity (R1; after C03) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F03 — code experience and search (R1; after C06) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F04 — pull-request and branch-policy parity (R1; after C04/C06) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F05 — issues and triage (R1; after C06) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F06 — project planning (R1; after F05) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F07 — discussions, documentation and snippets (R1; after F05) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F08 — people, discovery and notifications (R1; after F05/F07) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F09 — organizations and access (R1; after C01/C05) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F10 — CI engine and runner compatibility (R2; after C02/C08/F09) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F11 — releases, static sites and deployments (R2; after C07/F10) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F12 — packages and registries (R2; after F09/F10) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F13 — code and supply-chain security features (R2; after F09/F10/F12) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F14 — APIs, apps and ecosystem interoperability (R1 core; R2 expansion; after C08/F09) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F15 — complete migration and exit (R1; after F01–F09/C08; extend for R2 objects) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F16 — developer environments and agent interoperability (R2; after C02/F10/F14) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F17 — clients and accessibility (R3; after F03–F09/F14) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F18 — commercial and community operations (R3; after usage/authorization foundations) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F19 — operations, enterprise and service trust (R3; start relevant safeguards in C) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F20 — finite parity certification and stop (R3; after all included tickets) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F01 — repository lifecycle (R1; after C05) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F02 — Git transport, repository size and object integrity (R1; after C03) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F03 — code experience and search (R1; after C06) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F04 — pull-request and branch-policy parity (R1; after C04/C06) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F05 — issues and triage (R1; after C06) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F06 — project planning (R1; after F05) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F07 — discussions, documentation and snippets (R1; after F05) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F08 — people, discovery and notifications (R1; after F05/F07) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F09 — organizations and access (R1; after C01/C05) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F10 — CI engine and runner compatibility (R2; after C02/C08/F09) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F11 — releases, static sites and deployments (R2; after C07/F10) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F12 — packages and registries (R2; after F09/F10) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F13 — code and supply-chain security features (R2; after F09/F10/F12) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F14 — APIs, apps and ecosystem interoperability (R1 core; R2 expansion; after C08/F09) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F15 — complete migration and exit (R1; after F01–F09/C08; extend for R2 objects) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F16 — developer environments and agent interoperability (R2; after C02/F10/F14) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F17 — clients and accessibility (R3; after F03–F09/F14) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F18 — commercial and community operations (R3; after usage/authorization foundations) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F19 — operations, enterprise and service trust (R3; start relevant safeguards in C) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F20 — finite parity certification and stop (R3; after all included tickets) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
 
 ## C00 evidence reconciliation
 
