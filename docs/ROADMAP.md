@@ -3126,6 +3126,11 @@ Reference inventory: `https://docs.github.com/en/repositories`.
 size limit checked before any upload) and content-derived verification (an object is accepted only when its actual
 bytes match the declared size and SHA-256 OID). Evidence: `tests/git-lfs.test.ts` (5 pass); lint and typecheck pass.
 
+Existing local coverage re-run on October 8: exact advertised-ref parsing (`tests/exact-git-ref.test.ts`, 5 pass) and
+tag Git behavior (`tests/tag-git.test.ts`, 7 pass). Gitlink and submodule handling is covered by existing tests
+(for example `tests/git-migration-inventory.test.ts`). Remaining local F02 work: commit signature verification status,
+which needs a real signature parser and key handling (not started).
+
 **Still open for F02, not closable without spend:** the R2-backed LFS object store and its HTTP endpoints (billed R2
 storage), stock Git and Git LFS client acceptance against the deployed Worker (hosted), and the artifact-backed
 transport. Blocked until the owner approves that spend. Local work still open: branch/tag/signature behavior,
