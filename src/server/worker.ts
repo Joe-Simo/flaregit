@@ -703,6 +703,27 @@ export default {
       }
       if (path === "/me" && method === "GET") return json({ operator: operators.includes(accountKey) });
 
+      // ----- F02 trusted signing keys: signed-in human session only -----
+      if (path === "/signing-keys") {
+        if (auth.viaToken) return text("Signing keys require a signed-in human session", 403);
+        if (method === "GET") return json({ keys: (await account.trustedSigningKeys()).map((key) => ({ type: key.type, blob: key.blob, comment: key.comment })) });
+        if (method === "POST") {
+          const input = await body<{ key?: unknown }>();
+          if (Object.keys(input).some((field) => field !== "key")) return text("Signing keys accept only the key field", 400);
+          const result = await account.addTrustedSigningKey(input.key);
+          if (!result.ok) return text(result.error, 400);
+          return json({ keys: result.keys.map((key) => ({ type: key.type, blob: key.blob, comment: key.comment })) });
+        }
+        if (method === "DELETE") {
+          const input = await body<{ blob?: unknown }>();
+          if (Object.keys(input).some((field) => field !== "blob")) return text("Removal accepts only the blob field", 400);
+          const result = await account.removeTrustedSigningKey(input.blob);
+          if (!result.ok) return text(result.error, 400);
+          return json({ keys: result.keys.map((key) => ({ type: key.type, blob: key.blob, comment: key.comment })) });
+        }
+        return text("Signing keys accept GET, POST or DELETE", 405);
+      }
+
       // ----- profile -----
       if (path === "/profile" && method === "GET") { const publication = await account.publicProfileState(); return json({ ...publication.profile, visibility: publication.visibility, version: publication.version, moderation: ownerModerationNotice(publication.moderation) }); }
       if (path === "/profile/visibility" && method === "PUT") {

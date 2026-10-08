@@ -1,5 +1,6 @@
 import {applyLifecycleAction, initialLifecycle, type LifecycleAction, type LifecycleActor, type LifecycleResult, type RepositoryLifecycle} from "../core/repository-lifecycle";
 import {normalizeTopics} from "../core/repository-topics";
+import {addTrustedKey, removeTrustedKey, type TrustedKey, type TrustedKeyResult} from "../core/trusted-keys";
 import {BranchHttpAttempts} from "./branch-http-attempts";
 import {inspectHttpBranches} from "./branch-http-inventory";
 import {freezeContributionAttribution,ContributionAttributionLedger,assertJournalAttribution} from "./contribution-attribution";
@@ -597,6 +598,9 @@ export interface Ledger {
   inboxUnread(): Promise<{ direct: number; activity: number }>;
   domainsFor(projectId: string): Promise<DomainRow[]>;
   getProfile(): Promise<Profile>;
+  trustedSigningKeys(): Promise<TrustedKey[]>;
+  addTrustedSigningKey(line: unknown): Promise<TrustedKeyResult>;
+  removeTrustedSigningKey(blob: unknown): Promise<TrustedKeyResult>;
   publicProfileState(): Promise<PublicProfileState>;
   peopleSnapshot():Promise<PeopleSnapshot>;
   configureDiscovery(input:unknown,userId:string):Promise<ReturnType<CommunityPeople["state"]>>;
@@ -4256,6 +4260,29 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   // ---- identity (profile on the account instance; handle registry on the global instance) ----
+  /** F02: trusted SSH signing keys for this account; empty when none are registered. */
+  async trustedSigningKeys(): Promise<TrustedKey[]> {
+    this.ensureSigningKeyTable();
+    const row = this.ctx.storage.sql.exec<{ doc: string }>("SELECT doc FROM trusted_signing_keys WHERE id = 1").toArray()[0];
+    return row ? (JSON.parse(row.doc) as TrustedKey[]) : [];
+  }
+  async addTrustedSigningKey(line: unknown): Promise<TrustedKeyResult> {
+    const result = addTrustedKey(await this.trustedSigningKeys(), line);
+    if (result.ok) this.saveSigningKeys(result.keys);
+    return result;
+  }
+  async removeTrustedSigningKey(blob: unknown): Promise<TrustedKeyResult> {
+    const result = removeTrustedKey(await this.trustedSigningKeys(), blob);
+    if (result.ok) this.saveSigningKeys(result.keys);
+    return result;
+  }
+  private ensureSigningKeyTable(): void {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS trusted_signing_keys (id INTEGER PRIMARY KEY CHECK (id = 1), doc TEXT NOT NULL)");
+  }
+  private saveSigningKeys(keys: TrustedKey[]): void {
+    this.ensureSigningKeyTable();
+    this.ctx.storage.sql.exec("INSERT INTO trusted_signing_keys (id, doc) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET doc = excluded.doc", JSON.stringify(keys));
+  }
   async getProfile(): Promise<Profile> {
     const row = this.ctx.storage.sql.exec<{ doc: string }>("SELECT doc FROM profile WHERE id = 1").toArray()[0];
     return row ? (JSON.parse(row.doc) as Profile) : { handle: "", displayName: "", bio: "", joinedAt: new Date().toISOString() };

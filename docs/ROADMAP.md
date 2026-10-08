@@ -3192,8 +3192,11 @@ it verifies ssh-ed25519 SSHSIG signatures made by `ssh-keygen -Y sign -n git` ag
 other namespaces, untrusted keys, other key types, tampered bytes and non-SSH input. Test fixtures were generated locally with
 `ssh-keygen` and checked with `ssh-keygen -Y check-novalidate`. The trusted-key registry is in `src/core/trusted-keys.ts`
 (`tests/trusted-keys.test.ts`, 5 pass): it accepts only ssh-ed25519 authorized-key lines, validates the blob, de-duplicates,
-caps each user at 20 keys, refuses removal of unknown keys, and feeds the SSH verifier. Remaining F02 work: storing the
-registry on the account (wiring), GPG (OpenPGP) and X.509 verification, and connecting verification status to the commit view.
+caps each user at 20 keys, refuses removal of unknown keys, and feeds the SSH verifier. The registry is stored on the
+account in the Durable Object (`trusted_signing_keys`) and exposed at `/api/signing-keys` (GET, POST, DELETE) for a
+signed-in human session only; `tests/signing-keys-http.test.ts` (1 pass; 15 assertions in child mode) covers listing, idempotent
+add, refusal of other key types and extra fields, unknown removal, wrong methods and anonymous access. Remaining F02 work:
+GPG (OpenPGP) and X.509 verification, and connecting verification status to the commit view.
 
 **Still open for F02, not closable without spend:** the R2-backed LFS object store and its HTTP endpoints (billed R2
 storage), stock Git and Git LFS client acceptance against the deployed Worker (hosted), and the artifact-backed
