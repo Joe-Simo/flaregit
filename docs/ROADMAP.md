@@ -3195,8 +3195,11 @@ other namespaces, untrusted keys, other key types, tampered bytes and non-SSH in
 caps each user at 20 keys, refuses removal of unknown keys, and feeds the SSH verifier. The registry is stored on the
 account in the Durable Object (`trusted_signing_keys`) and exposed at `/api/signing-keys` (GET, POST, DELETE) for a
 signed-in human session only; `tests/signing-keys-http.test.ts` (1 pass; 15 assertions in child mode) covers listing, idempotent
-add, refusal of other key types and extra fields, unknown removal, wrong methods and anonymous access. Remaining F02 work:
-GPG (OpenPGP) and X.509 verification, and connecting verification status to the commit view.
+add, refusal of other key types and extra fields, unknown removal, wrong methods and anonymous access. GPG verification is in
+`src/core/gpg-signature.ts` (`tests/gpg-signature.test.ts`, 4 pass), using the `openpgp` library (6.3.2, pure JavaScript,
+Workers-compatible) against a key and signature produced by GnuPG 2.5 and checked with `gpg --verify`. It accepts only a
+signature that verifies against a trusted key, and reports that key's uppercase fingerprint. Remaining F02 work: storing trusted
+GPG keys on the account (wiring like the SSH keys), X.509 verification, and connecting verification status to the commit view.
 
 **Still open for F02, not closable without spend:** the R2-backed LFS object store and its HTTP endpoints (billed R2
 storage), stock Git and Git LFS client acceptance against the deployed Worker (hosted), and the artifact-backed
