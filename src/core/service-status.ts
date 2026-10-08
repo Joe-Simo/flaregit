@@ -15,7 +15,7 @@ export type ServiceStatus = "operational" | "degraded" | "unknown";
 export function computeStatus(checks: readonly HealthCheck[], now: number, maxAgeMs: number): ServiceStatus {
   if (checks.length === 0) return "unknown";
   if (checks.some((check) => !check.ok)) return "degraded";
-  if (checks.some((check) => now - check.checkedAt > maxAgeMs)) return "unknown";
+  if (!Number.isFinite(now) || !Number.isFinite(maxAgeMs) || maxAgeMs < 0 || checks.some((check) => !Number.isFinite(check.checkedAt) || check.checkedAt > now || now - check.checkedAt > maxAgeMs)) return "unknown";
   return "operational";
 }
 

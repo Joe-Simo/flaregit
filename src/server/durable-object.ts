@@ -1,3 +1,15 @@
+import {captureOperationalBackup,encryptOperationalBackup,decryptOperationalBackup,operationalHash,OperationalBackupRetention,type BackupScope,type EncryptedOperationalBackup} from './operational-backup';
+import {SecurityStore} from './security-store';
+import {SecurityReportError,type SecurityImport,type SecurityTriage} from '../core/security-report';
+import {OrganizationAccessLedger,organizationDocumentSchema,type OrganizationAccessSnapshot,type OrganizationRepositoryRole} from './organization-access';
+import {organizationMutationSchema,type OrganizationMutation} from './organization-requests';
+import {DurableSnippets,type SnippetWrite} from './snippet-store';
+import {InboxPreferences,type InboxPreference} from "./inbox-preferences";
+import {MetadataArchives,MetadataArchiveError,type MetadataArchive} from "./metadata-archive";
+import {IssueFeatureStore,type IssueFeatureWrite} from './issue-feature-store';
+import {PlanningStore,PlanningError,type PlanningMutation} from './planning-store';
+import {DurableWikiStore} from './wiki-store';
+import type {SaveRequest,HistoryOptions} from '../core/wiki';
 import {applyLifecycleAction, initialLifecycle, type LifecycleAction, type LifecycleActor, type LifecycleResult, type RepositoryLifecycle} from "../core/repository-lifecycle";
 import {normalizeTopics} from "../core/repository-topics";
 import {addTrustedKey, removeTrustedKey, type TrustedKey, type TrustedKeyResult} from "../core/trusted-keys";
@@ -43,6 +55,7 @@ import {AutoIntegrationDispatch,type AutoIntegrationFacts} from "./auto-integrat
 import {admitRun} from "./projects";
 import {planLimits} from "./polar";
 import {createNativeTag,inspectNativeTags,type TagCreationIdentity,type TagNativeOwnership} from "./tag-git";
+import {ReleaseAssets,type ReleaseAssetInput} from "./release-assets";
 import {ReleaseRecords,type ReleaseContent} from "./release-records";
 import {RepositoryInvitations,type InvitationGrant} from "./repository-invitations";
 import {MirrorExecutions,mapPolicyMirrorAuthority,type MirrorExecutionRecord,type MirrorExecutionScope} from "./mirror-execution";
@@ -132,7 +145,7 @@ import type { Env } from "./env.js";
 import { accountKeyFor,newProjectId,canonicalNameFor,managedBudget, accountOf, projectOf, globalOf } from "./projects.js";
 import { isCommandPolicy,isGitIntegrityPolicy,GIT_INTEGRITY_POLICY, settingsFor } from "../core/command-policy.js";
 import { VERIFIER_IDENTITIES } from "../core/verification-identities.js";
-import { RepositoryDeployments,type AcceptedDeploymentTarget,type DeploymentRecord } from "./deployments.js";
+import { RepositoryDeployments,type AcceptedDeploymentTarget,type DeploymentRecord,type DeploymentArtifactParameters } from "./deployments.js";
 import { RepositoryConnections, type ConnectionMetadata, type CallbackReceipt } from "./connections.js";
 import type { IntegrationCallback, IntegrationCapability } from "./integration-auth.js";
 import { externalCheckGate, type ExternalCheckPolicy, type ExternalCheckState } from "../core/external-checks.js";
@@ -142,7 +155,7 @@ import type { ImportJob } from "./import-job.js";
 import type { PublicRepositoryGrant } from "./public-repositories.js";
 import { AgentRunLedger, type AgentRunInput, type AgentRunRecord, type AgentRunClaim } from "./agent-run-ledger.js";
 import { actorName, RepositoryPublicCommunity, type PublicCommunityActor, type PublicCommunityPolicy, type PublicPost, type ContributionRequest } from "./public-community.js";
-export interface RepositoryReadContext { projectId:string; incarnation:string|null; canonicalRepoName:string; repoName:string; ownerId:string; accountKey:string; publicationVersion?:number; acceptedCommit?:string; taskBase?:string|null; taskCommit?:string|null; taskBranch?:string;taskContributorId?:string;taskInitiatorId?:string; candidateId?:string; candidateCommit?:string; candidateBase?:string|null; candidateInputCommit?:string; candidateInputBase?:string|null;retainedInputReceiptId?:string }
+export interface RepositoryReadContext { projectId:string; incarnation:string|null; canonicalRepoName:string; repoName:string; ownerId:string; accountKey:string; publicationVersion?:number; acceptedCommit?:string; taskBase?:string|null; taskCommit?:string|null; taskBranch?:string;taskContributorId?:string;taskInitiatorId?:string; candidateId?:string; candidateCommit?:string; candidateBase?:string|null; candidateInputCommit?:string; candidateInputBase?:string|null;retainedInputReceiptId?:string;organizationSource?:{id:string;revision:number} }
 export type OwnerRebaseRecoveryResult={ok:true;receipt:RebaseRecoveryReceipt}|{ok:false;status:409|503|429;error:string;report?:RebaseRecoveryReport};
 export type OwnerRebaseResumeResult={ok:true;attempt:RebaseResumeAttempt}|{ok:false;status:409|503|429;error:string;report?:RebaseRecoveryReport};
 export type OwnerRebaseApplication=RebaseRecoveryReport & {resumeAvailable:boolean;resume?:{id:string;generation:number;dispatch:RebaseResumeAttempt["dispatch"];nativeState:RebaseResumeAttempt["nativeState"];terminal?:RebaseResumeAttempt["terminal"];pauseReason?:string}};
@@ -224,6 +237,7 @@ export interface TokenScope {
 
 export interface IssueRow {
   importedOrigin?:ImportedConversationOrigin|null;
+  discussionOrigin?:ReturnType<RepositoryDiscussions['conversionOrigin']>;
   number: number;
   title: string;
   body: string;
@@ -406,7 +420,7 @@ export interface Ledger {
   nativeComputeFailure(key: string): Promise<boolean>;
   setNativeComputeFailure(key: string, failed: boolean): Promise<void>;
   nativeComputeStatus(key: string): Promise<{ active: boolean; sandboxName: string; token: string; deadline: number } | null>;
-  existingDeploymentRequest(target: AcceptedDeploymentTarget, serviceId: string, environment: string, key: string, actorId: string): Promise<DeploymentRecord | null>;
+  existingDeploymentRequest(target: AcceptedDeploymentTarget, serviceId: string, environment: string, key: string, actorId: string,artifactInput?:DeploymentArtifactParameters): Promise<DeploymentRecord | null>;
   claimNativeCompute(key: string): Promise<string | null>;
   finishNativeCompute(key: string, token: string): Promise<void>;
   reserveRepositoryReadOperation(operationId:string,accountKey:string):Promise<CoreGitAdmission>;
@@ -471,13 +485,18 @@ export interface Ledger {
   acceptedDeploymentTargets():Promise<AcceptedDeploymentTarget[]>;
   privateRecoveryTargets():Promise<PrivateRecoveryTarget[]>;
   listDeployments():Promise<DeploymentRecord[]>;
-  requestDeployment(target:AcceptedDeploymentTarget,serviceId:string,environment:string,key:string,actorId:string,pin?:CommittedDeploymentPin):Promise<{kind:"created"|"duplicate";deployment:DeploymentRecord}>;
+  deploymentEnvironments():ReturnType<RepositoryController["deploymentEnvironments"]>;
+  configureDeploymentEnvironment(input:{id:string;name:string;requireApproval:boolean},revision:number,actorId:string):ReturnType<RepositoryController["configureDeploymentEnvironment"]>;
+  approveDeploymentArtifact(journalId:string,input:DeploymentArtifactParameters,actorId:string):ReturnType<RepositoryController["approveDeploymentArtifact"]>;
+  requestDeployment(target:AcceptedDeploymentTarget,serviceId:string,environment:string,key:string,actorId:string,pin?:CommittedDeploymentPin,artifactInput?:DeploymentArtifactParameters):Promise<{kind:"created"|"duplicate";deployment:DeploymentRecord}>;
   discussionList(publicOnly:boolean,actor?:PublicCommunityActor):Promise<ReturnType<RepositoryDiscussions["list"]>>;
   publicDiscussionActivity(query:string,ids?:string[]):Promise<DiscussionTopic[]>;
   publicDiscussionActivitySnapshot(ids:string[]):Promise<{directory:DirectoryState;grant:PublicGrantMetadata|null;topics:DiscussionTopic[]}>;
   discussionTopic(id:string,publicOnly:boolean,actor?:PublicCommunityActor):Promise<ReturnType<RepositoryDiscussions["topic"]>>;
   discussionSettings(actor:PublicCommunityActor,input?:unknown):Promise<{enabled:boolean}>;
   discussionPermissions(actor:PublicCommunityActor,id:string,publicOnly:boolean,canAdminister?:boolean):Promise<ReturnType<RepositoryDiscussions["permissions"]>>;
+  discussionFeature(actor:PublicCommunityActor,operation:'poll'|'subscription'|'convert',id:string,input:unknown,publicOnly:boolean,canAdminister?:boolean):Promise<ReturnType<RepositoryDiscussions['pollMutate']>|ReturnType<RepositoryDiscussions['subscribe']>|ReturnType<RepositoryDiscussions['convert']>>;
+  discussionSubscriptions(actor:PublicCommunityActor,publicOnly:boolean):Promise<ReturnType<RepositoryDiscussions['subscriptions']>>;
   discussionMutate(actor:PublicCommunityActor,operation:"create"|"reply"|"edit"|"remove"|"control",input:unknown,id:string|undefined,publicOnly:boolean,canAdminister?:boolean):Promise<ReturnType<RepositoryDiscussions["create"]>>;
   publicCommunity(publicOnly?: boolean): Promise<{ policy: PublicCommunityPolicy; posts: PublicPost[] }>;
   configurePublicCommunity(policy: PublicCommunityPolicy, confirmed: boolean, actor: PublicCommunityActor): Promise<PublicCommunityPolicy>;
@@ -490,6 +509,9 @@ export interface Ledger {
   decidePublicContribution(actor: PublicCommunityActor, requestId: string, decision: "approved" | "rejected", confirmedPrivateAccess: boolean): Promise<ContributionRequest>;
   reconcileContributorRegistrations(): Promise<void>;
   cancelContributorRegistration(userId: string): Promise<void>;
+  snippetsList:RepositoryController["snippetsList"];
+  snippetRead:RepositoryController["snippetRead"];
+  snippetSave:RepositoryController["snippetSave"];
   accountLifecycle(): Promise<"active" | "deleting" | "deleted">;
   previewAvailable(): Promise<boolean>;
   beginAccountDeletion(): Promise<void>;
@@ -576,12 +598,32 @@ export interface Ledger {
   externalChecks(candidateId: string): Promise<ExternalCheckState | null>;
   registerExternalRun(candidateId: string, checkId: string, runId: string): Promise<ExternalCheckState>;
   acceptIntegrationCallback(callback: IntegrationCallback): Promise<CallbackReceipt>;
+  organizations: RepositoryController['organizations'];
+  organizationCreate: RepositoryController['organizationCreate'];
+  organizationRead: RepositoryController['organizationRead'];
+  organizationMutate: RepositoryController['organizationMutate'];
+  organizationSource: RepositoryController['organizationSource'];
+  synchronizeOrganization: RepositoryController['synchronizeOrganization'];
+  repositoryAccess: RepositoryController['repositoryAccess'];
   listProjects(): Promise<ProjectRow[]>;
   addProject(p: { id: string; name: string; role: "owner" | "member"; kind: string }): Promise<void>;
   removeProject(id: string): Promise<void>;
+  securityRead: RepositoryController['securityRead'];
+  securityImport: RepositoryController['securityImport'];
+  securityTriage: RepositoryController['securityTriage'];
+  planningRead: RepositoryController['planningRead'];
+  planningExport: RepositoryController['planningExport'];
+  planningMutate: RepositoryController['planningMutate'];
+  wikiList: RepositoryController['wikiList'];
+  wikiRead: RepositoryController['wikiRead'];
+  wikiHistory: RepositoryController['wikiHistory'];
+  wikiDiff: RepositoryController['wikiDiff'];
+  wikiSave: RepositoryController['wikiSave'];
+  wikiRevert: RepositoryController['wikiRevert'];
   roleOf(userId: string): Promise<"owner" | "member" | null>;
   addMember(userId: string, role: "owner" | "member", label?: string): Promise<void>;
   removeMember(userId: string): Promise<void>;
+  removeRepositoryMember(userId: string, actor: HumanDecisionActor, credentialHash?: string, sessionExpiresAt?: number): Promise<void>;
   listMembers(): Promise<Array<{ user_id: string; role: string; label: string | null; added_at: string }>>;
   peopleAttributionSnapshot(userId:string):Promise<{stamp:string;members:Array<{user_id:string;role:string;label:string|null;added_at:string}>;tasks:PeopleContribution[];writers:PeopleWriter[];acceptedContributions:Array<{candidateId:string;acceptedCommit:string;acceptedAt:string;attribution:import("../core/types").FrozenContributionAttribution[]|null}>}>;
   assertPeopleAttributionSnapshot(userId:string,stamp:string):Promise<boolean>;
@@ -593,7 +635,10 @@ export interface Ledger {
   createInvite(createdBy: string): Promise<string>;
   acceptInvite(token: string, userId: string, label?: string): Promise<boolean>;
   logActivity(actor: string, type: string, summary: string, opts?: { exceptUser?: string }): Promise<void>;
-  addInbox(item: { projectId: string; projectName: string; kind: "direct" | "activity"; type: string; title: string }): Promise<void>;
+  addInbox(item: { projectId: string; projectName: string; kind: "direct" | "activity"; type: string; title: string; eventKey?:string }): Promise<void>;
+  inboxPreference(projectId:string):Promise<InboxPreference>;
+  updateInboxPreference(projectId:string,input:unknown):Promise<InboxPreference>;
+  inboxSnapshot(): Promise<InboxRow[]>;
   listInbox(filter: "direct" | "activity" | "snoozed" | "archived"): Promise<InboxRow[]>;
   setInboxState(id: number, state: "unread" | "archived" | "snoozed"): Promise<void>;
   inboxUnread(): Promise<{ direct: number; activity: number }>;
@@ -619,6 +664,11 @@ export interface Ledger {
   publicAcceptedActivity(userId:string):Promise<{directory:DirectoryState;grant:PublicGrantMetadata|null;contributions:Array<{commit:string;acceptedAt:string}>}>;
   publicActivityProjects():Promise<Array<{id:string}>>;
   setPublicProfileVisibility(visibility: "public" | "private", confirmed: boolean, ownerId: string, expectedVersion?: number): Promise<void>;
+  issueFeatures(userId:string):Promise<ReturnType<IssueFeatureStore['view']>&{canManage:boolean;members:Array<{user_id:string;label:string}>}>;
+  issueFeatureUpdate(userId:string,input:IssueFeatureWrite):Promise<ReturnType<IssueFeatureStore['update']>>;
+  issueTemplatePreview(userId:string,name:string,values:Record<string,unknown>):Promise<ReturnType<IssueFeatureStore['preview']>>;
+  createTemplateIssue(userId:string,input:{title:string;name:string;values:Record<string,string|boolean>;idempotencyKey:string;expectedRevision:number;author:string}):Promise<IssueRow>;
+
   listIssues(state: "open" | "closed"): Promise<IssueRow[]>;
   getIssue(n: number): Promise<IssueRow | null>;
   createIssue(i: { title: string; body: string; author: string }): Promise<IssueRow>;
@@ -689,7 +739,9 @@ export interface Ledger {
   tagOperation(id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["tagOperation"]>;
   release(id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["release"]>;
   tagOperations(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["tagOperations"]>;
-  createRelease(input:{id:string;tagOperationId:string;title:string;notes:string},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["createRelease"]>;
+  createRelease(input:{id:string;tagOperationId:string;title:string;notes:string;prerelease?:boolean},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["createRelease"]>;
+  uploadReleaseAsset(id:string,input:ReleaseAssetInput,bytes:ArrayBuffer,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["uploadReleaseAsset"]>;
+  downloadReleaseAsset(id:string,assetId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["downloadReleaseAsset"]>;
   publishRelease(id:string,expectedRevision:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["publishRelease"]>;
   editRelease(id:string,editId:string,expectedRevision:number,content:ReleaseContent,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["editRelease"]>;
   releases(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["releases"]>;
@@ -697,6 +749,7 @@ export interface Ledger {
   setMirror(p: { target?: string; token?: string; enabled?: boolean }): Promise<void>;
   deleteMirror(): Promise<void>;
   recordMirrorRun(commit: string, status: string, detail: string): Promise<void>;
+  forumModeration(actorId:string,moderator:boolean,operation:string,id:string,input:unknown):Promise<unknown>;
   forumList(input:{category?:string;q?:string;sort?:string}):Promise<ReturnType<PlatformCommunity["list"]>>;
   forumTopic(id:string):Promise<ReturnType<PlatformCommunity["topic"]>>;
   forumCreate(actor:PublicCommunityActor,input:unknown,topicId?:string):Promise<ReturnType<PlatformCommunity["create"]>>;
@@ -806,6 +859,16 @@ export interface Ledger {
 
   revokeGitCapabilities(userId: string): Promise<void>;
   resolveDecision(decisionId: string, selectedOptionId: string, actor: HumanDecisionActor, credentialHash?: string, sessionExpiresAt?:number): Promise<{ taskIds: string[];legacyRerunId?:string;continuationWorkflowId?:string }>;
+  operationalBackupAudit(userId:string,expiresAt:number):Promise<Array<{id:string;actor:string;action:string;at:number}>>;
+  operationalBackupExport(userId:string,expiresAt:number,id:string):Promise<EncryptedOperationalBackup>;
+  operationalBackupDeleteExpired(userId:string,expiresAt:number,id:string):Promise<void>;
+  operationalBackupCreate(userId:string,expiresAt:number):Promise<{id:string;sha256:string;scope:BackupScope}>;
+  operationalBackupRead(userId:string,expiresAt:number):Promise<ReturnType<OperationalBackupRetention['exportAudit']>>;
+  operationalBackupHold(userId:string,expiresAt:number,id:string,held:boolean):Promise<void>;
+  operationalBackupRecover(userId:string,expiresAt:number,id:string):Promise<unknown>;
+  metadataArchiveExport(userId:string):Promise<{archive:MetadataArchive;sha256:string}>;
+  metadataArchiveRestore(userId:string,value:unknown,requestId:string,sha256:string,sessionExpiresAt:number):Promise<Awaited<ReturnType<MetadataArchives["restore"]>>>;
+  metadataArchiveHistory(userId:string):Promise<ReturnType<MetadataArchives["history"]>>;
   getState(): Promise<FlareGitProjectState>;
   repositoryLifecycle(): Promise<RepositoryLifecycle>;
   repositoryLifecycleTransition(action: LifecycleAction, actor: LifecycleActor): Promise<LifecycleResult>;
@@ -1434,15 +1497,19 @@ export class RepositoryController extends DurableObject<Env> {
     else { const legacy = this.legacyRecoveryTarget(); if (legacy) targets.unshift(legacy); }
     return targets;
   }
+  async deploymentEnvironments(){return new RepositoryDeployments(this.ctx.storage,this.load().projectId).environments();}
+  async configureDeploymentEnvironment(input:{id:string;name:string;requireApproval:boolean},revision:number,actorId:string){if(this.repositoryDeleting()||await this.roleOf(actorId)!=="owner")throw Error("Only owner may configure environments");return new RepositoryDeployments(this.ctx.storage,this.load().projectId).configureEnvironment(input,revision);}
+  private deploymentArtifact(target:AcceptedDeploymentTarget,input:DeploymentArtifactParameters){const scope=this.releaseScope(input.releaseId),record=new ReleaseRecords(this.ctx.storage).get(input.releaseId);if(record?.phase!=="published"||scope.source.commit!==target.commit||scope.source.tree!==target.tree||scope.source.acceptedJournalId!==target.journalId||(target.acceptedRef!==undefined&&scope.source.acceptedRef!==target.acceptedRef)||(target.acceptedRootVersion!==undefined&&scope.source.acceptedRootVersion!==target.acceptedRootVersion))throw Error("Published release must bind exact accepted deployment source");const asset=new ReleaseAssets(this.ctx.storage).list(scope).find(row=>row.id===input.assetId&&row.phase==="verified");if(!asset)throw Error("Verified immutable release asset required");return{artifactId:asset.id,digest:asset.sha256,environmentId:input.environmentId,...(input.rollbackOf?{rollbackOf:input.rollbackOf}:{})};}
+  async approveDeploymentArtifact(journalId:string,input:DeploymentArtifactParameters,actorId:string){if(this.repositoryDeleting()||await this.roleOf(actorId)!=="owner")throw Error("Only owner may approve deployments");const selected=this.selectRecordedDeployment(journalId);if(!selected)throw Error("Accepted source unavailable");const artifact=this.deploymentArtifact(selected.target,input);return{approvalId:new RepositoryDeployments(this.ctx.storage,this.load().projectId).approve(selected.target,artifact,actorId)};}
   async listDeployments():Promise<DeploymentRecord[]>{return new RepositoryDeployments(this.ctx.storage,this.load().projectId).list();}
   async acceptedDeploymentTargets():Promise<AcceptedDeploymentTarget[]>{
     const targets=await Promise.all(this.load().journal.filter(entry=>entry.state==="ACCEPTED").slice(-100).map(entry=>this.acceptedDeploymentTarget(entry.id)));
     return targets.filter((entry):entry is NonNullable<typeof entry>=>entry!==null).map(entry=>entry.target);
   }
-  async requestDeployment(target:AcceptedDeploymentTarget,serviceId:string,environment:string,key:string,actorId:string,pin?:CommittedDeploymentPin){
+  async requestDeployment(target:AcceptedDeploymentTarget,serviceId:string,environment:string,key:string,actorId:string,pin?:CommittedDeploymentPin,artifactInput?:DeploymentArtifactParameters){
     const context=await this.repositoryReadContext(actorId);if(await this.roleOf(actorId)!=="owner")throw Error("Only the owner can request a deployment");
     const selection=this.selectRecordedDeployment(target.journalId);if(!selection||JSON.stringify(selection.target)!==JSON.stringify(target))throw Error("Deployment target must match an exact accepted publication journal");
-    const ledger=new RepositoryDeployments(this.ctx.storage,this.load().projectId),duplicate=ledger.existingRequest(target,serviceId,environment,key,actorId,this.legacyPrimaryDeploymentCompatibility(selection));if(duplicate)return{kind:"duplicate" as const,deployment:duplicate};
+    const ledger=new RepositoryDeployments(this.ctx.storage,this.load().projectId),duplicate=await this.existingDeploymentRequest(target,serviceId,environment,key,actorId,artifactInput);if(duplicate)return{kind:"duplicate" as const,deployment:duplicate};
     if(!pin)throw Error("Trusted exact deployment pin required before creating an event");confirmAcceptedDeploymentSelection(selection,pin);
     const service=this.connections().signingConfig(serviceId);if(!service?.capabilities.includes("report-deployment"))throw Error("Deployment reporting service unavailable");
     if(!(await this.listWebhooks()).some(hook=>hook.active&&hook.events.split(",").includes("deployment.requested")))throw Error("Configure an active deployment.requested webhook before requesting delivery");
@@ -1450,7 +1517,8 @@ export class RepositoryController extends DurableObject<Env> {
     let deliveryIds:string[]=[];const result=this.ctx.storage.transactionSync(()=>{
       if(this.repositoryDeleting()||this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId).toArray()[0]?.role!=="owner")throw Error("Deployment owner authority changed");const current=this.selectRecordedDeployment(target.journalId);if(!current||JSON.stringify(current)!==JSON.stringify(selection))throw Error("Accepted deployment receipt changed");confirmAcceptedDeploymentSelection(current,pin);
       const freshService=this.connections().signingConfig(serviceId);if(!freshService?.capabilities.includes("report-deployment")||!this.ctx.storage.sql.exec<{events:string}>("SELECT events FROM webhooks WHERE active=1").toArray().some(hook=>hook.events.split(",").includes("deployment.requested")))throw Error("Deployment service or delivery authorization changed");
-      return ledger.request(current.target,serviceId,environment,key,actorId,event=>{deliveryIds=this.stageEvent(event.type,event.data,{id:event.id,createdAt:event.createdAt});},this.legacyPrimaryDeploymentCompatibility(current));
+      const artifact=artifactInput?{...this.deploymentArtifact(current.target,artifactInput),...(artifactInput.approvalId?{approvalId:artifactInput.approvalId}:{})}:undefined;
+      return ledger.request(current.target,serviceId,environment,key,actorId,event=>{deliveryIds=this.stageEvent(event.type,event.data,{id:event.id,createdAt:event.createdAt});},this.legacyPrimaryDeploymentCompatibility(current),artifact);
     });await Promise.all(deliveryIds.map(deliveryId=>this.enqueueWebhookDelivery(deliveryId)));return result;
   }
 
@@ -1484,12 +1552,44 @@ export class RepositoryController extends DurableObject<Env> {
     return {directory,grant,topics};
   }
   async discussionTopic(id:string,publicOnly:boolean,actor?:PublicCommunityActor){await this.assertDiscussionAccess(publicOnly,actor);return this.discussions(publicOnly).topic(id);}
-  async discussionPermissions(actor:PublicCommunityActor,id:string,publicOnly:boolean,canAdminister=false){const owner=canAdminister&&await this.roleOf(actor.userId)==="owner";await this.assertDiscussionAccess(publicOnly,actor);return this.discussions(publicOnly).permissions(actor,id,owner);}
-  async discussionMutate(actor:PublicCommunityActor,operation:"create"|"reply"|"edit"|"remove"|"control",input:unknown,id:string|undefined,publicOnly:boolean,canAdminister=false){
+  async discussionPermissions(actor:PublicCommunityActor,id:string,publicOnly:boolean,canAdminister=false){const owner=canAdminister&&await this.roleOf(actor.userId)==="owner";await this.assertDiscussionAccess(publicOnly,actor);return {...this.discussions(publicOnly).permissions(actor,id,owner),canConvert:!!this.ctx.storage.sql.exec('SELECT 1 FROM members WHERE user_id=?',actor.userId).toArray().length};}
+  async discussionSubscriptions(actor:PublicCommunityActor,publicOnly:boolean){await this.assertDiscussionAccess(publicOnly,actor);return this.discussions(publicOnly).subscriptions(actor);}
+  async discussionFeature(actor:PublicCommunityActor,operation:'poll'|'subscription'|'convert',id:string,input:unknown,publicOnly:boolean,canAdminister=false){
     await this.assertDiscussionAccess(publicOnly,actor);
     return this.ctx.storage.transactionSync(()=>{
+      const role=this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',actor.userId).toArray()[0]?.role,owner=canAdminister&&role==='owner';
+      if(!publicOnly&&!role||this.repositoryDeleting()||this.load().lifecycle?.state==='archived'||!this.discussionEnabled(publicOnly))throw Error('Discussion writing access changed');
+      const ledger=this.discussions(publicOnly);
+      if(operation==='poll')return ledger.pollMutate(actor,id,input,owner);
+      if(operation==='subscription')return ledger.subscribe(actor,id,input);
+      if(!role)throw Error('Only members can convert discussions into private repository issues');
+      return ledger.convert(actor,id,input);
+    });
+  }
+  private async deliverDiscussionNotifications(){
+    if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'repository_%_discussion_notifications' LIMIT 1").toArray().length)return;
+    for(const publicOnly of [true,false]){
+      const ledger=this.discussions(publicOnly);
+      for(const pending of ledger.pendingNotifications()){
+        try{
+          const available=()=>{if(this.repositoryDeleting()||!this.ctx.storage.sql.exec('SELECT 1 FROM members WHERE user_id=?',pending.actor_id).toArray().length)return false;try{return this.discussionEnabled(publicOnly)&&ledger.notificationAvailable(pending.topic_id,pending.entry_id,pending.actor_id);}catch{return false;}};
+          if(!available()){ledger.acknowledgeNotification(pending.event_id,pending.actor_id);continue;}
+          const account=accountOf(this.env,await accountKeyFor(pending.actor_id));
+          if(!available()){ledger.acknowledgeNotification(pending.event_id,pending.actor_id);continue;}
+          const state=this.load();
+          await account.addInbox({projectId:state.projectId,projectName:state.projectName,kind:'activity',type:`discussion.reply.${publicOnly?'public':'members'}.${pending.topic_id}`,title:'New reply in a subscribed discussion',eventKey:`discussion:${publicOnly?'public':'members'}:${pending.event_id}`});
+          ledger.acknowledgeNotification(pending.event_id,pending.actor_id);
+        }catch{/* A lost acknowledgement retains the original event for deduplicated delivery. */}
+      }
+      if(ledger.pendingNotifications().length)await this.ensureRecoveryAlarm(60000);
+    }
+  }
+  async discussionMutate(actor:PublicCommunityActor,operation:"create"|"reply"|"edit"|"remove"|"control",input:unknown,id:string|undefined,publicOnly:boolean,canAdminister=false){
+    await this.assertDiscussionAccess(publicOnly,actor);
+    if(operation==="reply")await this.ensureRecoveryAlarm(60000);
+    const result=this.ctx.storage.transactionSync(()=>{
       const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actor.userId).toArray()[0]?.role;const owner=canAdminister&&role==="owner";if(!publicOnly&&!role)throw new Error("Repository membership changed");
-      if(!this.discussionEnabled(publicOnly))throw new Error("Discussion access changed");const ledger=this.discussions(publicOnly);
+      if(this.load().lifecycle?.state==='archived'||!this.discussionEnabled(publicOnly))throw new Error("Discussion access changed");const ledger=this.discussions(publicOnly);
       if(operation==="create"){if(typeof input==="object"&&input!==null&&"category" in input&&input.category==="announcements"&&!owner)throw new Error("Announcements require maintainer");return ledger.create(actor,input);}
       if(!id)throw new Error("Discussion id required");
       if(operation==="reply")return ledger.create(actor,input,id);
@@ -1497,6 +1597,8 @@ export class RepositoryController extends DurableObject<Env> {
       if(operation==="remove")return ledger.remove(actor,id,input,owner);
       return ledger.control(actor,id,input,owner);
     });
+    if(operation==="reply")this.ctx.waitUntil(this.deliverDiscussionNotifications());
+    return result;
   }
   private community() { return new RepositoryPublicCommunity(this.ctx.storage, this.load().projectId); }
   private requirePublicRepository(): void {
@@ -1836,6 +1938,42 @@ export class RepositoryController extends DurableObject<Env> {
     const scope:CandidateReviewScope=candidateReviewScopeSchema.parse({candidateId,commit:candidate.candidateCommit,tree:evidence.candidateTree,base:candidate.expectedAcceptedBase,...(candidate.acceptedTarget?.kind==="unborn"?{unbornTarget:acceptedTargetSchema.parse(candidate.acceptedTarget)}:{}),verificationPolicyVersion:candidate.frozenPolicyVersion,reviewPolicyVersion:policy.version,authorIds:policy.authorIds});const frozen=ledger.frozen(candidateId);if(frozen){if(JSON.stringify(frozen.scope)!==JSON.stringify(scope))throw Error("Candidate review scope changed");}else ledger.freeze(scope,()=>{if(this.load().candidates[candidateId]?.candidateCommit!==scope.commit)throw Error("Candidate review scope changed");});return scope;
   }
   private async delegatedReviewGate(candidateId:string){const scope=this.delegatedReviewScope(candidateId),ledger=this.delegatedReviews(),users=this.ctx.storage.sql.exec<{reviewer_id:string}>("SELECT DISTINCT reviewer_id FROM candidate_approval_events WHERE candidate_id=? LIMIT 101",candidateId).toArray();if(users.length>100)throw Error("Review authority set exceeds bounded validation");const active=new Set<string>();for(const user of users){if(await this.roleOf(user.reviewer_id)&&await accountOf(this.env,await accountKeyFor(user.reviewer_id)).accountLifecycle()==="active")active.add(user.reviewer_id);}const current=this.delegatedReviewScope(candidateId);if(JSON.stringify(scope)!==JSON.stringify(current))throw Error("Candidate changed during reviewer authorization");return ledger.gate(current,user=>active.has(user)&&this.ctx.storage.sql.exec("SELECT user_id FROM members WHERE user_id=?",user).toArray().length>0);}
+  private async planningAccess(actorId:string,write=false){
+    const authority=await this.repositoryAccessFence(actorId,write);authority.assert();
+    if(write&&this.load().lifecycle?.state==='archived')throw Error('Repository is archived and read-only');
+    return {store:new PlanningStore(this.ctx.storage),owner:authority.role==='admin',assert:authority.assert};
+  }
+  async planningRead(actorId:string){const {store,assert}=await this.planningAccess(actorId);assert();return store.snapshot();}
+  async planningExport(actorId:string){const {store,assert}=await this.planningAccess(actorId);assert();return store.export();}
+  async planningMutate(actorId:string,input:PlanningMutation){const {store,owner,assert}=await this.planningAccess(actorId,true);assert();try{return {ok:true as const,value:store.mutate(input,owner)};}catch(error){if(error instanceof PlanningError)return {ok:false as const,error:error.message,status:error.status};throw error;}}
+
+  private async securityAccess(actorId:string,write=false){
+    const authority=await this.repositoryAccessFence(actorId,write);authority.assert();
+    if(write&&this.load().lifecycle?.state==='archived')throw new SecurityReportError('Repository is archived and read-only',409);
+    return new SecurityStore(this.ctx.storage);
+  }
+  async securityRead(actorId:string){return (await this.securityAccess(actorId)).read();}
+  async securityImport(actorId:string,input:SecurityImport){
+    const store=await this.securityAccess(actorId,true),state=this.load();
+    if(state.acceptedState.currentCommit!==input.commit)throw new SecurityReportError('Import reports for the current accepted commit; older revisions cannot resolve current alerts',409);
+    const tree=state.acceptedBaseline?.commit===input.commit?state.acceptedBaseline.tree:Object.values(state.evidence).find(evidence=>evidence.status==='passed'&&evidence.candidateCommit===input.commit)?.candidateTree;
+    if(!tree||tree!==input.tree)throw new SecurityReportError('The report must identify the recorded accepted commit and tree',409);
+    return store.import(input,actorId);
+  }
+  async securityTriage(actorId:string,id:string,input:SecurityTriage){return (await this.securityAccess(actorId,true)).triage(id,input,actorId);}
+
+  private async wikiAccess(actorId:string,write=false){
+    const authority=await this.repositoryAccessFence(actorId,write);authority.assert();
+    if(write&&this.load().lifecycle?.state==='archived')throw Error('Repository is archived and read-only');
+    return {store:new DurableWikiStore(this.ctx.storage),assert:authority.assert};
+  }
+  async wikiList(actorId:string){const {store,assert}=await this.wikiAccess(actorId);assert();return store.list();}
+  async wikiRead(actorId:string,slug:string,revision?:number){const {store,assert}=await this.wikiAccess(actorId);assert();const result=store.read(slug,revision);return result.ok?{...result,value:{...result.value,archiveOrigin:new MetadataArchives(this.ctx.storage).origin("wiki_revisions",`${result.value.slug}:${result.value.id}`)}}:result;}
+  async wikiHistory(actorId:string,slug:string,options:HistoryOptions){const {store,assert}=await this.wikiAccess(actorId);assert();return store.history(slug,options);}
+  async wikiDiff(actorId:string,slug:string,from:number,to:number){const {store,assert}=await this.wikiAccess(actorId);assert();return store.diff(slug,from,to);}
+  async wikiSave(actorId:string,slug:string,input:Omit<SaveRequest,'author'>){const {store,assert}=await this.wikiAccess(actorId,true);assert();return store.save(slug,{...input,author:actorId});}
+  async wikiRevert(actorId:string,slug:string,to:number,expectedRevision:number){const {store,assert}=await this.wikiAccess(actorId,true);assert();return store.revert(slug,to,actorId,expectedRevision);}
+
   /** F01: current archive state. Absent stored state reads as active. */
   async repositoryLifecycle():Promise<RepositoryLifecycle>{return structuredClone(this.load().lifecycle??initialLifecycle());}
   /** F01: archive or unarchive. Only the owner-level caller may change state; writes are saved with the project document. */
@@ -2437,6 +2575,53 @@ export class RepositoryController extends DurableObject<Env> {
   async admitPreviewRead():Promise<PreviewReadAdmission>{
     if(this.repositoryDeleting())throw Error("Preview repository unavailable");const state=this.load(),ownerId=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id;if(!ownerId)throw Error("Preview owner scope unavailable");const scope={projectId:state.projectId,canonicalRepoName:state.canonicalRepoName,incarnation:this.readRepositoryIncarnation(),ownerId},accountKey=await accountKeyFor(ownerId);const authorize=async()=>{if(await accountOf(this.env,accountKey).accountLifecycle()!=="active")throw Error("Preview owner account unavailable");const current=this.load();if(this.repositoryDeleting()||current.projectId!==scope.projectId||current.canonicalRepoName!==scope.canonicalRepoName||this.readRepositoryIncarnation()!==scope.incarnation||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==ownerId)throw Error("Preview ownership changed");};await authorize();const result=await globalOf(this.env).admitOwnerPreviewRead(accountKey);await authorize();return result;
   }
+  private operationalBackupAuthority(userId:string,expiresAt:number){
+    if(!this.env.OPERATIONAL_BACKUP_KEY||new TextEncoder().encode(this.env.OPERATIONAL_BACKUP_KEY).length<32)throw Error('Operator backup key is unavailable');
+    if(!Number.isFinite(expiresAt)||Date.now()>=expiresAt||this.repositoryDeleting()||this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',userId).toArray()[0]?.role!=='owner')throw Error('Current owner session required');
+  }
+  private async operationalBackupAdmission(userId:string,expiresAt:number){
+    this.operationalBackupAuthority(userId,expiresAt);const accountKey=await accountKeyFor(userId);
+    if(!(this.env.OPERATOR_ACCOUNTS??'').split(',').map(value=>value.trim()).includes(accountKey)||await accountOf(this.env,accountKey).accountLifecycle()!=='active')throw Error('Active operator owner required');
+    this.operationalBackupAuthority(userId,expiresAt);
+  }
+  private operationalBackupAuditEvent(actor:string,action:string){this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS operational_backup_audit(id TEXT PRIMARY KEY,actor TEXT NOT NULL,action TEXT NOT NULL,at INTEGER NOT NULL)');if(this.ctx.storage.sql.exec<{count:number}>('SELECT COUNT(*) AS count FROM operational_backup_audit').toArray()[0]!.count>=10000)throw Error('Operational audit capacity reached');this.ctx.storage.sql.exec('INSERT INTO operational_backup_audit VALUES(?,?,?,?)',crypto.randomUUID(),actor,action,Date.now());}
+  async operationalBackupAudit(userId:string,expiresAt:number){await this.operationalBackupAdmission(userId,expiresAt);const exists=this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='operational_backup_audit'").toArray().length;return exists?this.ctx.storage.sql.exec<{id:string;actor:string;action:string;at:number}>('SELECT id,actor,action,at FROM operational_backup_audit ORDER BY at,id LIMIT 10000').toArray():[];}
+  private operationalBackupTables(){this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS operational_backups(id TEXT PRIMARY KEY,envelope TEXT NOT NULL,sha256 TEXT NOT NULL,scope TEXT NOT NULL)');return new OperationalBackupRetention(this.ctx.storage);}
+  private operationalBackupCapacity(additionalBytes=0){const capacity=this.ctx.storage.sql.exec<{count:number;bytes:number}>('SELECT COUNT(*) AS count,COALESCE(SUM(LENGTH(CAST(envelope AS BLOB))),0) AS bytes FROM operational_backups').toArray()[0]!;if(capacity.count>=4||capacity.bytes+additionalBytes>32_000_000)throw Error('Operational backup capacity reached; release eligible backups before capture');}
+  private operationalBackupInFlight=false;
+  async operationalBackupCreate(userId:string,expiresAt:number){if(this.operationalBackupInFlight)throw Error('An operational backup operation is already running');this.operationalBackupInFlight=true;try{return await this.operationalBackupCapture(userId,expiresAt);}finally{this.operationalBackupInFlight=false;}}
+  private async operationalBackupCapture(userId:string,expiresAt:number){
+    await this.operationalBackupAdmission(userId,expiresAt);const authorize=()=>this.operationalBackupAuthority(userId,expiresAt);authorize();const retention=this.operationalBackupTables();this.operationalBackupCapacity(11_000_000);const state=this.load(),acceptedSnapshot=JSON.stringify(state.acceptedState);
+    const scope:BackupScope={repositoryId:state.projectId,canonicalRepository:state.canonicalRepoName,head:state.acceptedState.currentCommit,acceptedStateHash:await operationalHash(state.acceptedState)};
+    const backup=await captureOperationalBackup(this.ctx.storage,scope,this.env.OPERATIONAL_BACKUP_KEY!,authorize),envelope=await encryptOperationalBackup(backup,this.env.OPERATIONAL_BACKUP_KEY!),id=crypto.randomUUID(),envelopeText=JSON.stringify(envelope);
+    await this.operationalBackupAdmission(userId,expiresAt);this.ctx.storage.transactionSync(()=>{authorize();this.operationalBackupCapacity(new TextEncoder().encode(envelopeText).length);if(JSON.stringify(this.load().acceptedState)!==acceptedSnapshot)throw Error('Accepted state changed while backing up');this.ctx.storage.sql.exec('INSERT INTO operational_backups VALUES(?,?,?,?)',id,envelopeText,backup.sha256,JSON.stringify(scope));retention.register(id,Date.now(),authorize);this.operationalBackupAuditEvent(userId,`capture:${id}:${backup.sha256}`);});return {id,sha256:backup.sha256,scope};
+  }
+  async operationalBackupRead(userId:string,expiresAt:number){await this.operationalBackupAdmission(userId,expiresAt);const authorize=()=>this.operationalBackupAuthority(userId,expiresAt);authorize();return this.operationalBackupTables().exportAudit(authorize);}
+  async operationalBackupHold(userId:string,expiresAt:number,id:string,held:boolean){await this.operationalBackupAdmission(userId,expiresAt);const authorize=()=>this.operationalBackupAuthority(userId,expiresAt);authorize();this.ctx.storage.transactionSync(()=>{this.operationalBackupTables().hold(id,held,authorize);this.operationalBackupAuditEvent(userId,`${held?'hold':'release-hold'}:${id}`);});}
+  async operationalBackupExport(userId:string,expiresAt:number,id:string){await this.operationalBackupAdmission(userId,expiresAt);const row=this.ctx.storage.sql.exec<{envelope:string}>('SELECT envelope FROM operational_backups WHERE id=?',id).toArray()[0];if(!row)throw Error('Operational backup not found');return JSON.parse(row.envelope) as EncryptedOperationalBackup;}
+  async operationalBackupDeleteExpired(userId:string,expiresAt:number,id:string){await this.operationalBackupAdmission(userId,expiresAt);const authorize=()=>this.operationalBackupAuthority(userId,expiresAt);this.ctx.storage.transactionSync(()=>{this.operationalBackupTables().deleteExpired(id,Date.now(),()=>{this.ctx.storage.sql.exec('DELETE FROM operational_backups WHERE id=?',id);},authorize);this.operationalBackupAuditEvent(userId,`expire:${id}`);});}
+  async operationalBackupRecover(userId:string,expiresAt:number,id:string){if(this.operationalBackupInFlight)throw Error('An operational backup operation is already running');this.operationalBackupInFlight=true;try{return await this.operationalBackupRestore(userId,expiresAt,id);}finally{this.operationalBackupInFlight=false;}}
+  private async operationalBackupRestore(userId:string,expiresAt:number,id:string){
+    await this.operationalBackupAdmission(userId,expiresAt);const authorize=()=>this.operationalBackupAuthority(userId,expiresAt);authorize();if(!this.env.OPERATIONAL_RECOVERY||!this.env.OPERATIONAL_RECOVERY_GIT)throw Error('Isolated recovery service is unavailable');
+    const row=this.ctx.storage.sql.exec<{envelope:string;scope:string}>('SELECT envelope,scope FROM operational_backups WHERE id=?',id).toArray()[0];if(!row)throw Error('Operational backup not found');
+    const backup=await decryptOperationalBackup(JSON.parse(row.envelope),this.env.OPERATIONAL_BACKUP_KEY!),scope=JSON.parse(row.scope) as BackupScope;authorize();
+    const recoveryId=crypto.randomUUID(),destination=this.env.OPERATIONAL_RECOVERY.get(this.env.OPERATIONAL_RECOVERY.idFromName(`recovery:${scope.repositoryId}:${recoveryId}`));
+    const receipt=await destination.restore(backup,scope);await this.operationalBackupAdmission(userId,expiresAt);authorize();this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS operational_recovery_audit(id TEXT PRIMARY KEY,backup_id TEXT NOT NULL,actor TEXT NOT NULL,at INTEGER NOT NULL,receipt TEXT NOT NULL)');this.ctx.storage.sql.exec('INSERT INTO operational_recovery_audit VALUES(?,?,?,?,?)',recoveryId,id,userId,Date.now(),JSON.stringify(receipt));this.operationalBackupAuditEvent(userId,`restore-isolated:${id}:${recoveryId}`);return {recoveryId,...receipt};
+  }
+  private metadataArchiveContext(userId:string,owner=false){
+    const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",userId).toArray()[0]?.role;
+    if(!role||(owner&&role!=="owner"))throw new MetadataArchiveError(owner?"Only the owner can restore metadata":"Repository membership required",403);
+    const state=this.load();if(owner&&state.lifecycle?.state==='archived')throw new MetadataArchiveError("Repository is archived and read-only");if(!state.acceptedState.currentCommit)throw new MetadataArchiveError("Metadata archives require an accepted Git head");
+    new DurableWikiStore(this.ctx.storage);new PlanningStore(this.ctx.storage);new IssueFeatureStore(this.ctx.storage);new RepositoryDiscussions(this.ctx.storage,true);new RepositoryDiscussions(this.ctx.storage,false);new ReleaseRecords(this.ctx.storage);new MigrationConversationPublication(this.ctx.storage);
+    return {projectId:state.projectId,incarnation:this.readRepositoryIncarnation(),head:state.acceptedState.currentCommit};
+  }
+  async metadataArchiveExport(userId:string){const scope=this.metadataArchiveContext(userId),result=await new MetadataArchives(this.ctx.storage).export(scope);if(JSON.stringify(this.metadataArchiveContext(userId))!==JSON.stringify(scope))throw new MetadataArchiveError("Archive source identity changed");return result;}
+  async metadataArchiveRestore(userId:string,value:unknown,requestId:string,sha256:string,sessionExpiresAt:number){
+    const scope=this.metadataArchiveContext(userId,true),state=this.load();
+    if(Object.keys(state.tasks).length||Object.keys(state.candidates).length||state.journal.length||state.acceptedState.history.length)throw new MetadataArchiveError("Destination must contain no task or review history");
+    return new MetadataArchives(this.ctx.storage).restore(value,scope,requestId,sha256,()=>{const current=this.load();if(Object.keys(current.tasks).length||Object.keys(current.candidates).length||current.journal.length||current.acceptedState.history.length)throw new MetadataArchiveError("Destination acquired task or review history");if(JSON.stringify(this.metadataArchiveContext(userId,true))!==JSON.stringify(scope))throw new MetadataArchiveError("Destination identity changed");},()=>this.authorizeRebaseRecovery({userId,displayName:"Repository owner",viaToken:false},undefined,sessionExpiresAt));
+  }
+  async metadataArchiveHistory(userId:string){this.metadataArchiveContext(userId);return new MetadataArchives(this.ctx.storage).history();}
   async getState(): Promise<FlareGitProjectState> {
     const state=this.load(true);if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='task_target_generation_heads'").toArray().length)return state;
     if(!this.ctx.storage.sql.exec("SELECT task_id FROM task_target_generation_heads WHERE event_id IS NOT NULL LIMIT 1").toArray().length)return state;
@@ -2670,6 +2855,103 @@ export class RepositoryController extends DurableObject<Env> {
     return { applied: true };
   }
 
+  // Canonical organizations live on the global instance. Inherited grants never enter members.
+  private async organizationActor(userId:string,expiresAt:number) {
+    if (!userId || !Number.isSafeInteger(expiresAt) || Date.now()>=expiresAt || await accountOf(this.env,await accountKeyFor(userId)).accountLifecycle()!=='active') throw Error('Organization session unavailable');
+    if(Date.now()>=expiresAt) throw Error('Organization session expired');
+  }
+  async organizations(userId:string,expiresAt:number) {
+    await this.organizationActor(userId,expiresAt);
+    const ledger=new OrganizationAccessLedger(this.ctx.storage);
+    return ledger.listForUser(userId).map(doc=>this.organizationView(doc,userId));
+  }
+  private organizationView(doc:OrganizationAccessSnapshot,userId:string) {
+    const viewerRole=doc.members.find(m=>m.userId===userId)?.role??(doc.grants.some(g=>g.subject.kind==='user'&&g.subject.id===userId)?'outside':'invited');
+    if(viewerRole==='outside')return {...doc,members:[],teams:[],grants:doc.grants.filter(g=>g.subject.kind==='user'&&g.subject.id===userId),repositories:doc.grants.filter(g=>g.subject.kind==='user'&&g.subject.id===userId).map(g=>g.repositoryId),invitations:doc.invitations.filter(i=>i.userId===userId),viewerRole};
+    if(viewerRole==='invited') return {...doc,members:[],teams:[],grants:[],repositories:[],invitations:doc.invitations.filter(i=>i.userId===userId),viewerRole};
+    return {...doc,invitations:viewerRole==='owner'?doc.invitations:doc.invitations.filter(i=>i.userId===userId),viewerRole,accessSyncPending:new OrganizationAccessLedger(this.ctx.storage).pending(doc.id).length>0};
+  }
+  async organizationRead(id:string,userId:string,expiresAt:number) {
+    await this.organizationActor(userId,expiresAt);
+    const doc=new OrganizationAccessLedger(this.ctx.storage).listForUser(userId).find(d=>d.id===id);
+    if(!doc) throw Error('Organization unavailable');return this.organizationView(doc,userId);
+  }
+  async organizationCreate(name:string,userId:string,expiresAt:number) {
+    await this.organizationActor(userId,expiresAt);
+    const ledger=new OrganizationAccessLedger(this.ctx.storage);
+    if(ledger.listForUser(userId).length>=20)throw Error('Organization capacity reached');
+    return this.organizationView(ledger.createOrganization(crypto.randomUUID(),name,userId),userId);
+  }
+  async organizationSource(id:string) { return new OrganizationAccessLedger(this.ctx.storage).snapshot(id); }
+  private async reconcileOrganization(id:string) {
+    const ledger=new OrganizationAccessLedger(this.ctx.storage);
+    const deliveries=ledger.pending(id);
+    const results=await Promise.allSettled(deliveries.map(async row=>{
+      const doc=ledger.snapshot(id);if(!doc||doc.revision!==row.revision)throw Error('Organization revision changed');
+      await projectOf(this.env,row.repository_id).synchronizeOrganization(doc);
+      ledger.acknowledge(id,row.repository_id,row.revision);
+    }));
+    if(results.some(result=>result.status==='rejected')||ledger.pending(id).length)throw Error('Organization access revision saved; repository revocation fanout incomplete. Refresh and reconcile.');
+  }
+  async organizationMutate(id:string,userId:string,expiresAt:number,input:OrganizationMutation) {
+    await this.organizationActor(userId,expiresAt);const value=organizationMutationSchema.parse(input),ledger=new OrganizationAccessLedger(this.ctx.storage),doc=ledger.snapshot(id);
+    if(!doc||doc.revision!==value.expectedRevision)throw Error('Organization revision changed');
+    if(value.action!=='accept-invite'&&!doc.members.some(m=>m.userId===userId&&m.role==='owner'))throw Error('Organization owner required');
+    if(value.action==='grant'||value.action==='revoke-grant'){
+      if(await projectOf(this.env,value.repositoryId).roleOf(userId)!=='owner')throw Error('Direct repository owner required to share access');
+      await this.organizationActor(userId,expiresAt);
+    }
+    const args=[id,userId,value.expectedRevision] as const;
+    switch(value.action){
+      case 'member':ledger.setMember(...args,value.userId,value.role);break;
+      case 'remove-member':ledger.removeMember(...args,value.userId);break;
+      case 'team':ledger.createTeam(...args,value.teamId,value.name);break;
+      case 'remove-team':ledger.removeTeam(...args,value.teamId);break;
+      case 'team-member':ledger.setTeamMember(...args,value.teamId,value.userId,value.present);break;
+      case 'grant':ledger.grantRepository(...args,value.repositoryId,value.subject,value.role);break;
+      case 'revoke-grant':ledger.revokeRepositoryGrant(...args,value.repositoryId,value.subject);break;
+      case 'invite':ledger.invite(...args,{id:crypto.randomUUID(),userId:value.userId,role:value.role,expiresAt:Date.now()+7*86400000});break;
+      case 'revoke-invite':ledger.revokeInvitation(...args,value.invitationId);break;
+      case 'accept-invite':ledger.acceptInvitation(id,userId,value.invitationId);break;
+      case 'reconcile':break;
+    }
+    await this.reconcileOrganization(id);await this.organizationActor(userId,expiresAt);
+    const current=ledger.snapshot(id)!;return this.organizationView(current,userId);
+  }
+  private inheritedTable() { this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS repository_organization_sources(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,doc TEXT NOT NULL)'); }
+  async synchronizeOrganization(input:OrganizationAccessSnapshot) {
+    const doc=organizationDocumentSchema.parse(input);this.inheritedTable();
+    const fresh=await globalOf(this.env).organizationSource(doc.id);
+    if(!fresh||JSON.stringify(fresh)!==JSON.stringify(doc)||!doc.repositories.includes(this.load().projectId))throw Error('Original organization source revision required');
+    this.ctx.storage.transactionSync(()=>{
+      const old=this.ctx.storage.sql.exec<{revision:number}>('SELECT revision FROM repository_organization_sources WHERE id=?',doc.id).toArray()[0];
+      if(old&&old.revision>doc.revision)throw Error('Organization source revision was superseded');
+      this.ctx.storage.sql.exec('INSERT INTO repository_organization_sources VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,doc=excluded.doc',doc.id,doc.revision,JSON.stringify(doc));
+    });
+  }
+  private inheritedRole(doc:OrganizationAccessSnapshot,userId:string):OrganizationRepositoryRole|null {
+    if(!doc.repositories.includes(this.load().projectId))return null;
+    if(doc.members.some(m=>m.userId===userId&&m.role==='owner'))return 'admin';
+    const teams=new Set(doc.members.some(m=>m.userId===userId)?doc.teams.filter(t=>t.members.includes(userId)).map(t=>t.id):[]);
+    const roles=doc.grants.filter(g=>g.repositoryId===this.load().projectId&&((g.subject.kind==='user'&&g.subject.id===userId)||(g.subject.kind==='team'&&teams.has(g.subject.id)))).map(g=>g.role);
+    return roles.includes('admin')?'admin':roles.includes('write')?'write':roles.includes('read')?'read':null;
+  }
+  private async repositoryAccessFence(userId:string,write=false) {
+    const scope=JSON.stringify([this.load().projectId,this.load().canonicalRepoName,this.readRepositoryIncarnation()]);
+    const scopeCurrent=()=>{if(scope!==JSON.stringify([this.load().projectId,this.load().canonicalRepoName,this.readRepositoryIncarnation()])||write&&this.load().lifecycle?.state==='archived')throw Error('Repository access scope changed');};scopeCurrent();
+    if(this.repositoryDeleting())throw Error('Repository access revoked');
+    const direct=this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',userId).toArray()[0]?.role;
+    if(direct){return {role:direct==='owner'?'admin' as const:'write' as const,direct:direct==='owner'?'owner' as const:'member' as const,source:undefined,assert:()=>{scopeCurrent();if(this.repositoryDeleting()||this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',userId).toArray()[0]?.role!==direct)throw Error('Direct repository authority changed');}};}
+    this.inheritedTable();const rows=this.ctx.storage.sql.exec<{id:string;revision:number;doc:string}>('SELECT id,revision,doc FROM repository_organization_sources').toArray();
+    for(const row of rows){
+      const fresh=await globalOf(this.env).organizationSource(row.id);if(!fresh||fresh.revision!==row.revision)continue;
+      const role=this.inheritedRole(fresh,userId);if(!role||write&&role==='read')continue;
+      const assert=()=>{scopeCurrent();const current=this.ctx.storage.sql.exec<{revision:number;doc:string}>('SELECT revision,doc FROM repository_organization_sources WHERE id=?',row.id).toArray()[0];if(this.repositoryDeleting()||!current||current.revision!==fresh.revision||current.doc!==JSON.stringify(fresh))throw Error('Inherited repository authority changed');};assert();return {role,direct:null,source:{id:fresh.id,revision:fresh.revision},assert};
+    }
+    throw Error('Repository access revoked');
+  }
+  async repositoryAccess(userId:string) {try{const access=await this.repositoryAccessFence(userId);access.assert();return {role:access.role,direct:access.direct};}catch{return null;}}
+
   // ---- account registry (used on the per-account instance) ----
   async listProjects(): Promise<ProjectRow[]> {
     return this.ctx.storage.sql.exec("SELECT id, name, role, kind, created_at FROM projects ORDER BY created_at DESC").toArray() as unknown as ProjectRow[];
@@ -2685,7 +2967,8 @@ export class RepositoryController extends DurableObject<Env> {
   // ---- membership and invites (per project) ----
   async roleOf(userId: string): Promise<"owner" | "member" | null> {
     const row = this.ctx.storage.sql.exec<{ role: string }>("SELECT role FROM members WHERE user_id = ?", userId).toArray()[0];
-    return (row?.role as "owner" | "member" | undefined) ?? null;
+    if(row) return (row.role as "owner" | "member");
+    return await this.repositoryAccess(userId) ? "member" : null;
   }
   async addMember(userId: string, role: "owner" | "member", label?: string): Promise<void> {
     if (this.repositoryDeleting()) throw new Error("Repository deletion is in progress");
@@ -2695,6 +2978,13 @@ export class RepositoryController extends DurableObject<Env> {
     const role = await this.roleOf(userId);
     if (role === "owner") throw new Error("The owner cannot be removed");
     await this.cancelContributorRegistration(userId);
+  }
+  async removeRepositoryMember(userId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<void>{
+    const authorize=actor.userId===userId?await this.authorizeBranchRead(actor,credentialHash,sessionExpiresAt):await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);
+    authorize();
+    if(actor.viaToken){const account=accountOf(this.env,await accountKeyFor(actor.userId));if(!credentialHash||!await account.apiTokenHashCanAdminister(credentialHash,actor.userId,this.load().projectId))throw Error("Member removal token authority changed");authorize();}
+    this.registrationTable();
+    this.ctx.storage.transactionSync(()=>{authorize();if(this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",userId).toArray()[0]?.role==="owner")throw Error("The owner cannot be removed");this.ctx.storage.sql.exec("UPDATE member_registrations SET status='revoked' WHERE user_id=?",userId);this.ctx.storage.sql.exec("DELETE FROM members WHERE user_id=?",userId);});
   }
   async peopleAttributionSnapshot(userId:string){
     if(this.repositoryDeleting()||!this.ctx.storage.sql.exec("SELECT 1 FROM members WHERE user_id=?",userId).toArray().length)throw Error("Private people access unavailable");
@@ -3622,6 +3912,7 @@ export class RepositoryController extends DurableObject<Env> {
   private async retryInvitationProjections(){if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='repository_invitation_receipts'").toArray().length)return;const ledger=new RepositoryInvitations(this.ctx.storage),state=this.load(),incarnation=this.readRepositoryIncarnation(),rows=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM repository_invitation_receipts WHERE json_extract(doc,'$.projection')='pending' AND json_extract(doc,'$.scope.projectId')=? AND json_extract(doc,'$.scope.incarnation')=? ORDER BY invitation_id LIMIT 20",state.projectId,incarnation??"").toArray();for(const row of rows){const receipt=JSON.parse(row.doc) as import("./repository-invitations").InvitationJoinReceipt,role=await this.roleOf(receipt.userId);if(!role)continue;try{const account=accountOf(this.env,await accountKeyFor(receipt.userId));if(await account.accountLifecycle()!=="active")continue;await account.addProject({id:state.projectId,name:state.projectName,role,kind:state.kind??"demo"});const projection=(await account.listProjects()).find(project=>project.id===state.projectId&&project.role===role);ledger.confirmProjection(receipt,()=>!!projection&&!this.repositoryDeleting()&&this.readRepositoryIncarnation()===receipt.scope.incarnation&&this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",receipt.userId).toArray()[0]?.role===role);}catch{/* Pending projection remains visible and never restores removed membership. */}}}
   private async retryRepositoryInitializationCredentials():Promise<void>{if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='repository_initialization_intents'").toArray().length)return;const intents=new RepositoryInitializationIntents(this.ctx.storage);for(const ledger of [intents.credentials,intents.readCredentials]){for(const pending of ledger.pendingBatch()){if(!ledger.markAutomaticSweep(pending.scope.eventId))continue;const record=intents.get(pending.scope.eventId);if(!record?.metadata||record.scope.canonicalRepoName!==pending.scope.canonicalRepoName)continue;const funding=await globalOf(this.env).reserveCoreGitOperation(`repository-init-cleanup-${crypto.randomUUID()}`,pending.scope.accountKey,this.currentGitBudget()).catch(()=>null);if(!funding?.allowed||!ledger.markAttempt(pending.scope.eventId))continue;try{using repository=await this.env.ARTIFACTS.get(pending.scope.canonicalRepoName);const info=await repository.info();if(info.id!==record.metadata.id||info.name!==record.metadata.name||info.remote!==record.metadata.remote)continue;if(await repository.revokeToken(pending.token))await ledger.markRevoked(pending.scope,pending.token,{repoName:pending.scope.canonicalRepoName,revoked:true});}catch{/* Unconfirmed cleanup retains its exact private capability and hold. */}}const wake=ledger.nextWake();if(wake!==null)await this.ensureRecoveryAlarm(Math.max(1,wake-Date.now()));}}
   override async alarm(): Promise<void> {
+    await this.deliverDiscussionNotifications();
     await this.retryRepositoryInitializationCredentials();
     await this.retryInvitationProjections();
     await this.reconcileLegacyPublicationReadbacks();
@@ -3972,17 +4263,43 @@ export class RepositoryController extends DurableObject<Env> {
     );
   }
 
+  private async issueFeatureAccess(userId:string,write=false){
+    const authority=await this.repositoryAccessFence(userId,write);authority.assert();
+    if(write&&this.load().lifecycle?.state==='archived')throw Error('Repository is archived and read-only');
+    return {store:new IssueFeatureStore(this.ctx.storage),owner:authority.role==='admin',assert:authority.assert};
+  }
+  async issueFeatures(userId:string){const access=await this.issueFeatureAccess(userId);access.assert();return {...access.store.view(),canManage:access.owner,members:this.ctx.storage.sql.exec<{user_id:string;label:string}>('SELECT user_id,label FROM members ORDER BY user_id LIMIT 100').toArray()};}
+  async issueFeatureUpdate(userId:string,input:IssueFeatureWrite){const access=await this.issueFeatureAccess(userId,true);access.assert();return access.store.update(input,this.ctx.storage.sql.exec<{user_id:string}>('SELECT user_id FROM members').toArray().map(m=>m.user_id),access.owner);}
+  async issueTemplatePreview(userId:string,name:string,values:Record<string,unknown>){const access=await this.issueFeatureAccess(userId);access.assert();return access.store.preview(name,values);}
+  async createTemplateIssue(userId:string,input:{title:string;name:string;values:Record<string,string|boolean>;idempotencyKey:string;expectedRevision:number;author:string}){
+    if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(input.idempotencyKey))throw Error('Invalid issue creation request key');
+    const access=await this.issueFeatureAccess(userId,true),payload=JSON.stringify([input.title,input.name,Object.entries(input.values).sort(([a],[b])=>a.localeCompare(b)),input.expectedRevision]);
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS template_issue_requests(actor_id TEXT,event_key TEXT,payload TEXT,title TEXT,body TEXT,PRIMARY KEY(actor_id,event_key))');
+    const rendered=this.ctx.storage.transactionSync(()=>{
+      access.assert();
+      const old=this.ctx.storage.sql.exec<{payload:string;title:string;body:string}>('SELECT payload,title,body FROM template_issue_requests WHERE actor_id=? AND event_key=?',userId,input.idempotencyKey).toArray()[0];
+      if(old){if(old.payload!==payload)throw Error('Template issue request key was used for different content');return old;}
+      if(access.store.read().revision!==input.expectedRevision)throw Error('Issue template changed; reload before creating an issue');
+      const result=access.store.preview(input.name,input.values);if(!result.ok)throw Error('error' in result?result.error:result.errors.map(e=>e.field+': '+e.error).join('; '));
+      const usage=this.ctx.storage.sql.exec<{count:number;bytes:number}>('SELECT COUNT(*) AS count,COALESCE(SUM(length(CAST(body AS BLOB))),0) AS bytes FROM template_issue_requests').toArray()[0]!;
+      if(usage.count>=1000||usage.bytes+new TextEncoder().encode(result.body).length>5_000_000)throw Error('Template issue recovery capacity reached');
+      this.ctx.storage.sql.exec('INSERT INTO template_issue_requests VALUES(?,?,?,?,?)',userId,input.idempotencyKey,payload,input.title,result.body);return {title:input.title,body:result.body};
+    });
+    return this.createMemberIssue(userId,{...rendered,author:input.author,idempotencyKey:input.idempotencyKey});
+  }
+
+
   // ---- issues and conversations (per project) ----
   private issueRow(n: number): IssueRow | null {
     const row = this.ctx.storage.sql
       .exec("SELECT i.*, (SELECT COUNT(*) FROM comments c WHERE c.subject = 'issue:' || i.number) AS comments FROM issues i WHERE number = ?", n)
       .toArray()[0];
-    if(!row)return null;const origin=new MigrationConversationPublication(this.ctx.storage).issueOrigin(n);return origin?{...(row as unknown as IssueRow),importedOrigin:origin}:row as unknown as IssueRow;
+    if(!row)return null;const discussionOrigin=this.discussions(false).conversionOrigin(n)??this.discussions(true).conversionOrigin(n);const origin=new MigrationConversationPublication(this.ctx.storage).issueOrigin(n),archiveOrigin=new MetadataArchives(this.ctx.storage).origin("issues",String(n));return {...(row as unknown as IssueRow),...(discussionOrigin?{discussionOrigin}:{}),...(origin?{importedOrigin:origin}:{}),...(archiveOrigin?{archiveOrigin}:{})};
   }
   async listIssues(state: "open" | "closed"): Promise<IssueRow[]> {
     return this.ctx.storage.sql
       .exec("SELECT i.*, (SELECT COUNT(*) FROM comments c WHERE c.subject = 'issue:' || i.number) AS comments FROM issues i WHERE state = ? ORDER BY number DESC LIMIT 200", state)
-      .toArray().map(row=>{const issue=row as unknown as IssueRow;const origin=new MigrationConversationPublication(this.ctx.storage).issueOrigin(issue.number);return origin?{...issue,importedOrigin:origin}:issue;});
+      .toArray().map(row=>{const issue=row as unknown as IssueRow;const origin=new MigrationConversationPublication(this.ctx.storage).issueOrigin(issue.number),archiveOrigin=new MetadataArchives(this.ctx.storage).origin("issues",String(issue.number));return {...issue,...(origin?{importedOrigin:origin}:{}),...(archiveOrigin?{archiveOrigin}:{})};});
   }
   async getIssue(n: number): Promise<IssueRow | null> {
     return this.issueRow(n);
@@ -3990,9 +4307,10 @@ export class RepositoryController extends DurableObject<Env> {
   async createMemberIssue(userId:string,input:MemberIssueInput):Promise<IssueRow>{
     if(typeof input.title!=="string"||typeof input.body!=="string"||typeof input.author!=="string"||!input.title.trim()||input.title.trim().length>200||input.body.trim().length>20_000||!input.author.trim()||input.author.trim().length>120)throw new Error("Invalid issue creation content");
     const normalized={...input,title:input.title.trim(),body:input.body.trim(),author:input.author.trim()};
+    const authority=await this.repositoryAccessFence(userId,true);
     let opened=false;
     const issue=this.ctx.storage.transactionSync(()=>{
-      if(this.repositoryDeleting()||!this.ctx.storage.sql.exec("SELECT 1 FROM members WHERE user_id=?",userId).toArray().length)throw new Error("Issue creation access was revoked");
+      authority.assert();
       if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(normalized.idempotencyKey))throw new Error("Invalid issue creation request key");
       const payload=JSON.stringify([normalized.title,normalized.body]);
       const receipt=this.ctx.storage.sql.exec<{payload:string;issue_number:number}>("SELECT payload,issue_number FROM member_issue_receipts WHERE actor_id=? AND event_key=?",userId,normalized.idempotencyKey).toArray()[0];
@@ -4022,7 +4340,7 @@ export class RepositoryController extends DurableObject<Env> {
     return this.ctx.storage.sql.exec('SELECT id, subject, author, body, path, line, "commit", created_at FROM comments WHERE subject = ? ORDER BY id LIMIT 500', subject).toArray() as unknown as CommentRow[];
   }
   async listMemberCommentsPage(userId: string, subject: string, cursor?: string): Promise<CommentPage> {
-    if (this.repositoryDeleting() || !this.ctx.storage.sql.exec("SELECT 1 FROM members WHERE user_id=?", userId).toArray().length) throw new Error("Comment access was revoked");
+    (await this.repositoryAccessFence(userId)).assert();
     let before = Number.MAX_SAFE_INTEGER;
     if (cursor !== undefined) {
       try {
@@ -4033,13 +4351,14 @@ export class RepositoryController extends DurableObject<Env> {
       } catch { throw new Error("Invalid comment cursor"); }
     }
     const rows = this.ctx.storage.sql.exec('SELECT id,subject,author,body,path,line,"commit",created_at FROM comments WHERE subject=? AND id<? ORDER BY id DESC LIMIT 101', subject, before).toArray() as unknown as CommentRow[];
-    const publication=new MigrationConversationPublication(this.ctx.storage);const page = rows.slice(0,100).map(row=>{const origin=publication.commentOrigin(row.id);return origin?{...row,importedOrigin:origin}:row;});
+    const publication=new MigrationConversationPublication(this.ctx.storage);const page = rows.slice(0,100).map(row=>{const origin=publication.commentOrigin(row.id),archiveOrigin=new MetadataArchives(this.ctx.storage).origin("comments",String(row.id));return {...row,...(origin?{importedOrigin:origin}:{}),...(archiveOrigin?{archiveOrigin}:{})};});
     const nextCursor = rows.length > 100 ? btoa(JSON.stringify([subject,page.at(-1)!.id])).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "") : null;
     return { comments: page.reverse(), nextCursor, hasMore: nextCursor !== null };
   }
   async addMemberComment(userId: string, input: MemberCommentInput): Promise<CommentRow> {
+    const authority=await this.repositoryAccessFence(userId,true);
     return this.ctx.storage.transactionSync(() => {
-      if (this.repositoryDeleting() || !this.ctx.storage.sql.exec("SELECT 1 FROM members WHERE user_id=?",userId).toArray().length) throw new Error("Comment access was revoked");
+      authority.assert();
       const payload = JSON.stringify([input.subject,input.body,input.path ?? null,input.line ?? null,input.commit ?? null]);
       if (input.idempotencyKey) {
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(input.idempotencyKey)) throw new Error("Invalid comment request key");
@@ -4078,6 +4397,7 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   // ---- abuse and impersonation reports (global instance): a human queue whose backlog is published ----
+  async forumModeration(actorId:string,moderator:boolean,operation:string,id:string,input:unknown) {const ledger=new PlatformCommunity(this.ctx.storage).moderation();switch(operation){case "report":return ledger.report(id,actorId,input);case "inbox":return ledger.inbox(actorId,moderator);case "audit":return ledger.history(actorId,moderator);case "resolve":return ledger.resolve(id,actorId,moderator,input);case "appeal":return ledger.appeal(id,actorId,input);case "decide":return ledger.decide(id,actorId,moderator,input);default:throw Error("Unknown moderation operation");}}
   async forumList(input:{category?:string;q?:string;sort?:string}) {return new PlatformCommunity(this.ctx.storage).list(input);}
   async forumTopic(id:string) {return new PlatformCommunity(this.ctx.storage).topic(id);}
   async forumCreate(actor:PublicCommunityActor,input:unknown,topicId?:string) {return new PlatformCommunity(this.ctx.storage).create(actor,input,topicId);}
@@ -4185,15 +4505,17 @@ export class RepositoryController extends DurableObject<Env> {
     if(!record)throw Error("Saved release unavailable");
     this.releaseScope(id);
     const editHistory=ledger.editHistory(record.scope,authority);authority();
-    return {...record,editHistory,assetsSupported:false as const};
+    return {...record,editHistory,assets:new ReleaseAssets(this.ctx.storage).list(record.scope).map(({key:_key,scope:_scope,...asset})=>asset),assetsSupported:true as const};
   }
+  async uploadReleaseAsset(id:string,input:ReleaseAssetInput,bytes:ArrayBuffer,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authority=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authority();const scope=this.releaseScope(id);return new ReleaseAssets(this.ctx.storage).upload(scope,input,bytes,this.env.EVIDENCE_BUCKET,authority,()=>{this.releaseScope(id);if(new ReleaseRecords(this.ctx.storage).get(id)?.phase!=="draft")throw Error("Published release assets are immutable");});}
+  async downloadReleaseAsset(id:string,assetId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authority=await this.authorizeBranchRead(actor,credentialHash,sessionExpiresAt);authority();const scope=this.releaseScope(id);return new ReleaseAssets(this.ctx.storage).download(scope,assetId,this.env.EVIDENCE_BUCKET,()=>{authority();this.releaseScope(id);});}
   async tagOperations(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authority=await this.authorizeBranchRead(actor,credentialHash,sessionExpiresAt);authority();this.tagSources();new BranchCredentialIncidents(this.ctx.storage);const state=this.load(),rows=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM tag_creation_operations WHERE project_id=? AND incarnation=? AND repo_name=? ORDER BY (json_extract(doc,'$.phase') IN ('prepared','unknown')) DESC,rowid DESC LIMIT 21",state.projectId,this.readRepositoryIncarnation()??"",state.canonicalRepoName).toArray();return{operations:rows.slice(0,20).map(row=>this.tagView(JSON.parse(row.doc) as TagCreationOperation)),truncated:rows.length>20};}
   private releaseTagSource(tagOperationId:string){const operation=new TagCreationOperations(this.ctx.storage).get(tagOperationId);if(!operation||operation.phase!=="confirmed"||!operation.observation)throw Error("Confirmed native tag required");const view=this.tagView(operation);if(!view.nativeStopped||!view.credentialsComplete)throw Error("Tag native and credential cleanup remains unconfirmed");const accepted=this.assertTagScope(operation);return{operation,source:{name:operation.tag,tagOperationId,acceptedJournalId:accepted.acceptedJournalId,acceptedRef:accepted.acceptedRef,acceptedRootVersion:accepted.acceptedRootVersion,commit:accepted.commit,tree:accepted.tree}};}
-  async createRelease(input:{id:string;tagOperationId:string;title:string;notes:string},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authority=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authority();const {operation,source}=this.releaseTagSource(input.tagOperationId);return new ReleaseRecords(this.ctx.storage).create({id:input.id,projectId:operation.projectId,incarnation:operation.incarnation,canonicalRepoName:operation.canonicalRepoName,authorId:actor.userId,source},{title:input.title,notes:input.notes},authority);}
+  async createRelease(input:{id:string;tagOperationId:string;title:string;notes:string;prerelease?:boolean},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authority=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authority();const {operation,source}=this.releaseTagSource(input.tagOperationId);return new ReleaseRecords(this.ctx.storage).create({id:input.id,projectId:operation.projectId,incarnation:operation.incarnation,canonicalRepoName:operation.canonicalRepoName,authorId:actor.userId,source},{title:input.title,notes:input.notes,...(input.prerelease!==undefined?{prerelease:input.prerelease}:{})},authority);}
   private releaseScope(id:string){const record=new ReleaseRecords(this.ctx.storage).get(id);if(!record)throw Error("Saved release unavailable");const state=this.load();if(record.scope.projectId!==state.projectId||record.scope.incarnation!==this.readRepositoryIncarnation()||record.scope.canonicalRepoName!==state.canonicalRepoName)throw Error("Release repository scope changed");this.releaseTagSource(record.scope.source.tagOperationId);return record.scope;}
-  async publishRelease(id:string,expectedRevision:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const original=new ReleaseRecords(this.ctx.storage).get(id);if(!original)throw Error("Saved release unavailable");if(original.phase!=="published"){const observed=await this.reconcileTag(original.scope.source.tagOperationId,actor,credentialHash,sessionExpiresAt);if(!observed.currentTagVerified)throw Error("Current exact native tag could not be verified; release remains draft");}const authority=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authority();const scope=this.releaseScope(id),{operation}=this.releaseTagSource(scope.source.tagOperationId),observation=operation.observation!;if(!observation.commit||!observation.tree||!observation.type)throw Error("Exact native tag observation unavailable");return new ReleaseRecords(this.ctx.storage).publish(scope,{projectId:scope.projectId,incarnation:scope.incarnation,canonicalRepoName:scope.canonicalRepoName,source:scope.source,status:"confirmed",object:observation.object,type:observation.type,commit:observation.commit,tree:observation.tree},actor.userId,expectedRevision,authority);}
+  async publishRelease(id:string,expectedRevision:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const original=new ReleaseRecords(this.ctx.storage).get(id);if(!original)throw Error("Saved release unavailable");if(original.phase!=="published"){const observed=await this.reconcileTag(original.scope.source.tagOperationId,actor,credentialHash,sessionExpiresAt);if(!observed.currentTagVerified)throw Error("Current exact native tag could not be verified; release remains draft");}const authority=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authority();const scope=this.releaseScope(id),{operation}=this.releaseTagSource(scope.source.tagOperationId),observation=operation.observation!;if(!observation.commit||!observation.tree||!observation.type)throw Error("Exact native tag observation unavailable");new ReleaseAssets(this.ctx.storage).assertPublishable(scope);return new ReleaseRecords(this.ctx.storage).publish(scope,{projectId:scope.projectId,incarnation:scope.incarnation,canonicalRepoName:scope.canonicalRepoName,source:scope.source,status:"confirmed",object:observation.object,type:observation.type,commit:observation.commit,tree:observation.tree},actor.userId,expectedRevision,authority);}
   async editRelease(id:string,editId:string,expectedRevision:number,content:ReleaseContent,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authority=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authority();return new ReleaseRecords(this.ctx.storage).edit(this.releaseScope(id),editId,expectedRevision,content,actor.userId,authority);}
-  async releases(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authority=await this.authorizeBranchRead(actor,credentialHash,sessionExpiresAt);authority();new ReleaseRecords(this.ctx.storage);const state=this.load(),rows=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM release_records WHERE project_id=? AND incarnation=? AND repo_name=? ORDER BY rowid DESC LIMIT 21",state.projectId,this.readRepositoryIncarnation()??"",state.canonicalRepoName).toArray();return{releases:rows.slice(0,20).map(row=>{const record=JSON.parse(row.doc) as import("./release-records").ReleaseRecord;return{...record,editHistory:new ReleaseRecords(this.ctx.storage).editHistory(record.scope,authority)};}),truncated:rows.length>20,assetsSupported:false as const};}
+  async releases(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authority=await this.authorizeBranchRead(actor,credentialHash,sessionExpiresAt);authority();new ReleaseRecords(this.ctx.storage);const state=this.load(),rows=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM release_records WHERE project_id=? AND incarnation=? AND repo_name=? ORDER BY rowid DESC LIMIT 21",state.projectId,this.readRepositoryIncarnation()??"",state.canonicalRepoName).toArray();return{releases:rows.slice(0,20).map(row=>{const record=JSON.parse(row.doc) as import("./release-records").ReleaseRecord;return{...record,editHistory:new ReleaseRecords(this.ctx.storage).editHistory(record.scope,authority),assets:new ReleaseAssets(this.ctx.storage).list(record.scope).map(({key:_key,scope:_scope,...asset})=>asset)};}),truncated:rows.length>20,assetsSupported:true as const};}
 
   // ---- GitHub mirror (per project) ----
   private mirrorConfiguration(){const row=this.ctx.storage.sql.exec<{target:string;token:string;enabled:number;created_at:string}>("SELECT target,token,enabled,created_at FROM mirror WHERE id=1").toArray()[0];if(!row||validateMirrorTarget(row.target)!==row.target)throw Error("Approved normalized mirror configuration unavailable");return row;}
@@ -4312,6 +4634,9 @@ export class RepositoryController extends DurableObject<Env> {
     this.ensureSigningKeyTable();
     this.ctx.storage.sql.exec("INSERT INTO trusted_signing_keys (id, doc) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET doc = excluded.doc", JSON.stringify(keys));
   }
+  async snippetsList(viewerId?:string){if(this.accountLifecycleState()!=="active")throw Error("Account unavailable");return new DurableSnippets(this.ctx.storage).list(viewerId);}
+  async snippetRead(id:string,viewerId?:string,revision?:number){if(this.accountLifecycleState()!=="active")throw Error("Account unavailable");return new DurableSnippets(this.ctx.storage).read(id,viewerId,revision);}
+  async snippetSave(id:string,ownerId:string,input:SnippetWrite){if(this.accountLifecycleState()!=="active")throw Error("Account unavailable");return new DurableSnippets(this.ctx.storage).save(id,ownerId,input);}
   async getProfile(): Promise<Profile> {
     const row = this.ctx.storage.sql.exec<{ doc: string }>("SELECT doc FROM profile WHERE id = 1").toArray()[0];
     return row ? (JSON.parse(row.doc) as Profile) : { handle: "", displayName: "", bio: "", joinedAt: new Date().toISOString() };
@@ -4444,11 +4769,23 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   // ---- notification inbox (used on the account instance) ----
-  async addInbox(item: { projectId: string; projectName: string; kind: "direct" | "activity"; type: string; title: string }): Promise<void> {
+  async inboxPreference(projectId:string):Promise<InboxPreference>{return new InboxPreferences(this.ctx.storage).read(projectId);}
+  async updateInboxPreference(projectId:string,input:unknown):Promise<InboxPreference>{return new InboxPreferences(this.ctx.storage).update(projectId,input);}
+  async addInbox(item: { projectId: string; projectName: string; kind: "direct" | "activity"; type: string; title: string; eventKey?:string }): Promise<void> {
+    if(this.accountLifecycleState()!=="active")return;
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS inbox_event_receipts(project_id TEXT NOT NULL,event_key TEXT NOT NULL,PRIMARY KEY(project_id,event_key))");
+    if(item.eventKey&&(!/^[A-Za-z0-9:_-]{1,200}$/.test(item.eventKey)||this.ctx.storage.sql.exec('SELECT 1 FROM inbox_event_receipts WHERE project_id=? AND event_key=?',item.projectId,item.eventKey).toArray().length))return;
+    this.ctx.storage.transactionSync(()=>{
+    if(item.eventKey)this.ctx.storage.sql.exec('INSERT INTO inbox_event_receipts VALUES(?,?)',item.projectId,item.eventKey);
+    if(!new InboxPreferences(this.ctx.storage).allows(item.projectId,item.kind))return;
     // "Snooze until the next push" ends as soon as anything new happens in that repository.
     this.ctx.storage.sql.exec("UPDATE inbox SET state = 'unread' WHERE project_id = ? AND state = 'snoozed'", item.projectId);
     this.ctx.storage.sql.exec("INSERT INTO inbox (project_id, project_name, kind, type, title, created_at) VALUES (?, ?, ?, ?, ?, ?)", item.projectId, item.projectName, item.kind, item.type, item.title, new Date().toISOString());
     this.ctx.storage.sql.exec("DELETE FROM inbox WHERE id <= (SELECT MAX(id) FROM inbox) - 300");
+    });
+  }
+  async inboxSnapshot(): Promise<InboxRow[]> {
+    return this.ctx.storage.sql.exec("SELECT * FROM inbox ORDER BY id DESC LIMIT 300").toArray() as unknown as InboxRow[];
   }
   async listInbox(filter: "direct" | "activity" | "snoozed" | "archived"): Promise<InboxRow[]> {
     const byState = filter === "snoozed" || filter === "archived";
@@ -4527,10 +4864,10 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   /** Spend guard: atomically count a model-backed run against today's per-project allowance. */
-  async existingDeploymentRequest(target: AcceptedDeploymentTarget, serviceId: string, environment: string, key: string, actorId: string): Promise<DeploymentRecord | null> {
+  async existingDeploymentRequest(target: AcceptedDeploymentTarget, serviceId: string, environment: string, key: string, actorId: string,artifactInput?:DeploymentArtifactParameters): Promise<DeploymentRecord | null> {
     if(await this.roleOf(actorId)!=="owner")throw new Error("Owner required");
     const state=await this.getState();
-    const selection=this.selectRecordedDeployment(target.journalId);return new RepositoryDeployments(this.ctx.storage,state.projectId).existingRequest(target,serviceId,environment,key,actorId,selection?this.legacyPrimaryDeploymentCompatibility(selection):undefined);
+    const selection=this.selectRecordedDeployment(target.journalId),saved=new RepositoryDeployments(this.ctx.storage,state.projectId).existingRequest(target,serviceId,environment,key,actorId,selection?this.legacyPrimaryDeploymentCompatibility(selection):undefined);if(saved){const artifact=artifactInput?{...this.deploymentArtifact(target,artifactInput),...(artifactInput.approvalId?{approvalId:artifactInput.approvalId}:{})}:undefined;if(JSON.stringify(saved.artifact)!==JSON.stringify(artifact))throw Error("Deployment request identity changed artifact");}return saved;
   }
   async reserveHealthProbe(): Promise<HealthProbeAdmission> {
     return new HealthProbeBudget(this.ctx.storage).reserve();
@@ -4630,6 +4967,7 @@ export class RepositoryController extends DurableObject<Env> {
   private readRepositoryIncarnation():string|null {return this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='private_recovery_incarnation'").toArray().length?this.ctx.storage.sql.exec<{value:string}>("SELECT value FROM private_recovery_incarnation WHERE id=1").toArray()[0]?.value??null:null;}
   async repositoryReadContext(userId:string|null,taskId:string|null=null,candidateId:string|null=null):Promise<RepositoryReadContext>{
     if(this.repositoryDeleting())throw new Error("Repository unavailable");
+    const authority=userId?await this.repositoryAccessFence(userId):null;authority?.assert();
     const state=this.load(),incarnation=this.readRepositoryIncarnation();
     const ownerId=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id;
     if(!ownerId)throw new Error("Repository owner unavailable");
@@ -4644,7 +4982,8 @@ export class RepositoryController extends DurableObject<Env> {
     if(userId!==null&&!await this.canGitAccess(userId,taskId,false))throw new Error("Repository access changed");
     if(userId===null&&JSON.stringify(await this.publicGrant())!==JSON.stringify(grant))throw new Error("Public repository changed");
     const latest=this.load();
-    if(this.repositoryDeleting()||latest.canonicalRepoName!==state.canonicalRepoName||latest.projectId!==state.projectId||this.readRepositoryIncarnation()!==incarnation||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==ownerId||(userId!==null&&!this.ctx.storage.sql.exec("SELECT role FROM members WHERE user_id=?",userId).toArray().length))throw new Error("Repository authority changed");
+    if(this.repositoryDeleting()||latest.canonicalRepoName!==state.canonicalRepoName||latest.projectId!==state.projectId||this.readRepositoryIncarnation()!==incarnation||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==ownerId||(userId!==null&&!authority))throw new Error("Repository authority changed");
+    authority?.assert();
     let repoName=taskId?latest.tasks[taskId]?.workspace.repoName:latest.canonicalRepoName;if(!repoName)throw new Error("Workspace unavailable");
     const candidate=candidateId?latest.candidates[candidateId]:null;
     if(candidateId&&(!candidate||(!taskId&&!candidate.candidateCommit)))throw new Error("Candidate unavailable");
@@ -4657,12 +4996,13 @@ export class RepositoryController extends DurableObject<Env> {
       retained=new RetainedInputs(this.ctx.storage).lookup(taskId,candidate.id,inputCommit);
       if(retained){if(retained.projectId!==latest.projectId||retained.incarnation!==incarnation||retained.canonicalRepoName!==latest.canonicalRepoName||retained.workflowId!==candidate.workflowInstanceId||(inputBase!==undefined&&retained.base!==inputBase))throw new Error("Retained input scope changed");inputBase=retained.base;repoName=latest.canonicalRepoName;}
     }
-    return {projectId:fresh.projectId,incarnation,canonicalRepoName:fresh.canonicalRepoName,repoName,ownerId,accountKey,...(retained?{retainedInputReceiptId:retained.id}:{}),...(candidate?{candidateId:candidate.id,candidateCommit:candidate.candidateCommit,candidateBase:candidate.expectedAcceptedBase,...(taskId?{candidateInputCommit:inputCommit,candidateInputBase:inputBase}:{})}:{}),...(taskId&&!retained?{taskBase:latest.tasks[taskId]!.baseCommit,taskCommit:latest.tasks[taskId]!.currentCommit,taskBranch:latest.tasks[taskId]!.workspace.branch,taskContributorId:latest.tasks[taskId]!.contributor.id,taskInitiatorId:latest.tasks[taskId]!.initiatedBy?.id}:{}),...(grant?{publicationVersion:grant.version,acceptedCommit:grant.acceptedCommit}:{})};
+    return {projectId:fresh.projectId,incarnation,canonicalRepoName:fresh.canonicalRepoName,repoName,ownerId,accountKey,...(authority?.source?{organizationSource:authority.source}:{}),...(retained?{retainedInputReceiptId:retained.id}:{}),...(candidate?{candidateId:candidate.id,candidateCommit:candidate.candidateCommit,candidateBase:candidate.expectedAcceptedBase,...(taskId?{candidateInputCommit:inputCommit,candidateInputBase:inputBase}:{})}:{}),...(taskId&&!retained?{taskBase:latest.tasks[taskId]!.baseCommit,taskCommit:latest.tasks[taskId]!.currentCommit,taskBranch:latest.tasks[taskId]!.workspace.branch,taskContributorId:latest.tasks[taskId]!.contributor.id,taskInitiatorId:latest.tasks[taskId]!.initiatedBy?.id}:{}),...(grant?{publicationVersion:grant.version,acceptedCommit:grant.acceptedCommit}:{})};
   }
   private assertReadLocal(context:RepositoryReadContext,userId:string|null,taskId:string|null,write=false):void {
     const state=this.load(),task=taskId?state.tasks[taskId]:null;
     const role=userId?this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",userId).toArray()[0]?.role:null;
-    if(this.repositoryDeleting()||state.projectId!==context.projectId||state.canonicalRepoName!==context.canonicalRepoName||this.readRepositoryIncarnation()!==context.incarnation||(userId&&!role)||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==context.ownerId)throw new Error("Repository read authority changed");
+    if(this.repositoryDeleting()||state.projectId!==context.projectId||state.canonicalRepoName!==context.canonicalRepoName||this.readRepositoryIncarnation()!==context.incarnation||(userId&&!role&&!context.organizationSource)||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==context.ownerId)throw new Error("Repository read authority changed");
+    if(context.organizationSource){this.inheritedTable();const row=this.ctx.storage.sql.exec<{revision:number;doc:string}>('SELECT revision,doc FROM repository_organization_sources WHERE id=?',context.organizationSource.id).toArray()[0];if(!userId||!row||row.revision!==context.organizationSource.revision||!this.inheritedRole(organizationDocumentSchema.parse(JSON.parse(row.doc)),userId))throw Error('Inherited read authority changed');}
     if(taskId&&(!task||(!context.retainedInputReceiptId&&(task.workspace.repoName!==context.repoName||task.baseCommit!==context.taskBase||task.currentCommit!==context.taskCommit||task.workspace.branch!==context.taskBranch||task.contributor.id!==context.taskContributorId||task.initiatedBy?.id!==context.taskInitiatorId))))throw new Error("Contribution checkpoint changed");
     if(context.candidateId){const candidate=state.candidates[context.candidateId];if(!candidate||candidate.candidateCommit!==context.candidateCommit||candidate.expectedAcceptedBase!==context.candidateBase)throw new Error("Candidate review changed");if(taskId&&( !candidate.participatingTaskIds.includes(taskId)||candidate.participatingCommits[taskId]!==context.candidateInputCommit||((candidate.frozenContributorProofs?.find(proof=>proof.id===taskId&&proof.commit===context.candidateInputCommit)?.baseCommit!==undefined||!context.retainedInputReceiptId)&&candidate.frozenContributorProofs?.find(proof=>proof.id===taskId&&proof.commit===context.candidateInputCommit)?.baseCommit!==context.candidateInputBase)))throw new Error("Frozen candidate input changed");}
     if(context.retainedInputReceiptId){const retained=new RetainedInputs(this.ctx.storage).get(context.retainedInputReceiptId);if(!retained||retained.projectId!==context.projectId||retained.incarnation!==context.incarnation||retained.canonicalRepoName!==context.repoName||retained.taskId!==taskId||retained.candidateId!==context.candidateId||retained.commit!==context.candidateInputCommit||retained.base!==context.candidateInputBase)throw new Error("Retained input read scope changed");}

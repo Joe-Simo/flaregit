@@ -39,3 +39,10 @@ test("templates must be well formed", () => {
   expect(validateTemplate({name: " ", fields: []}).length).toBe(2);
   expect(validateTemplate({name: "t", fields: [{id: "a", type: "text", required: false}, {id: "a", type: "dropdown", required: false, options: []}]}).length).toBe(2);
 });
+
+
+test('required prototype-named fields remain ordinary validated own properties',()=>{
+ const template:IssueTemplate={name:'Reserved key fixture',fields:[{id:'__proto__',type:'text',required:true}]};
+ const values=JSON.parse('{"__proto__":"kept"}') as Record<string,unknown>;
+ const result=validateSubmission(template,values);expect(result.ok).toBe(true);if(!result.ok)throw Error('Expected valid field');expect(Object.hasOwn(result.values,'__proto__')).toBe(true);expect(result.values['__proto__']).toBe('kept');expect(Object.getPrototypeOf(result.values)).toBe(Object.prototype);
+});

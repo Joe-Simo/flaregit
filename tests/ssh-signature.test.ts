@@ -43,3 +43,36 @@ test('input that is not an SSH signature block is refused', async () => {
   const result = await verifySshSignature({armored: '-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----', payload: PAYLOAD, namespace: 'git', trustedKeys: [TRUSTED]});
   expect(result).toEqual({ok: false, error: 'Signature is not a well-formed SSH signature block'});
 });
+
+test('armor must contain exactly one complete signature without surrounding content', async () => {
+  for (const armored of [`prefix\n${SIGNATURE}`, `${SIGNATURE}\nsuffix`, `${SIGNATURE}\n${SIGNATURE}`]) {
+    expect((await verifySshSignature({armored, payload: PAYLOAD, namespace: 'git', trustedKeys: [TRUSTED]})).ok).toBe(false);
+  }
+  expect((await verifySshSignature({armored: SIGNATURE.replaceAll('\n', '\r\n') + '\r\n', payload: PAYLOAD, namespace: 'git', trustedKeys: [TRUSTED]})).ok).toBe(true);
+});
+
+test('trailing binary data in the envelope, public key or signature is refused', async () => {
+  const original = Buffer.from(SIGNATURE.split('\n').slice(1, -1).join(''), 'base64');
+  const armor = (bytes: Uint8Array) => `-----BEGIN SSH SIGNATURE-----\n${Buffer.from(bytes).toString('base64')}\n-----END SSH SIGNATURE-----`;
+  const insertInString = (offset: number) => {
+    const length = original.readUInt32BE(offset);
+    const end = offset + 4 + length;
+    const mutated = Buffer.concat([original.subarray(0, end), Buffer.from([0]), original.subarray(end)]);
+    mutated.writeUInt32BE(length + 1, offset);
+    return mutated;
+  };
+  // SSHSIG magic/version is followed by five length-prefixed strings.
+  let signatureOffset = 10;
+  for (let index = 0; index < 4; index++) signatureOffset += 4 + original.readUInt32BE(signatureOffset);
+  for (const bytes of [Buffer.concat([original, Buffer.from([0])]), insertInString(10), insertInString(signatureOffset)]) {
+    expect((await verifySshSignature({armored: armor(bytes), payload: PAYLOAD, namespace: 'git', trustedKeys: [TRUSTED]})).ok).toBe(false);
+  }
+});
+
+test('noncanonical and incorrectly padded base64 cannot be accepted as an SSH signature', async () => {
+  const encoded = SIGNATURE.split('\n').slice(1, -1).join('');
+  for (const body of [encoded.replace(/=$/, ''), encoded + '=', encoded.slice(0, -2) + 'N=']) {
+    const armored = `-----BEGIN SSH SIGNATURE-----\n${body}\n-----END SSH SIGNATURE-----`;
+    expect((await verifySshSignature({armored, payload: PAYLOAD, namespace: 'git', trustedKeys: [TRUSTED]})).ok).toBe(false);
+  }
+});

@@ -1,6 +1,6 @@
 /** F14 slice: OAuth authorization request validation. Redirect URIs match exactly, only known scopes are granted, and PKCE S256 is required. */
 
-export const OAUTH_SCOPES = ["issues:read", "issues:write", "code:read", "code:write", "reviews:read", "reviews:write"] as const;
+export const OAUTH_SCOPES = ["issues:read", "issues:write", "code:read", "code:write", "reviews:read", "reviews:write", "checks:read", "checks:write"] as const;
 export type OAuthScope = (typeof OAUTH_SCOPES)[number];
 
 export interface OAuthClient {

@@ -1,11 +1,12 @@
-/** F10 slice: local CI run engine. Jobs run in dependency waves through an injected runner; a failed dependency skips its dependents; cancel stops new waves; a finished run never changes. */
+/** F10 slice: local CI run engine. Jobs run in dependency waves through an injected runner; a failed dependency skips its dependents; cancel requests runner abort and stops new waves; a finished run never changes. */
 import type {CheckRun} from "./ci-gate";
 import {parseWorkflow, type WorkflowJob} from "./workflow-parser";
 
 export type CiConclusion = "success" | "failure" | "cancelled";
 export type CiJobConclusion = CiConclusion | "skipped";
 
-export type CiJobRunner = (job: WorkflowJob, commit: string) => Promise<{readonly conclusion: CiConclusion}>;
+/** Runners must propagate abort to their process/container and release resources. Engine settlement alone does not terminate external work. */
+export type CiJobRunner = (job: WorkflowJob, commit: string, signal: AbortSignal) => Promise<{readonly conclusion: CiConclusion}>;
 
 export interface CiJobRecord {
   readonly name: string;
@@ -16,6 +17,8 @@ export interface CiJobRecord {
   readonly finishedAt: number | null;
   /** Runner exception message, capped at 500 characters. */
   readonly error: string | null;
+  /** Whether runner completion was observed before engine settlement. Unconfirmed aborts require runtime cleanup. */
+  readonly termination: "pending" | "settled" | "unconfirmed";
 }
 
 export interface CiRunRecord {
@@ -36,13 +39,15 @@ export type CiCancelResult = {readonly ok: true} | {readonly ok: false; readonly
 export interface CiEngine {
   /** Starts a run for a workflow definition at an exact commit. Execution continues in the background; `done` settles with the final record. */
   start(definition: unknown, commit: string): CiStartResult;
-  /** Stops scheduling. Pending jobs become cancelled; in-flight jobs keep their runner's conclusion. */
+  /** Requests abort and stops scheduling. Completion records expose unconfirmed termination until a runtime proves cleanup. */
   cancel(runId: string): CiCancelResult;
   get(runId: string): CiRunRecord | undefined;
 }
 
 export interface CiEngineOptions {
   readonly runner: CiJobRunner;
+  /** Maximum wall-clock duration of each job. Defaults to 30 minutes. */
+  readonly jobTimeoutMs?: number;
   /** Clock for job and run timestamps. Defaults to Date.now. */
   readonly now?: () => number;
 }
@@ -54,10 +59,12 @@ const isConclusion = (value: unknown): value is CiConclusion => value === "succe
 
 interface LiveJob {
   readonly spec: WorkflowJob;
+  readonly controller: AbortController;
   conclusion: CiJobConclusion | null;
   startedAt: number | null;
   finishedAt: number | null;
   error: string | null;
+  termination: "pending" | "settled" | "unconfirmed";
 }
 
 interface LiveRun {
@@ -93,6 +100,7 @@ const snapshot = (run: LiveRun): CiRunRecord =>
           startedAt: job.startedAt,
           finishedAt: job.finishedAt,
           error: job.error,
+          termination: job.termination,
         }),
       ),
     ),
@@ -107,19 +115,38 @@ const overallConclusion = (run: LiveRun): CiConclusion => {
 
 export function createCiEngine(options: CiEngineOptions): CiEngine {
   const now = options.now ?? (() => Date.now());
+  const timeoutMs = options.jobTimeoutMs ?? 30 * 60_000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 24 * 60 * 60_000) throw new Error("Job timeout must be between 1 ms and 24 hours");
   const runs = new Map<string, LiveRun>();
 
   const runJob = async (run: LiveRun, job: LiveJob): Promise<void> => {
     job.startedAt = now();
     let conclusion: CiConclusion = "failure";
     let error: string | null = null;
+    let timedOut = false;
+    let runnerSettled = false;
+    const onTimeout = setTimeout(() => {
+      timedOut = true;
+      job.controller.abort();
+    }, timeoutMs);
+    let removeAbortListener = () => {};
+    const aborted = new Promise<{readonly conclusion: CiConclusion}>((resolve) => {
+      const onAbort = () => resolve({conclusion: timedOut ? "failure" : "cancelled"});
+      job.controller.signal.addEventListener("abort", onAbort, {once: true});
+      removeAbortListener = () => job.controller.signal.removeEventListener("abort", onAbort);
+    });
     try {
-      const result = await options.runner(job.spec, run.commit);
+      // Racing also bounds an unresponsive runner; its late result never mutates the completed record.
+      const result = await Promise.race([options.runner(job.spec, run.commit, job.controller.signal).finally(() => { runnerSettled = true; }), aborted]);
       if (isConclusion(result.conclusion)) conclusion = result.conclusion;
       else error = "The runner returned an unknown conclusion";
     } catch (caught) {
       error = (caught instanceof Error ? caught.message : String(caught)).slice(0, MAX_ERROR_LENGTH);
     }
+    clearTimeout(onTimeout);
+    removeAbortListener();
+    if (timedOut) error = "Job exceeded its timeout";
+    job.termination = runnerSettled ? "settled" : "unconfirmed";
     job.conclusion = conclusion;
     job.error = error;
     job.finishedAt = now();
@@ -135,6 +162,7 @@ export function createCiEngine(options: CiEngineOptions): CiEngine {
       });
       if (blocked) {
         job.conclusion = "skipped";
+        job.termination = "settled";
         job.finishedAt = now();
       }
     }
@@ -158,7 +186,7 @@ export function createCiEngine(options: CiEngineOptions): CiEngine {
     if (!COMMIT_SHA.test(commit)) return {ok: false, error: "A run needs an exact commit SHA"};
     const parsed = parseWorkflow(definition);
     if (!parsed.ok) return {ok: false, error: parsed.error};
-    const jobs: LiveJob[] = parsed.workflow.jobs.map((spec) => ({spec, conclusion: null, startedAt: null, finishedAt: null, error: null}));
+    const jobs: LiveJob[] = parsed.workflow.jobs.map((spec) => ({spec, controller: new AbortController(), conclusion: null, startedAt: null, finishedAt: null, error: null, termination: "pending"}));
     const run: LiveRun = {
       runId: crypto.randomUUID(),
       workflow: parsed.workflow.name,
@@ -182,8 +210,10 @@ export function createCiEngine(options: CiEngineOptions): CiEngine {
     run.cancelRequested = true;
     const at = now();
     for (const job of run.jobs) {
+      if (job.conclusion === null && job.startedAt !== null) job.controller.abort();
       if (job.conclusion === null && job.startedAt === null) {
         job.conclusion = "cancelled";
+        job.termination = "settled";
         job.finishedAt = at;
       }
     }

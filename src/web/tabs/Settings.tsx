@@ -1,3 +1,4 @@
+import {RepositoryNotifications} from "../components/RepositoryNotifications";
 import {InviteManagement} from "../components/InviteManagement";
 import {GitCredentialRevocation} from "../components/GitCredentialRevocation";
 import { StorageReconciliation } from "../components/StorageReconciliation";
@@ -19,6 +20,8 @@ import { MirrorCard } from "../components/MirrorCard";
 import { apiJson } from "../api";
 import { navigate } from "../router";
 
+const RepositoryApplications=lazy(async()=>({default:(await import("../components/RepositoryApplications")).RepositoryApplications}));
+const MetadataArchiveCard=lazy(async()=>({default:(await import("../components/MetadataArchiveCard")).MetadataArchiveCard}));
 const ConversationMigrationCard=lazy(async()=>({default:(await import("../components/ConversationMigrationCard")).ConversationMigrationCard}));
 const ReviewPolicySettings=lazy(async()=>({default:(await import("../components/ReviewPolicySettings")).ReviewPolicySettings}));
 const AgentCleanupRecovery=lazy(async()=>({default:(await import("../components/AgentCleanupRecovery")).AgentCleanupRecovery}));
@@ -76,6 +79,9 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
   return (
     <div className="space-y-4 max-w-3xl min-w-0">
       <h2 className="sr-only">Repository settings</h2>
+      <div className="flex items-center justify-between gap-3"><p className="text-sm text-muted-foreground">Your repository notifications</p><RepositoryNotifications key={meta.id} projectId={meta.id} projectName={meta.name}/></div>
+      <Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Loading app access…</p>}><RepositoryApplications key={`apps:${meta.id}`} projectId={meta.id}/></Suspense>
+      <Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Loading metadata archive…</p>}><MetadataArchiveCard key={`metadata-archive:${meta.id}`} projectId={meta.id} isOwner={isOwner}/></Suspense>
       <GitCredentialRevocation key={`git-credentials:${meta.id}`} projectId={meta.id}/>
       {isOwner&&<Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Loading review settings…</p>}><ReviewPolicySettings key={`review-policy:${meta.id}`} projectId={meta.id}/></Suspense>}
       {isOwner&&<Suspense fallback={null}><AgentCleanupRecovery key={`agent-cleanup:${meta.id}`} projectId={meta.id}/></Suspense>}

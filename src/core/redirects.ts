@@ -217,3 +217,45 @@ export function importRedirects(list: unknown, clock: () => number): RedirectRes
   }
   return {ok: true, table: {clock, current, redirects, tombstones: new Map()}};
 }
+
+
+/** Complete migration snapshot: includes standalone names and deleted resources. */
+export function exportRedirectTable(table: RedirectTable) {
+  return {
+    version: 1 as const,
+    current: [...table.current].sort(),
+    redirects: exportRedirects(table),
+    tombstones: [...table.tombstones.values()].sort((a, b) => tombstoneKey(a.kind, a.id).localeCompare(tombstoneKey(b.kind, b.id))),
+  };
+}
+
+/** Validates the entire snapshot before publishing any imported state. */
+export function importRedirectTable(value: unknown, clock: () => number): RedirectResult {
+  if (typeof value !== "object" || value === null) return fail("A redirect snapshot must be an object");
+  const {version, current: names, redirects: entries, tombstones: deleted} = value as Record<string, unknown>;
+  if (version !== 1) return fail("Unsupported redirect snapshot version");
+  const imported = importRedirects(entries, clock);
+  if (!imported.ok) return imported;
+  if (!Array.isArray(names) || !Array.isArray(deleted)) return fail("Current names and tombstones must be lists");
+  const current = new Set<string>();
+  for (const name of names) {
+    if (!isName(name)) return fail("Each current repository needs a name");
+    if (current.has(name) || imported.table.redirects.has(name)) return fail(`Current name ${name} conflicts with another name or redirect`);
+    current.add(name);
+  }
+  const tombstones = new Map<string, Tombstone>();
+  for (const item of deleted) {
+    if (typeof item !== "object" || item === null) return fail("Each tombstone must be an object");
+    const {kind, id, deletedAt, reason} = item as Record<string, unknown>;
+    if (kind !== "repository" && kind !== "issue") return fail("Unknown tombstone resource kind");
+    if (!isName(id) || !isName(reason) || typeof deletedAt !== "number" || !Number.isSafeInteger(deletedAt) || deletedAt < 0) return fail("Invalid tombstone id, reason or deletion time");
+    const key = tombstoneKey(kind, id);
+    if (tombstones.has(key)) return fail(`Tombstone ${key} is listed more than once`);
+    if (kind === "repository" && (current.has(id) || imported.table.redirects.has(id))) return fail(`Deleted repository ${id} conflicts with a live name or redirect`);
+    tombstones.set(key, {kind, id, deletedAt, reason});
+  }
+  for (const record of imported.table.redirects.values()) {
+    if (!imported.table.redirects.has(record.to) && !current.has(record.to) && !tombstones.has(tombstoneKey("repository", record.to))) return fail(`Redirect target ${record.to} is missing`);
+  }
+  return {ok: true, table: {clock, current, redirects: imported.table.redirects, tombstones}};
+}

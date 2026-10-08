@@ -86,7 +86,7 @@ test("jobs and the run take their start and finish times from the injected clock
   ]);
 });
 
-test("cancel lets the running wave settle, schedules nothing new, and cancels pending jobs", async () => {
+test("cancel aborts the running wave, schedules nothing new, and cancels pending jobs", async () => {
   const called: string[] = [];
   const gate = deferred<{conclusion: CiConclusion}>();
   const runner: CiJobRunner = async (job) => {
@@ -101,7 +101,7 @@ test("cancel lets the running wave settle, schedules nothing new, and cancels pe
   gate.resolve({conclusion: "success"});
   const record = await done;
   expect(called).toEqual(["build"]);
-  expect(outcomes(record)).toEqual({build: "success", test: "cancelled", deploy: "cancelled"});
+  expect(outcomes(record)).toEqual({build: "cancelled", test: "cancelled", deploy: "cancelled"});
   expect(record.conclusion).toBe("cancelled");
 });
 
@@ -136,4 +136,39 @@ test("check runs from a finished run feed the required-check gate for its exact 
   const required = ["build", "test", "deploy"];
   expect(failingRequiredChecks(required, checkRunsFor(record), SHA)).toEqual(["test", "deploy"]);
   expect(failingRequiredChecks(required, checkRunsFor(record), OTHER_SHA)).toEqual(required);
+});
+
+
+test("timeout aborts an unresponsive runner and skips its dependents", async () => {
+  let signal: AbortSignal | undefined;
+  const engine = createCiEngine({jobTimeoutMs: 5, runner: async (_job, _commit, abortSignal) => {
+    signal = abortSignal;
+    return new Promise(() => {});
+  }});
+  const record = await startRun(engine, definition([{name: "build"}, {name: "deploy", needs: ["build"]}])).done;
+  expect(signal?.aborted).toBe(true);
+  expect(record.jobs[0]?.error).toBe("Job exceeded its timeout");
+  expect(record.jobs[0]?.termination).toBe("unconfirmed");
+  expect(outcomes(record)).toEqual({build: "failure", deploy: "skipped"});
+});
+
+test("cancel settles an unresponsive runner and ignores its late success", async () => {
+  const gate = deferred<{conclusion: CiConclusion}>();
+  let signal: AbortSignal | undefined;
+  const engine = createCiEngine({runner: async (_job, _commit, abortSignal) => { signal = abortSignal; return gate.promise; }});
+  const {run, done} = startRun(engine, definition([{name: "build"}]));
+  engine.cancel(run.runId);
+  const record = await done;
+  expect(signal?.aborted).toBe(true);
+  expect(record.conclusion).toBe("cancelled");
+  expect(record.jobs[0]?.termination).toBe("unconfirmed");
+  gate.resolve({conclusion: "success"});
+  await Promise.resolve();
+  expect(engine.get(run.runId)).toEqual(record);
+});
+
+test("invalid timeout budgets fail before any job starts", () => {
+  for (const jobTimeoutMs of [0, -1, NaN, Infinity, 1.5, 86_400_001]) {
+    expect(() => createCiEngine({runner: succeed, jobTimeoutMs})).toThrow("Job timeout");
+  }
 });

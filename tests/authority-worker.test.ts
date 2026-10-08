@@ -18,7 +18,7 @@ test("the authority Durable Object runs under workerd: OAuth and registry state 
       script: await built.outputs[0]!.text(),
       compatibilityDate: "2026-10-02",
       compatibilityFlags: ["nodejs_compat"],
-      durableObjects: { AUTHORITY: { className: "AuthorityController", useSQLite: true } },
+      durableObjects: { REPOSITORY_CONTROLLER: {className: "RepositoryController", useSQLite: true}, AUTHORITY: { className: "AuthorityController", useSQLite: true } },
     }],
   }));
   try {

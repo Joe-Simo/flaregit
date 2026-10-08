@@ -1,3 +1,4 @@
+import {Snippets} from './pages/Snippets';
 import { FlareGitBrand } from "./components/Brand";
 import { InvitationSignIn } from "./pages/InvitationSignIn";
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -130,6 +131,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     const destination = safeSignInReturn(`/community${query ? `?${query}` : ""}`) ?? "/community";
     window.location.assign(`/#${destination}${destination.includes("?") ? "&" : "?"}signin=1`);
   }} />;
+  if(route.name==="snippets"&&route.accountKey&&route.id)return <Snippets key={`${route.accountKey}:${route.id}`} accountKey={route.accountKey} id={route.id}/>;
   if (route.name === "profile") return <PublicProfile key={route.handle} handle={route.handle} />;
   if (route.name === "public") return <PublicRepo key={route.projectId} projectId={route.projectId} params={route.params} onSignIn={() => { beginSignIn(`/participate/${route.projectId}`); navigate(`/participate/${route.projectId}`); }} />;
 

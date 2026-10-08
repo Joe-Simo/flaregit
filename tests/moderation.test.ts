@@ -141,3 +141,30 @@ test("check refuses invalid limits and usage", () => {
   expect(() => check(10, "members", Number.NaN)).toThrow(RangeError);
   expect(() => check(-1, "members", 0)).toThrow(RangeError);
 });
+
+
+test("reporting moderators cannot resolve or review their own reports", () => {
+  const {moderation} = clockedModeration();
+  const report = moderation.report({id: "post-1", authorId: "alice"}, "bob", "spam", "");
+  const reporter = {id: "bob", canModerate: true};
+  expect(() => moderation.resolve(report.id, "hide", reporter, "spam")).toThrow(ModerationError);
+  moderation.resolve(report.id, "hide", moderator, "spam");
+  const appeal = moderation.appeal(report.id, "alice");
+  expect(() => moderation.decideAppeal(appeal.id, "upheld", reporter, "spam")).toThrow(ModerationError);
+  expect(moderation.auditLog()).toHaveLength(1);
+});
+
+test("overturn restores visibility without erasing history or other active restrictions", () => {
+  const {moderation} = clockedModeration();
+  const hidden = moderation.report({id: "post-1", authorId: "alice"}, "bob", "spam", "");
+  moderation.resolve(hidden.id, "hide", moderator, "spam");
+  expect(moderation.contentState("post-1")).toBe("hidden");
+  const removed = moderation.report({id: "post-1", authorId: "alice"}, "carol", "harassment", "");
+  moderation.resolve(removed.id, "remove", moderator, "harassment");
+  expect(moderation.contentState("post-1")).toBe("removed");
+  moderation.decideAppeal(moderation.appeal(removed.id, "alice").id, "overturned", otherModerator, "context");
+  expect(moderation.contentState("post-1")).toBe("hidden");
+  moderation.decideAppeal(moderation.appeal(hidden.id, "alice").id, "overturned", otherModerator, "context");
+  expect(moderation.contentState("post-1")).toBe("visible");
+  expect(moderation.auditLog().map((entry) => entry.action)).toEqual(["hide", "remove", "appeal_overturned", "appeal_overturned"]);
+});

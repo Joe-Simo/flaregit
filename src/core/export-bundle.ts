@@ -1,7 +1,9 @@
 /** F15 slice: export manifest. Every exported object carries a digest so a migration can be verified, and private objects stay out unless the requester may read them. */
 
+export const BUNDLE_KINDS = ["issue", "comment", "label", "milestone", "conversation", "review", "release", "wiki", "planning", "redirect-table"] as const;
+
 export interface ExportObject {
-  readonly kind: "issue" | "comment" | "label" | "milestone";
+  readonly kind: (typeof BUNDLE_KINDS)[number];
   readonly id: string;
   readonly body: string;
   readonly private: boolean;

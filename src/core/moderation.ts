@@ -129,6 +129,7 @@ export function createModeration(options: ModerationOptions) {
       if (!ACTIONS.includes(action)) throw new RangeError("Unknown moderation action");
       requireText(reason, "Moderation reason");
       if (moderator.id === report.authorId) throw new ModerationError("Moderators cannot act on content they authored");
+      if (moderator.id === report.reporterId) throw new ModerationError("Reporters cannot resolve their own reports");
       if (report.status !== "open") throw new ModerationError("Report is already resolved");
       const at = options.now();
       const resolved = Object.freeze<Report>({...report, status: "resolved", action, resolvedBy: moderator.id, resolvedAt: at});
@@ -172,11 +173,21 @@ export function createModeration(options: ModerationOptions) {
       const report = requireReport(appeal.reportId);
       if (moderator.id === report.resolvedBy) throw new ModerationError("A different moderator must decide the appeal");
       if (moderator.id === report.authorId) throw new ModerationError("Moderators cannot act on content they authored");
+      if (moderator.id === report.reporterId) throw new ModerationError("Reporters cannot decide appeals for their own reports");
       const at = options.now();
       const decided = Object.freeze<Appeal>({...appeal, status: decision, decidedBy: moderator.id, decidedAt: at});
       appeals.set(appeal.id, decided);
       record(decision === "upheld" ? "appeal_upheld" : "appeal_overturned", moderator.id, report.id, at, reason);
       return decided;
+    },
+
+    /** Effective restrictions, preserving original decisions in the report and audit trail. */
+    contentState(contentId: string): "visible" | "hidden" | "removed" {
+      const overturned = new Set([...appeals.values()].filter((appeal) => appeal.status === "overturned").map((appeal) => appeal.reportId));
+      const active = [...reports.values()].filter((report) => report.contentId === contentId && report.status === "resolved" && !overturned.has(report.id));
+      if (active.some((report) => report.action === "remove")) return "removed";
+      if (active.some((report) => report.action === "hide")) return "hidden";
+      return "visible";
     },
 
     openReports(): readonly Report[] {

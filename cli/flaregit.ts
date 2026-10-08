@@ -10,6 +10,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { structuredPatch } from "diff";
 import { downloadRecoveryBundle } from "../src/cli/recovery-download.js";
+import {runCustomerCi} from "../src/cli/customer-ci";
+import {workflowDigest} from "../src/core/ci-workflow";
+import {LocalCiLedger} from "../src/cli/ci-ledger";
+import { credentialOrigin, saveCredentials } from "../src/cli/credentials";
 import { readServiceCandidate, sendServiceReport } from "../src/cli/report.js";
 
 const CONFIG_DIR = path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"), "flaregit");
@@ -49,13 +53,14 @@ const fail = (message: string, code = 1): never => {
 };
 
 const cfg = readConfig();
-const API = (process.env.FLAREGIT_API ?? cfg.api ?? "https://flaregit.com").replace(/\/$/, "");
+const API = (() => { try { return credentialOrigin(process.env.FLAREGIT_API ?? cfg.api ?? "https://flaregit.com"); } catch (error) { return fail(error instanceof Error ? error.message : "Invalid API origin"); } })();
 const TOKEN = process.env.FLAREGIT_TOKEN ?? cfg.token;
 
 async function api<T>(method: string, route: string, body?: unknown): Promise<T> {
   if (!TOKEN) fail("Not signed in. Create a token in the web app (Account → API tokens), then run: flaregit auth login <token>");
   const res = await fetch(`${API}/api${route}`, {
     method,
+    redirect: "error",
     headers: { Authorization: `Bearer ${TOKEN}`, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
@@ -98,12 +103,16 @@ const color = { red: (s: string) => `\x1b[31m${s}\x1b[0m`, green: (s: string) =>
 
 const HELP = `flaregit — JSON by default (--pretty for humans)
 
-  auth login <token> | auth status | auth logout
+  auth login --stdin | auth login <token> | auth status | auth logout
+    --stdin reads a token from standard input without putting it in shell arguments
   auth token [--scope read|write] [--ttl 1h] [--repo R]   mint a short-lived, narrower token
   repos
   repo import <url> --name N --test "cmd" [--install "cmd"] [--build "cmd"] [--branch B]
   repo demo [--name N]
   repo delete <repo> --confirm <name>
+  ci-digest --file workflow.json   calculate the workflow digest for explicit owner review
+  ci-run <repository-id> <candidate-id> --service ID --check ID --commit SHA --repo PATH --file workflow.json --approved-digest SHA --ledger PATH   customer-owned Linux CI
+  ci-cancel <run-id> --ledger PATH   cancel queued/running work in the local durable ledger
   service-candidate <repository-id> <candidate-id> --service ID --commit SHA   signed metadata snapshot; no clone credential
   report <repository-id> --service ID --file report.json [--event stable-id]   signed service report; environment secret only
   changes <repo>
@@ -140,6 +149,13 @@ async function main() {
     finally { process.removeListener("SIGINT", abort); process.removeListener("SIGTERM", abort); }
   }
 
+  if(cmd==="ci-digest")return out({workflowDigest:await workflowDigest(JSON.parse(await Bun.file(flag("file")??fail("--file required")).text()))});
+  if(cmd==="ci-cancel"){const ledger=new LocalCiLedger(flag("ledger")??fail("--ledger required"));try{ledger.cancel(sub??fail("Exact run ID required"));return out({cancelRequested:true});}finally{ledger.close();}}
+  if(cmd==="ci-run"){
+    const secret=process.env.FLAREGIT_CONNECTION_SECRET;if(!secret||secret.length<32)fail("Set FLAREGIT_CONNECTION_SECRET in the customer-owned runner environment");
+    const controller=new AbortController(),abort=()=>controller.abort();process.once("SIGINT",abort);process.once("SIGTERM",abort);
+    try{return out(await runCustomerCi({origin:API,repositoryId:sub??fail("Exact repository ID required"),candidateId:pos[2]??fail("Exact candidate ID required"),serviceId:flag("service")??fail("--service required"),checkId:flag("check")??fail("--check required"),commit:flag("commit")??fail("--commit required"),secret,repoDirectory:flag("repo")??fail("--repo required"),workflow:JSON.parse(await Bun.file(flag("file")??fail("--file required")).text()),approvedDigest:flag("approved-digest")??fail("--approved-digest required"),ledgerPath:flag("ledger")??fail("--ledger required"),cacheDirectory:flag("cache"),signal:controller.signal}));}finally{process.removeListener("SIGINT",abort);process.removeListener("SIGTERM",abort);}
+  }
   if (cmd === "service-candidate") {
     const secret = process.env.FLAREGIT_CONNECTION_SECRET;
     if (!secret || secret.length < 32) fail("Set FLAREGIT_CONNECTION_SECRET in the local service environment");
@@ -180,12 +196,13 @@ async function main() {
   }
   if (cmd === "auth") {
     if (sub === "login") {
-      const token = rest[0] ?? fail("Usage: flaregit auth login <token>");
+      if (flags.has("stdin") && rest.length) fail("Use either --stdin or a token argument");
+      if (flags.has("stdin") && process.stdin.isTTY) fail("Pipe the token to flaregit auth login --stdin");
+      const token = flags.has("stdin") ? (await Bun.stdin.text()).trim() : rest[0] ?? fail("Usage: flaregit auth login --stdin (or supply a token argument)");
       if (!/^fgt_[0-9a-f]{12}_[A-Za-z0-9]{32,64}$/.test(token)) fail("That does not look like a FlareGit token (fgt_…)");
-      const res = await fetch(`${API}/api/account`, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(`${API}/api/account`, { redirect: "error", headers: { Authorization: `Bearer ${token}` } });
       if (!res.ok) fail("Token rejected", 2);
-      fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(CONFIG_FILE, JSON.stringify({ api: API, token }), { mode: 0o600 });
+      saveCredentials(CONFIG_FILE, { api: API, token });
       return out({ ok: true, api: API });
     }
     if (sub === "logout") {

@@ -1,5 +1,5 @@
 import {expect, test} from "bun:test";
-import {createOAuthServer, OAUTH_ACCESS_TTL_MS, OAUTH_CODE_TTL_MS, type AuthorizeRequest, type MemoryOAuthStore, type OAuthServer, type TokenPair} from "../src/core/oauth-server";
+import {createOAuthServer, OAUTH_ACCESS_TTL_MS, OAUTH_CODE_TTL_MS, OAUTH_REFRESH_TTL_MS, type AuthorizeRequest, type MemoryOAuthStore, type OAuthServer, type TokenPair} from "../src/core/oauth-server";
 
 // RFC 7636 appendix B: the challenge is base64url(SHA-256(verifier)).
 const VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
@@ -44,7 +44,7 @@ async function issueTokens(server: OAuthServer, clientId: string): Promise<Token
 test("app registration accepts https and loopback http and refuses other redirects and scopes", () => {
   const server = createOAuthServer();
   expect(server.registerApp({name: "Ok", redirectUris: [REDIRECT, "http://localhost:3000/cb", "http://127.0.0.1:8080/cb"], scopes: ["code:read"]}).ok).toBe(true);
-  for (const redirectUri of ["http://app.example/cb", "https://app.example/cb#fragment", "ftp://app.example/cb", "not a url"]) {
+  for (const redirectUri of ["http://app.example/cb", "https://app.example/cb#fragment", "https://user:password@app.example/cb", "ftp://app.example/cb", "not a url"]) {
     expect(server.registerApp({name: "Bad", redirectUris: [redirectUri], scopes: ["code:read"]}).ok).toBe(false);
   }
   expect(server.registerApp({name: "Bad", redirectUris: [REDIRECT], scopes: ["admin:write"]})).toEqual({ok: false, error: "Unknown scope admin:write"});
@@ -78,7 +78,7 @@ test("happy path exchanges a real S256 verifier for tokens that introspect as ac
   if (!issued.ok) throw new Error(issued.error);
   expect(issued.scopes).toEqual(["code:read", "issues:write"]);
   expect(issued.expiresIn).toBe(3600);
-  expect(await server.introspect(issued.accessToken)).toEqual({active: true, scopes: ["code:read", "issues:write"], userId: "user-1", clientId});
+  expect(await server.introspect(issued.accessToken)).toEqual({active: true, scopes: ["code:read", "issues:write"], userId: "user-1", clientId, repositoryId: undefined, expiresAt:START+OAUTH_ACCESS_TTL_MS});
 });
 
 test("a replayed code is refused and revokes the tokens already issued from it", async () => {
@@ -173,7 +173,9 @@ test("concurrent exchanges of one code cannot both succeed", async () => {
   const code = await codeFor(server, clientId);
   const attempt = () => server.exchange({code, clientId, redirectUri: REDIRECT, codeVerifier: VERIFIER});
   const results = await Promise.all([attempt(), attempt()]);
-  expect(results.filter((result) => result.ok)).toHaveLength(1);
+  // A concurrent replay revokes the issued grant; the first attempt may observe that revocation before returning.
+  expect(results.filter((result) => result.ok).length).toBeLessThanOrEqual(1);
+  expect(results.some(result => !result.ok && result.error.includes("already been used"))).toBe(true);
 });
 
 test("codes, access tokens and refresh tokens are stored only as SHA-256 digests", async () => {
@@ -197,4 +199,97 @@ test("codes, access tokens and refresh tokens are stored only as SHA-256 digests
   expect(memory.refreshTokens.has(await digest(issued.refreshToken))).toBe(true);
   expect(memory.refreshTokens.has(await digest(rotated.refreshToken))).toBe(true);
   expect(memory.accessTokens.size).toBe(2);
+});
+
+
+test("refresh rotation preserves the absolute expiry and expires the whole grant", async () => {
+  const {server, clientId, advance} = setup();
+  const issued = await issueTokens(server, clientId);
+  advance(OAUTH_REFRESH_TTL_MS - 1);
+  const rotated = await server.refresh({refreshToken: issued.refreshToken, clientId});
+  if (!rotated.ok) throw new Error(rotated.error);
+  expect(rotated.expiresIn).toBe(0);
+  expect(await server.introspect(rotated.accessToken)).toMatchObject({active: true});
+  advance(1);
+  expect(await server.introspect(rotated.accessToken)).toEqual({active: false});
+  expect(await server.refresh({refreshToken: rotated.refreshToken, clientId})).toEqual({ok: false, error: "Refresh token has expired"});
+});
+
+test("persisted unbounded refresh grants require fresh authorization", async () => {
+  const {server, clientId} = setup();
+  const issued = await issueTokens(server, clientId);
+  const memory = server.store as MemoryOAuthStore;
+  for (const [key, grant] of memory.grants) {
+    const {expiresAt: _expiresAt, ...legacy} = grant;
+    memory.grants.set(key, legacy);
+  }
+  expect(await server.introspect(issued.accessToken)).toEqual({active: false});
+  expect(await server.refresh({refreshToken: issued.refreshToken, clientId})).toEqual({ok: false, error: "Refresh token has expired"});
+});
+
+test("inactive accounts cannot authorize, exchange, refresh or expose introspected identity", async () => {
+  let active = true;
+  const server = createOAuthServer({isUserActive: async () => active});
+  const app = server.registerApp({name: "Lifecycle", redirectUris: [REDIRECT], scopes: ["code:read", "issues:write"]});
+  if (!app.ok) throw Error(app.error);
+  const pair = await issueTokens(server, app.clientId);
+  const pending = await codeFor(server, app.clientId);
+  active = false;
+  expect((await authorize(server, app.clientId)).ok).toBe(false);
+  expect((await server.exchange({code: pending, clientId: app.clientId, redirectUri: REDIRECT, codeVerifier: VERIFIER})).ok).toBe(false);
+  expect(await server.introspect(pair.accessToken)).toEqual({active: false});
+  expect((await server.refresh({refreshToken: pair.refreshToken, clientId: app.clientId})).ok).toBe(false);
+  active = true;
+  expect(await server.introspect(pair.accessToken)).toEqual({active: false});
+});
+
+test("lifecycle awaits preserve code single-use and refresh reuse revocation", async () => {
+  const server = createOAuthServer({isUserActive: async () => {await Promise.resolve(); return true;}});
+  const app = server.registerApp({name: "Concurrent", redirectUris: [REDIRECT], scopes: ["code:read", "issues:write"]});
+  if (!app.ok) throw Error(app.error);
+  const code = await codeFor(server, app.clientId);
+  const exchanged = await Promise.all([1,2].map(() => server.exchange({code, clientId: app.clientId, redirectUri: REDIRECT, codeVerifier: VERIFIER})));
+  expect(exchanged.filter(value => value.ok).length).toBeLessThanOrEqual(1);
+  const pair = await issueTokens(server, app.clientId);
+  const rotated = await Promise.all([1,2].map(() => server.refresh({refreshToken: pair.refreshToken, clientId: app.clientId})));
+  expect(rotated.filter(value => value.ok).length).toBeLessThanOrEqual(1);
+  expect(await server.introspect(pair.accessToken)).toEqual({active: false});
+});
+
+test('observed membership revocation permanently ends an installed grant even after membership returns', async () => {
+  let member = true;
+  const server = createOAuthServer({canAccessRepository: async () => member});
+  const app = server.registerApp({name: 'Issues integration', redirectUris: [REDIRECT], scopes: ['issues:read']});
+  if (!app.ok) throw Error(app.error);
+  const request = {repositoryId:'p123456789abc',scope:'issues:read'};
+  const authorization = await authorize(server, app.clientId, request);
+  if (!authorization.ok) throw Error(authorization.error);
+  const pair = await server.exchange({code:authorization.code,clientId:app.clientId,redirectUri:REDIRECT,codeVerifier:VERIFIER});
+  if (!pair.ok) throw Error(pair.error);
+  expect(await server.introspect(pair.accessToken)).toMatchObject({active:true,repositoryId:request.repositoryId});
+  member = false;
+  expect(await server.introspect(pair.accessToken)).toEqual({active:false});
+  expect((await authorize(server, app.clientId, request)).ok).toBe(false);
+  member = true;
+  expect(await server.introspect(pair.accessToken)).toEqual({active:false});
+  expect((await server.refresh({refreshToken:pair.refreshToken,clientId:app.clientId})).ok).toBe(false);
+  expect(await server.installations('user-1',request.repositoryId)).toEqual([]);
+  expect((await authorize(server, app.clientId, request)).ok).toBe(true);
+});
+
+test('temporary membership lookup failure denies access without consuming installation authority', async () => {
+ let unavailable = false;
+ const server = createOAuthServer({canAccessRepository: async () => {if(unavailable)throw Error('Transport unavailable');return true;}});
+ const app=server.registerApp({name:'Lookup recovery',redirectUris:[REDIRECT],scopes:['issues:read']});
+ if(!app.ok)throw Error(app.error);
+ const code=await authorize(server,app.clientId,{repositoryId:'p123456789abc',scope:'issues:read'});
+ if(!code.ok)throw Error(code.error);
+ const pair=await server.exchange({code:code.code,clientId:app.clientId,redirectUri:REDIRECT,codeVerifier:VERIFIER});
+ if(!pair.ok)throw Error(pair.error);
+ unavailable=true;
+ expect(await server.introspect(pair.accessToken)).toEqual({active:false});
+ expect((await server.refresh({refreshToken:pair.refreshToken,clientId:app.clientId})).ok).toBe(false);
+ unavailable=false;
+ expect(await server.introspect(pair.accessToken)).toMatchObject({active:true});
+ expect((await server.refresh({refreshToken:pair.refreshToken,clientId:app.clientId})).ok).toBe(true);
 });

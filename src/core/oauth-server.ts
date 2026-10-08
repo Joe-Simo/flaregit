@@ -4,6 +4,8 @@ import {OAUTH_SCOPES, validateAuthorizationRequest, type OAuthScope} from "./oau
 
 export const OAUTH_CODE_TTL_MS = 10 * 60 * 1000;
 export const OAUTH_ACCESS_TTL_MS = 60 * 60 * 1000;
+/** Absolute authorization lifetime: rotation never extends this window. */
+export const OAUTH_REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const encoder = new TextEncoder();
@@ -22,6 +24,7 @@ export interface CodeRecord {
   readonly redirectUri: string;
   readonly userId: string;
   readonly scopes: readonly OAuthScope[];
+  readonly repositoryId?: string;
   readonly codeChallenge: string;
   readonly expiresAt: number;
   used: boolean;
@@ -33,6 +36,8 @@ export interface GrantRecord {
   readonly clientId: string;
   readonly userId: string;
   readonly scopes: readonly OAuthScope[];
+  readonly repositoryId?: string;
+  readonly expiresAt?: number;
   revoked: boolean;
 }
 
@@ -43,6 +48,7 @@ export interface AccessTokenRecord {
 
 export interface RefreshTokenRecord {
   readonly grantId: string;
+  readonly expiresAt?: number;
   consumed: boolean;
 }
 
@@ -51,6 +57,7 @@ export interface RefreshTokenRecord {
 export interface KeyValue<V> {
   get(key: string): V | undefined;
   set(key: string, value: V): unknown;
+  values(): Iterable<V>;
 }
 
 export interface OAuthStore {
@@ -84,7 +91,7 @@ export interface TokenPair {
 }
 
 export type IntrospectionResult =
-  | {readonly active: true; readonly scopes: OAuthScope[]; readonly userId: string; readonly clientId: string}
+  | {readonly active: true; readonly scopes: OAuthScope[]; readonly userId: string; readonly clientId: string; readonly repositoryId?: string; readonly expiresAt: number}
   | {readonly active: false};
 
 export interface RegisterAppRequest {
@@ -101,6 +108,7 @@ export interface AuthorizeRequest {
   readonly codeChallengeMethod?: string;
   readonly userId: string;
   readonly state?: string;
+  readonly repositoryId?: string;
 }
 
 export interface ExchangeRequest {
@@ -123,12 +131,18 @@ export interface OAuthServer {
   refresh(request: RefreshRequest): Promise<OAuthResult<TokenPair>>;
   /** Revokes the grant behind an access or refresh token. Unknown tokens are ignored, as RFC 7009 requires. */
   revoke(token: string): Promise<void>;
+  app(clientId: string): AppRecord | undefined;
+  installations(userId: string, repositoryId: string): Promise<readonly Pick<GrantRecord,"id"|"clientId"|"scopes"|"expiresAt"|"repositoryId">[]>;
+  uninstall(userId: string, repositoryId: string, grantId: string): boolean;
   introspect(accessToken: string): Promise<IntrospectionResult>;
 }
 
 export interface OAuthServerOptions {
   /** Milliseconds since the epoch. Injected so expiry can be tested. */
   readonly clock?: () => number;
+  /** Production authority must resolve current account lifecycle; failures deny authorization. */
+  readonly isUserActive?: (userId: string) => Promise<boolean>;
+  readonly canAccessRepository?: (userId: string, repositoryId: string) => Promise<boolean>;
   readonly store?: OAuthStore;
 }
 
@@ -166,6 +180,7 @@ function isAllowedRedirectUri(value: string): boolean {
     return false;
   }
   if (url.hash !== "") return false;
+  if (url.username || url.password) return false;
   if (url.protocol === "https:") return true;
   return url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname);
 }
@@ -174,13 +189,30 @@ export function createOAuthServer(options: OAuthServerOptions = {}): OAuthServer
   const clock = options.clock ?? (() => Date.now());
   const store: OAuthStore = options.store ?? createMemoryOAuthStore();
 
+  const isUserActive = async (userId: string): Promise<boolean | null> => {
+    try { return await (options.isUserActive?.(userId) ?? Promise.resolve(true)); } catch { return null; }
+  };
+  const repositoryActive = async (userId: string, repositoryId?: string): Promise<boolean | null> => {
+    if (repositoryId === undefined) return true;
+    try { return /^[a-z0-9]{12,16}$/.test(repositoryId) && await (options.canAccessRepository?.(userId, repositoryId) ?? Promise.resolve(false)); } catch { return null; }
+  };
+  const grantActive = (grant: GrantRecord): boolean => !grant.revoked && grant.expiresAt !== undefined && Number.isFinite(grant.expiresAt) && clock() < grant.expiresAt;
+  async function issuedResult(grant: GrantRecord, now: number): Promise<OAuthResult<TokenPair>> {
+    const pair = await issueTokens(grant, now);
+    if (!await isUserActive(grant.userId) || !await repositoryActive(grant.userId, grant.repositoryId)) { revokeGrant(grant.id); return fail("Account is unavailable"); }
+    const fresh = store.grants.get(grant.id);
+    if (!fresh || !grantActive(fresh) || fresh.userId !== grant.userId) return fail("Grant is no longer active");
+    return {ok: true, ...pair};
+  }
+
   // Raw tokens are returned to the caller once and only their digests are kept.
   async function issueTokens(grant: GrantRecord, now: number): Promise<TokenPair> {
-    const accessToken = randomToken(32);
+    const accessToken = "fgo_" + randomToken(32);
     const refreshToken = randomToken(32);
-    store.accessTokens.set(await storeKey(accessToken), {grantId: grant.id, expiresAt: now + OAUTH_ACCESS_TTL_MS});
-    store.refreshTokens.set(await storeKey(refreshToken), {grantId: grant.id, consumed: false});
-    return {accessToken, refreshToken, expiresIn: OAUTH_ACCESS_TTL_MS / 1000, scopes: [...grant.scopes]};
+    const expiresAt = Math.min(now + OAUTH_ACCESS_TTL_MS, grant.expiresAt ?? now);
+    store.accessTokens.set(await storeKey(accessToken), {grantId: grant.id, expiresAt});
+    store.refreshTokens.set(await storeKey(refreshToken), {grantId: grant.id, expiresAt: grant.expiresAt, consumed: false});
+    return {accessToken, refreshToken, expiresIn: Math.max(0, Math.floor((expiresAt - now) / 1000)), scopes: [...grant.scopes]};
   }
 
   const revokeGrant = (grantId: string): void => {
@@ -222,10 +254,14 @@ export function createOAuthServer(options: OAuthServerOptions = {}): OAuthServer
       if (unregistered !== undefined) return fail(`Scope ${unregistered} was not registered for this app`);
 
       const code = randomToken(32);
-      store.codes.set(await storeKey(code), {
+      const codeKey = await storeKey(code);
+      if (!await isUserActive(request.userId) || !await repositoryActive(request.userId, request.repositoryId)) return fail("Account is unavailable");
+      if (JSON.stringify(store.apps.get(request.clientId)) !== JSON.stringify(app)) return fail("App authorization changed");
+      store.codes.set(codeKey, {
         clientId: app.clientId,
         redirectUri: validation.redirectUri,
         userId: request.userId,
+        repositoryId: request.repositoryId,
         scopes: validation.scopes,
         codeChallenge: request.codeChallenge,
         expiresAt: clock() + OAUTH_CODE_TTL_MS,
@@ -242,9 +278,13 @@ export function createOAuthServer(options: OAuthServerOptions = {}): OAuthServer
       // Hash everything asynchronously first, so the check-and-set below runs without an await in between.
       const codeKey = await storeKey(request.code);
       const verifierDigest = toBase64Url(await digest(request.codeVerifier));
+      const initial = store.codes.get(codeKey);
+      if (initial === undefined) return fail("Unknown authorization code");
+      if (!await isUserActive(initial.userId) || !await repositoryActive(initial.userId, initial.repositoryId)) return fail("Account is unavailable");
       const now = clock();
 
       const record = store.codes.get(codeKey);
+      if (record && record.userId !== initial.userId) return fail("Authorization code changed");
       if (record === undefined) return fail("Unknown authorization code");
       if (record.used) {
         // RFC 6749 section 4.1.2: a replayed code revokes the tokens already issued from it.
@@ -257,16 +297,26 @@ export function createOAuthServer(options: OAuthServerOptions = {}): OAuthServer
       if (!timingSafeEqual(encoder.encode(verifierDigest), encoder.encode(record.codeChallenge))) return fail("PKCE verification failed");
 
       record.used = true;
-      const grant: GrantRecord = {id: randomToken(16), clientId: record.clientId, userId: record.userId, scopes: record.scopes, revoked: false};
+      const grant: GrantRecord = {id: randomToken(16), clientId: record.clientId, userId: record.userId, scopes: record.scopes, repositoryId: record.repositoryId, expiresAt: now + OAUTH_REFRESH_TTL_MS, revoked: false};
       store.grants.set(grant.id, grant);
       record.grantId = grant.id;
       store.codes.set(codeKey, record);
-      return {ok: true, ...(await issueTokens(grant, now))};
+      return issuedResult(grant, now);
     },
 
     async refresh(request) {
       const refreshKey = await storeKey(request.refreshToken);
+      const initial = store.refreshTokens.get(refreshKey);
+      const initialGrant = initial && store.grants.get(initial.grantId);
+      if (!initialGrant) return fail("Unknown refresh token");
+      const userActive = await isUserActive(initialGrant.userId);
+      const repositoryAvailable = await repositoryActive(initialGrant.userId, initialGrant.repositoryId);
+      if (!userActive || !repositoryAvailable) {
+        if (userActive === false || repositoryAvailable === false) revokeGrant(initialGrant.id);
+        return fail("Account is unavailable");
+      }
       const record = store.refreshTokens.get(refreshKey);
+      if (record && record.grantId !== initialGrant.id) return fail("Refresh token changed");
       if (record === undefined) return fail("Unknown refresh token");
       const grant = store.grants.get(record.grantId);
       if (grant === undefined) return fail("Unknown refresh token");
@@ -278,12 +328,21 @@ export function createOAuthServer(options: OAuthServerOptions = {}): OAuthServer
         store.grants.set(grant.id, grant);
         return fail("Refresh token reuse detected; the grant has been revoked");
       }
+      const now = clock();
+      // Legacy persisted records without a bounded expiry require fresh authorization.
+      if (record.expiresAt === undefined || grant.expiresAt === undefined || !Number.isFinite(record.expiresAt) || !Number.isFinite(grant.expiresAt) || now >= record.expiresAt || now >= grant.expiresAt) {
+        revokeGrant(grant.id);
+        return fail("Refresh token has expired");
+      }
       // No await between the lookup and this write, so a rotated token cannot be spent twice.
       record.consumed = true;
       store.refreshTokens.set(refreshKey, record);
-      return {ok: true, ...(await issueTokens(grant, clock()))};
+      return issuedResult(grant, now);
     },
 
+    app(clientId) { const app = store.apps.get(clientId); return app ? {...app, scopes:[...app.scopes], redirectUris:[...app.redirectUris]} : undefined; },
+    async installations(userId, repositoryId) { if (!await isUserActive(userId) || !await repositoryActive(userId, repositoryId)) return []; return [...store.grants.values()].filter(grant => grant.userId === userId && grant.repositoryId === repositoryId && grantActive(grant)).map(({id,clientId,scopes,expiresAt,repositoryId}) => ({id,clientId,scopes:[...scopes],expiresAt,repositoryId})); },
+    uninstall(userId, repositoryId, grantId) { const grant = store.grants.get(grantId); if (!grant || grant.userId !== userId || grant.repositoryId !== repositoryId) return false; revokeGrant(grantId); return true; },
     async revoke(token) {
       const key = await storeKey(token);
       const grantId = store.accessTokens.get(key)?.grantId ?? store.refreshTokens.get(key)?.grantId;
@@ -291,11 +350,20 @@ export function createOAuthServer(options: OAuthServerOptions = {}): OAuthServer
     },
 
     async introspect(accessToken) {
-      const record = store.accessTokens.get(await storeKey(accessToken));
-      if (record === undefined) return {active: false};
-      const grant = store.grants.get(record.grantId);
-      if (grant === undefined || grant.revoked || clock() >= record.expiresAt) return {active: false};
-      return {active: true, scopes: [...grant.scopes], userId: grant.userId, clientId: grant.clientId};
+      const key = await storeKey(accessToken);
+      const initial = store.accessTokens.get(key);
+      const initialGrant = initial && store.grants.get(initial.grantId);
+      if (!initialGrant) return {active: false};
+      const userActive = await isUserActive(initialGrant.userId);
+      const repositoryAvailable = await repositoryActive(initialGrant.userId, initialGrant.repositoryId);
+      if (!userActive || !repositoryAvailable) {
+        if (userActive === false || repositoryAvailable === false) revokeGrant(initialGrant.id);
+        return {active: false};
+      }
+      const record = store.accessTokens.get(key);
+      const grant = record && store.grants.get(record.grantId);
+      if (!record || !grant || grant.userId !== initialGrant.userId || !grantActive(grant) || clock() >= record.expiresAt) return {active: false};
+      return {active: true, scopes: [...grant.scopes], userId: grant.userId, clientId: grant.clientId, repositoryId: grant.repositoryId, expiresAt: Math.min(record.expiresAt, grant.expiresAt!)};
     },
   };
 }

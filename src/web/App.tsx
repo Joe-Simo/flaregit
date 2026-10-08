@@ -1,3 +1,5 @@
+import {Snippets} from './pages/Snippets';
+import { Organizations } from './pages/Organizations';
 import {readHealthObservation,type HealthObservation} from "./health-observation";
 import { FlareGitBrand } from "./components/Brand";
 import { CloudflareBadgeFooter } from "./components/CloudflareBadge";
@@ -34,11 +36,11 @@ export function App() {
   useEffect(() => {
     const shortcuts = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); setSearchOpen((value) => !value); }
-      if (event.key === "Escape") { setSidebarOpen(false); menuButton.current?.focus(); }
+      if (event.key === "Escape" && sidebarOpen && !event.defaultPrevented) { setSidebarOpen(false); menuButton.current?.focus(); }
     };
     window.addEventListener("keydown", shortcuts);
     return () => window.removeEventListener("keydown", shortcuts);
-  }, []);
+  }, [sidebarOpen]);
   useEffect(() => setSidebarOpen(false), [route.name]);
   useEffect(() => {
     const poll = () => apiJson<{ unread: { direct: number } }>("/inbox?filter=direct").then((response) => setUnread(response.unread.direct)).catch(() => undefined);
@@ -49,8 +51,8 @@ export function App() {
     const check=async()=>{const current=++sequence;const observed=await readHealthObservation(fetch,lifetime.signal);if(current===sequence&&!lifetime.signal.aborted)setHealth(observed);};
     void check(); const timer = setInterval(check, 60_000); return () => {lifetime.abort();sequence++;clearInterval(timer);};
   }, []);
-  const section = route.name === "home" ? "Repositories" : route.name === "repo" ? "Repository" : route.name === "new" ? "New repository" : route.name === "inbox" ? "Inbox" : route.name === "account" ? "Account" : (route.name === "community" || route.name === "community-post") ? "Community" : route.name === "participate" ? "Public participation" : "Workspace";
-  const nav = [{ name: "Repositories", path: "/", current: route.name === "home" || route.name === "repo", Icon: FolderGit2 }, { name: "Community", path: "/community", current: route.name === "community" || route.name === "community-post", Icon: MessageSquare }, { name: "Inbox", path: "/inbox", current: route.name === "inbox", Icon: InboxIcon }, { name: "Account", path: "/account", current: route.name === "account", Icon: Settings }];
+  const section = route.name === "home" ? "Repositories" : route.name === "repo" ? "Repository" : route.name === "new" ? "New repository" : route.name === "inbox" ? "Inbox" : route.name === "account" ? "Account" : route.name === "organizations" ? "Organizations" : (route.name === "community" || route.name === "community-post") ? "Community" : route.name === "participate" ? "Public participation" : "Workspace";
+  const nav = [{name:"Snippets",path:"/snippets",current:route.name==="snippets",Icon:FolderGit2},{ name: "Repositories", path: "/", current: route.name === "home" || route.name === "repo", Icon: FolderGit2 }, { name: "Community", path: "/community", current: route.name === "community" || route.name === "community-post", Icon: MessageSquare }, { name: "Inbox", path: "/inbox", current: route.name === "inbox", Icon: InboxIcon }, { name: "Organizations", path: "/organizations", current: route.name === "organizations", Icon: FolderGit2 }, { name: "Account", path: "/account", current: route.name === "account", Icon: Settings }];
   return (
     <div className="dashboard-shell min-h-screen bg-background text-foreground">
       <a href="#workspace-content" onClick={(event) => { event.preventDefault(); document.getElementById("workspace-content")?.focus(); }} className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[100] focus:bg-card focus:px-4 focus:py-2">Skip to content</a>
@@ -72,12 +74,14 @@ export function App() {
       )}
       <BillingBar refreshKey={0} />
       <main id="workspace-content" tabIndex={-1} className="flex-1 min-w-0">
+        {route.name === "snippets" && <Snippets accountKey={route.accountKey} id={route.id}/>}
         {route.name === "home" && <Home />}
         {route.name === "participate" && <PublicParticipation key={route.projectId} projectId={route.projectId} />}
         {route.name === "community" && <Community workspace />}
         {route.name === "community-post" && <CommunityCompose key={`${route.params.get("repo") ?? "help"}:${route.params.get("topic") ?? "new"}`} repository={route.params.get("repo") ?? undefined} topic={route.params.get("topic") ?? undefined} />}
         {route.name === "new" && <NewRepo />}
         {route.name === "account" && <Account />}
+        {route.name === "organizations" && <Organizations />}
         {route.name === "inbox" && <Inbox onCount={setUnread} />}
         {route.name === "report" && <ReportPage key={route.params.get("target") ?? "report"} initialTarget={route.params.get("target")} initialKind={route.params.get("kind")} />}
         {route.name === "operator" && <OperatorPage />}

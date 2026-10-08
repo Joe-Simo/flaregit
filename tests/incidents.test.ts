@@ -100,3 +100,14 @@ test("unavailable workflow telemetry remains unverified", async () => {
   const env = { REPOSITORY_CONTROLLER: { idFromName: (s: string) => s, get: () => ({ workflowCounts: async () => { throw new Error("unavailable"); } }) } } as unknown as import("../src/server/env").Env;
   expect((await workflowHealth(env)).verified).toBe(false);
 });
+
+test("public status uses bounded probe evidence and exposes unknown observations", async () => {
+  const { summarizeComponentStatus, statusPage } = await import("../src/server/status");
+  const base = {component: "api", degradedNow: false, lastCheckAt: T0, checks24h: 1, failed24h: 0, lastFailureAt: null, lastFailureDetail: null, degradedMinutes24h: 0};
+  expect(summarizeComponentStatus([base], T0)[0]).toMatchObject({status: "operational", degradedNow: false});
+  expect(summarizeComponentStatus([base], T0 + 15 * M + 1)[0]).toMatchObject({status: "unknown", degradedNow: true});
+  const future = summarizeComponentStatus([{...base, lastCheckAt: T0 + 1}], T0);
+  expect(future[0]).toMatchObject({status: "unknown", degradedNow: true});
+  expect(statusPage(future)).toContain("Unverified");
+  expect(summarizeComponentStatus([{...base, degradedNow: true}], T0)[0]).toMatchObject({status: "degraded", degradedNow: true});
+});

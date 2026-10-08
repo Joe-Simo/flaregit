@@ -152,3 +152,47 @@ export async function readBlobByHash(repo: RepositoryReader, hash: string): Prom
   if (bytes.subarray(0, 8000).includes(0)) return { binary: true, truncated: false, size: blob.size, content: "" };
   return { binary: false, truncated: false, size: blob.size, content: new TextDecoder().decode(bytes) };
 }
+
+
+export interface FileHistoryPage {
+  readonly commit: string;
+  readonly path: string;
+  readonly commits: readonly (CommitInfo & {readonly pathExists: boolean})[];
+  /** Pagination counts examined commits, rather than matching changes. */
+  readonly nextOffset: number | null;
+  readonly scanned: number;
+  readonly comparison: "first-parent";
+  readonly followsRenames: false;
+}
+
+/** Compares real tree entries, never decoded contents, for a bounded page of reachable commits.
+ * Merge commits are compared to their first parent; callers must disclose this and the absence of rename following.
+ */
+export async function listFileHistory(repo: RepositoryReader, head: CommitInfo, path: string, limit: number, offset: number): Promise<FileHistoryPage> {
+  const segments = cleanPath(path);
+  if (!segments.length || !Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(offset) || offset < 0) throw new Error("Invalid file history request");
+  const objectAt = async (commit: CommitInfo): Promise<string | null> => {
+    let hash = commit.treeHash;
+    for (let index = 0; index < segments.length; index++) {
+      const entries = await repo.readTree(hash);
+      if (!entries) throw new Error("History tree is unavailable; no complete page was returned");
+      const entry = entries.find(item => item.name === segments[index]);
+      if (!entry) return null;
+      if (index === segments.length - 1) return `${entry.type}:${entry.mode}:${entry.hash}`;
+      if (entry.type !== "tree") return null;
+      hash = entry.hash;
+    }
+    return null;
+  };
+  const rows = await listCommits(repo, head.hash, limit, offset);
+  const commits: Array<CommitInfo & {pathExists: boolean}> = [];
+  for (const commit of rows) {
+    const parentHash = commit.parents[0];
+    const parent = parentHash ? await resolveCommit(repo, parentHash) : null;
+    if (parentHash && !parent) throw new Error("History parent is unavailable; no complete page was returned");
+    const current = await objectAt(commit);
+    const previous = parent ? await objectAt(parent) : null;
+    if (current !== previous) commits.push({...commit, pathExists: current !== null});
+  }
+  return {commit: head.hash, path, commits, scanned: rows.length, nextOffset: rows.length === limit ? offset + rows.length : null, comparison: "first-parent", followsRenames: false};
+}

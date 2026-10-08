@@ -45,11 +45,13 @@ function encodeString(value: Uint8Array): Uint8Array {
 const text = (value: Uint8Array) => new TextDecoder().decode(value);
 
 function decodeArmor(armored: string): Uint8Array | null {
-  const match = /-----BEGIN SSH SIGNATURE-----\n([\s\S]+?)\n-----END SSH SIGNATURE-----/.exec(armored);
+  const match = /^-----BEGIN SSH SIGNATURE-----\r?\n([A-Za-z0-9+/=\r\n]+)\r?\n-----END SSH SIGNATURE-----(?:\r?\n)?$/.exec(armored);
   if (!match) return null;
-  const body = match[1]!.replace(/\n/g, "");
-  if (!/^[A-Za-z0-9+/=]+$/.test(body)) return null;
-  return new Uint8Array(Buffer.from(body, "base64"));
+  const body = match[1]!.replace(/[\r\n]/g, "");
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(body) || body.length === 0) return null;
+  const decoded = Buffer.from(body, "base64");
+  if (decoded.toString("base64") !== body) return null;
+  return new Uint8Array(decoded);
 }
 
 /** Verifies an armored SSHSIG over `payload` in `namespace` against authorized-key lines. Only ssh-ed25519 is accepted. */
@@ -72,6 +74,7 @@ export async function verifySshSignature(options: {
     reserved = readString(reader);
     hashAlgorithm = readString(reader);
     signatureBlob = readString(reader);
+    if (reader.offset !== reader.bytes.length) return {ok: false, error: "Signature contains trailing data"};
   } catch {
     return {ok: false, error: "Signature is truncated or malformed"};
   }
@@ -85,6 +88,7 @@ export async function verifySshSignature(options: {
   try {
     keyType = readString(keyReader);
     rawKey = readString(keyReader);
+    if (keyReader.offset !== keyReader.bytes.length) return {ok: false, error: "Signing key contains trailing data"};
   } catch {
     return {ok: false, error: "Signing key is malformed"};
   }
@@ -100,6 +104,7 @@ export async function verifySshSignature(options: {
   try {
     sigAlgorithm = readString(sigReader);
     signature = readString(sigReader);
+    if (sigReader.offset !== sigReader.bytes.length) return {ok: false, error: "Signature value contains trailing data"};
   } catch {
     return {ok: false, error: "Signature value is malformed"};
   }

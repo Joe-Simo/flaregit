@@ -4,6 +4,7 @@ import { canPublish, visiblePackages, type PackageRecord } from "./package-visib
 
 /** Total UTF-8 bytes of one version's files. */
 export const MAX_PACKAGE_BYTES = 10 * 1024 * 1024;
+export class PackageCapacityError extends Error {}
 
 export type RegistryStatus = 400 | 403 | 404 | 409 | 413 | 500;
 
@@ -110,7 +111,7 @@ export class MemoryPackageStore implements PackageStore {
 
 const INVALID_NAME = "Package names are 1-100 characters of lowercase letters, digits, '-', '_' or '.', and cannot start with a dot";
 const INVALID_VERSION = "Versions must be semantic x.y.z with an optional prerelease";
-const PACKAGE_NAME = /^(?!\.)[a-z0-9._-]{1,100}$/;
+const PACKAGE_NAME = /^(?:(?!\.)[a-z0-9._-]{1,100}|@[a-z0-9_-]{1,100}\/(?!\.)[a-z0-9._-]{1,100})$/;
 const PRERELEASE_ID = String.raw`(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)`;
 const VERSION = new RegExp(String.raw`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(${PRERELEASE_ID}(?:\.${PRERELEASE_ID})*))?$`);
 const X_MAJOR = /^(0|[1-9]\d*)\.[xX*](?:\.[xX*])?$/;
@@ -268,6 +269,16 @@ export class PackageRegistry {
   constructor(private readonly store: PackageStore = new MemoryPackageStore()) {}
 
   async publish(input: PublishInput): Promise<PublishResult> {
+    if (typeof input.files !== "object" || input.files === null) return fail(400, "files must map paths to text");
+    const files: Record<string, Uint8Array<ArrayBuffer>> = {};
+    for (const [path, content] of Object.entries(input.files)) {
+      if (typeof content !== "string") return fail(400, `File ${path} must be text`);
+      files[path] = new TextEncoder().encode(content);
+    }
+    return this.publishBinary({ ...input, files });
+  }
+
+  async publishBinary(input: Omit<PublishInput, "files"> & { readonly files: Readonly<Record<string, Uint8Array<ArrayBuffer>>> }): Promise<PublishResult> {
     const { name, version, ownerId } = input;
     if (!isPackageName(name)) return fail(400, INVALID_NAME);
     if (!isVersion(version)) return fail(400, INVALID_VERSION);
@@ -281,8 +292,8 @@ export class PackageRegistry {
     const encoded: { readonly path: string; readonly bytes: Uint8Array<ArrayBuffer> }[] = [];
     for (const [path, content] of entries) {
       if (!isValidPath(path)) return fail(400, `File path ${JSON.stringify(path)} is not allowed`);
-      if (typeof content !== "string") return fail(400, `File ${path} must be text`);
-      const bytes = new TextEncoder().encode(content);
+      if (!(content instanceof Uint8Array)) return fail(400, `File ${path} must be bytes`);
+      const bytes = content.slice();
       totalBytes += bytes.byteLength;
       if (totalBytes > MAX_PACKAGE_BYTES) return fail(413, `Package files exceed ${MAX_PACKAGE_BYTES} bytes`);
       encoded.push({ path, bytes });
@@ -300,7 +311,7 @@ export class PackageRegistry {
     const isPrivate = input.private === true;
     if (owner !== undefined && owner.private !== isPrivate) return fail(409, `${name} keeps the visibility of its first publish`);
     if (!canPublish(existing, name, version)) return fail(409, `${name}@${version} is already published and cannot change`);
-    this.store.putVersion({
+    try { this.store.putVersion({
       name,
       version,
       private: isPrivate,
@@ -308,7 +319,10 @@ export class PackageRegistry {
       files: new Map(files.map((file): [string, StoredFile] => [file.path, file])),
       integrity,
       deprecated: null,
-    });
+    }); } catch (error) {
+      if (error instanceof PackageCapacityError) return fail(413, error.message);
+      throw error;
+    }
     return { ok: true, name, version, integrity };
   }
 
@@ -322,6 +336,11 @@ export class PackageRegistry {
 
   /** Returns content only after the stored bytes match the digest recorded at publish. */
   async fetchFile(name: string, version: string, path: string, viewer: Viewer): Promise<FetchResult> {
+    const result = await this.fetchBytes(name, version, path, viewer);
+    return result.ok ? { ok: true, content: new TextDecoder().decode(result.bytes) } : result;
+  }
+
+  async fetchBytes(name: string, version: string, path: string, viewer: Viewer): Promise<{ readonly ok: true; readonly bytes: Uint8Array<ArrayBuffer> } | RegistryFailure> {
     if (!isPackageName(name) || !isVersion(version) || !isValidPath(path)) return fail(400, "Package name, version or file path is invalid");
     const stored = this.store.getVersion(name, version);
     if (stored === undefined || visiblePackages([stored], viewer.id, viewer.memberOf).length === 0) return fail(404, `${name}@${version} was not found`);
@@ -330,7 +349,7 @@ export class PackageRegistry {
     // Hash and decode the same copy, so the bytes returned are the bytes verified.
     const bytes = file.bytes.slice();
     if ((await sha256Hex(bytes)) !== file.sha256) return fail(500, `Stored ${name}@${version} ${path} failed digest verification`);
-    return { ok: true, content: new TextDecoder().decode(bytes) };
+    return { ok: true, bytes };
   }
 
   /** Marks a version deprecated. The version stays listed and fetchable; resolve stops choosing it. */

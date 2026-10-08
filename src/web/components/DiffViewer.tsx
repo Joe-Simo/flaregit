@@ -179,6 +179,9 @@ export function DiffViewer({ files, loadBlob, onLineClick, commented, onReadyCha
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null;
+      // Single-character review shortcuts belong to the focused diff, not the
+      // whole workspace or a dialog opened above it.
+      if (e.defaultPrevented || !el || !parentRef.current?.contains(el)) return;
       if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key === "j") jump(fileStarts, 1);

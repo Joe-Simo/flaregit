@@ -1,3 +1,7 @@
+import {IssueBulkControls} from '../components/IssueBulkControls';
+import {Checkbox} from '@/components/ui/checkbox';
+import {IssueTemplatePicker} from '../components/IssueTemplatePicker';
+import {IssuePlanning} from '../components/IssuePlanning';
 import {ImportedOrigin} from "../components/ImportedOrigin";
 import type {ImportedConversationOrigin} from "../../server/migration-conversation-publication";
 import React, { useCallback, useEffect, useRef, useState } from "react";
@@ -14,7 +18,7 @@ import { navigate, timeAgo } from "../router";
 import { changeCreationFollowup, type ChangeCreationResponse } from "../change-creation-followup";
 import { Conversation } from "../components/Conversation";
 
-interface Issue { number: number; title: string; body: string; state: "open" | "closed"; author: string; created_at: string; updated_at: string; closed_by: string | null; comments: number; importedOrigin?:ImportedConversationOrigin|null }
+interface Issue { discussionOrigin?:{discussionId:string;scope:'public'|'members';author:string;createdAt:string;convertedBy:string}; number: number; title: string; body: string; state: "open" | "closed"; author: string; created_at: string; updated_at: string; closed_by: string | null; comments: number; importedOrigin?:ImportedConversationOrigin|null }
 interface IssueDetail extends Omit<Issue, "comments"> { linked: Array<{ id: string; goal: string; status: string }> }
 const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm";
 const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive";
@@ -36,6 +40,7 @@ export function IssuesTab({ projectId, issue }: { projectId: string; issue?: num
 }
 
 function IssueList({ projectId }: { projectId: string }) {
+  const [selected,setSelected]=useState<number[]>([]);
   const [state, setState] = useState<"open" | "closed">("open");
   const [issues, setIssues] = useState<Issue[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -55,7 +60,7 @@ function IssueList({ projectId }: { projectId: string }) {
 
   const load = useCallback(async () => {
     const generation=lifetime.current, sequence=++readSequence.current; readController.current?.abort(); const controller=new AbortController();readController.current=controller;
-    setIssues(null);
+    setIssues(null);setSelected([]);
     setLoadError(null);
     try {
       const rows=await apiJson<Issue[]>(`/p/${projectId}/issues?state=${state}`,{signal:controller.signal});
@@ -102,6 +107,7 @@ function IssueList({ projectId }: { projectId: string }) {
           <label className="block text-sm"><span className="font-medium">Title</span>
             <Input className={field} value={title} disabled={saving} maxLength={200} onChange={(e) => editDraft(e.target.value,body)} />
           </label>
+          <IssueTemplatePicker projectId={projectId} disabled={saving} onApply={nextBody=>editDraft(title,nextBody)}/>
           <label className="block text-sm"><span className="font-medium">Description</span>
             <Textarea className={field} rows={5} maxLength={20000} disabled={saving} value={body} onChange={(e) => editDraft(title,e.target.value)} placeholder="What should change, and why? Agents working on a linked change read this." />
           </label>
@@ -110,6 +116,7 @@ function IssueList({ projectId }: { projectId: string }) {
         </form>
       )}
       <TabsContent value={state}>
+      {selected.length>0&&<IssueBulkControls key={`${projectId}:${state}`} projectId={projectId} numbers={selected} onSaved={()=>{setSelected([]);void load();}}/>}
       {loadError && <LoadError message={loadError} onRetry={() => void load()} />}
       {!issues && !loadError && <p role="status" className="text-sm text-muted-foreground">Loading issues…</p>}
       {issues && (
@@ -117,6 +124,7 @@ function IssueList({ projectId }: { projectId: string }) {
           {issues.length === 0 && <li className="px-3 py-6 text-center text-sm text-muted-foreground">No {state} issues.</li>}
           {issues.map((i) => (
             <li key={i.number}>
+              <div className="flex items-start"><Checkbox className="m-3 shrink-0" aria-label={`Select issue ${i.number}`} checked={selected.includes(i.number)} disabled={!selected.includes(i.number)&&selected.length>=100} onCheckedChange={checked=>setSelected(previous=>checked===true?[...previous,i.number]:previous.filter(n=>n!==i.number))}/>
               <button className="w-full text-left px-3 py-2 flex items-start gap-2 hover:bg-muted/40" onClick={() => navigate(`/p/${projectId}/issues?n=${i.number}`)}>
                 {i.state === "open" ? <CircleDot className="h-4 w-4 mt-0.5 text-emerald-400 shrink-0" aria-label="open" /> : <CircleCheck className="h-4 w-4 mt-0.5 text-purple-400 shrink-0" aria-label="closed" />}
                 <span className="min-w-0">
@@ -124,6 +132,7 @@ function IssueList({ projectId }: { projectId: string }) {
                   <span className="block text-xs text-muted-foreground">#{i.number}{!i.importedOrigin&&<> by {i.author}</>} · updated {timeAgo(i.updated_at)}{i.comments ? ` · ${i.comments} comment${i.comments === 1 ? "" : "s"}` : ""}</span>
                 </span>
               </button>
+              </div>
               {i.importedOrigin&&<div className="px-3 pb-2"><ImportedOrigin sourceUrl={i.importedOrigin.sourceUrl} login={i.importedOrigin.login} createdAt={i.importedOrigin.createdAt}/></div>}
             </li>
           ))}
@@ -229,6 +238,7 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
         <h2 className="text-lg font-semibold break-words">{issue.title} <span className="text-muted-foreground font-normal">#{issue.number}</span></h2>
         <p className="text-xs text-muted-foreground">
           <Badge variant={issue.state === "open" ? "success" : "purple"}>{issue.state}</Badge> {issue.importedOrigin?<ImportedOrigin sourceUrl={issue.importedOrigin.sourceUrl} login={issue.importedOrigin.login} createdAt={issue.importedOrigin.createdAt}/>:<>opened by {issue.author} {timeAgo(issue.created_at)}</>}
+          {issue.discussionOrigin&&<p className="mt-2 text-xs text-muted-foreground">Converted by {issue.discussionOrigin.convertedBy} from a {issue.discussionOrigin.scope==='members'?'member':'public'} discussion. <a className="underline" href={issue.discussionOrigin.scope==='members'?`/#/p/${projectId}/discussions?topic=${encodeURIComponent(issue.discussionOrigin.discussionId)}`:`/#/community?repo=${encodeURIComponent(projectId)}&topic=${encodeURIComponent(issue.discussionOrigin.discussionId)}`}>View original discussion</a></p>}
           {issue.closed_by && issue.state === "closed" ? ` · closed by ${issue.closed_by}` : ""}
         </p>
       </div>
@@ -249,6 +259,7 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
           <ul className="space-y-1">{issue.linked.map((t) => <li key={t.id} className="break-words"><button className="hover:underline text-left" onClick={() => navigate(`/p/${projectId}/review?task=${t.id}`)}>{t.goal}</button> <span className="text-xs text-muted-foreground">{t.status}</span></li>)}</ul>
         </div>
       )}
+      <IssuePlanning key={`${projectId}:${number}`} projectId={projectId} number={number}/>
       <Conversation key={`${projectId}:issue:${number}`} projectId={projectId} subject={`issue:${number}`} title="Conversation" />
     </div>
   );

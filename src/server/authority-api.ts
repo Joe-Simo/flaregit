@@ -54,12 +54,33 @@ export async function handleAuthorityCall(backend: AuthorityBackend, call: Autho
     return registered.ok ? json(201, { clientId: registered.clientId }) : failure(400, registered.error);
   }
 
-  if (pathname === "/api/oauth/authorize" && method === "POST") {
+  const appRoute = /^\/api\/oauth\/apps\/([A-Za-z0-9_-]{22})$/.exec(pathname);
+  if (appRoute && method === "GET") {
+    const denied=needsSession(); if (denied) return denied;
+    const app=backend.oauth.app(appRoute[1]!); return app ? json(200,app) : failure(404,"App not found");
+  }
+  if (pathname === "/api/oauth/installations" && method === "GET") {
+    const denied=needsSession(); if (denied) return denied;
+    const repositoryId=new URLSearchParams(call.search).get("repositoryId") ?? "";
+    if (!/^[a-z0-9]{12,16}$/.test(repositoryId)) return failure(400,"Select a repository");
+    return json(200,{installations:await backend.oauth.installations(userId!,repositoryId)});
+  }
+  const installationRoute = /^\/api\/oauth\/installations\/([A-Za-z0-9_-]{22})$/.exec(pathname);
+  if (installationRoute && method === "DELETE") {
+    const denied=needsSession(); if (denied) return denied;
+    const repositoryId=new URLSearchParams(call.search).get("repositoryId") ?? "";
+    if (!/^[a-z0-9]{12,16}$/.test(repositoryId)) return failure(400,"Select a repository");
+    return backend.oauth.uninstall(userId!,repositoryId,installationRoute[1]!) ? json(200,{revoked:true}) : failure(404,"Installation not found");
+  }
+  if ((pathname === "/api/oauth/authorize" || pathname === "/api/oauth/install") && method === "POST") {
     const denied = needsSession();
     if (denied) return denied;
     const input = asObject(body);
     if (!input) return badBody;
+    if (pathname === "/api/oauth/install" && (typeof input.repositoryId !== "string" || !/^[a-z0-9]{12,16}$/.test(input.repositoryId))) return failure(400,"Select the exact repository for this installation");
+    if (input.repositoryId !== undefined && typeof input.repositoryId !== "string") return failure(400,"Invalid repository");
     const authorized = await backend.oauth.authorize({
+      repositoryId: typeof input.repositoryId === "string" ? input.repositoryId : undefined,
       clientId: String(input.clientId ?? ""),
       redirectUri: String(input.redirectUri ?? ""),
       scope: String(input.scope ?? ""),
@@ -68,7 +89,7 @@ export async function handleAuthorityCall(backend: AuthorityBackend, call: Autho
       userId: userId!,
       state: typeof input.state === "string" ? input.state : undefined,
     });
-    return authorized.ok ? json(200, { code: authorized.code }) : failure(400, authorized.error);
+    return authorized.ok ? json(200, { code: authorized.code, ...(pathname === "/api/oauth/install" ? {redirectTo:authorized.redirectTo} : {}) }) : failure(400, authorized.error);
   }
 
   if (pathname === "/api/oauth/token" && method === "POST") {
@@ -100,8 +121,18 @@ export async function handleAuthorityCall(backend: AuthorityBackend, call: Autho
 
   const match = RESOURCE.exec(pathname);
   if (!match) return failure(404, "Not found");
-  const name = decodeURIComponent(match[1]!);
   const tail = match[2];
+  let name: string;
+  let version: string | undefined;
+  let filePath: string | undefined;
+  try {
+    name = decodeURIComponent(match[1]!);
+    version = tail !== undefined && tail !== "resolve" ? decodeURIComponent(match[3]!) : undefined;
+    filePath = match[5]?.split("/").map(decodeURIComponent).join("/");
+  } catch (error) {
+    if (error instanceof URIError) return failure(400, "Invalid URL encoding");
+    throw error;
+  }
 
   if (tail === undefined && method === "GET") {
     const metadata = backend.registry.metadata(name, viewer);
@@ -114,7 +145,6 @@ export async function handleAuthorityCall(backend: AuthorityBackend, call: Autho
     return resolved.ok ? json(200, { version: resolved.version, integrity: resolved.integrity }) : failure(resolved.status, resolved.error);
   }
 
-  const version = tail !== undefined && tail !== "resolve" ? decodeURIComponent(match[3]!) : undefined;
   const action = match[4];
 
   if (version !== undefined && action === undefined && method === "POST") {
@@ -122,6 +152,7 @@ export async function handleAuthorityCall(backend: AuthorityBackend, call: Autho
     if (denied) return denied;
     const input = asObject(body);
     if (!input) return badBody;
+    if ("private" in input && typeof input.private !== "boolean") return failure(400, "private must be true or false");
     const files = asObject(input.files);
     if (!files) return failure(400, "files must map paths to text");
     const published = await backend.registry.publish({
@@ -145,8 +176,7 @@ export async function handleAuthorityCall(backend: AuthorityBackend, call: Autho
   }
 
   if (version !== undefined && action !== undefined && action.startsWith("files/") && method === "GET") {
-    const path = match[5]!.split("/").map(decodeURIComponent).join("/");
-    const fetched = await backend.registry.fetchFile(name, version, path, viewer);
+    const fetched = await backend.registry.fetchFile(name, version, filePath!, viewer);
     return fetched.ok
       ? { status: 200, contentType: "text/plain; charset=utf-8", body: fetched.content }
       : failure(fetched.status, fetched.error);

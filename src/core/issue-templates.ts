@@ -53,7 +53,7 @@ export function validateSubmission(template: IssueTemplate, submitted: Readonly<
     if (field.type === "checkbox") {
       if (typeof value !== "boolean") errors.push({field: field.id, error: "Must be true or false"});
       else if (field.required && !value) errors.push({field: field.id, error: "This field is required"});
-      else values[field.id] = value;
+      else Object.defineProperty(values,field.id,{value,enumerable:true,configurable:true,writable:true});
       continue;
     }
     if (typeof value !== "string") {
@@ -69,7 +69,7 @@ export function validateSubmission(template: IssueTemplate, submitted: Readonly<
       errors.push({field: field.id, error: "Not one of the allowed options"});
       continue;
     }
-    values[field.id] = text;
+    Object.defineProperty(values,field.id,{value:text,enumerable:true,configurable:true,writable:true});
   }
   return errors.length > 0 ? {ok: false, errors} : {ok: true, values};
 }

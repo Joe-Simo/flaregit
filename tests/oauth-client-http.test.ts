@@ -1,0 +1,55 @@
+import {expect,test} from 'bun:test';
+import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
+import {generateKeyPair,exportJWK,SignJWT} from 'jose';
+import {workerdChild} from './support/workerd-child';
+
+test('external OAuth client installs, uses scoped issues and exact checks, then loses access on uninstall and membership revoke',async()=>{
+  if(await workerdChild('tests/oauth-client-http.test.ts'))return;
+  const pair=await generateKeyPair('RS256'),jwk={...await exportJWK(pair.publicKey),kid:'authority-life',alg:'RS256',use:'sig'};
+  const issuer=Bun.serve({hostname:'127.0.0.1',port:0,fetch:()=>Response.json({keys:[jwk]})});
+  const built=await Bun.build({entrypoints:['tests/support/authority-lifecycle-worker.ts'],target:'browser',external:['cloudflare:workers','node:*']});
+  if(!built.success)throw Error(built.logs.join('\n'));
+  const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:'authority-life',modules:true,script:await built.outputs[0]!.text(),compatibilityDate:'2026-10-02',compatibilityFlags:['nodejs_compat'],bindings:{FIXTURE_ISSUER:issuer.url.origin},durableObjects:{REPOSITORY_CONTROLLER:{className:'AuthorityAccountFixture',useSQLite:true},AUTHORITY:{className:'AuthorityController',useSQLite:true}}}]}));
+  try{
+    const target=await mf.getWorker('authority-life');
+    const token=await new SignJWT({azp:'https://fixture.example'}).setProtectedHeader({alg:'RS256',kid:jwk.kid}).setIssuer(issuer.url.origin).setSubject('member').setIssuedAt().setExpirationTime('5m').sign(pair.privateKey);
+    const send=(path:string,body:unknown)=>target.fetch('http://fixture'+path,{method:'POST',headers:{Authorization:'Bearer '+token,'content-type':'application/json'},body:JSON.stringify(body)});
+    await target.fetch('http://fixture/fixture/seed');
+    const app={name:'External issue client',redirectUris:['https://app.example/cb'],scopes:['issues:read','issues:write','checks:read','checks:write']};
+    const registered=await send('/api/oauth/apps',app);expect(registered.status).toBe(201);
+    const {clientId}=await registered.json() as {clientId:string};
+    const authorize=async(scopes:string)=>send('/api/oauth/install',{clientId,repositoryId:'p123456789abc',redirectUri:'https://app.example/cb',scope:scopes,codeChallenge:'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM'});
+    const exchange=async(scopes:string)=>{
+      const authorized=await authorize(scopes);expect(authorized.status).toBe(200);const {code}=await authorized.json() as {code:string};
+      const result=await target.fetch('http://fixture/api/oauth/token',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({grant_type:'authorization_code',clientId,code,redirectUri:'https://app.example/cb',codeVerifier:'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk'})});expect(result.status).toBe(200);return await result.json() as {access_token:string};
+    };
+    const appToken=await exchange(app.scopes.join(' '));
+    const appCall=(path:string,method='GET',body?:unknown,access=appToken.access_token)=>target.fetch('http://fixture'+path,{method,headers:{Authorization:'Bearer '+access,'content-type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})});
+    const created=await appCall('/api/p/p123456789abc/issues','POST',{title:'External client issue',body:'Owned by the client',idempotencyKey:crypto.randomUUID()});expect(created.status).toBe(201);
+    const issue=await created.json() as {number:number};
+    expect((await appCall('/api/p/p123456789abc/issues')).status).toBe(200);
+    expect((await appCall('/api/p/p123456789abc/issues/'+issue.number,'PATCH',{state:'closed'})).status).toBe(200);
+    expect((await appCall('/api/p/p123456789abc/candidates/candidate-one/checks','POST',{checkId:'build',commit:'c'.repeat(40)})).status).toBe(409);
+    expect((await appCall('/api/p/p123456789abc/candidates/candidate-one/checks','POST',{checkId:'build',commit:'a'.repeat(40)})).status).toBe(201);
+    expect((await appCall('/api/p/p123456789abc/candidates/candidate-one/checks')).status).toBe(200);
+    expect((await appCall('/api/p/p999999999999/issues')).status).toBe(403);
+    expect((await appCall('/api/p/p123456789abc/lifecycle','POST',{action:'archive'})).status).toBe(403);
+    expect((await appCall('/api/signing-keys')).status).toBe(403);
+    for (const path of ['/api/p/p123456789abc/native/git-credentials','/api/p/p123456789abc/members','/api/oauth/apps','/api/registry/owned','/npm/owned','/v2/owned/manifests/latest']) expect([403,404]).toContain((await appCall(path)).status);
+    const readOnly=await exchange('issues:read');
+    expect((await appCall('/api/p/p123456789abc/issues','POST',{title:'Denied'},readOnly.access_token)).status).toBe(403);
+    expect((await appCall('/api/p/p123456789abc/candidates/candidate-one/checks','GET',undefined,readOnly.access_token)).status).toBe(403);
+    const installed=await target.fetch('http://fixture/api/oauth/installations?repositoryId=p123456789abc',{headers:{Authorization:'Bearer '+token}});
+    const catalog=await installed.json() as {installations:Array<{id:string}>};expect(catalog.installations.length).toBe(2);
+    for(const grant of catalog.installations)expect((await target.fetch('http://fixture/api/oauth/installations/'+grant.id+'?repositoryId=p123456789abc',{method:'DELETE',headers:{Authorization:'Bearer '+token}})).status).toBe(200);
+    expect((await appCall('/api/p/p123456789abc/issues')).status).toBe(401);
+    const deletedAccount=await exchange('issues:read');
+    await target.fetch('http://fixture/fixture/lifecycle?state=deleted');
+    expect((await appCall('/api/p/p123456789abc/issues','GET',undefined,deletedAccount.access_token)).status).toBe(401);
+    await target.fetch('http://fixture/fixture/lifecycle?state=active');
+    expect((await appCall('/api/p/p123456789abc/issues','GET',undefined,deletedAccount.access_token)).status).toBe(401);
+    const revokedMember=await exchange('issues:read');
+    await target.fetch('http://fixture/fixture/revoke-member');
+    expect((await appCall('/api/p/p123456789abc/issues','GET',undefined,revokedMember.access_token)).status).toBe(401);
+  }finally{await mf.dispose();issuer.stop(true);}
+},60000);

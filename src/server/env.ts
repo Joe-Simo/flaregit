@@ -2,6 +2,13 @@ import type { ArtifactsBinding } from "../artifacts/cloudflare.js";
 import type { AiBinding } from "../ai/workers-ai.js";
 
 export interface Env {
+  /** Optional server-only recovery key; unset disables operational backups. */
+  OPERATIONAL_BACKUP_KEY?:string;
+  /** Isolated recovery databases, never registered as live repository controllers. */
+  OPERATIONAL_RECOVERY?:DurableObjectNamespace<import('./operational-recovery-controller').OperationalRecoveryController>;
+  /** Operator-maintained isolated native clone reader; no live publication capability. */
+  OPERATIONAL_RECOVERY_GIT?:Fetcher;
+
   /** Private exact publisher checkpoint binding. Unset in ordinary/public deployments. */
   C03_PRIVATE_MATRIX_ENABLED?:string;
   C03_PUBLICATION_CHECKPOINT_GRANT_JSON?:string;

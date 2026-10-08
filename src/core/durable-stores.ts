@@ -1,6 +1,6 @@
 /** Durable stores for the OAuth server and package registry, backed by any synchronous SQL object (a Durable Object's `ctx.storage.sql` or bun:sqlite). Values are stored as JSON; bytes are base64. */
 import type {KeyValue, OAuthStore, AppRecord, CodeRecord, GrantRecord, AccessTokenRecord, RefreshTokenRecord} from "./oauth-server";
-import type {PackageStore, StoredFile, StoredVersion} from "./package-registry";
+import {PackageCapacityError, type PackageStore, type StoredFile, type StoredVersion} from "./package-registry";
 
 export interface SqlLike {
   exec(query: string, ...bindings: unknown[]): {toArray(): unknown[]};
@@ -20,6 +20,12 @@ export class SqlKeyValue<V> implements KeyValue<V> {
   get(key: string): V | undefined {
     const row = this.sql.exec("SELECT v FROM kv WHERE ns = ? AND k = ?", this.namespace, key).toArray()[0] as {v: string} | undefined;
     return row === undefined ? undefined : (JSON.parse(row.v) as V);
+  }
+
+  values(): V[] {
+    const rows = this.sql.exec("SELECT v FROM kv WHERE ns = ? LIMIT 10001", this.namespace).toArray() as {v:string}[];
+    if (rows.length > 10000) throw Error("OAuth catalog capacity exceeded");
+    return rows.map(row => JSON.parse(row.v) as V);
   }
 
   set(key: string, value: V): void {
@@ -117,7 +123,10 @@ export class SqlPackageStore implements PackageStore {
 
   putVersion(stored: StoredVersion): void {
     if (this.getVersion(stored.name, stored.version) !== undefined) throw new Error(`${stored.name}@${stored.version} is already stored`);
-    this.sql.exec("INSERT INTO pkg_versions(name, version, json) VALUES(?, ?, ?)", stored.name, stored.version, encodeVersion(stored));
+    const encoded = encodeVersion(stored);
+    const usage = this.sql.exec("SELECT COUNT(*) AS count, COALESCE(SUM(length(CAST(json AS BLOB))), 0) AS bytes FROM pkg_versions").toArray()[0] as {count: number; bytes: number};
+    if (usage.count >= 9000 || usage.bytes + new TextEncoder().encode(encoded).byteLength > 192 * 1024 * 1024) throw new PackageCapacityError("Package registry capacity reached");
+    this.sql.exec("INSERT INTO pkg_versions(name, version, json) VALUES(?, ?, ?)", stored.name, stored.version, encoded);
   }
 
   setDeprecation(name: string, version: string, message: string): void {

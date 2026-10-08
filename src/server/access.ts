@@ -24,6 +24,8 @@ export interface Identity {
   /** Set for API tokens: what the token may do and which repository it is pinned to. */
   tokenScope?: "full" | "read" | "write";
   tokenRepo?: string | null;
+  oauthClientId?: string;
+  oauthScopes?: readonly string[];
 }
 
 /**
@@ -39,6 +41,18 @@ export async function authenticate(request: Request, env: Env): Promise<Identity
     if (!m) return new Response("Unauthorized", { status: 401 });
     const t = await accountOf(env, m[1]!).verifyApiToken(raw).catch(() => null);
     return t ? { id: t.userId, viaToken: true, tokenScope: t.scope, tokenRepo: t.repo } : new Response("Unauthorized", { status: 401 });
+  }
+  if (raw?.startsWith("fgo_")) {
+    if (!/^fgo_[A-Za-z0-9_-]{43}$/.test(raw)) return new Response("Unauthorized", {status:401});
+    const token = await env.AUTHORITY.get(env.AUTHORITY.idFromName("authority")).introspect(raw).catch(() => ({active:false as const}));
+    if (!token.active || !token.repositoryId) return new Response("Unauthorized", {status:401});
+    const url = new URL(request.url), match = /^\/api\/p\/([a-z0-9]{12,16})(\/.*)$/.exec(url.pathname);
+    if (!match || match[1] !== token.repositoryId) return new Response("App access is limited to its installed repository", {status:403});
+    const method=request.method, path=match[2]!;
+    const read=method==="GET";
+    const resource=/^\/issues(?:\/\d{1,7})?$/.test(path) && (read || path==="/issues" && method==="POST" || /^\/issues\/\d{1,7}$/.test(path) && method==="PATCH") ? "issues" : /^\/candidates\/[a-z0-9_-]+\/checks$/.test(path) && (read || method==="POST") ? "checks" : null;
+    if (!resource || !token.scopes.includes(`${resource}:${read?"read":"write"}`)) return new Response("App scope does not permit this operation", {status:403});
+    return {id:token.userId,viaToken:true,tokenScope:read?"read":"write",tokenRepo:token.repositoryId,oauthClientId:token.clientId,oauthScopes:token.scopes,expiresAt:token.expiresAt};
   }
   if (!env.CLERK_ISSUER) return new Response("Authentication is not configured", { status: 503 });
   const allowed = (env.CLERK_AUTHORIZED_PARTIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);

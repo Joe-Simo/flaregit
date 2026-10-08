@@ -1,3 +1,5 @@
+import {RepositoryController} from "../../src/server/durable-object";
+export {RepositoryController};
 import { AuthorityController } from "../../src/server/authority-controller";
 import type { AuthorityCall } from "../../src/server/authority-api";
 

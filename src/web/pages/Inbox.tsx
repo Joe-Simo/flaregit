@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { apiJson } from "../api";
 import { navigate, timeAgo } from "../router";
+import {RepositoryNotifications} from "../components/RepositoryNotifications";
 import {Button} from "@/components/ui/button";
 import {inboxDestination,inboxShortcutAllowed,INBOX_INTERACTIVE_TARGETS} from "../inbox-navigation";
 
@@ -15,12 +16,19 @@ export function Inbox({ onCount }: { onCount: (n: number) => void }) {
   const [cursor, setCursor] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
+  const requestSequence=useRef(0),requestController=useRef<AbortController|null>(null),activeFilter=useRef(filter);
+  activeFilter.current=filter;
+  const [loading,setLoading]=useState(false);
   const load = useCallback(() => {
-    apiJson<{ items: Item[]; unread: { direct: number } }>(`/inbox?filter=${filter}`)
-      .then((r) => { setItems(r.items); onCount(r.unread.direct); setCursor((c) => Math.min(c, Math.max(0, r.items.length - 1))); })
-      .catch((e: Error) => setError(e.message));
+    if(activeFilter.current!==filter)return;
+    const sequence=++requestSequence.current;requestController.current?.abort();const controller=new AbortController();requestController.current=controller;
+    setItems([]);setError(null);setLoading(true);onCount(0);
+    void apiJson<{ items: Item[]; unread: { direct: number } }>(`/inbox?filter=${filter}`,{signal:AbortSignal.any([controller.signal,AbortSignal.timeout(15000)])})
+      .then((r) => {if(sequence!==requestSequence.current||activeFilter.current!==filter)return;setItems(r.items);onCount(r.unread.direct);setCursor((c)=>Math.min(c,Math.max(0,r.items.length-1)));})
+      .catch((e: Error) => {if(sequence!==requestSequence.current||controller.signal.aborted)return;setItems([]);onCount(0);setError(e.message);})
+      .finally(()=>{if(sequence===requestSequence.current)setLoading(false);});
   }, [filter, onCount]);
-  useEffect(load, [load]);
+  useEffect(()=>{load();return()=>{requestSequence.current++;requestController.current?.abort();};}, [load]);
 
   const act = useCallback(async (item: Item | undefined, state: "archived" | "snoozed" | "unread") => {
     if (!item) return;
@@ -57,14 +65,16 @@ export function Inbox({ onCount }: { onCount: (n: number) => void }) {
         ))}
       </div>
       <div className="divide-y divide-border rounded-md border border-border" aria-label="Notifications">
-        {items.length === 0 && <p className="px-3 py-6 text-sm text-center text-muted-foreground">{filter === "direct" ? "Inbox zero. Nothing needs you." : "Nothing here."}</p>}
+        {loading&&<p role="status" className="px-3 py-6 text-sm text-center text-muted-foreground">Loading notifications…</p>}
+        {!loading&&!error&&items.length === 0 && <p className="px-3 py-6 text-sm text-center text-muted-foreground">{filter === "direct" ? "Inbox zero. Nothing needs you." : "Nothing here."}</p>}
         {items.map((it, i) => (
-          <div key={it.id} className={`px-3 py-2 flex items-center gap-3 text-sm ${i === cursor ? "bg-muted/60" : ""}`} onClick={() => setCursor(i)}>
+          <div key={it.id} className={`px-3 py-2 flex flex-wrap items-center gap-3 text-sm ${i === cursor ? "bg-muted/60" : ""}`} onClick={() => setCursor(i)}>
             <div className="min-w-0 flex-1">
               <div className="truncate">{it.title}</div>
               <div className="text-xs text-muted-foreground">{it.project_name} · {timeAgo(it.created_at)}</div>
             </div>
-            <div className="flex gap-1 shrink-0">
+            <div className="flex flex-wrap gap-1 shrink-0">
+              <RepositoryNotifications key={it.project_id} projectId={it.project_id} projectName={it.project_name}/>
               <Button size="sm" variant="ghost" onClick={(e)=>{e.stopPropagation();navigate(inboxDestination(it));}} aria-label={`Open ${it.title}`}>Open</Button>
               <button className="px-2 py-1 rounded border border-border text-xs hover:bg-muted" onClick={(e) => { e.stopPropagation(); void act(it, "archived"); }}>Archive</button>
               {filter !== "snoozed" && <button className="px-2 py-1 rounded border border-border text-xs hover:bg-muted" onClick={(e) => { e.stopPropagation(); void act(it, "snoozed"); }}>Snooze</button>}

@@ -3,13 +3,13 @@ import {createHash} from 'node:crypto';
 import {isSafeRef} from '../core/sanitize';
 const id=z.string().min(1).max(200),sha=z.string().regex(/^[a-f0-9]{40}$/).refine(value=>!/^0{40}$/.test(value));
 const sourceSchema=z.object({name:z.string().min(1).max(200).refine(value=>isSafeRef(value)&&!value.startsWith('refs/')&&value!=='HEAD'),tagOperationId:z.uuid(),acceptedJournalId:id,acceptedRef:z.string().max(220).refine(value=>value.startsWith('refs/heads/')&&isSafeRef(value)),acceptedRootVersion:z.number().int().nonnegative().safe(),commit:sha,tree:sha}).strict().refine(value=>(value.acceptedJournalId==="baseline")===(value.acceptedRootVersion===0),"Baseline provenance requires version zero; reviewed acceptance requires a positive version");
-const contentSchema=z.object({title:z.string().trim().min(1).max(200),notes:z.string().max(16000).refine(value=>!value.includes('\0'))}).strict();
+const contentSchema=z.object({prerelease:z.boolean().optional(),title:z.string().trim().min(1).max(200),notes:z.string().max(16000).refine(value=>!value.includes('\0'))}).strict();
 const scopeSchema=z.object({id:z.uuid(),projectId:id,incarnation:z.uuid(),canonicalRepoName:id,authorId:z.string().min(1).max(256),source:sourceSchema}).strict();
 export type ReleaseScope=z.infer<typeof scopeSchema>;
 export type ReleaseContent=z.infer<typeof contentSchema>;
 const tagProofSchema=z.object({projectId:id,incarnation:z.uuid(),canonicalRepoName:id,source:sourceSchema,status:z.literal('confirmed'),object:sha,type:z.enum(['commit','tag']),commit:sha,tree:sha}).strict();
 export type ConfirmedReleaseTag=z.infer<typeof tagProofSchema>;
-export interface ReleaseRecord {scope:ReleaseScope;title:string;notes:string;revision:number;phase:'draft'|'published';createdAt:string;updatedAt:string;publishedAt?:string;publishedBy?:string;tag?:{object:string;type:'commit'|'tag';commit:string;tree:string}}
+export interface ReleaseRecord {prerelease?:boolean;scope:ReleaseScope;title:string;notes:string;revision:number;phase:'draft'|'published';createdAt:string;updatedAt:string;publishedAt?:string;publishedBy?:string;tag?:{object:string;type:'commit'|'tag';commit:string;tree:string}}
 export class ReleaseRecordError extends Error {}
 function digest(value:unknown){return createHash('sha256').update(JSON.stringify(value)).digest('hex');}
 /** Metadata only. Authority and actual native tag receipts come from the owning

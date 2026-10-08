@@ -6,63 +6,140 @@ checklist while preserving its evidence below. No competing tracker is created.
 
 **Product:** Work in parallel. Integration happens automatically.
 
-## No-money plan — October 8, 2026 (supersedes the deferred list below)
+## Current scope — October 8, 2026
 
-The owner's requirement: the app must be buildable and testable without money. Checked against Cloudflare's
-pricing pages on October 8, 2026:
+Continue the existing finite roadmap without spending money. Local implementation, local Git/workerd/SQLite
+fixtures, lint, typecheck, tests and builds are authorized. Paid execution, provider mutations, billing,
+identity migration, destructive actions and legal acceptance remain outside this continuation.
+The earlier pricing and scope discussions are retained in git history; they do not establish new authorization.
 
-- **Free tiers exist for:** Workers (100,000 requests/day, 10 ms CPU per invocation), Durable Objects with SQLite
-  (100,000 requests/day, 5 GB stored), R2 (10 GB-month, 1 M Class A and 10 M Class B operations/month), D1 (5 GB).
-- **Paid only:** Cloudflare Artifacts (Workers Paid plan, $5/month minimum, then per-operation and per-GB charges;
-  billing starts October 14, 2026). Cloudflare Containers (Workers Paid plan, then compute, memory, disk and egress).
+**Status: incomplete.** F01–F20 all have partial source work; “F03–F20 not started” was stale. Tested helpers,
+production API/storage wiring, rendered UI, stock-client interoperability and hosted acceptance are separate
+states. Hosted restrictions do not prevent implementing and verifying local storage adapters and HTTP flows.
+No source helper alone closes a ticket or establishes release parity.
 
-Therefore the product should not depend on Artifacts or Containers. Replacements that need no money:
+### Resource constraint — owner warning, October 8
 
-1. **Git storage stays on Artifacts.** The contest rules require Workers and Artifacts, and the owner's Theo
-   requirement keeps PRs, CI, profiles and community. Replacing Artifacts with our own Git store was rejected because it
-   breaks the contest rules. The cost is the Workers Paid plan ($5/month minimum plus Artifacts usage).
-2. **Untrusted execution (replaces Containers):** run customer verification outside the platform on free runners
-   (for example GitHub Actions, free for public repositories). The Worker is the trusted publisher: it accepts only
-   signed attestations bound to the exact commit, tree, policy and runner identity. This is a product decision; see
-   the decisions list below.
-3. **Hosted receipts:** produced by the free Worker and Durable Object tiers and by the free runner. No paid
-   resource is required for any receipt.
+Disk exhaustion interrupted current verification. Docker Desktop was stopped, together with task-owned duplicate
+FlareGit typechecks/lint processes and temporary fixture servers. The Docker VM was configured for24GiB RAM;
+its existing32GiB image/data was preserved. Only disposable synthetic UI builds were removed; source changes,
+screenshots and logs remain. Free disk recovered from below600MiB to approximately3.7GiB after stopping the load.
 
-**Work that remains, with no money required:** F01 route-level HTTP tests for the guarded non-project routes; F02
-signature verification; F03–F20 (not started). Each will be recorded here as it lands.
+Keep Docker off. Root owns at most one heavy test/build/typecheck at a time; agents may perform source-only work.
+Check available disk before each heavy command and defer it below2GiB. Limit Node heap to1536MiB for checks.
+Do not resume broad suites, downloads, container builds or parallel checks merely to collect more green results.
+Current interrupted verification must remain distinct from the earlier passing baseline until rerun safely.
+A single1536MiB-capped typecheck passed after source repairs; interrupted runtime/browser checks remain pending.
 
-## Superseded: earlier no-spend scope — owner decision, October 8, 2026
+### Resource-safe continuation — October 8
 
-The owner has ruled out spending money. The active scope is therefore limited to work that costs nothing:
-local source, local tests, local Docker images, and reading public documents. Everything that needs paid
-Cloudflare resources or a paid decision is moved to the deferred list below. Nothing is deleted; the original
-text and evidence remain in this file and in git history.
+Verified the interrupted integrations one command at a time with a1536MiB Node heap cap and2GiB disk preflight.
+Docker remains off. Latest source passes typecheck, lint, build and diff-whitespace checks. The earlier full-suite
+baseline remains separate; a new full-suite or new browser pass was not run under the resource constraint.
 
-**Active (no-spend):**
-- Source implementation and local tests for C02–C09 and F01–F20 where no paid resource is needed.
-- Local gates: `bun run lint`, `bun run typecheck`, `bun test`, `bun run build`, and clean-clone reproducibility.
-- Documentation of evidence, status, and blockers.
+- Core integration run:34 pass, two explicit skips across13 files. This includes actual stock npm publish/install and
+  credential revocation, organizations, OAuth issue/check use, SARIF, forum appeals, release assets, native Git inspection,
+  encrypted backup modules and customer CI. Linux production attestation remains skipped; the test harness never reports it passed.
+- Daemonless stock OCI run:5 pass/64 assertions, including binary push/pull, revocation, immutable manifests and restart.
+- Additional HTTP/archive run:9 pass across6 files, including signed release asset/R2 and security-report requests,
+  canonical discussion polls/subscriptions/conversion, signed backup recovery primitives and actual pinned-answer export.
+- New operational backup HTTP run:operator-owner authorization, encrypted-only export, persistent hold and unsafe deletion
+  refusal pass. Unconfigured isolated recovery refuses to run. No provider resources or Docker images were allocated.
 
-**Removed from the roadmap (owner decision, October 8, 2026):** everything that costs money. That is every hosted receipt and
-hosted proof (C02–C09, F01–F20), all Containers and billed Artifacts runs, new Cloudflare resources beyond the free tiers, the
-untrusted-execution replacement design, F18 billing, F01 rename/default branch/forks/ownership transfer/deletion (they change
-Artifacts state or spend), and travel. Nothing paid is planned, requested or tracked. The original text stays in git history.
-The C11 contest entry is a manual owner step and is not engineering work.
+Canonical discussion replies now retain a namespace-isolated retry outbox and account deduplication receipts; delivery
+rechecks current subscription/topic/member access. Issue details link preserved discussion provenance. Code search/blame
+now has UI and immutable revision/path/line opening. A strict archive schema gap for pinned/answered topics was fixed
+and tested against actual canonical discussion records; subscription/outbox authority stays excluded from customer imports.
 
-**Completion now means:** local source, local tests, lint, typecheck and build for every free item. Free-tier items such as the
-R2-backed Git LFS store stay in scope behind a storage interface tested locally.
+Operator backup source is now wired:server-only signing/encryption, bounded base64 envelopes,8MB snapshots,
+4-entry/32MB vault admission, one capture/recovery in flight, no recursive operational-table snapshots, persisted
+holds and audit, and an isolated controller with no live publication RPC. Isolated Git/recovery bindings remain optional
+and unconfigured by default; a hosted recovery claim is not made.
 
-**Committed locally on `main`, not pushed (October 8):**
-- F01: archive/unarchive, visibility, and topics (`109c2ab`, `e9adc73`, `8720856`), with HTTP and unit tests.
-- F02: Git LFS batch validation and content-derived hash checks (`0e45935`), with 5 tests.
-- Tracker updates: `75b0087`, `9e3b70c`, and the commits before them.
+**Still incomplete:** Linux passing CI and crash cleanup; broader organization/native-task inheritance and nesting;
+public outsider subscription delivery, browser edits and Git wiki interoperability; registry protocol expansion;
+actual deployment adapters/static sites/domains; scanner/advisory/SBOM coverage; complete client/operational acceptance.
+The finite parity gate remains open. A local checkpoint preserves these changes; no push or deployment is authorized here.
 
-**Still open without spend (local engineering):**
-- F01: non-project route guards for archived repositories (wired; route-level HTTP tests still open).
-- F02: commit signature verification status.
-- F03–F20: not started. Each still needs local source work and tests, and any paid step moves to the deferred list.
+### Latest continuation — integrated local product flows
 
-**Status:** Not complete. Remaining scope is free local engineering only.
+- F03: signed file-history API and Code tab traverse real pinned Git objects. Changes compare each commit to its first
+  parent, with bounded pagination; rename following is explicitly unsupported. Code search and blame integration remain open.
+- F05: durable triage, labels/assignees, atomic bulk changes, milestones/due dates/reassignment, relationships and templates
+  now have member-authorized HTTP and issue UI flows. Required template fields are enforced by `/issues/from-template`;
+  retries preserve the original rendered body and issue identity even after template edits. Owner configuration requires
+  owner/full administration authority. Attachments, saved filters, full moderation and transfer/deletion flows remain open.
+- F06: repository Planning now references actual issues across board/table/timeline views, typed fields, saved filters/sorts,
+  iterations, status-driven field automation, bulk edits, progress and deterministic export. Full saved-view semantics are
+  honored. Whole-plan/item versions refuse stale updates. Accepted-change-driven automation and full project parity remain open.
+- F08: inbox projections and unread counts revalidate current repository membership and deletion state; titles from revoked
+  repositories are withheld. Durable repository delivery preferences offer All activity, Needs you only and Muted from Inbox
+  and Settings. Existing history is preserved; stale asynchronous responses and failed refreshes cannot retain old titles.
+  True thread subscriptions, mentions and email delivery remain open.
+- F09: member removal now uses fresh actor/session/token authority with an atomic durable membership/registration fence.
+  Owner removal and stale authority are refused. Organization/team inheritance remains open.
+- F12/F14: nonboolean package visibility is refused before publication. OAuth registration, authorization, code exchange,
+  refresh and introspection check current account lifecycle; replay and expiry checks survive asynchronous authority checks.
+  Production scoped OAuth consumption, app installation UX and stock registry protocol compatibility remain open.
+- F15: metadata archives have actual member export/history APIs, owner-confirmed empty-destination restore, matching accepted
+  Git head, SHA-256 verification, bounded transport, transactional rollback and stable request receipts. Settings provides
+  export/inspection/restore with preserved lost-acknowledgement retries. Issues, their comments, wiki histories and validated
+  planning activate; discussions, release records, issue-feature documents and omitted-review comments remain historical.
+  Source identities are unverified external claims, never local author/permission authority. Wiki shows this provenance.
+  Git objects/refs require a separate native transfer. Credentials, memberships, accepted-review authority and provider state
+  are not imported. This is partial migration coverage, not complete exit parity.
+
+**Current verification:** final lint, typecheck, build and `git diff --check` pass. `bun test --timeout 30000` finished
+with 2,249 passes, six existing skips and zero failures across 546 files (21,353 assertions). The combined integration
+suite passed 80 tests across 20 files; later authorization/archive-contract checks also pass, including seven tests
+across five files after the last fixture/type repairs. New tests created after broad-run enumeration are covered by
+those focused checks. Actual components with real CSS passed synthetic desktop/mobile flows for planning, file
+history, issue triage/templates/bulk labels, inbox preferences and reverse-response handling, archive lost-ack retry,
+and restored wiki provenance. All temporary fixture servers and browsers were stopped. These local tests do not
+establish hosted authentication, cross-account customer acceptance, stock registry compatibility or full release parity.
+No provider mutation, deployment, paid execution or paid API call occurred in this continuation.
+
+### Earlier continuation — local evidence
+
+- F02: strict complete SSHSIG envelope validation, including canonical base64 and binary trailing-data refusal.
+- F07: wiki revision storage and authorized HTTP reads, edits, history, diffs and optimistic-concurrency revert.
+  The repository Wiki tab supports creation, editing, revision history and confirmed restores.
+  Storage is capped at 5 MB of body bytes and 10,000 revisions; history returns metadata.
+  Reads are member-only, including public repositories. Git-backed wiki access remains open.
+- F10: bounded per-job timeout and cancellation signals; an unresolved runner reports termination unconfirmed.
+  A signal is not process-cleanup evidence. Executable workflow steps and a trusted runtime adapter remain open.
+- F14: absolute 30-day OAuth refresh-grant expiry survives rotation and SQLite reopen; access lifetime is clamped
+  to remaining grant lifetime. Legacy unbounded grants require fresh authorization. Malformed registry URL encoding
+  returns a controlled error. No new Jev call was made: this work uses deterministic rules and no configured
+  TypeSafe credential was found in the checkout.
+- F15: complete redirect snapshots preserve tombstones and validate before replacing state. Full migration wiring remains open.
+- F18: reporter conflict checks and overturned-appeal visibility restoration preserve independent restrictions and audit history.
+  These are core rules; production moderation integration remains open. Billing stays outside scope.
+- F19: actual public status readers refuse to treat stale, missing, malformed or future-dated successful probes as operational.
+  Recorded failures remain degraded even when their timestamps are stale; missing fresh success is never uptime proof.
+- F20: certification requires a nonempty valid catalog and passing UI/API/interoperability/permissions receipt metadata,
+  bound to each ticket and the expected source revision. Receipt authentication remains a caller responsibility;
+  no parity certification is claimed.
+
+**Verification:** lint, typecheck and build pass. The combined changed-feature suite passes 117 tests/436 assertions
+across 12 files, including signed workerd HTTP and SQLite reopen coverage. Actual WikiTab with real CSS passed
+synthetic desktop (1280×800) and mobile (390×844) edit/save/history/restore-view checks under React StrictMode;
+zero runtime errors or horizontal overflow. Temporary browser/server were stopped. The page content is plain text,
+not rendered Markdown. No hosted authentication, Durable Object eviction, Git wiki interoperability or release
+acceptance is claimed.
+
+**Broad-suite result:** `bun test` completed 2,224 passes, six skips and two failures across 534 files. The failures
+were unchanged deadline-sensitive cases in `isolated-build-job.test.ts` and `accepted-followups.test.ts`; both
+passed on isolated reruns with a 30-second test timeout. The former still uses its own short injected job deadline,
+so its successful rerun also exercised the stop/seal assertions. This is not a clean single-run full-suite claim.
+The changed-feature aggregate above covers newly added tests that were not necessarily enumerated when the broad
+run started. Final lint, typecheck, build and `git diff --check` pass. Changes remain local and uncommitted; no push,
+deployment, provider mutation or paid API call occurred during this continuation.
+
+**Next acceptance work:** connect existing F03–F09 rules to authorized durable APIs and product flows; provide
+executable CI steps and a trusted runner adapter with confirmed cleanup (F10); complete stock registry protocol
+and client compatibility (F12); exercise complete local export/restore (F15); then validate the declared client,
+permission and operational journeys. These remain open work, not certification exceptions.
 
 ## Current handoff — October 7, 2026
 
@@ -3245,10 +3322,10 @@ and is idempotent by fingerprint; `tests/gpg-keys-http.test.ts` (1 pass; 13 asse
   the server, and the server reads commit objects through Artifacts. Validating that on a real repository is a hosted
   Artifacts operation, which needs the owner's confirmation before it runs.
 
-**Still open for F02, not closable without spend:** the R2-backed LFS object store and its HTTP endpoints (billed R2
-storage), stock Git and Git LFS client acceptance against the deployed Worker (hosted), and the artifact-backed
-transport. Blocked until the owner approves that spend. Local work still open: branch/tag/signature behavior,
-submodule identity checks, and the non-project guard list from F01.
+**Still open for F02:** local LFS HTTP/storage integration and stock-client acceptance can be developed with local
+storage/workerd/Git fixtures without spending. `lfs-object-store.ts` already supplies a tested hash/size/quota core.
+Hosted Git/LFS acceptance and provider transport changes remain outside this continuation. Branch/tag/signature and
+submodule behavior have focused local coverage; the non-project guard HTTP tests from F01 already exist.
 
 Complete normal Git branch/tag behavior, signatures and verification status, clone/fetch/push/pull, submodule references, and an interoperable Git LFS batch/object service on R2 where needed. Check actual object hashes, not pointer files alone. Evaluate an ordinary SSH Git path separately; a custom tunneling client is not transparent SSH parity. Cloudflare's documented Wrangler SSH access is account-authenticated and does not expose public container ports; do not confuse it with a public Git SSH service.
 
@@ -3264,10 +3341,10 @@ members or outsiders), matches literally and case-insensitively with line number
 at 1,000 matches. Every response says whether it is `complete`; a capped or unfinished search reports a `reason` instead of
 silently truncating. Queries are limited to 200 characters, and empty queries and bad cursors are refused.
 
-**Still open for F03 (local):** branch- and tag-aware browsing, Markdown, raw and binary views, path and history navigation,
-blame, compare, commit and line permalinks, rename tracking, and the cache keys that include version and access scope.
-These need the commit-object reader, which is blocked on owner confirmation for hosted Artifacts reads (see F02). Browser
-edits and uploads write to Git and are blocked on the same Artifacts decision.
+**Still open for F03 (local):** complete production browsing/search/history wiring, rename tracking and access-scoped
+cache keys. `blame.ts` already has local blame/history/permalink rules; these do not establish actual commit-object
+reader integration. Local Git fixtures and adapters can advance this work without provider operations. Hosted
+Artifacts reads/writes and browser-edit publication remain outside this continuation.
 
 Finish branch/tag-aware browsing, Markdown/raw/binary views, path/history navigation, blame, compare, commit/line permalinks, browser edits/uploads, and permission-filtered code search. Keep query syntax, paging, supported file types and indexing freshness explicit. Reuse the working virtualized diff; do not rebuild it for aesthetics.
 
@@ -3301,7 +3378,7 @@ reason. `src/core/review-requests.ts` (1 pass) refuses self-requests and non-rea
 stacked change merges only after every ancestor; missing parents and cycles are refused. A suggestion replaces exactly one existing
 line and fails when the line is outside the file. Maintainer pushes to a fork need the fork owner's opt-in.
 
-**Still open for F04 (local):** base-branch changes. Hosted proof remains blocked on owner confirmation. Hosted merge into Artifacts-backed branches needs owner confirmation.
+**Still open for F04 (local):** production wiring for base-branch changes; `base-branch-change.ts` already has source-tested rules. Hosted proof remains blocked on owner confirmation. Hosted merge into Artifacts-backed branches needs owner confirmation.
 
 Complete drafts, review requests, required approvals, CODEOWNERS, multiline/inline threads, suggested edits, resolution, stale approvals, base changes, fork permissions, stacked changes, merge queues, merge/squash/rebase policies, and explicit revert. Retain original contributor attribution and verifiable repair intent. Platform policy—not an agent—controls gate satisfaction.
 
@@ -3316,8 +3393,10 @@ trimmed, deduplicated and limited to 50 characters. Only repository members can 
 once; a second closure keeps the original record, and reopening clears the closing change without fabricating history. A
 transferred issue keeps a tombstone with its destination and refuses further changes. Lint and typecheck pass.
 
-**Still open for F05 (local):** milestones, templates/forms, attachments, duplicates, relationships/sub-issues, saved filters,
-bulk actions, moderation, and deletion tombstones with redirects.
+**Integrated locally for F05:** `issue-feature-store.ts`, member-authorized `/issue-features` and `/issues/from-template`
+routes, plus issue planning/template/bulk UI. SQLite reopen, actual signed Worker HTTP, required-field/retry and
+rendered desktop/mobile flows pass. Still open: attachments, complete duplicate/sub-issue workflows, saved filters,
+moderation and deleted/transferred-resource routes; this does not close the full ticket.
 
 Complete labels, assignees, milestones, templates/forms, attachment handling, linking/closing through accepted work, duplicate/transfer workflows, relationships/subissues, saved filtering, bulk actions, and moderation. Preserve discussion context when tasks are assigned to agents.
 
@@ -3329,7 +3408,10 @@ Reference: `https://docs.github.com/en/issues`.
 
 **Progress (source-tested only, October 8):** `src/core/project-planning.ts` (`tests/project-planning.test.ts`, 3 pass). Items reference
 issues by number and only accessible issues can be added, once. Stale edits are rejected by item version, fields are typed, and
-progress counts come from stored items. Open: views, iterations, automation, bulk editing, export.
+progress counts come from stored items. `planning-store.ts` now persists those rules through `/planning` and
+`/planning/export`; the Planning tab provides board/table/timeline, typed fields, complete saved-view semantics,
+iterations, bulk editing and export. Actual signed Worker HTTP, reopen/CAS and synthetic rendered flows pass.
+Accepted-change-driven automation and complete project parity remain open.
 
 Implement project boards, tables, timeline/roadmap views, custom fields, saved filters/sorts, iterations, item status automation, bulk editing, and useful progress charts. Projects must reference issues/changes rather than duplicate them into unrelated state.
 
@@ -3341,7 +3423,9 @@ Reference: `https://docs.github.com/en/issues`.
 
 **Progress (source-tested only, October 8):** `src/core/discussions.ts` (`tests/discussions.test.ts`, 3 pass). Moderation (lock,
 pin) is maintainer-only and audited; locked discussions refuse replies; only the asker or a maintainer marks an answer, only in
-questions. Open: polls, subscriptions, issue conversion, wikis, snippets.
+questions. Polls, snippets and wiki rules exist as tested core modules. This continuation wires wiki revisions into
+member-authorized SQLite/API/UI flows. Git-backed wiki interoperability, subscriptions, issue conversion and
+production integration of the other core modules remain open.
 
 Implement discussion categories, question/answer marking, polls, threading, subscriptions, pin/lock/moderation, and issue conversion; versioned wikis with Git access; shareable revisioned snippets with explicit visibility. Do not call issue comments a full discussion system.
 
@@ -3353,7 +3437,11 @@ References: `https://docs.github.com/en/discussions` and `https://github.com/fea
 
 **Progress (source-tested only, October 8):** `src/core/notification-privacy.ts` (`tests/notification-privacy.test.ts`, 3 pass).
 Recipients without read access never get a title; muted threads and unsubscribed users get no ordinary events; mentions reach
-unsubscribed readers but not muted ones. Open: profiles, follows, stars, discovery, email preferences, diagnostics.
+unsubscribed readers but not muted ones. Follow/contribution-visibility rules and existing profile/community/inbox
+modules are present. Complete discovery, subscription/preferences, delivery diagnostics and end-to-end privacy
+verification remain open. Durable repository delivery preferences and current-access inbox projection are now
+integrated and locally verified, including revoked membership, stale writes, reversed responses and failed refreshes.
+True thread subscriptions, mentions and email delivery remain open.
 
 Complete profiles, contribution visibility controls, follows, stars/watch subscriptions, repository discovery/topics, notifications, mentions, mute/unsubscribe, read/unread state, email preferences, and delivery diagnostics. Use existing profile/community/inbox modules where they work. Prevent name/namespace impersonation through a defined reporting and review process.
 
@@ -3375,7 +3463,9 @@ References: `https://docs.github.com/en/organizations` and `https://docs.github.
 ### F10 — CI engine and runner compatibility (R2; after C02/C08/F09)
 
 **Progress (source-tested only, October 8):** `src/core/ci-gate.ts` (`tests/ci-gate.test.ts`, 2 pass). A required check passes only with
-a successful latest run on the exact commit; missing checks block. Open: the engine, runners, workflows (hosted/Containers blocked).
+a successful latest run on the exact commit; missing checks block. `workflow-parser.ts` and `ci-engine.ts` provide
+a local dependency scheduler with timeouts, abort requests and unconfirmed-termination reporting. Executable
+steps, trusted runtime integration, persistence, matrix/secret/cache compatibility and actual cleanup remain open.
 
 Implement triggers, job dependencies, matrices, conditions, reusable workflows, logs, artifacts/caches, timeouts, cancellation/retry, secret scopes, environment approval, workload identity, resource quotas and billable usage. Publish a precise workflow dialect/compatibility matrix. Test imported workflows through actual execution; an Actions YAML parser alone is not compatibility.
 
@@ -3397,7 +3487,8 @@ References: `https://docs.github.com/en/pages` and `https://docs.github.com/en/r
 
 ### F12 — packages and registries (R2; after F09/F10)
 
-**Progress (source-tested only, October 8):** `src/core/package-visibility.ts` (2 tests): private packages hidden from outsiders; published versions immutable. Open: registries, protocols.
+**Progress (source-tested only, October 8):** `src/core/package-visibility.ts` (2 tests): private packages hidden from outsiders; published versions immutable. `package-registry.ts` and AuthorityController
+provide a SQLite-backed custom text-file API. This is not npm/OCI stock-client protocol compatibility; that remains open.
 
 Provide actual package protocol implementations for the registries included in the frozen catalog, not generic file-upload pages: OCI/container images and the required language-package formats. Implement public/private access, version immutability, digest/provenance, retention, deletion/restoration policy, repository linkage and namespace protection. Pin supported protocol versions.
 
@@ -3418,7 +3509,9 @@ Reference: `https://docs.github.com/en/code-security`.
 ### F14 — APIs, apps and ecosystem interoperability (R1 core; R2 expansion; after C08/F09)
 
 **Progress (source-tested only, October 8):** `src/core/token-scopes.ts` (`tests/token-scopes.test.ts`, 2 pass). Least-privilege scopes;
-write implies read of the same resource only; unknown scopes are refused. Open: apps, webhooks expansion, OAuth.
+write implies read of the same resource only; unknown scopes are refused. OAuth app/code/token routes and hashed
+SQLite storage are implemented; this continuation adds bounded expiry. Complete installation/consent UX, token
+consumption across product APIs, webhook expansion and external-client journeys remain open.
 
 Publish stable versioned contracts, pagination, rate limits, resource IDs, webhook events and replay rules. Complete app installation/consent, scoped authentication, revocation, check/report APIs, and a trustworthy integration discovery surface. Expose REST and GraphQL equivalents where included; disclose exact incompatibilities rather than claiming drop-in GitHub API support.
 
@@ -3429,7 +3522,9 @@ References: `https://docs.github.com/en/rest`, `https://docs.github.com/en/graph
 ### F15 — complete migration and exit (R1; after F01–F09/C08; extend for R2 objects)
 
 **Progress (source-tested only, October 8):** `src/core/export-bundle.ts` (`tests/export-bundle.test.ts`, 2 pass). SHA-256 manifest per
-object; private objects excluded without access; tampered or missing content reported. Open: import, Git data, redirects.
+object; private objects excluded without access; tampered or missing content reported. Import digest checks and
+complete redirect/tombstone snapshots have source tests. Full Git/LFS/conversation inventory, resumable production
+wiring and export/restore acceptance remain open.
 
 Inventory and transfer all in-scope heads/tags/reachable objects and LFS bytes; map issues, PRs, inline reviews, discussions, reactions, attachments, releases, wiki and project metadata. Support authorized private sources, resumable jobs, deletions, idempotent restart, and provenance. Imported authors retain attribution without impersonating local accounts. Produce a coverage and discrepancy report.
 
@@ -3439,7 +3534,8 @@ Reference: `https://docs.github.com/en/migrations`.
 
 ### F16 — developer environments and agent interoperability (R2; after C02/F10/F14)
 
-**Progress (source-tested only, October 8):** `src/core/agent-permissions.ts` (1 test): an agent calls only granted tools inside its own repository. Open: environments, protocol interoperability.
+**Progress (source-tested only, October 8):** `src/core/agent-permissions.ts` (1 test): an agent calls only granted tools inside its own repository. `agent-environment.ts` adds local environment rules,
+but actual command egress enforcement, reconnect/cleanup and protocol interoperability remain open.
 
 Extend existing managed agents and Git workspaces to resumable development environments, editor attachment, scoped terminals, dependency/bootstrap policies, snapshot/cleanup, and safe AI assistance. Keep provider/agent identity verifiable and distinguish local customer-owned agents from built-in runtime agents. Preserve prompts, requirements, patches and evidence without exposing private transcripts publicly.
 
@@ -3469,7 +3565,9 @@ References: `https://docs.github.com/en/billing`, `https://docs.github.com/en/sp
 
 ### F19 — operations, enterprise and service trust (R3; start relevant safeguards in C)
 
-**Progress (source-tested only, October 8):** `src/core/audit-log.ts` (1 test): hash-chained audit log locates the first edited or removed entry. Open: SSO, retention, status page.
+**Progress (source-tested only, October 8):** `src/core/audit-log.ts` (1 test): hash-chained audit log locates the first edited or removed entry. Retention rules and real public status readers
+exist; this continuation tightens status evidence freshness. Actual backup/restore, operational incidents,
+retention enforcement and enterprise identity/governance remain open.
 
 Provide scoped backups and tested restores, monitoring of actual user journeys, declared service objectives, incident communications, abuse and security-response queues, retention/deletion controls, audit export, capacity management and a recovery runbook. Enterprise identity/governance/self-hosting or data-residency commitments require tested support, not badges. Never claim independent compliance certification without the real assessment.
 

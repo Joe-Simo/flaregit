@@ -20,6 +20,7 @@ export interface WikiRevision {
 }
 
 export type WikiErrorCode =
+  | "capacity"
   | "invalid-slug"
   | "invalid-author"
   | "invalid-body"
@@ -79,7 +80,7 @@ export interface WikiStore {
   revert(slug: string, toRevision: number, actor: string): Promise<WikiResult<WikiRevision>>;
 }
 
-function failure(code: WikiErrorCode, error: string): WikiFailure {
+export function failure(code: WikiErrorCode, error: string): WikiFailure {
   return {ok: false, code, error};
 }
 
@@ -91,28 +92,28 @@ export function normalizeSlug(input: string): WikiResult<string> {
   return {ok: true, value: slug};
 }
 
-function checkAuthor(author: string): WikiFailure | null {
+export function checkAuthor(author: string): WikiFailure | null {
   return typeof author === "string" && author.trim() !== "" ? null : failure("invalid-author", "An author is required");
 }
 
 /** Counts code points, so an emoji is one character. Code points never outnumber UTF-16 units, so short bodies skip the count. */
-function checkBody(body: string): WikiFailure | null {
+export function checkBody(body: string): WikiFailure | null {
   if (typeof body !== "string") return failure("invalid-body", "A page body must be a string");
   const tooLong = body.length > MAX_BODY_CHARACTERS && [...body].length > MAX_BODY_CHARACTERS;
   return tooLong ? failure("invalid-body", `A page body may be at most ${MAX_BODY_CHARACTERS} characters`) : null;
 }
 
-function isRevisionId(value: number): boolean {
+export function isRevisionId(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 1;
 }
 
 /** An empty body has no lines, so emptying a page removes lines instead of adding a blank one. */
-function linesOf(body: string): string[] {
+export function linesOf(body: string): string[] {
   return body === "" ? [] : body.split("\n");
 }
 
 /** Longest-common-subsequence diff over lines. Callers bound both sides, so the table of lengths fits in Uint16. */
-function lineDiff(from: readonly string[], to: readonly string[]): LineDiff {
+export function lineDiff(from: readonly string[], to: readonly string[]): LineDiff {
   const width = to.length + 1;
   // suffix[i * width + j] is the LCS length of from[i..] and to[j..].
   const suffix = new Uint16Array((from.length + 1) * width);

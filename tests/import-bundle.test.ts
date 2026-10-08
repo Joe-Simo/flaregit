@@ -63,18 +63,18 @@ test("a manifest listing the same kind and id twice is rejected", async () => {
 });
 
 test("an unknown kind is rejected in both the manifest and the objects", async () => {
-  const alien = {kind: "release", id: "9", body: "x", private: false} as unknown as ExportObject;
+  const alien = {kind: "unknown-kind", id: "9", body: "x", private: false} as unknown as ExportObject;
   const alienEntry = (await buildManifest([alien], true))[0]!;
   const clean = await buildManifest(objects, true);
   const spy = spyStore(createMemoryStore());
 
   expect(await importBundle([...clean, alienEntry], objects, spy.target)).toMatchObject({
     ok: false,
-    error: expect.stringContaining("release"),
+    error: expect.stringContaining("unknown-kind"),
   });
   expect(await importBundle(clean, [...objects, alien], spy.target)).toMatchObject({
     ok: false,
-    error: expect.stringContaining("release"),
+    error: expect.stringContaining("unknown-kind"),
   });
   expect(spy.writes).toEqual([]);
 });

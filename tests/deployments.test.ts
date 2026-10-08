@@ -25,5 +25,21 @@ test("deployment SQL binds accepted state and atomically stages stable events wi
     const success={...report,eventId:"provider-success",sequence:1,status:"succeeded"};expect((await(await call("/report",{report:success,service:input.service})).json() as{kind:string}).kind).toBe("applied");
     expect((await(await call("/report",{report:{...success,eventId:"late-failure",sequence:2,status:"failed"},service:input.service})).json() as{kind:string}).kind).toBe("rejected");
     expect((await(await call("/report?namespace=other",{report:success,service:input.service})).json() as{kind:string}).kind).toBe("rejected");
+    await call("/environment",{id:"production-id",name:"production",requireApproval:true,revision:0});
+    const artifact={artifactId:"release-asset",digest:"d".repeat(64),environmentId:"production-id"};
+    expect((await call("/request",{...input,key:"artifact-deploy"})).status).toBe(409);
+    const approval=await(await call("/approve",{target,artifact,actor:input.actor})).json() as{approvalId:string};
+    const bound={...input,key:"artifact-deploy",artifact:{...artifact,...approval}};
+    const deployment=await(await call("/request",bound)).json() as typeof created;
+    expect(deployment.kind).toBe("created");expect((await(await call("/request",bound)).json() as typeof created).kind).toBe("duplicate");
+    expect((await call("/request",{...bound,artifact:{...bound.artifact,digest:"e".repeat(64)}})).status).toBe(409);
+    const observed={...success,deploymentId:deployment.deployment.id,eventId:"bound-observed",artifactId:artifact.artifactId,digest:artifact.digest,environmentId:artifact.environmentId};
+    expect((await(await call("/report",{report:{...observed,digest:"e".repeat(64)},service:input.service})).json() as{kind:string}).kind).toBe("rejected");
+    expect((await(await call("/report",{report:observed,service:input.service})).json() as{kind:string}).kind).toBe("applied");
+    const rollback={...artifact,rollbackOf:deployment.deployment.id};
+    const rollbackApproval=await(await call("/approve",{target,artifact:rollback,actor:input.actor})).json() as{approvalId:string};
+    expect((await call("/request",{...bound,key:"rollback-1",artifact:{...rollback,...rollbackApproval}})).status).toBe(200);
+    await call("/environment",{id:"production-id",name:"production",requireApproval:true,revision:1});
+    expect((await call("/request",{...bound,key:"stale-approval"})).status).toBe(409);
   }finally{await mf.dispose();}
 },30000);

@@ -106,7 +106,9 @@ export function parsePublicBrowseRequest(kind: string, query: URLSearchParams): 
 }
 
 export type SignedRepositoryBrowseRequest =
-  | { kind: "history"; ref?: string; limit: number; offset: number }
+  | {kind:"search";ref:string;query:string;cursor?:string}
+  | {kind:"blame";ref:string;path:string}
+  | { kind: "history"; ref?: string; limit: number; offset: number; path?: string }
   | { kind: "directory"; ref?: string; path: string }
   | { kind: "file"; ref?: string; path: string }
   | { kind: "diff"; commit?: string; base?: string; task?: string; candidate?: string; input?: string }
@@ -115,7 +117,8 @@ export type SignedRepositoryBrowseRequest =
 /** Validate the complete request before acquiring a provider capability. */
 export function parseSignedRepositoryBrowseRequest(route: string, query: URLSearchParams): SignedRepositoryBrowseRequest {
   const keys: Record<string, readonly string[]> = {
-    "/commits": ["ref", "limit", "offset"], "/tree": ["ref", "path"], "/blob": ["ref", "path"],
+    "/code-search":["ref","q","cursor"],"/blame":["ref","path"],
+    "/commits": ["ref", "limit", "offset", "path"], "/tree": ["ref", "path"], "/blob": ["ref", "path"],
     "/diff": ["commit", "base", "task", "candidate", "input"], "/blob-by-hash": ["hash", "task", "candidate", "input"],
   };
   const allowed = keys[route];
@@ -123,6 +126,12 @@ export function parseSignedRepositoryBrowseRequest(route: string, query: URLSear
   for (const key of query.keys()) if (!allowed.includes(key) || query.getAll(key).length !== 1) throw new RepositoryBrowseRequestError("Invalid repository query");
   const ref = query.get("ref") ?? undefined;
   if (ref !== undefined && !isSafeRef(ref)) throw new RepositoryBrowseRequestError("Invalid ref");
+  if(route==='/code-search'||route==='/blame'){
+    if(!ref||!HASH.test(ref))throw new RepositoryBrowseRequestError('An exact pinned commit is required');
+    if(route==='/blame'){const path=query.get('path')??'';validateRepositoryPath(path);if(!path)throw new RepositoryBrowseRequestError('File path required');return {kind:'blame',ref,path};}
+    const text=query.get('q')??'',cursor=query.get('cursor')??undefined;if(!text.trim()||text.trim().length>200)throw new RepositoryBrowseRequestError('Search requires a literal query of 1 to 200 characters');
+    if(cursor!==undefined&&(!cursor||cursor.length>512||!/^[A-Za-z0-9_-]+$/.test(cursor)))throw new RepositoryBrowseRequestError('Invalid search cursor');return {kind:'search',ref,query:text,cursor};
+  }
   const integer = (key: string, fallback: number, maximum: number) => {
     const raw = query.get(key);
     if (raw === null) return fallback;
@@ -134,7 +143,9 @@ export function parseSignedRepositoryBrowseRequest(route: string, query: URLSear
   if (route === "/commits") {
     const limit = integer("limit", 30, 100), offset = integer("offset", 0, 1_000_000);
     if (limit < 1) throw new RepositoryBrowseRequestError("Invalid history pagination");
-    return { kind: "history", ref, limit, offset };
+    const path = query.get("path") ?? undefined;
+    if (path !== undefined) { validateRepositoryPath(path); if (!path) throw new RepositoryBrowseRequestError("File path required"); }
+    return { kind: "history", ref, limit, offset, ...(path === undefined ? {} : {path}) };
   }
   if (route === "/tree" || route === "/blob") {
     const path = query.get("path") ?? "";

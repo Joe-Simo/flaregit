@@ -95,3 +95,9 @@ test("an incident resolves once and reports its duration in ms", () => {
 test("an incident cannot resolve before it opened", () => {
   expect(resolveIncident(openIncident(NOW), NOW - 1)).toEqual({ok: false, error: "Incident cannot resolve before it opened"});
 });
+
+test("future and malformed successful checks cannot establish operational status", () => {
+  expect(computeStatus([{name: "api", ok: true, checkedAt: NOW + 1}], NOW, 60_000)).toBe("unknown");
+  expect(computeStatus([{name: "api", ok: true, checkedAt: Number.NaN}], NOW, 60_000)).toBe("unknown");
+  expect(computeStatus([{name: "api", ok: true, checkedAt: NOW}], NOW, -1)).toBe("unknown");
+});

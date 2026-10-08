@@ -3,6 +3,8 @@ import {
   createRedirectTable,
   deleteResource,
   exportRedirects,
+  exportRedirectTable,
+  importRedirectTable,
   importRedirects,
   lookupMissing,
   MAX_REDIRECT_DEPTH,
@@ -168,4 +170,31 @@ test("invalid redirect imports are refused", () => {
   const chain = Array.from({length: MAX_REDIRECT_DEPTH + 1}, (_, index) => entry(name(index), name(index + 1)));
   expect(refusal(importRedirects(chain, clock))).toContain("exceed");
   expect(importRedirects(chain.slice(0, MAX_REDIRECT_DEPTH), clock).ok).toBe(true);
+});
+
+
+test("complete snapshots preserve deleted redirect targets, issues and standalone names", () => {
+  const clock = () => 1_000;
+  let table = unwrap(registerRepository(createRedirectTable(clock), "alpha"));
+  table = unwrap(recordRename(table, "alpha", "beta", "alice"));
+  table = unwrap(deleteResource(table, "repository", "beta", "archived"));
+  table = unwrap(deleteResource(table, "issue", "42", "duplicate"));
+  table = unwrap(registerRepository(table, "standalone"));
+  const snapshot = exportRedirectTable(table);
+  const imported = unwrap(importRedirectTable(JSON.parse(JSON.stringify(snapshot)), clock));
+  expect(exportRedirectTable(imported)).toEqual(snapshot);
+  expect(resolve(imported, "alpha")).toMatchObject({ok: false, reason: "gone", name: "beta"});
+  expect(resolve(imported, "standalone").ok).toBe(true);
+  expect(lookupMissing(imported, "issue", "42").status).toBe("gone");
+  expect(registerRepository(imported, "beta").ok).toBe(false);
+});
+
+test("complete snapshot imports reject conflicting deletions and dangling targets", () => {
+  const clock = () => 1_000;
+  const base = {version: 1, current: ["beta"], redirects: [{from: "alpha", to: "beta", actorId: "alice", renamedAt: 0}], tombstones: []};
+  expect(importRedirectTable({...base, current: []}, clock).ok).toBe(false);
+  const deletion = {kind: "repository", id: "beta", deletedAt: 0, reason: "deleted"};
+  expect(importRedirectTable({...base, tombstones: [deletion]}, clock).ok).toBe(false);
+  expect(importRedirectTable({...base, current: [], tombstones: [deletion, deletion]}, clock).ok).toBe(false);
+  expect(importRedirectTable({...base, current: [], tombstones: [{...deletion, deletedAt: Number.NaN}]}, clock).ok).toBe(false);
 });
