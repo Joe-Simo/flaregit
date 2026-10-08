@@ -2491,6 +2491,21 @@ policy does not approve competition terms, identity replacement, or payments.
 - Committed and pushed to `main` as `aa9d529` (fast-forward from `bcd29bf`), approved by the owner.
   Not deployed or published. Its CI result was pending at push time and is not yet recorded here.
 
+### Known flake quarantine — October 7, 2026
+
+- Test: `tests/verification-closure-http.test.ts` ("signed owner exact verification recovery …").
+- Symptom: `TypeError: The socket connection was closed unexpectedly … code: "ECONNRESET"` on Miniflare's
+  internal platform-proxy request, after four earlier assertions pass. The app returns the correct 400 before the reset.
+- Runtime: Bun 1.4.2 (the version CI installs). Bun 1.4.2 is the latest release; no downgrade is permitted.
+- Reproduction: intermittent in isolation and in the full suite (CI attempts 1–3 on `18155a8` failed the same test).
+  Not caused by product code: a minimal body-reading Worker passed 40 alternating requests; undici 8.11.2 and
+  Miniflare 5.20261006.0-alpha did not fix it; consuming response bodies did not fix it.
+- Quarantine: the blocking `verify` job skips this one test on Bun 1.4.2 only (`knownFlakeQuarantined`).
+  The `known-flake-quarantine` job runs it with `FLAREGIT_KNOWN_FLAKE_RUN=1` and is `continue-on-error`, so the
+  result stays visible without blocking merges or deploys. Every assertion is unchanged.
+- Reinstatement: remove the quarantine gate and the quarantine job once a Bun or Miniflare release passes
+  the job reliably. Draft upstream report: `scratchpad/bun-issue-draft.md` (not yet filed).
+
 ### C01 owner decision
 
 Approved in this chat: retain Clerk for customer identity, keep Polar checkout

@@ -21,6 +21,21 @@ jobs:
       - run: bun test
       - run: bun run build
 
+  known-flake-quarantine:
+    # Non-blocking: runs the Bun 1.4.2 quarantined test so its result stays visible. See docs/ROADMAP.md, "Known flake quarantine".
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Run the quarantined Bun 1.4.2 test (non-blocking)
+        env:
+          FLAREGIT_KNOWN_FLAKE_RUN: "1"
+        run: bun test tests/verification-closure-http.test.ts
+
   native-boundary:
     runs-on: ubuntu-latest
     timeout-minutes: 15
