@@ -3346,6 +3346,8 @@ References: `https://docs.github.com/en/actions`, `https://github.com/features`,
 
 ### F11 — releases, static sites and deployments (R2; after C07/F10)
 
+**Progress (source-tested only, October 8):** `src/core/release-rules.ts` (2 tests): semantic tags, one release per tag, unique assets, SHA-256 digests. Open: static sites, deployments.
+
 Extend release support to assets, draft/prerelease state, changelog/provenance, immutable downloads, and permission-safe publication. Provide static-site publishing, custom domain validation, deployment environments, approval, statuses and rollback. Distinguish source accepted, artifact built, deployment requested, and deployment observed.
 
 Acceptance: publish an actual asset, validate its digest, install/download it through the documented client flow, deploy the exact approved artifact, fail/retry a delivery, and roll back deliberately. No acceptance or re-delivery silently repeats a production migration. Environment secrets never reach untrusted previews.
@@ -3354,6 +3356,8 @@ References: `https://docs.github.com/en/pages` and `https://docs.github.com/en/r
 
 ### F12 — packages and registries (R2; after F09/F10)
 
+**Progress (source-tested only, October 8):** `src/core/package-visibility.ts` (2 tests): private packages hidden from outsiders; published versions immutable. Open: registries, protocols.
+
 Provide actual package protocol implementations for the registries included in the frozen catalog, not generic file-upload pages: OCI/container images and the required language-package formats. Implement public/private access, version immutability, digest/provenance, retention, deletion/restoration policy, repository linkage and namespace protection. Pin supported protocol versions.
 
 Acceptance: stock ecosystem clients publish, install/pull and verify actual package contents, scoped tokens cannot cross namespaces, and conflicting versions cannot overwrite a published artifact. Permission changes take effect on every download path. No fake registry listing without working client commands.
@@ -3361,6 +3365,8 @@ Acceptance: stock ecosystem clients publish, install/pull and verify actual pack
 Reference: `https://docs.github.com/en/packages`.
 
 ### F13 — code and supply-chain security features (R2; after F09/F10/F12)
+
+**Progress (source-tested only, October 8):** `src/core/security-alerts.ts` (2 tests): secret-pattern scan reports kind and line only, never the value. Open: dependency graph, advisories, code scanning.
 
 Integrate maintained scanners and suitable advisory data for secret, source-code and dependency findings; support SARIF ingestion, vulnerability reporting/advisories, alert triage, dependency update proposals, license policy and SBOM/provenance. Check licenses and hosted-use terms before integrating tools. Do not simply label any scanner “CodeQL equivalent.”
 
@@ -3392,6 +3398,8 @@ Reference: `https://docs.github.com/en/migrations`.
 
 ### F16 — developer environments and agent interoperability (R2; after C02/F10/F14)
 
+**Progress (source-tested only, October 8):** `src/core/agent-permissions.ts` (1 test): an agent calls only granted tools inside its own repository. Open: environments, protocol interoperability.
+
 Extend existing managed agents and Git workspaces to resumable development environments, editor attachment, scoped terminals, dependency/bootstrap policies, snapshot/cleanup, and safe AI assistance. Keep provider/agent identity verifiable and distinguish local customer-owned agents from built-in runtime agents. Preserve prompts, requirements, patches and evidence without exposing private transcripts publicly.
 
 Acceptance: a human and two agents modify a normal second repository concurrently, reconnect after an interruption, retain their work, and integrate through the same policy engine. A coding workspace cannot become the trusted publisher. Persistent environments have explicit quotas and deletion/recovery semantics.
@@ -3399,6 +3407,8 @@ Acceptance: a human and two agents modify a normal second repository concurrentl
 References: `https://docs.github.com/en/codespaces`, `https://docs.github.com/en/copilot`.
 
 ### F17 — clients and accessibility (R3; after F03–F09/F14)
+
+**Progress (source-tested only, October 8):** `src/core/accessible-names.ts` (1 test): interactive elements without a name are reported. Open: clients, full audit.
 
 Finish the CLI's supported workflows and credentials on macOS/Windows/Linux. Provide the agreed desktop and mobile/tablet client experiences, including review, notifications and authentication. Record whether these are native clients or responsive web; do not call a mobile webpage native app parity. Preserve normal editor/Git compatibility.
 
@@ -3408,6 +3418,8 @@ Reference inventory: `https://docs.github.com/en`.
 
 ### F18 — commercial and community operations (R3; after usage/authorization foundations)
 
+**Progress (source-tested only, October 8):** `src/core/usage-limits.ts` (2 tests): usage accumulates, overage is flagged, invalid amounts refused. Open: billing, sponsorship (owner decisions).
+
 Complete measured pricing, entitlements, usage accuracy, checkout/webhook recovery, refunds/cancellation, receipts and support before enabling payments. Preserve free basic private repositories with truthful quotas; do not promise unlimited loss-making hosted agent work. Sponsorship, education/nonprofit programs, and community support have operational, legal and payment obligations; code alone cannot manufacture these services.
 
 Acceptance: an approved test purchase and cancellation reconcile entitlement exactly once; billing failure does not seize accepted work; user export remains available. Any sponsorship payout flow is validated by an authorized operator and processor, never fabricated. Record unapproved provider dependencies as blocked.
@@ -3416,6 +3428,8 @@ References: `https://docs.github.com/en/billing`, `https://docs.github.com/en/sp
 
 ### F19 — operations, enterprise and service trust (R3; start relevant safeguards in C)
 
+**Progress (source-tested only, October 8):** `src/core/audit-log.ts` (1 test): hash-chained audit log locates the first edited or removed entry. Open: SSO, retention, status page.
+
 Provide scoped backups and tested restores, monitoring of actual user journeys, declared service objectives, incident communications, abuse and security-response queues, retention/deletion controls, audit export, capacity management and a recovery runbook. Enterprise identity/governance/self-hosting or data-residency commitments require tested support, not badges. Never claim independent compliance certification without the real assessment.
 
 Acceptance: exercise the agreed recovery objective, restore in an isolated environment, confirm no accepted state disappears during optional-service failure, revoke leaked test credentials, and resolve an abuse report with an audit trail. Monitor clone/review/accept/delivery separately; a health endpoint that always returns 200 is not platform uptime evidence.
@@ -3423,6 +3437,8 @@ Acceptance: exercise the agreed recovery objective, restore in an isolated envir
 References: `https://docs.github.com/en/organizations` and `https://docs.github.com/en/enterprise-cloud@latest`.
 
 ### F20 — finite parity certification and stop (R3; after all included tickets)
+
+**Progress (source-tested only, October 8):** `src/core/parity-certification.ts` (1 test): a ticket counts only with evidence; the rest are listed gaps. The certification itself is not claimed.
 
 Review the frozen feature register, not all future GitHub ideas. Each included row must link passing UI/API/native interoperability and permissions evidence. Every external dependency/exception must be approved, and every unresolved operational requirement stays open. Remove overbroad claims, not useful features, when a capability is genuinely unsupported.
 
