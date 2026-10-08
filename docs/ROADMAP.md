@@ -2506,6 +2506,14 @@ policy does not approve competition terms, identity replacement, or payments.
 - Reinstatement: remove the quarantine gate and the quarantine job once a Bun or Miniflare release passes
   the job reliably. Draft upstream report: `scratchpad/bun-issue-draft.md` (not yet filed).
 
+### Production deploy — `f67dfb1` (October 7–8, 2026)
+
+- Source: `f67dfb17ff03dfacb7f84716678f30ab42a615c4` (commits `bcd0fee` quarantine and `f67dfb1` web-build fix on top of `18155a8`).
+- CI on `f67dfb1` (run `37709137161`): `verify` success, `native-boundary` success, `known-flake-quarantine` success.
+- Deployed with `wrangler deploy --var FLAREGIT_SOURCE_VERSION:f67dfb1…`. Live `flaregit` version `aaf1354e-89a6-4d84-bbf8-b7d3584bc81b` at 100%.
+- Smoke: `https://flaregit.com/` 200; `/privacy.html` and `/terms.html` 307 (redirect, not a failure).
+- Not claimed: C02, C03, C05–C11 and F01–F20 remain open. This deploy is not hosted proof for those tickets.
+
 ### C01 owner decision
 
 Approved in this chat: retain Clerk for customer identity, keep Polar checkout
