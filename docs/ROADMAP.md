@@ -2932,6 +2932,12 @@ Keep payments disabled for the competition. For authentication, either obtain an
 - Status: source-tested and local-image-tested only. No hosted Cloudflare receipt, no synthetic canary run, and no
   cloud allocation was produced. C02's hosted pass criteria remain open and need an approved spend ceiling.
 
+### C03 local source gate — October 8, 2026 (source-tested only)
+
+- All 9 `tests/c03-*.test.ts` files run one at a time on local Bun 1.3.4: 32 pass, 0 fail.
+- Status: source-tested only. The hosted publication matrix (stale base, interrupts, competing publishers, cancel)
+  remains open and needs an approved spend ceiling.
+
 ### C02 — replace assumed sandbox trust with demonstrated boundaries
 
 **Dependencies:** C00. **Budget:** two days; highest technical priority. **Starting files:** `integrator.ts`, `src/core/verification/execution.ts`, `workflow.ts`, build/verification modules, Dockerfile, Wrangler configuration.
