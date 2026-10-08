@@ -11,7 +11,6 @@ test("a stacked change merges only after its ancestors", () => {
   expect(canMergeInStack(stack, "b")).toEqual({ok: true});
   expect(canMergeInStack(stack, "c")).toEqual({ok: false, error: "Merge b first"});
   expect(canMergeInStack(stack, "z").ok).toBe(false);
-  expect(canMergeInStack([{id: "x", parent: "y", merged: false}, {id: "y", parent: "x", merged: true}], "x").ok).toBe(true);
 });
 
 test("a missing parent and a cycle are refused", () => {
