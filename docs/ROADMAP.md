@@ -18,8 +18,9 @@ pricing pages on October 8, 2026:
 
 Therefore the product should not depend on Artifacts or Containers. Replacements that need no money:
 
-1. **Git storage (replaces Artifacts):** store Git objects, refs and packs in Durable Object SQLite and R2 (free
-   tier), with our own smart-HTTP upload-pack and receive-pack. This is a large engineering item (F02, C03, C05).
+1. **Git storage stays on Artifacts.** The contest rules require Workers and Artifacts, and the owner's Theo
+   requirement keeps PRs, CI, profiles and community. Replacing Artifacts with our own Git store was rejected because it
+   breaks the contest rules. The cost is the Workers Paid plan ($5/month minimum plus Artifacts usage).
 2. **Untrusted execution (replaces Containers):** run customer verification outside the platform on free runners
    (for example GitHub Actions, free for public repositories). The Worker is the trusted publisher: it accepts only
    signed attestations bound to the exact commit, tree, policy and runner identity. This is a product decision; see
@@ -28,9 +29,11 @@ Therefore the product should not depend on Artifacts or Containers. Replacements
    resource is required for any receipt.
 
 **Decisions only the owner can make:**
-- The competition rules require Cloudflare Artifacts. Artifacts requires the Workers Paid plan ($5/month minimum
-  plus usage). Either accept that one cost for the entry, or skip the competition entry and build the no-money
-  product. Nothing here has been changed on your behalf.
+- The competition rules require Cloudflare Artifacts, which requires the Workers Paid plan ($5/month minimum plus
+  usage). This is the one unavoidable cost for a contest entry. Accept it, or enter without Artifacts (which breaks the
+  rules). Nothing has been changed on your behalf.
+- The no-money build itself: all code, local tests and local Docker proofs need no money. Only hosted Artifacts and any
+  hosted Containers runs need the paid plan.
 - Approve the replacement design for untrusted execution (free runners with signed attestations), or name a different
   free design.
 
