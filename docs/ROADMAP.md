@@ -3164,7 +3164,8 @@ Each stays blocked until the owner approves the spend or makes the billing decis
 
 Non-project writes are now guarded by `archivedWriteRefusal` (`src/server/archive-guard.ts`, 3 unit tests pass): connection
 event callbacks, public participation, public discussion changes, and invitation joins return 409 while archived. Route-level
-HTTP tests for those four families are still open. Still open for F01: rename, forks, ownership transfer, and deletion
+HTTP tests for those four families now exist: `tests/archived-nonproject-http.test.ts` (1 pass; 10 assertions in child
+mode; authenticated member requests get 409 with the read-only message, and a public read is not refused). Still open for F01: rename, forks, ownership transfer, and deletion
 with recovery, which are blocked as listed above.
 
 Cover repository visibility, README/license/gitignore initialization, template creation, independent forks, fork relationships, default branch changes, topics, archive/unarchive, rename, ownership transfer, deletion and recovery. Preserve source identity and permission boundaries during every transition. Imported data stays attributed and source repos are never mutated by an import.
