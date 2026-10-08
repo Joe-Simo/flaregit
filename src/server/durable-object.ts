@@ -1,4 +1,5 @@
 import {applyLifecycleAction, initialLifecycle, type LifecycleAction, type LifecycleActor, type LifecycleResult, type RepositoryLifecycle} from "../core/repository-lifecycle";
+import {normalizeTopics} from "../core/repository-topics";
 import {BranchHttpAttempts} from "./branch-http-attempts";
 import {inspectHttpBranches} from "./branch-http-inventory";
 import {freezeContributionAttribution,ContributionAttributionLedger,assertJournalAttribution} from "./contribution-attribution";
@@ -800,6 +801,8 @@ export interface Ledger {
   getState(): Promise<FlareGitProjectState>;
   repositoryLifecycle(): Promise<RepositoryLifecycle>;
   repositoryLifecycleTransition(action: LifecycleAction, actor: LifecycleActor): Promise<LifecycleResult>;
+  repositoryTopics(): Promise<string[]>;
+  setRepositoryTopics(topics: string[]): Promise<string[]>;
   repositoryInitializationStatusByRequest(requestId:string,actorId:string,credential:TaskCreationCredential):Promise<RepositoryInitializationStatus|null>;
   repositoryInitializationDiagnosticByRequest(requestId:string,actorId:string,credential:TaskCreationCredential):Promise<{requestId:string;eventId:string;allocationId:string;projectId:string;projectName:string;canonicalRepoName:string;nativeName:string|null;phase:RepositoryInitializationIntent["phase"];metadataRecorded:boolean;commitRecorded:boolean;published:boolean}|null>;
   repositoryInitializationStatuses(actorId:string,credential:TaskCreationCredential,options?:{limit?:number;cursor?:string}):Promise<{initializations:RepositoryInitializationStatus[];nextCursor:string|null}>;
@@ -1829,6 +1832,10 @@ export class RepositoryController extends DurableObject<Env> {
   async repositoryLifecycle():Promise<RepositoryLifecycle>{return structuredClone(this.load().lifecycle??initialLifecycle());}
   /** F01: archive or unarchive. Only the owner-level caller may change state; writes are saved with the project document. */
   async repositoryLifecycleTransition(action:LifecycleAction,actor:LifecycleActor):Promise<LifecycleResult>{const state=this.load(),result=applyLifecycleAction(state.lifecycle??initialLifecycle(),action,actor,new Date().toISOString());if(result.ok){state.lifecycle=result.next;this.save();}return result;}
+  /** F01: repository topics; empty when none are stored. */
+  async repositoryTopics():Promise<string[]>{return [...(this.load().topics??[])];}
+  /** F01: replaces topics after validation; invalid input never reaches storage. */
+  async setRepositoryTopics(topics:string[]):Promise<string[]>{const checked=normalizeTopics(topics);if(!checked.ok)throw Error(checked.error);const state=this.load();state.topics=checked.topics;this.save();return [...checked.topics];}
   async repositoryReviewSettings(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authorize();const ledger=this.delegatedReviews(),rows=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM repository_review_grants ORDER BY user_id LIMIT 101").toArray();return{policy:ledger.policy(),grants:rows.slice(0,100).map(row=>ledger.grant(row.user_id)!),truncated:rows.length>100};}
   async configureRepositoryReviewPolicy(input:{eventId:string;expectedVersion:number;policy:RepositoryReviewPolicy},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);return this.delegatedReviews().configurePolicy({...input,ownerId:actor.userId},authorize);}
   async setRepositoryReviewGrant(input:{eventId:string;userId:string;expectedVersion:number;enabled:boolean},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);if(input.enabled&&!await this.roleOf(input.userId))throw Error("Reviewer must be a current repository member");authorize();return this.delegatedReviews().setGrant({...input,ownerId:actor.userId},()=>{authorize();if(input.enabled&&!this.ctx.storage.sql.exec("SELECT user_id FROM members WHERE user_id=?",input.userId).toArray().length)throw Error("Reviewer membership changed");});}

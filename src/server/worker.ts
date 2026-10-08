@@ -1,4 +1,5 @@
 import {dispatchPreparedPublication,preparedPublicationRequestSchema,PreparedPublicationDispatchError} from './prepared-publication-dispatch';
+import {normalizeTopics} from '../core/repository-topics';
 import {exactHumanContributions,unattributedHumanContributions,type PeopleContribution} from "./repository-people-attribution";
 import {integrationRequestInputSchema} from './integration-request-intents';
 import {webhookReplayRequestSchema} from './webhook-replay-intents';
@@ -940,6 +941,16 @@ export default {
           return repositoryReadJson(result.next);
         }
         if (state.lifecycle?.state === "archived" && method !== "GET" && !(sub === "" && method === "DELETE")) return text("Repository is archived and read-only; unarchive it to change anything", 409);
+        if (sub === "/topics") {
+          if (method === "GET") return repositoryReadJson({ topics: await project.repositoryTopics() });
+          if (method !== "POST") return text("Repository topics require GET or POST", 405);
+          if (!isOwner) return text("Only the current repository owner can change topics", 403);
+          const input = await body<{ topics?: unknown }>();
+          if (Object.keys(input).some((key) => key !== "topics")) return text("Topics accept only the topics field", 400);
+          const checked = normalizeTopics(input.topics);
+          if (!checked.ok) return text(checked.error, 400);
+          return repositoryReadJson({ topics: await project.setRepositoryTopics(checked.topics) });
+        }
 
 
         if(sub==="/acceptance-policy"){

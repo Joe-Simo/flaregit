@@ -81,6 +81,26 @@ test('signed HTTP archive state is owner-only, read-only while archived, and res
     expect(notArchived.status).toBe(409);
     expect(await notArchived.text()).toBe('Repository is not archived');
 
+    // F01 topics: owner-only, validated, sorted and de-duplicated, readable by members, and read-only while archived.
+    const topicsPath = '/api/p/p123456789abc/topics';
+    expect(await (await call(member, topicsPath)).json()).toEqual({topics: []});
+    const memberTopics = await call(member, topicsPath, 'POST', {topics: ['agents']});
+    expect(memberTopics.status).toBe(403);
+    expect(await memberTopics.text()).toBe('Only the current repository owner can change topics');
+    expect((await call(owner, topicsPath, 'POST', {topics: ['Bad Topic']})).status).toBe(400);
+    expect((await call(owner, topicsPath, 'POST', {topics: 'agents'})).status).toBe(400);
+    expect((await call(owner, topicsPath, 'POST', {topics: ['agents'], extra: true})).status).toBe(400);
+    const setTopics = await call(owner, topicsPath, 'POST', {topics: ['typescript', 'agents', 'agents']});
+    expect(setTopics.status).toBe(200);
+    expect(await setTopics.json()).toEqual({topics: ['agents', 'typescript']});
+    expect(await (await call(member, topicsPath)).json()).toEqual({topics: ['agents', 'typescript']});
+    await call(owner, life, 'POST', {action: 'archive'});
+    const archivedTopics = await call(owner, topicsPath, 'POST', {topics: ['git']});
+    expect(archivedTopics.status).toBe(409);
+    expect(await archivedTopics.text()).toBe('Repository is archived and read-only; unarchive it to change anything');
+    expect(await (await call(owner, topicsPath)).json()).toEqual({topics: ['agents', 'typescript']});
+    expect((await call(owner, life, 'POST', {action: 'unarchive'})).status).toBe(200);
+
     // F01 visibility: owner-only; going public needs explicit confirmation; invalid values are refused.
     const visibility = '/api/p/p123456789abc/visibility';
     const setVisibility = (token: string, value: unknown) => call(token, visibility, 'POST', value);
