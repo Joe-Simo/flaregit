@@ -3187,8 +3187,11 @@ Existing local coverage re-run on October 8: exact advertised-ref parsing (`test
 tag Git behavior (`tests/tag-git.test.ts`, 7 pass). Gitlink and submodule handling is covered by existing tests
 (for example `tests/git-migration-inventory.test.ts`). Commit signature parsing is in `src/core/commit-signature.ts` (`tests/commit-signature.test.ts`, 5 pass): it detects
 unsigned, gpg, ssh, x509 and unknown blocks, refuses two signature headers, and rebuilds the exact signed payload byte for
-byte. Every signed commit reports `signed_unverified`. Remaining F02 work: cryptographic verification against trusted keys,
-which needs key registration and the verification code (local, not started).
+byte. Cryptographic verification for SSH signatures is in `src/core/ssh-signature.ts` (`tests/ssh-signature.test.ts`, 6 pass):
+it verifies ssh-ed25519 SSHSIG signatures made by `ssh-keygen -Y sign -n git` against a trusted authorized key, and refuses
+other namespaces, untrusted keys, other key types, tampered bytes and non-SSH input. Test fixtures were generated locally with
+`ssh-keygen` and checked with `ssh-keygen -Y check-novalidate`. Remaining F02 work: GPG (OpenPGP) and X.509 verification, and
+the trusted-key registry that stores each user's authorized keys. Connecting verification status to the commit view is open.
 
 **Still open for F02, not closable without spend:** the R2-backed LFS object store and its HTTP endpoints (billed R2
 storage), stock Git and Git LFS client acceptance against the deployed Worker (hosted), and the artifact-backed
