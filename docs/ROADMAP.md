@@ -3286,6 +3286,10 @@ Reference: `https://docs.github.com/en/issues`.
 
 ### F06 — project planning (R1; after F05)
 
+**Progress (source-tested only, October 8):** `src/core/project-planning.ts` (`tests/project-planning.test.ts`, 3 pass). Items reference
+issues by number and only accessible issues can be added, once. Stale edits are rejected by item version, fields are typed, and
+progress counts come from stored items. Open: views, iterations, automation, bulk editing, export.
+
 Implement project boards, tables, timeline/roadmap views, custom fields, saved filters/sorts, iterations, item status automation, bulk editing, and useful progress charts. Projects must reference issues/changes rather than duplicate them into unrelated state.
 
 Acceptance: the same issue moves between views, is updated by an accepted change, remains accessible only to authorized members, and exports with its custom fields. Conflicting edits are detected or deterministically reconciled. Charts use real stored data.
@@ -3294,6 +3298,10 @@ Reference: `https://docs.github.com/en/issues`.
 
 ### F07 — discussions, documentation and snippets (R1; after F05)
 
+**Progress (source-tested only, October 8):** `src/core/discussions.ts` (`tests/discussions.test.ts`, 3 pass). Moderation (lock,
+pin) is maintainer-only and audited; locked discussions refuse replies; only the asker or a maintainer marks an answer, only in
+questions. Open: polls, subscriptions, issue conversion, wikis, snippets.
+
 Implement discussion categories, question/answer marking, polls, threading, subscriptions, pin/lock/moderation, and issue conversion; versioned wikis with Git access; shareable revisioned snippets with explicit visibility. Do not call issue comments a full discussion system.
 
 Acceptance: a question becomes an issue without losing attribution/links; wiki edits and history survive ordinary Git operations; private snippets cannot leak through discovery, feeds or raw URLs; moderation is audited and appeal/support routes are real.
@@ -3301,6 +3309,10 @@ Acceptance: a question becomes an issue without losing attribution/links; wiki e
 References: `https://docs.github.com/en/discussions` and `https://github.com/features`.
 
 ### F08 — people, discovery and notifications (R1; after F05/F07)
+
+**Progress (source-tested only, October 8):** `src/core/notification-privacy.ts` (`tests/notification-privacy.test.ts`, 3 pass).
+Recipients without read access never get a title; muted threads and unsubscribed users get no ordinary events; mentions reach
+unsubscribed readers but not muted ones. Open: profiles, follows, stars, discovery, email preferences, diagnostics.
 
 Complete profiles, contribution visibility controls, follows, stars/watch subscriptions, repository discovery/topics, notifications, mentions, mute/unsubscribe, read/unread state, email preferences, and delivery diagnostics. Use existing profile/community/inbox modules where they work. Prevent name/namespace impersonation through a defined reporting and review process.
 
