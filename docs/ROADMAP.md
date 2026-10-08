@@ -2932,6 +2932,22 @@ Keep payments disabled for the competition. For authentication, either obtain an
 - Status: source-tested and local-image-tested only. No hosted Cloudflare receipt, no synthetic canary run, and no
   cloud allocation was produced. C02's hosted pass criteria remain open and need an approved spend ceiling.
 
+### C11 official rules recheck — October 8, 2026 (no entry, no terms accepted)
+
+- Official Rules PDF (local copy, read directly): contest period Oct 1, 2026 9:00 AM EDT to Oct 14, 2026 11:59 PM PDT.
+- Eligibility: legal resident of the US or Canada, 18+, not on sanctions lists and not a Sponsor employee or family member.
+- Entry: a 5–10 minute demo video, the source repository, run instructions, and acceptance of the Official Rules.
+- Submission criteria: must use Cloudflare's developer platform including Workers and Artifacts, with multiple agents
+  working on changes concurrently; source licensed under MIT, Apache 2.0, or BSD 2/3-clause, with a LICENSE file.
+- Finalists (three) present live at Cloudflare Connect (San Francisco, Oct 21, 2026); winners must attend in person.
+  Travel and hotel for finalists may be sponsor-provided, but finalists pay some expenses. This is a spending
+  consideration; do not commit to it without the owner's decision.
+- The rules grant Cloudflare broad rights to the demo video and presentation materials, and require access to the
+  complete source code to administer judging. The owner must review this before accepting.
+- Entry form (per Cloudflare's submit page): team and attendee details, project name, vision, Cloudflare use,
+  demo video (MP4/WebM/MOV, up to 2 GiB), open-source repository URL, run instructions, and two confirmation boxes.
+- Owner-only: the entry form and the terms acceptance. No entry was submitted and no terms were accepted.
+
 ### C10 local reproducibility — October 8, 2026 (source-tested only)
 
 - Clean clone of `17d7550` (reset from `origin/main` into a scratch checkout, no local edits) inside
