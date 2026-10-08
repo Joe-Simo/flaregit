@@ -1,6 +1,7 @@
 import {applyLifecycleAction, initialLifecycle, type LifecycleAction, type LifecycleActor, type LifecycleResult, type RepositoryLifecycle} from "../core/repository-lifecycle";
 import {normalizeTopics} from "../core/repository-topics";
 import {addTrustedKey, removeTrustedKey, type TrustedKey, type TrustedKeyResult} from "../core/trusted-keys";
+import {addTrustedGpgKey, parseTrustedGpgKey, removeTrustedGpgKey, type TrustedGpgKey, type TrustedGpgResult} from "../core/trusted-gpg-keys";
 import {BranchHttpAttempts} from "./branch-http-attempts";
 import {inspectHttpBranches} from "./branch-http-inventory";
 import {freezeContributionAttribution,ContributionAttributionLedger,assertJournalAttribution} from "./contribution-attribution";
@@ -601,6 +602,9 @@ export interface Ledger {
   trustedSigningKeys(): Promise<TrustedKey[]>;
   addTrustedSigningKey(line: unknown): Promise<TrustedKeyResult>;
   removeTrustedSigningKey(blob: unknown): Promise<TrustedKeyResult>;
+  trustedGpgKeys(): Promise<TrustedGpgKey[]>;
+  addTrustedGpgKey(armored: unknown): Promise<TrustedGpgResult>;
+  removeTrustedGpgKey(fingerprint: unknown): Promise<TrustedGpgResult>;
   publicProfileState(): Promise<PublicProfileState>;
   peopleSnapshot():Promise<PeopleSnapshot>;
   configureDiscovery(input:unknown,userId:string):Promise<ReturnType<CommunityPeople["state"]>>;
@@ -4260,6 +4264,31 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   // ---- identity (profile on the account instance; handle registry on the global instance) ----
+  /** F02: trusted GPG public keys for this account; empty when none are registered. */
+  async trustedGpgKeys(): Promise<TrustedGpgKey[]> {
+    this.ensureGpgKeyTable();
+    const row = this.ctx.storage.sql.exec<{ doc: string }>("SELECT doc FROM trusted_gpg_keys WHERE id = 1").toArray()[0];
+    return row ? (JSON.parse(row.doc) as TrustedGpgKey[]) : [];
+  }
+  async addTrustedGpgKey(armored: unknown): Promise<TrustedGpgResult> {
+    const parsed = await parseTrustedGpgKey(armored);
+    if (!parsed.ok) return parsed;
+    const result = addTrustedGpgKey(await this.trustedGpgKeys(), parsed.key);
+    if (result.ok) this.saveGpgKeys(result.keys);
+    return result;
+  }
+  async removeTrustedGpgKey(fingerprint: unknown): Promise<TrustedGpgResult> {
+    const result = removeTrustedGpgKey(await this.trustedGpgKeys(), fingerprint);
+    if (result.ok) this.saveGpgKeys(result.keys);
+    return result;
+  }
+  private ensureGpgKeyTable(): void {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS trusted_gpg_keys (id INTEGER PRIMARY KEY CHECK (id = 1), doc TEXT NOT NULL)");
+  }
+  private saveGpgKeys(keys: TrustedGpgKey[]): void {
+    this.ensureGpgKeyTable();
+    this.ctx.storage.sql.exec("INSERT INTO trusted_gpg_keys (id, doc) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET doc = excluded.doc", JSON.stringify(keys));
+  }
   /** F02: trusted SSH signing keys for this account; empty when none are registered. */
   async trustedSigningKeys(): Promise<TrustedKey[]> {
     this.ensureSigningKeyTable();

@@ -703,6 +703,27 @@ export default {
       }
       if (path === "/me" && method === "GET") return json({ operator: operators.includes(accountKey) });
 
+      // ----- F02 trusted GPG keys: signed-in human session only -----
+      if (path === "/signing-keys/gpg") {
+        if (auth.viaToken) return text("Signing keys require a signed-in human session", 403);
+        if (method === "GET") return json({ keys: (await account.trustedGpgKeys()).map((key) => ({ fingerprint: key.fingerprint, armored: key.armored })) });
+        if (method === "POST") {
+          const input = await body<{ key?: unknown }>();
+          if (Object.keys(input).some((field) => field !== "key")) return text("GPG keys accept only the key field", 400);
+          const result = await account.addTrustedGpgKey(input.key);
+          if (!result.ok) return text(result.error, 400);
+          return json({ keys: result.keys.map((key) => ({ fingerprint: key.fingerprint, armored: key.armored })) });
+        }
+        if (method === "DELETE") {
+          const input = await body<{ fingerprint?: unknown }>();
+          if (Object.keys(input).some((field) => field !== "fingerprint")) return text("Removal accepts only the fingerprint field", 400);
+          const result = await account.removeTrustedGpgKey(input.fingerprint);
+          if (!result.ok) return text(result.error, 400);
+          return json({ keys: result.keys.map((key) => ({ fingerprint: key.fingerprint, armored: key.armored })) });
+        }
+        return text("GPG keys accept GET, POST or DELETE", 405);
+      }
+
       // ----- F02 trusted signing keys: signed-in human session only -----
       if (path === "/signing-keys") {
         if (auth.viaToken) return text("Signing keys require a signed-in human session", 403);

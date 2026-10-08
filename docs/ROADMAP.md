@@ -3198,8 +3198,11 @@ signed-in human session only; `tests/signing-keys-http.test.ts` (1 pass; 15 asse
 add, refusal of other key types and extra fields, unknown removal, wrong methods and anonymous access. GPG verification is in
 `src/core/gpg-signature.ts` (`tests/gpg-signature.test.ts`, 4 pass), using the `openpgp` library (6.3.2, pure JavaScript,
 Workers-compatible) against a key and signature produced by GnuPG 2.5 and checked with `gpg --verify`. It accepts only a
-signature that verifies against a trusted key, and reports that key's uppercase fingerprint. Remaining F02 work: storing trusted
-GPG keys on the account (wiring like the SSH keys), X.509 verification, and connecting verification status to the commit view.
+signature that verifies against a trusted key, and reports that key's uppercase fingerprint. Trusted GPG public keys are stored
+on the account (`trusted_gpg_keys` in the account Durable Object) and exposed at `/api/signing-keys/gpg` (GET, POST, DELETE) for
+signed-in human sessions only. Validation (`src/core/trusted-gpg-keys.ts`) refuses private keys, malformed input and extra fields,
+and is idempotent by fingerprint; `tests/gpg-keys-http.test.ts` (1 pass; 13 assertions in child mode) covers it. Remaining F02 work:
+X.509 verification and connecting verification status to the commit view.
 
 **Still open for F02, not closable without spend:** the R2-backed LFS object store and its HTTP endpoints (billed R2
 storage), stock Git and Git LFS client acceptance against the deployed Worker (hosted), and the artifact-backed
