@@ -2152,6 +2152,11 @@ migration, destructive action, or legal acceptance is authorized by this tracker
 - The deploy also rebuilt and pushed the AgentSandbox and IntegratorSandbox Container images. Containers may be billed; check the Cloudflare dashboard.
 - Live checks: `/health` 200, anonymous app registration 401, bad grant type 400, unknown package 404.
 
+## Fourth batch of local slices, October 8 (source-tested; not wired)
+
+- F18: `moderation.ts`: report queue (no self-reports, no duplicates), moderator actions with an append-only audit log, one appeal within 14 days decided by a different moderator, and a pure limit check. Plan limits are not set: the repo defines only the 10-repository free limit, so limits must come from configuration. Gaps: an overturned appeal does not reverse the action (no unhide exists), and a reporter may resolve their own report.
+- F19: `retention.ts` and `service-status.ts`: retention periods, legal holds, status from fresh checks (stale never counts as ok), uptime with no-sample null, and single-resolution incidents.
+
 ## Active ticket ledger
 
 | Ticket | Status | Primary owner | Next acceptance action |
