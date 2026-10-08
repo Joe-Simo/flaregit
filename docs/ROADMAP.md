@@ -26,7 +26,24 @@ text and evidence remain in this file and in git history.
 - Finalist travel to Cloudflare Connect (Oct 21, 2026) and any expense the owner has not approved.
 - The C11 entry, terms acceptance, and submission: owner-only manual steps.
 
-**Status:** The goal is not complete under this no-spend scope. Local work continues on the active list.
+**Blocked on spend or an owner decision (not in progress; not started without approval):**
+- F01: rename (changes the canonical Artifacts identity); default branch (Artifacts ref writes); forks (creates a
+  hosted Artifacts repository); ownership transfer (changes who controls spend, so it needs a billing decision);
+  deletion with recovery (extends storage retention, so it needs a retention decision).
+- F02: the R2-backed Git LFS object store and its endpoints; stock Git and Git LFS client acceptance against the
+  deployed Worker.
+
+**Committed locally on `main`, not pushed (October 8):**
+- F01: archive/unarchive, visibility, and topics (`109c2ab`, `e9adc73`, `8720856`), with HTTP and unit tests.
+- F02: Git LFS batch validation and content-derived hash checks (`0e45935`), with 5 tests.
+- Tracker updates: `75b0087`, `9e3b70c`, and the commits before them.
+
+**Still open without spend (local engineering):**
+- F01: non-project route guards for archived repositories.
+- F02: commit signature verification status.
+- F03–F20: not started. Each still needs local source work and tests, and any paid step moves to the deferred list.
+
+**Status:** Not complete. No paid work is in progress, and none will start without your approval.
 
 ## Current handoff — October 7, 2026
 
