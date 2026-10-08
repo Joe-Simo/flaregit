@@ -1,7 +1,7 @@
-import { cp, rm, rename } from "node:fs/promises";
+import { cp, readdir, rm, rename } from "node:fs/promises";
 import tailwind from "./tailwind";
 import { retainWebAssets, importVerifiedWebAssetRelease, exportWebAssetRelease } from "./retained-web-assets";
-import { resolve, relative } from "node:path";
+import { join, resolve, relative } from "node:path";
 
 const args = Bun.argv.slice(2);
 const option = (name: string) => { const index = args.indexOf(name); return index < 0 ? undefined : args[index + 1]; };
@@ -33,7 +33,8 @@ if (releaseSource) {
   console.log(JSON.stringify(receipt));
 }
 await retainWebAssets(resolve(".cache/web-build"), result.outputs.map(output => output.path), resolve(".cache/web-assets"));
-await cp("public", ".cache/web-build", { recursive: true, force: false, errorOnExist: true });
+// Copy each public entry explicitly: Bun 1.4.2 rejects copying a directory onto the existing build output directory, while any real name collision still fails here.
+for (const entry of await readdir("public")) await cp(join("public", entry), join(".cache/web-build", entry), { recursive: true, force: false, errorOnExist: true });
 const outputs = result.outputs.map(output => ({ path: resolve("dist", relative(resolve(".cache/web-build"), output.path)), size: output.size }));
 await rm("dist", { recursive: true, force: true });
 await rename(".cache/web-build", "dist");
