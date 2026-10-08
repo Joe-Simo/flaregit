@@ -2142,6 +2142,10 @@ migration, destructive action, or legal acceptance is authorized by this tracker
 - F16: `agent-environment.ts`: fixed tool list, exact-host egress, no secrets, run ledger with timeouts. Commands can reach the network without a declared host; only runtime enforcement closes that.
 - F17: `client-capabilities.ts`: one permission model for web, CLI and API, with per-surface request budgets. Role mapping awaits owner sign-off.
 
+## Duplicate modules removed, October 8
+
+- Deleted `src/core/deployments.ts` and `src/core/org-invitations.ts` with their tests. The server's own `src/server/deployments.ts` and `src/server/repository-invitations.ts` remain the source of truth.
+
 ## Active ticket ledger
 
 | Ticket | Status | Primary owner | Next acceptance action |
