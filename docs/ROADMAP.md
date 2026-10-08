@@ -3224,6 +3224,17 @@ References: `https://docs.github.com/en/repositories`, `https://developers.cloud
 
 ### F03 — code experience and search (R1; after C06)
 
+**Progress (source-tested only, October 8):** permission-filtered code search is in `src/core/code-search.ts`
+(`tests/code-search.test.ts`, 5 pass). It searches only files the actor may read (owner-only files are never searched for
+members or outsiders), matches literally and case-insensitively with line numbers, pages with a cursor (50 per page), and caps
+at 1,000 matches. Every response says whether it is `complete`; a capped or unfinished search reports a `reason` instead of
+silently truncating. Queries are limited to 200 characters, and empty queries and bad cursors are refused.
+
+**Still open for F03 (local):** branch- and tag-aware browsing, Markdown, raw and binary views, path and history navigation,
+blame, compare, commit and line permalinks, rename tracking, and the cache keys that include version and access scope.
+These need the commit-object reader, which is blocked on owner confirmation for hosted Artifacts reads (see F02). Browser
+edits and uploads write to Git and are blocked on the same Artifacts decision.
+
 Finish branch/tag-aware browsing, Markdown/raw/binary views, path/history navigation, blame, compare, commit/line permalinks, browser edits/uploads, and permission-filtered code search. Keep query syntax, paging, supported file types and indexing freshness explicit. Reuse the working virtualized diff; do not rebuild it for aesthetics.
 
 Acceptance: a user follows an issue to a line at an old commit, sees accurate blame/history, searches a symbol, proposes an edit, and returns after a rename. Deleted/private material is removed from unauthorized search projections. Searches must not silently truncate and report complete results. Cache keys include relevant version and access scope.
