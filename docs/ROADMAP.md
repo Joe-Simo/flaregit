@@ -3259,8 +3259,11 @@ Drafts stay private to their author until published, and publishing affects only
 repository-relative path and a line of at least 1 (no traversal or absolute paths). Comments are limited to 65,536 characters.
 Only a participant who has published can resolve a thread, and a resolved thread cannot be resolved again.
 
-**Still open for F04 (local):** review requests, suggested edits, base-branch changes, fork permissions, stacked changes, merge
-queues, and explicit revert. Hosted merge into Artifacts-backed branches needs owner confirmation.
+**Queue, revert and requests (source-tested, October 8):** `src/core/merge-queue.ts` (`tests/merge-queue.test.ts`, 2 pass) merges the
+queue head only on the current base with passing checks and otherwise requeues it; a revert is a new change naming its target and
+reason. `src/core/review-requests.ts` (1 pass) refuses self-requests and non-readers and deduplicates.
+
+**Still open for F04 (local):** suggested edits, base-branch changes, fork permissions and stacked changes. Hosted merge into Artifacts-backed branches needs owner confirmation.
 
 Complete drafts, review requests, required approvals, CODEOWNERS, multiline/inline threads, suggested edits, resolution, stale approvals, base changes, fork permissions, stacked changes, merge queues, merge/squash/rebase policies, and explicit revert. Retain original contributor attribution and verifiable repair intent. Platform policy—not an agent—controls gate satisfaction.
 
