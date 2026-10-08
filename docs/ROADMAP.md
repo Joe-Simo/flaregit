@@ -3190,8 +3190,10 @@ unsigned, gpg, ssh, x509 and unknown blocks, refuses two signature headers, and 
 byte. Cryptographic verification for SSH signatures is in `src/core/ssh-signature.ts` (`tests/ssh-signature.test.ts`, 6 pass):
 it verifies ssh-ed25519 SSHSIG signatures made by `ssh-keygen -Y sign -n git` against a trusted authorized key, and refuses
 other namespaces, untrusted keys, other key types, tampered bytes and non-SSH input. Test fixtures were generated locally with
-`ssh-keygen` and checked with `ssh-keygen -Y check-novalidate`. Remaining F02 work: GPG (OpenPGP) and X.509 verification, and
-the trusted-key registry that stores each user's authorized keys. Connecting verification status to the commit view is open.
+`ssh-keygen` and checked with `ssh-keygen -Y check-novalidate`. The trusted-key registry is in `src/core/trusted-keys.ts`
+(`tests/trusted-keys.test.ts`, 5 pass): it accepts only ssh-ed25519 authorized-key lines, validates the blob, de-duplicates,
+caps each user at 20 keys, refuses removal of unknown keys, and feeds the SSH verifier. Remaining F02 work: storing the
+registry on the account (wiring), GPG (OpenPGP) and X.509 verification, and connecting verification status to the commit view.
 
 **Still open for F02, not closable without spend:** the R2-backed LFS object store and its HTTP endpoints (billed R2
 storage), stock Git and Git LFS client acceptance against the deployed Worker (hosted), and the artifact-backed
