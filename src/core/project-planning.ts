@@ -40,7 +40,8 @@ export function updateItem(
   for (const [name, value] of Object.entries(change.fields ?? {})) {
     const type = project.fieldTypes[name];
     if (type === undefined) return {ok: false, error: `Unknown field ${name}`};
-    if (typeof value !== type) return {ok: false, error: `Field ${name} must be ${type}`};
+    const expected = type === "text" ? "string" : "number";
+    if (typeof value !== expected) return {ok: false, error: `Field ${name} must be ${type}`};
   }
   const next: ProjectItem = {...item, status: change.status ?? item.status, fields: {...item.fields, ...change.fields}, version: item.version + 1};
   return {ok: true, project: {...project, items: project.items.map((candidate) => (candidate === item ? next : candidate))}};

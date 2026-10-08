@@ -30,3 +30,11 @@ test("progress counts stored items", () => {
   const moved = must(updateItem(two, 2, 1, {status: "done"}));
   expect(progress(moved)).toEqual({todo: 1, done: 1});
 });
+
+test("text fields accept strings and number fields accept numbers", () => {
+  const added = must(addItem(empty, 3, [3]));
+  const withOwner = must(updateItem(added, 3, 1, {fields: {owner: "alice"}}));
+  expect(withOwner.items[0]?.fields).toEqual({owner: "alice"});
+  expect(updateItem(withOwner, 3, 2, {fields: {owner: 7}}).ok).toBe(false);
+  expect(updateItem(withOwner, 3, 2, {fields: {points: "5"}}).ok).toBe(false);
+});
