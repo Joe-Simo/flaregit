@@ -3243,6 +3243,17 @@ References: `https://github.com/features` and `https://docs.github.com/en/search
 
 ### F04 — pull-request and branch-policy parity (R1; after C04/C06)
 
+**Progress (source-tested only, October 8):** the platform merge gate is in `src/core/merge-gate.ts`
+(`tests/merge-gate.test.ts`, 5 pass). Only the latest review per reviewer counts, and only on the current head commit, so stale
+approvals stop counting when the head changes. Self-approval and duplicate approvals from one reviewer do not count. Any
+outstanding "request changes" blocks the merge. Required approval counts are enforced, and CODEOWNERS rules use the most
+specific path prefix; an owner's approval is needed for each changed path under that rule, and an author cannot satisfy their own
+code-owner rule. The gate reports every blocker. Lint and typecheck pass.
+
+**Still open for F04 (local):** drafts, review requests, multiline and inline threads, suggested edits, resolution, base-branch
+changes, fork permissions, stacked changes, merge queues, merge, squash and rebase policies, and explicit revert. These are
+local engineering and are scheduled after this slice. Hosted merge into Artifacts-backed branches needs owner confirmation.
+
 Complete drafts, review requests, required approvals, CODEOWNERS, multiline/inline threads, suggested edits, resolution, stale approvals, base changes, fork permissions, stacked changes, merge queues, merge/squash/rebase policies, and explicit revert. Retain original contributor attribution and verifiable repair intent. Platform policy—not an agent—controls gate satisfaction.
 
 Acceptance: two accounts and one agent perform a fork-based review cycle, a stack, an approval-invalidating change, a required-check failure, and each allowed merge method. The exact produced commit is verified for its method. Concurrent base changes never discard accepted history. Review-required and safe auto modes remain clear and independently tested.
