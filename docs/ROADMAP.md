@@ -3270,6 +3270,14 @@ References: `https://docs.github.com/en/pull-requests` and `https://docs.github.
 
 ### F05 — issues and triage (R1; after C06)
 
+**Progress (source-tested only, October 8):** `src/core/issue-triage.ts` (`tests/issue-triage.test.ts`, 4 pass). Labels are
+trimmed, deduplicated and limited to 50 characters. Only repository members can be assigned. An accepted change closes an issue
+once; a second closure keeps the original record, and reopening clears the closing change without fabricating history. A
+transferred issue keeps a tombstone with its destination and refuses further changes. Lint and typecheck pass.
+
+**Still open for F05 (local):** milestones, templates/forms, attachments, duplicates, relationships/sub-issues, saved filters,
+bulk actions, moderation, and deletion tombstones with redirects.
+
 Complete labels, assignees, milestones, templates/forms, attachment handling, linking/closing through accepted work, duplicate/transfer workflows, relationships/subissues, saved filtering, bulk actions, and moderation. Preserve discussion context when tasks are assigned to agents.
 
 Acceptance: a maintainer triages a set of issues, converts one into a task, merges its fix, and sees the correct issue close once; reopen/revert does not fabricate history. Deleted and transferred resources retain appropriate redirects or tombstones. All actions respect role and privacy boundaries.
