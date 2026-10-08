@@ -928,6 +928,18 @@ export default {
         // deletion and approving what becomes history need a signed-in session or a full-access token.
         const canAdminister = !auth.viaToken || auth.tokenScope === "full";
         const isOwner = role === "owner" && canAdminister;
+        // F01 archive state: the lifecycle route is the only write allowed on an archived repository, besides deletion.
+        if (sub === "/lifecycle") {
+          if (method === "GET") return repositoryReadJson(await project.repositoryLifecycle());
+          if (method !== "POST") return text("Repository lifecycle requires GET or POST", 405);
+          if (!isOwner) return text("Only the current repository owner can change archive state", 403);
+          const input = await body<{ action?: unknown }>();
+          if (Object.keys(input).some((key) => key !== "action") || (input.action !== "archive" && input.action !== "unarchive")) return text("Archive state requires action archive or unarchive", 400);
+          const result = await project.repositoryLifecycleTransition(input.action, { canAdmin: isOwner });
+          if (!result.ok) return text(result.error, result.status);
+          return repositoryReadJson(result.next);
+        }
+        if (state.lifecycle?.state === "archived" && method !== "GET" && !(sub === "" && method === "DELETE")) return text("Repository is archived and read-only; unarchive it to change anything", 409);
 
 
         if(sub==="/acceptance-policy"){

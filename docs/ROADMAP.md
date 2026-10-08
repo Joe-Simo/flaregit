@@ -3088,6 +3088,15 @@ Each ticket below is a finite workstream. Split it into approximately one-day ve
 
 ### F01 — repository lifecycle (R1; after C05)
 
+**Progress (source-tested only, October 8):** archive and unarchive are implemented end to end: pure rules in
+`src/core/repository-lifecycle.ts`; optional `lifecycle` field in the project document; Durable Object methods
+`repositoryLifecycle` and `repositoryLifecycleTransition`; route `/api/p/:id/lifecycle` (GET for members, POST
+archive/unarchive for owners only); and a central read-only guard on archived repositories for every non-GET
+project route except the lifecycle route and repository deletion. Evidence: `tests/repository-lifecycle.test.ts`
+(5 pass) and `tests/repository-lifecycle-http.test.ts` (1 pass; 25 assertions in child mode), with lint, typecheck
+and build passing. Still open for F01: visibility, default branch, rename, topics, forks, ownership transfer, and
+deletion with recovery; and non-project routes are not yet guarded.
+
 Cover repository visibility, README/license/gitignore initialization, template creation, independent forks, fork relationships, default branch changes, topics, archive/unarchive, rename, ownership transfer, deletion and recovery. Preserve source identity and permission boundaries during every transition. Imported data stays attributed and source repos are never mutated by an import.
 
 Acceptance: migrate an owned test repository through rename, transfer, archive, restore, and fork contribution; verify links/refs/data and old credential denial. A fork is not merely a hidden task workspace with no user lifecycle. Owner deletion must not orphan unbounded billable resources.

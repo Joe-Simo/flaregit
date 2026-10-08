@@ -304,6 +304,8 @@ export interface FlareGitProjectState {
   acceptedState: AcceptedState;
   /** Immutable initial accepted snapshot; never inferred from a candidate or a later head. */
   acceptedBaseline?: { commit: string; tree?: string; acceptedAt: string };
+  /** Archive state (F01). Absent on older documents, which means active. */
+  lifecycle?: import("./repository-lifecycle").RepositoryLifecycle;
   tasks: Record<string, Task>;
   candidates: Record<string, CandidateGeneration>;
   evidence: Record<string, VerificationEvidence>;
