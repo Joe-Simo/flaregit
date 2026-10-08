@@ -1,5 +1,6 @@
 import {dispatchPreparedPublication,preparedPublicationRequestSchema,PreparedPublicationDispatchError} from './prepared-publication-dispatch';
 import {normalizeTopics} from '../core/repository-topics';
+import {archivedWriteRefusal} from './archive-guard';
 import {exactHumanContributions,unattributedHumanContributions,type PeopleContribution} from "./repository-people-attribution";
 import {integrationRequestInputSchema} from './integration-request-intents';
 import {webhookReplayRequestSchema} from './webhook-replay-intents';
@@ -318,6 +319,7 @@ export default {
     const callbackRoute = /^\/api\/p\/([a-z0-9]{12,16})\/connections\/(svc_[a-f0-9-]{36})\/events$/.exec(url.pathname);
     if (callbackRoute && request.method === "POST") {
       const project = projectOf(env, callbackRoute[1]!);
+        { const refusal = await archivedWriteRefusal(project, request.method); if (refusal) return refusal; }
       const config = await project.connectionSigningConfig(callbackRoute[2]!).catch(() => null);
       if (!config) return text("Unauthorized", 401);
       const limited = await env.API_LIMITER.limit({ key: `service:${callbackRoute[1]}:${callbackRoute[2]}` });
@@ -428,7 +430,7 @@ export default {
         }catch(error){if(error instanceof RequestBodyError)throw error;return text("Community change was not saved; check confirmation, content, ownership and version before retrying",409);}
       }
       if(discussionRoute){
-        const project=projectOf(env,discussionRoute[1]!);if(!await project.publicGrant())return text("Not found",404);
+        const project=projectOf(env,discussionRoute[1]!);{const refusal=await archivedWriteRefusal(project,request.method);if(refusal)return refusal;}if(!await project.publicGrant())return text("Not found",404);
         const profile=await account.getProfile(),actor={userId,accountKey,displayName:profile.displayName||"Contributor"};
         try{
           if(discussionRoute[2]==="permissions"&&method==="GET"){const id=url.searchParams.get("topic")??"";if(!/^discussion_[a-f0-9-]{36}$/.test(id))return text("Invalid discussion",400);return json(await project.discussionPermissions(actor,id,true,!auth.viaToken||auth.tokenScope==="full"));}
@@ -438,6 +440,7 @@ export default {
       }
       if (publicParticipationRoute) {
         const project = projectOf(env, publicParticipationRoute[1]!);
+        { const refusal = await archivedWriteRefusal(project, request.method); if (refusal) return refusal; }
         const participationGrant = await project.publicGrant().catch(() => null);
         if (!participationGrant) return text("Not found", 404);
         const profile = await account.getProfile();
@@ -874,7 +877,7 @@ export default {
         const parsed=z.object({projectId:z.string().regex(PROJECT_ID),token:z.string().regex(/^[a-f0-9]{48}$/),requestId:z.uuid()}).strict().safeParse(await body<unknown>());
         if(!parsed.success)return text("Confirm the exact invitation and join request",400);
         const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.viaToken||current.id!==userId)return text("Joining session changed",403);
-        const profile=await account.getProfile(),project=projectOf(env,parsed.data.projectId);
+        const profile=await account.getProfile(),project=projectOf(env,parsed.data.projectId);{const refusal=await archivedWriteRefusal(project,request.method);if(refusal)return refusal;}
         try{const joined=await project.joinRepositoryInvitation(parsed.data.token,parsed.data.requestId,userId,clean(profile.displayName,60)||"Collaborator",{viaToken:false,sessionExpiresAt:current.expiresAt});
           const fresh=await authenticate(request,env);if(fresh instanceof Response||fresh.viaToken||fresh.id!==userId)return text("Join acknowledgement unavailable; retry the original request",409);
           if(!joined.joined||!await project.roleOf(userId))return text("Current membership could not be confirmed",409);

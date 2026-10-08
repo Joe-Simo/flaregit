@@ -38,8 +38,8 @@ Therefore the product should not depend on Artifacts or Containers. Replacements
 - Approve the replacement design for untrusted execution (free runners with signed attestations), or name a different
   free design.
 
-**Work that remains, with no money required:** F01 non-project route guards; F02 signature verification and
-replacement Git storage; F03–F20 (not started); C02–C09 replacement designs. Each will be recorded here as it lands.
+**Work that remains, with no money required:** F01 route-level HTTP tests for the guarded non-project routes; F02
+signature verification; F03–F20 (not started). Each will be recorded here as it lands.
 
 ## Superseded: earlier no-spend scope — owner decision, October 8, 2026
 
@@ -74,7 +74,7 @@ text and evidence remain in this file and in git history.
 - Tracker updates: `75b0087`, `9e3b70c`, and the commits before them.
 
 **Still open without spend (local engineering):**
-- F01: non-project route guards for archived repositories.
+- F01: non-project route guards for archived repositories (wired; route-level HTTP tests still open).
 - F02: commit signature verification status.
 - F03–F20: not started. Each still needs local source work and tests, and any paid step moves to the deferred list.
 
@@ -3162,8 +3162,10 @@ topics: owner-only, validated, and refused while archived). Topics validation li
 
 Each stays blocked until the owner approves the spend or makes the billing decision.
 
-Still open for F01: rename, forks, ownership transfer, and deletion with recovery; and non-project routes are not
-yet guarded.
+Non-project writes are now guarded by `archivedWriteRefusal` (`src/server/archive-guard.ts`, 3 unit tests pass): connection
+event callbacks, public participation, public discussion changes, and invitation joins return 409 while archived. Route-level
+HTTP tests for those four families are still open. Still open for F01: rename, forks, ownership transfer, and deletion
+with recovery, which are blocked as listed above.
 
 Cover repository visibility, README/license/gitignore initialization, template creation, independent forks, fork relationships, default branch changes, topics, archive/unarchive, rename, ownership transfer, deletion and recovery. Preserve source identity and permission boundaries during every transition. Imported data stays attributed and source repos are never mutated by an import.
 
