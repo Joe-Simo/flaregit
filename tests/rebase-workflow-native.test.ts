@@ -38,3 +38,12 @@ test.each(['push', 'ledger'] as const)('production rebase orchestration with nat
 finally {
     await f.cleanup();
 } }, 30000);
+test('optional stack rewrite without creator consent defers while preserving original fork and accepted root',async()=>{
+ const f=await rebaseWorkflowNativeFixture();try{
+  f.denyMaintainerWrites();expect(await f.execute()).toMatchObject({status:'deferred',reason:'creator_consent_required',rebased:[],blocked:['child']});
+  expect(f.commands).toEqual([]);expect(f.branchPushes()).toBe(0);expect(f.applications()).toBe(0);
+  expect(f.child.currentCommit).toBe(f.original);expect(f.child.baseCommit).toBe(f.parent);
+  expect(await f.git(`git --git-dir '${f.workspace}' rev-parse refs/heads/child`)).toBe(f.original);
+  expect(await f.git(`git --git-dir '${f.canonical}' rev-parse refs/heads/main`)).toBe(f.landed);
+ }finally{await f.cleanup();}
+},30000);

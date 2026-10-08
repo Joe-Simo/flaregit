@@ -1,3 +1,5 @@
+import {browserEditSchema} from "./browser-edit";
+import {handleLfsHttp} from "./lfs-http";
 export {OperationalRecoveryController} from './operational-recovery-controller';
 import {securityImportSchema,securityTriageSchema,SecurityReportError} from '../core/security-report';
 import {organizationMutationSchema} from './organization-requests';
@@ -139,6 +141,7 @@ export default {
     if(url.pathname.startsWith("/api/")||url.pathname.startsWith("/git/")){const denied=await admitCredentialLookup(request,env);if(denied)return denied;}
 
     if (url.pathname === "/health") return json({ ok: true });
+    if (url.pathname.startsWith("/git/")) { const lfs=await handleLfsHttp(request,env);if(lfs)return lfs; }
     if (url.pathname.startsWith("/git/")) return handleGitGateway(request, env, async (_account, userId, route, operationId) => {
       const admission = await admitGitOperation(env, userId, operationId, route);
       return admission instanceof Response ? admission : { finish: admission.finish ?? (async () => {}) };
@@ -805,6 +808,7 @@ export default {
           else if(sub==='/teams'&&method==='POST')action={...input,action:'team'};
           else if(team&&method==='DELETE')action={...input,action:'remove-team',teamId:team[1]};
           else if(teamMember&&method==='PUT')action={...input,action:'team-member',teamId:teamMember[1],userId:teamMember[2]};
+          else if(/^\/teams\/[A-Za-z0-9_.:@-]{1,256}\/children\/[A-Za-z0-9_.:@-]{1,256}$/.test(sub)&&method==='PUT'){const parts=sub.split('/');action={...input,action:'team-child',teamId:parts[2],childTeamId:parts[4]};}
           else if(sub==='/grants'&&(method==='PUT'||method==='DELETE'))action={...input,action:method==='PUT'?'grant':'revoke-grant'};
           else if(sub==='/invitations'&&method==='POST')action={...input,action:'invite'};
           else if(invite&&(method==='DELETE'&&!invite[2]||method==='POST'&&invite[2]))action={...input,action:invite[2]?'accept-invite':'revoke-invite',invitationId:invite[1]};
@@ -1081,8 +1085,8 @@ export default {
         const effectiveAccess=await project.repositoryAccess(userId);
         if(!effectiveAccess)return text('Not found',404);
         if(method!=='GET'&&!effectiveAccess.direct){
-          if(effectiveAccess.role==='read')return text('Repository access is read-only',403);
-          if(!sub.startsWith('/wiki/')&&sub!=='/planning'&&sub!=='/issues'&&sub!=='/comments')return text('This operation requires direct repository membership',403);
+          if(effectiveAccess.role==='read'&&sub!=='/clone')return text('Repository access is read-only',403);
+          if(sub!=='/clone'&&!sub.startsWith('/wiki/')&&sub!=='/planning'&&sub!=='/issues'&&sub!=='/comments'&&sub!=='/tasks'&&!/^\/tasks\/[a-z0-9-]+\/(token|ready|cancel|browser-edit|fork-permission)$/.test(sub))return text('This operation requires direct repository membership',403);
         }
 
         if(sub==="/storage-reconciliation"&&method==="GET"){
@@ -1187,7 +1191,7 @@ export default {
           if(method!=='POST'||sub.endsWith('/export'))return text('Method not allowed',405);
           const parsed=planningMutationSchema.safeParse(await body<unknown>());if(!parsed.success)return text('Confirm the exact planning operation and current version',400);
           const current=await freshMetadataActor(true);if(!current)return text('Planning access changed',403);
-          if((parsed.data.operation==='configure'||parsed.data.operation==='setAutomation')&&!current.isOwner)return text('Only the repository owner can configure planning',403);
+          if(['configure','setAutomation','setAcceptedStatus','retryAccepted'].includes(parsed.data.operation)&&!current.isOwner)return text('Only the repository owner can configure planning',403);
           try{const result=await project.planningMutate(userId,parsed.data);return repositoryReadJson(result.ok?result.value:{error:result.error},result.ok?200:result.status);}catch(error){const status=typeof error==='object'&&error!==null&&'status' in error&&typeof error.status==='number'?error.status:409;return repositoryReadJson({error:error instanceof Error?error.message:'Planning changed; refresh before saving'},status);}
         }
         if(sub==='/metadata-archive'||sub==='/metadata-archive/history'){
@@ -1318,7 +1322,7 @@ export default {
             try{const current=await authenticate(request,env);return !(current instanceof Response)&&current.id===userId&&(!current.tokenRepo||current.tokenRepo===projectId)&&await account.accountLifecycle()==="active"&&await project.canGitAccess(userId,null,false)&&await project.privateRecoveryReadable(op.id);}catch{return false;}
           }});
         }
-        if (sub === "" && method === "GET") return json({ id: projectId, role, kind: state.kind ?? "demo", name: state.projectName, source: state.source ?? null, verification: state.verificationPolicy, protectedPaths: settings.protectedPaths, visibility: await project.repositoryVisibility(), ...(role === "owner" ? {moderation:ownerModerationNotice(await project.repositoryModerationState())} : {}) });
+        if (sub === "" && method === "GET") return json({ id: projectId, role, permission:effectiveAccess.role,inheritedAccess:!effectiveAccess.direct,kind: state.kind ?? "demo", name: state.projectName, source: state.source ?? null, verification: state.verificationPolicy, protectedPaths: settings.protectedPaths, visibility: await project.repositoryVisibility(), ...(role === "owner" ? {moderation:ownerModerationNotice(await project.repositoryModerationState())} : {}) });
         const conversationMigrationRoute=/^\/conversation-migrations\/([A-Za-z0-9_-]{1,200})(?:\/(capture|manifest|publish))?$/.exec(sub);
         if(sub==="/conversation-migrations"||conversationMigrationRoute){
           if(!isOwner)return text("Only the repository owner can migrate conversations",403);
@@ -1442,7 +1446,7 @@ export default {
           if (settings.fixture === "ticket-booking" && state.acceptedState.currentCommit !== null) {
             ctx.waitUntil(ensureBuild(env, projectId, state.acceptedState.currentCommit, state.canonicalRepoName, accountKey).catch((e) => console.error("preview build failed", String(e))));
           }
-          return json({ ...state, role });
+          return json({ ...state, role,permission:effectiveAccess.role,inheritedAccess:!effectiveAccess.direct,writableTaskIds:effectiveAccess.writableTaskIds,cancellableTaskIds:effectiveAccess.cancellableTaskIds,forkPermissions:effectiveAccess.forkPermissions });
         }
 
         if (sub === "/activity" && method === "GET") return json(await project.listActivity(60));
@@ -1797,10 +1801,11 @@ export default {
 
         // ----- changes (tasks) -----
         if (sub === "/tasks" && method === "POST") {
-          const b = await body<{ taskId?: string; goal?: string; name?: string; dependsOn?: string; issue?: number;expectedTarget?:unknown;externalTool?:unknown }>();
+          const b = await body<{ taskId?: string; goal?: string; name?: string; dependsOn?: string; issue?: number;expectedTarget?:unknown;externalTool?:unknown;browserEdit?:boolean }>();
           const goal = clean(b.goal, 300);
           if (!b.taskId || !TASK_ID.test(b.taskId) || !goal) return text("taskId (3-101 chars: a-z, 0-9, -) and goal are required", 400);
-          if(Object.keys(b).some(key=>!["taskId","goal","name","dependsOn","issue","expectedTarget","externalTool"].includes(key)))return text("Invalid change creation input",400);
+          if(Object.keys(b).some(key=>!["taskId","goal","name","dependsOn","issue","expectedTarget","externalTool","browserEdit"].includes(key)))return text("Invalid change creation input",400);
+          if(b.browserEdit!==undefined&&typeof b.browserEdit!=="boolean")return text("Invalid browser contribution mode",400);
           const input=taskCreationInputSchema.safeParse({goal,dependsOn:b.dependsOn??null,issue:b.issue??null,...(b.expectedTarget!==undefined?{expectedTarget:b.expectedTarget}:{}),...(b.externalTool!==undefined?{externalTool:b.externalTool}:{})});
           if(!input.success)return text("Invalid change goal, dependency or issue",400);
           const requestedTarget=input.data.expectedTarget?{acceptedTargetRef:input.data.expectedTarget.ref}:undefined;
@@ -1812,6 +1817,7 @@ export default {
             const remote=gitRemote(url.origin,projectId,replay.id);
             if(terminal)return json({task:replay.id,remote,branch:replay.workspace.branch,replayed:true,terminal:true,status:replay.status,agentRunId:replay.agentRunId??null,commands:[]});
             try{
+              if(b.browserEdit){if(!await project.canGitAccess(userId,replay.id,true))return text("Contribution writer access changed",403);return json({task:replay.id,branch:replay.workspace.branch,replayed:true,terminal:false,status:replay.status});}
               const {token}=await project.mintGitCapability(userId,replay.id,true,await gitParentTokenHash(request));
               const current=await project.taskCreationReplay(replay.id,userId,input.data,requestedTarget,creationCredential);
               if(!current||current.status==="accepted"||current.status==="cancelled")return text("Saved change state changed during recovery; retry to read its current state",409);
@@ -1879,6 +1885,7 @@ export default {
           const existing=await project.taskCreationReplay(saved.id,userId,input.data,requestedTarget,creationCredential);
           if(!existing)return text("Saved change could not be confirmed; retry the same creation request",409);
           if(existing.status==="accepted"||existing.status==="cancelled")return json({task:existing.id,remote,branch:existing.workspace.branch,replayed:true,terminal:true,status:existing.status,agentRunId:existing.agentRunId??null,commands:[]});
+          if(b.browserEdit){if(!await project.canGitAccess(userId,saved.id,true))return text("Contribution writer access changed",403);return json({task:saved.id,branch:existing.workspace.branch,replayed:saved.creationReplayed===true,terminal:false,status:existing.status},201);}
           const {token}=await project.mintGitCapability(userId,b.taskId,true,await gitParentTokenHash(request));
           const current=await project.taskCreationReplay(saved.id,userId,input.data,requestedTarget,creationCredential);
           if(!current)return text("Saved change state changed; retry the same creation request",409);
@@ -1908,6 +1915,25 @@ export default {
           try{await project.ownerGitGatewayRecovery(taskId,actor,credentialHash,current.expiresAt,options);const fresh=await currentOwner();if(fresh instanceof Response)return fresh;const report=await project.ownerGitGatewayRecovery(taskId,actor,credentialHash,fresh.expiresAt,options);return repositoryReadJson(report);}catch{return repositoryReadJson({error:"Git transfer recovery could not be confirmed. Saved transfer and credential holds remain preserved."},409);}
         }
 
+        const browserEditRoute=/^\/tasks\/([a-z0-9-]+)\/browser-edit$/.exec(sub);
+        if(browserEditRoute){
+          if(method!=="POST"||url.search)return repositoryReadJson({error:"Exact browser edit POST required"},400);
+          const value=browserEditSchema.safeParse(await body<unknown>(524288));if(!value.success)return repositoryReadJson({error:"Original head, tree, file and content digests are required"},400);
+          if(!await project.canGitAccess(userId,browserEditRoute[1]!,true))return repositoryReadJson({error:"Contribution author or owner required"},403);
+          const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||current.viaToken&&(current.tokenScope!=="full"||current.tokenRepo&&current.tokenRepo!==projectId))return repositoryReadJson({error:"Browser edit write authority changed"},403);
+          const profile=await account.getProfile();
+          try{return repositoryReadJson(await project.browserEdit(browserEditRoute[1]!,value.data,{userId,displayName:clean(profile.displayName,120)||"Contributor",viaToken:current.viaToken===true},current.viaToken?await gitParentTokenHash(request):undefined,current.expiresAt));}catch{return repositoryReadJson({error:"Original browser contribution was not confirmed; preserve this request and inspect current access"},409);}
+        }
+
+        const forkPermissionRoute=/^\/tasks\/([a-z0-9-]+)\/fork-permission$/.exec(sub);
+        if(forkPermissionRoute){
+          if(method==='GET')return repositoryReadJson(await project.taskForkPermission(forkPermissionRoute[1]!,userId));
+          if(method!=='PUT')return text('Method not allowed',405);
+          const parsed=z.object({enabled:z.boolean(),expectedRevision:z.number().int().nonnegative().safe()}).strict().safeParse(await body<unknown>());if(!parsed.success)return text('Exact human fork permission revision required',400);
+          const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||current.viaToken!==auth.viaToken)return text('Fork creator authentication changed',403);
+          const credential={viaToken:current.viaToken===true,...(current.viaToken?{credentialHash:await gitParentTokenHash(request)}:{sessionExpiresAt:current.expiresAt})};
+          try{return repositoryReadJson(await project.taskForkPermissionUpdate(forkPermissionRoute[1]!,userId,parsed.data,credential));}catch(error){return repositoryReadJson({error:error instanceof Error?error.message:'Human fork permission changed'},409);}
+        }
         const tokenRoute = /^\/tasks\/([a-z0-9-]+)\/token$/.exec(sub);
         const agentRecordRoute = /^\/tasks\/([a-z0-9-]+)\/agent-run$/.exec(sub);
         if (agentRecordRoute && method === "GET") {
@@ -1928,10 +1954,10 @@ export default {
         if (taskRoute && method === "POST") {
           const task = state.tasks[taskRoute[1]!];
           if (!task) return text("Unknown change", 404);
-          if (!(await project.canGitAccess(userId, task.id, true))) return text("Only this workspace's contributor or the owner can change it", 403);
           const action = taskRoute[2];
+          if(action!=="cancel"&&!(await project.canGitAccess(userId, task.id, true))) return text("Only this workspace's contributor or the owner can change it", 403);
           if (action === "cancel") {
-            await project.cancelTask(task.id);
+            await project.cancelMemberTask(task.id,userId,auth.viaToken?await gitParentTokenHash(request):undefined,auth.expiresAt);
             // Cancellation stops integration, but the contributor's pushed branch remains recoverable.
             return json({ cancelled: task.id });
           }

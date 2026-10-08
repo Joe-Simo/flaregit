@@ -131,3 +131,10 @@ test("deprecation is persisted and resolve skips deprecated versions after a res
 afterAll(() => {
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('immutable package publication order survives durable restart and deprecation',async()=>{
+ const path=join(dir,'publication-order.sqlite'),first=openSql(path),registry=new PackageRegistry(new SqlPackageStore(first.sql));
+ expect((await registry.publish({...base,version:'9.0.0'})).ok).toBe(true);expect((await registry.publish({...base,version:'1.0.0'})).ok).toBe(true);
+ expect([...registry.publicationOrder(base.name,owner)]).toEqual([['9.0.0',1],['1.0.0',2]]);first.db.close();
+ const second=openSql(path);try{const restarted=new PackageRegistry(new SqlPackageStore(second.sql));expect([...restarted.publicationOrder(base.name,owner)]).toEqual([['9.0.0',1],['1.0.0',2]]);expect(restarted.deprecate(base.name,'1.0.0','Old',base.ownerId).ok).toBe(true);expect([...restarted.publicationOrder(base.name,owner)]).toEqual([['9.0.0',1],['1.0.0',2]]);}finally{second.db.close();}
+});

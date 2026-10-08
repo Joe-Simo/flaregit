@@ -66,6 +66,8 @@ export interface StoredFile {
 }
 
 export interface StoredVersion extends PackageRecord {
+  /** Immutable order assigned by the registry at the synchronous version write. */
+  readonly publication?: number;
   readonly files: ReadonlyMap<string, StoredFile>;
   readonly integrity: string;
   readonly deprecated: string | null;
@@ -319,12 +321,16 @@ export class PackageRegistry {
       files: new Map(files.map((file): [string, StoredFile] => [file.path, file])),
       integrity,
       deprecated: null,
+      publication: existing.length + 1,
     }); } catch (error) {
       if (error instanceof PackageCapacityError) return fail(413, error.message);
       throw error;
     }
     return { ok: true, name, version, integrity };
   }
+
+  /** Stored insertion order, independent of semantic version precedence. Legacy rows retain store insertion order. */
+  publicationOrder(name:string,viewer:Viewer):ReadonlyMap<string,number>{return new Map(this.visibleVersions(name,viewer).map((version,index)=>[version.version,version.publication??index+1]));}
 
   metadata(name: string, viewer: Viewer): MetadataResult {
     if (!isPackageName(name)) return fail(400, INVALID_NAME);

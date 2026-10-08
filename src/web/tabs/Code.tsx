@@ -4,13 +4,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { apiJson, ApiError } from "../api";
 import { timeAgo } from "../router";
+import {BrowserEdit} from '../components/BrowserEdit';
 import {CodeInspection} from '../components/CodeInspection';
 
 import type {FileHistoryPage} from "../../server/browse";
 import type {BranchSelection} from "../branch-browser";
 const BranchControls=lazy(async()=>({default:(await import("../components/BranchControls")).BranchControls}));
 
-interface Commit { hash: string; message: string; author: { name: string }; committedAt: number }
+interface Commit { hash: string; treeHash:string; message: string; author: { name: string }; committedAt: number }
 interface Entry { name: string; type: "blob" | "tree" }
 
 export function UnbornCodeState(){return <Card><CardContent className="p-5 space-y-2"><h3 className="text-sm font-semibold">No accepted commit yet</h3><p className="text-sm text-muted-foreground">The recorded default branch has no accepted history. Create a contribution, push its first commit, and review it before acceptance.</p></CardContent></Card>;}
@@ -114,6 +115,7 @@ function CodeBrowser({ projectId,isOwner,acceptedCommit,link }: { projectId: str
         </div>
       )}
       <Button size="sm" variant="ghost" disabled={loading !== null} onClick={()=>void open(file?.path ?? path, file !== null, selection&&!selection.accepted?selection.commit:null)}>Refresh {selection&&!selection.accepted?"pinned branch snapshot":"latest accepted revision"}</Button>
+      {commit&&loading===null&&/^[a-f0-9]{40}$/.test(commit.treeHash)&&(!file||!file.binary&&!file.truncated)&&<BrowserEdit key={`edit:${commit.hash}:${file?.path??''}`} projectId={projectId} head={commit.hash} tree={commit.treeHash} branchName={selection?.name} path={file?.path} content={file?.content}/>}
       {commit&&<CodeInspection key={`${commit.hash}:${file?.path??''}`} projectId={projectId} commit={commit.hash} path={file&&!file.binary&&!file.truncated?file.path:undefined} onOpen={(target,line)=>{window.location.hash=codeHref(target,line);}}/>}
       {loading && entries !== null && <p role="status" className="text-xs text-muted-foreground break-all">Loading {loading}…</p>}
       {error && (

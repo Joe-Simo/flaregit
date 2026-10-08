@@ -52,6 +52,7 @@ interface StoredFileJson {
 }
 
 interface StoredVersionJson {
+  readonly publication?: number;
   readonly name: string;
   readonly version: string;
   readonly ownerId: string;
@@ -82,6 +83,7 @@ function encodeVersion(stored: StoredVersion): string {
     private: stored.private,
     integrity: stored.integrity,
     deprecated: stored.deprecated,
+    ...(stored.publication!==undefined?{publication:stored.publication}:{}),
     files: [...stored.files.values()].map((file) => ({path: file.path, sha256: file.sha256, size: file.size, bytes: toBase64(file.bytes)})),
   };
   return JSON.stringify(json);
@@ -99,6 +101,7 @@ function decodeVersion(text: string): StoredVersion {
     private: json.private,
     integrity: json.integrity,
     deprecated: json.deprecated,
+    ...(json.publication!==undefined?{publication:json.publication}:{}),
     files,
   };
 }
@@ -111,7 +114,7 @@ export class SqlPackageStore implements PackageStore {
 
   versionsOf(name: string): StoredVersion[] {
     return this.sql
-      .exec("SELECT json FROM pkg_versions WHERE name = ?", name)
+      .exec("SELECT json FROM pkg_versions WHERE name = ? ORDER BY rowid ASC", name)
       .toArray()
       .map((row) => decodeVersion((row as {json: string}).json));
   }

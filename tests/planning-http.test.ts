@@ -33,6 +33,12 @@ test('planning HTTP links real issues with persisted views, iterations, automati
     expect((await worker.fetch('http://fixture/fixture/seed')).status).toBe(200);
 
     const planning='/api/p/p123456789abc/planning';
+    const writer=(await(await worker.fetch('http://fixture/fixture/owner-write-token')).json() as {token:string}).token;
+    for(const operation of [
+      {operation:'setAcceptedStatus',expectedVersion:0,acceptedIssueStatus:'Done'},
+      {operation:'retryAccepted',expectedVersion:0,journalId:'synthetic',issueNumber:1,expectedItemVersion:1},
+    ])expect((await call(writer,planning,'POST',operation)).status).toBe(403);
+
     expect((await call(null,planning)).status).not.toBe(200);
     expect(await (await call(member,planning)).json()).toMatchObject({version:0,plan:{project:{items:[]}}});
     const create=await call(member,'/api/p/p123456789abc/issues','POST',{title:'Real planning issue',body:'Actual record'});

@@ -1,10 +1,10 @@
 /** OCI Distribution push/pull subset: sha256 blobs, chunked/monolithic uploads,
  * image manifests/indexes, immutable tags and discovery. No deletion or cross-repository mount.
  * https://github.com/opencontainers/distribution-spec/blob/main/spec.md */
-import {decodeOciBytes,encodeOciBytes,ociDigest,type OciStore,type OciObject} from '../core/oci-store';
+import {decodeOciBytes,encodeOciBytes,ociDigest,OCI_CATALOG_ROW_LIMIT,OCI_UPLOAD_ROW_LIMIT,type OciStore,type OciObject} from '../core/oci-store';
 export const OCI_MAX_BYTES=10*1024*1024;
 const CAPACITY=128*1024*1024;
-const ROW_CAPACITY=9000;
+const ROW_CAPACITY=OCI_CATALOG_ROW_LIMIT;
 export interface OciRegistryCall {method:string;url:string;body:Uint8Array<ArrayBuffer>;contentType?:string;userId?:string;namespaces?:readonly string[];memberOf?:readonly string[];canPublish?:boolean;private?:boolean;contentRange?:string}
 export interface OciRegistryReply {status:number;headers:Record<string,string>;body:string|Uint8Array<ArrayBuffer>}
 const digestPattern=/^sha256:[a-f0-9]{64}$/;
@@ -27,11 +27,11 @@ export async function handleOciRegistryCall(store:OciStore,call:OciRegistryCall)
  const usedBytes=()=>store.objects.entries().reduce((sum,[,value])=>sum+value.size,0)+store.uploads.entries().reduce((sum,[,value])=>sum+value.size,0);
  const key=(digest:string)=>name+'@'+digest;
  const location=(path:string)=>url.origin+'/v2/'+name+'/'+path;
- const save=(digest:string,bytes:Uint8Array<ArrayBuffer>,mediaType:string):boolean=>{const existing=store.objects.get(key(digest));if(existing){if(existing.size!==bytes.length||existing.data!==encodeOciBytes(bytes))return false;if(mediaTypes.has(mediaType)&&!mediaTypes.has(existing.mediaType))store.objects.set(key(digest),{...existing,mediaType});return true;}if(store.objects.entries().length>=ROW_CAPACITY)return false;const used=store.objects.entries().reduce((sum,[,v])=>sum+v.size,0)+store.uploads.entries().reduce((sum,[,v])=>sum+v.size,0);if(used+bytes.length>CAPACITY)return false;store.objects.set(key(digest),{data:encodeOciBytes(bytes),size:bytes.length,mediaType});return true;};
+ const save=(digest:string,bytes:Uint8Array<ArrayBuffer>,mediaType:string):boolean=>{const existing=store.objects.get(key(digest));if(existing){if(existing.size!==bytes.length||existing.data!==encodeOciBytes(bytes))return false;if(mediaTypes.has(mediaType))store.objects.set(key(digest),{...existing,manifestMediaType:mediaType});return true;}if(store.objects.entries().length>=ROW_CAPACITY)return false;const used=store.objects.entries().reduce((sum,[,v])=>sum+v.size,0)+store.uploads.entries().reduce((sum,[,v])=>sum+v.size,0);if(used+bytes.length>CAPACITY)return false;store.objects.set(key(digest),{data:encodeOciBytes(bytes),size:bytes.length,mediaType:'application/octet-stream',...(mediaTypes.has(mediaType)?{manifestMediaType:mediaType}:{})});return true;};
  if(kind==='tags'&&ref==='list'&&method==='GET'){if(!repository)return error(404,'NAME_UNKNOWN','Repository not found');const tags=store.tags.entries().filter(([k])=>k.startsWith(name+'@')).map(([k])=>k.slice(name.length+1)).sort();return reply(200,JSON.stringify({name,tags}),{'Content-Type':'application/json'});}
  if(kind==='blobs'&&ref.startsWith('uploads/')){
   const id=ref.slice('uploads/'.length);
-  if(method==='POST'&&!id){if(usedBytes()+call.body.length>CAPACITY)return error(507,'SIZE_INVALID','Registry capacity reached');if(store.uploads.entries().length>=32)return error(429,'TOOMANYREQUESTS','Upload capacity reached');if(!repository)store.repositories.set(name,{ownerId:call.userId!,private:call.private===true});const supplied=url.searchParams.get('digest');if(supplied){if(!digestPattern.test(supplied)||await ociDigest(call.body)!==supplied)return error(400,'DIGEST_INVALID','Digest mismatch');if(!save(supplied,call.body,'application/octet-stream'))return error(507,'SIZE_INVALID','Registry capacity reached');return reply(201,'',{'Location':location('blobs/'+supplied),'Docker-Content-Digest':supplied});}const newId=crypto.randomUUID();store.uploads.set(newId,{ownerId:call.userId!,repository:name,data:encodeOciBytes(call.body),size:call.body.length,expires:now+3600000});return reply(202,'',{'Location':location('blobs/uploads/'+newId),'Range':'0-'+Math.max(0,call.body.length-1),'Docker-Upload-UUID':newId});}
+  if(method==='POST'&&!id){if(usedBytes()+call.body.length>CAPACITY)return error(507,'SIZE_INVALID','Registry capacity reached');if(store.uploads.entries().length>=OCI_UPLOAD_ROW_LIMIT)return error(429,'TOOMANYREQUESTS','Upload capacity reached');if(!repository)store.repositories.set(name,{ownerId:call.userId!,private:call.private===true});const supplied=url.searchParams.get('digest');if(supplied){if(!digestPattern.test(supplied)||await ociDigest(call.body)!==supplied)return error(400,'DIGEST_INVALID','Digest mismatch');if(!save(supplied,call.body,'application/octet-stream'))return error(507,'SIZE_INVALID','Registry capacity reached');return reply(201,'',{'Location':location('blobs/'+supplied),'Docker-Content-Digest':supplied});}const newId=crypto.randomUUID();store.uploads.set(newId,{ownerId:call.userId!,repository:name,data:encodeOciBytes(call.body),size:call.body.length,expires:now+3600000});return reply(202,'',{'Location':location('blobs/uploads/'+newId),'Range':'0-'+Math.max(0,call.body.length-1),'Docker-Upload-UUID':newId});}
   const upload=store.uploads.get(id);if(!upload||upload.repository!==name||upload.ownerId!==call.userId)return error(404,'BLOB_UPLOAD_UNKNOWN','Upload not found');
   if(method==='DELETE'){store.uploads.delete(id);return reply(204);}
   if(method==='GET')return reply(204,'',{'Location':location('blobs/uploads/'+id),'Range':'0-'+Math.max(0,upload.size-1)});
@@ -57,7 +57,8 @@ export async function handleOciRegistryCall(store:OciStore,call:OciRegistryCall)
  }
  if((kind==='blobs'||kind==='manifests')&&(method==='GET'||method==='HEAD')){
   const digest=digestPattern.test(ref)?ref:kind==='manifests'?store.tags.get(key(ref)):undefined;const stored:OciObject|undefined=digest?store.objects.get(key(digest)):undefined;
-  if(!stored||!digest||kind==='manifests'&&!mediaTypes.has(stored.mediaType))return error(404,kind==='blobs'?'BLOB_UNKNOWN':'MANIFEST_UNKNOWN','Content not found');const bytes=decodeOciBytes(stored.data);if(bytes.length!==stored.size||await ociDigest(bytes)!==digest)return error(500,'UNKNOWN','Stored content failed digest verification');return reply(200,method==='HEAD'?'':bytes,{'Content-Type':stored.mediaType,'Content-Length':String(bytes.length),'Docker-Content-Digest':digest});
+  const manifestType=stored?.manifestMediaType??(stored&&mediaTypes.has(stored.mediaType)?stored.mediaType:undefined);
+  if(!stored||!digest||kind==='manifests'&&!manifestType)return error(404,kind==='blobs'?'BLOB_UNKNOWN':'MANIFEST_UNKNOWN','Content not found');const bytes=decodeOciBytes(stored.data);if(bytes.length!==stored.size||await ociDigest(bytes)!==digest)return error(500,'UNKNOWN','Stored content failed digest verification');return reply(200,method==='HEAD'?'':bytes,{'Content-Type':kind==='manifests'?manifestType!:'application/octet-stream','Content-Length':String(bytes.length),'Docker-Content-Digest':digest});
  }
  return error(405,'UNSUPPORTED','Method not supported');
 }

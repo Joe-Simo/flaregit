@@ -7,12 +7,25 @@ export const organizationSubjectSchema = z.discriminatedUnion('kind', [z.object(
 export type OrganizationSubject = z.infer<typeof organizationSubjectSchema>;
 export type OrganizationRepositoryRole = z.infer<typeof organizationRepositoryRoleSchema>;
 const memberSchema = z.object({ userId: id, role: organizationRoleSchema });
-const teamSchema = z.object({ id, name: z.string().min(1).max(128), members: z.array(id) });
+const teamSchema = z.object({ id, name: z.string().min(1).max(128), members: z.array(id), childTeams:z.array(id).default([]) });
 const grantSchema = z.object({ repositoryId: id, subject: organizationSubjectSchema, role: organizationRepositoryRoleSchema });
 const invitationSchema = z.object({ id, userId: id, role: organizationRoleSchema, expiresAt: z.number().int().positive() });
 export const organizationDocumentSchema = z.object({ id, name: z.string().min(1).max(128), revision: z.number().int().positive(), members: z.array(memberSchema), teams: z.array(teamSchema), grants: z.array(grantSchema), repositories: z.array(id).default([]), invitations: z.array(invitationSchema) });
 export type OrganizationAccessSnapshot = z.infer<typeof organizationDocumentSchema>;
 export interface OrganizationAccessResolution { organizationId: string; revision: number; role: OrganizationRepositoryRole | null; sources: Array<{ kind: 'owner' | 'user' | 'team'; id: string; role: OrganizationRepositoryRole }> }
+/** Parent grants include members of descendant teams; identifiers remain typed subjects. */
+export function organizationTeamsFor(doc:OrganizationAccessSnapshot,userId:string):Set<string> {
+  if(!doc.members.some(member=>member.userId===userId))return new Set();
+  const teams=new Set(doc.teams.filter(team=>team.members.includes(userId)).map(team=>team.id));
+  const pending=[...teams];
+  while(pending.length){const child=pending.pop()!;for(const parent of doc.teams){if(parent.childTeams.includes(child)&&!teams.has(parent.id)){teams.add(parent.id);pending.push(parent.id);}}}
+  return teams;
+}
+function assertTeamHierarchy(doc:OrganizationAccessSnapshot) {
+  const byId=new Map(doc.teams.map(team=>[team.id,team])),visiting=new Set<string>(),visited=new Set<string>();
+  const visit=(teamId:string)=>{if(visiting.has(teamId))throw Error('Nested teams cannot contain cycles');if(visited.has(teamId))return;const team=byId.get(teamId);if(!team)throw Error('Nested child team unavailable');visiting.add(teamId);for(const child of team.childTeams)visit(child);visiting.delete(teamId);visited.add(teamId);};
+  for(const team of doc.teams){if(team.childTeams.length>100||new Set(team.childTeams).size!==team.childTeams.length)throw Error('Invalid nested team hierarchy');visit(team.id);}
+}
 type Storage = Pick<DurableObjectStorage, 'sql' | 'transactionSync'>;
 /** Canonical ledger: callers must supply authenticated user identities, never identities from request arguments. */
 export class OrganizationAccessLedger {
@@ -45,6 +58,7 @@ export class OrganizationAccessLedger {
   }
   private save(doc: OrganizationAccessSnapshot) {
     organizationDocumentSchema.parse(doc);
+    assertTeamHierarchy(doc);
     if (!doc.members.some(m => m.role === 'owner')) throw Error('Organization requires an owner');
     if (doc.members.length > 1000 || doc.teams.length > 100 || doc.grants.length > 1000 || doc.repositories.length > 100 || doc.invitations.length > 1000) throw Error('Organization capacity reached');
     const serialized = JSON.stringify(doc);
@@ -90,6 +104,7 @@ export class OrganizationAccessLedger {
     id.parse(teamId);
     return this.mutate(organizationId, actorId, expectedRevision, doc => {
       doc.teams = doc.teams.filter(t => t.id !== teamId);
+      for(const parent of doc.teams)parent.childTeams=parent.childTeams.filter(child=>child!==teamId);
       doc.grants = doc.grants.filter(g => !(g.subject.kind === 'team' && g.subject.id === teamId));
     });
   }
@@ -99,6 +114,15 @@ export class OrganizationAccessLedger {
       const team = doc.teams.find(t => t.id === teamId); if (!team) throw Error('Team unavailable');
       if (present && !doc.members.some(m => m.userId === userId)) throw Error('Organization membership required');
       team.members = team.members.filter(m => m !== userId); if (present) team.members.push(userId);
+    });
+  }
+  setTeamChild(organizationId:string,actorId:string,expectedRevision:number,teamId:string,childTeamId:string,present:boolean) {
+    id.parse(teamId);id.parse(childTeamId);z.boolean().parse(present);
+    return this.mutate(organizationId,actorId,expectedRevision,doc=>{
+      const team=doc.teams.find(candidate=>candidate.id===teamId);
+      if(!team||!doc.teams.some(candidate=>candidate.id===childTeamId))throw Error('Nested team unavailable');
+      team.childTeams=team.childTeams.filter(child=>child!==childTeamId);
+      if(present)team.childTeams.push(childTeamId);
     });
   }
   grantRepository(organizationId: string, actorId: string, expectedRevision: number, repositoryId: string, subject: OrganizationSubject, role: OrganizationRepositoryRole) {
@@ -136,11 +160,11 @@ export class OrganizationAccessLedger {
   resolveAccess(organizationId: string, repositoryId: string, userId: string): OrganizationAccessResolution | null {
     id.parse(repositoryId); id.parse(userId); const doc = this.snapshot(organizationId); if (!doc) return null;
     const sources: OrganizationAccessResolution['sources'] = [];
-    const member = doc.members.find(m => m.userId === userId);
+    const member = doc.members.find(m => m.userId === userId),teams=organizationTeamsFor(doc,userId);
     if (doc.repositories.includes(repositoryId) && member?.role === 'owner') sources.push({ kind: 'owner', id: userId, role: 'admin' });
     for (const grant of doc.grants.filter(g => g.repositoryId === repositoryId)) {
       if (grant.subject.kind === 'user' && grant.subject.id === userId) sources.push({ kind: 'user', id: userId, role: grant.role });
-      if (member && grant.subject.kind === 'team' && doc.teams.some(t => t.id === grant.subject.id && t.members.includes(userId))) sources.push({ kind: 'team', id: grant.subject.id, role: grant.role });
+      if (member && grant.subject.kind === 'team' && teams.has(grant.subject.id)) sources.push({ kind: 'team', id: grant.subject.id, role: grant.role });
     }
     const ranks = { read: 1, write: 2, admin: 3 }; const role = sources.reduce<OrganizationRepositoryRole | null>((best, source) => !best || ranks[source.role] > ranks[best] ? source.role : best, null);
     return { organizationId, revision: doc.revision, role, sources };

@@ -10,7 +10,7 @@ export const organizationSnapshot = z.object({
   accessSyncPending: z.boolean().optional(),
   viewerRole: z.enum(['owner', 'member', 'outside', 'invited']).optional(),
   members: z.array(z.object({userId: id, role: organizationRole})),
-  teams: z.array(z.object({id, name: z.string(), members: z.array(id)})),
+  teams: z.array(z.object({id, name: z.string(), members: z.array(id), childTeams: z.array(id).default([])})),
   grants: z.array(z.object({repositoryId: id, subject: organizationSubject, role: repositoryRole})),
   invitations: z.array(z.object({id, userId: id, role: organizationRole, expiresAt: z.number().int().positive()})),
 });

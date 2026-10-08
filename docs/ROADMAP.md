@@ -63,6 +63,24 @@ The finite parity gate remains open. A local checkpoint preserves these changes;
 
 ### Latest continuation — integrated local product flows
 
+**Current continuation after checkpoint `c383554`:** source work proceeds in parallel while root serializes
+runtime checks. Docker remains off; disk headroom is approximately 3.9GiB. The prior checkpoint's passing gates
+do not certify these newer edits. Browser editing now uses bounded native Git arguments and frozen fork targets;
+maintainer consent binds write operations to a revocable epoch, including agent handoff and streaming LFS uploads.
+Nested organization teams grant scoped human contribution access. Accepted changes apply frozen owner planning
+automation with durable retry receipts. These remain partial roadmap slices, with hosted acceptance still open.
+
+Git LFS passed sixteen focused tests, including the official stock client against workerd's direct HTTP listener,
+binary upload/download/checkout, revocation epochs, malformed-upload recovery, uncertain-write receipts and
+public ancestor visibility. A failing cross-runtime test bridge was removed; both protocol checks now use actual
+wire HTTP. Native browser edits, planning automation and organization resolution passed nine tests (77 assertions).
+npm publication ordering, independent tags, immutable versions and durable restart passed seventeen tests.
+OCI passed seven focused tests, including stock ORAS push/pull,
+catalog admission boundaries and blob/manifest coexistence across restart. Browser editing and permission
+integration passed ten tests across six files. No full-suite, new rendered UI, push or deployment
+claim is made for this continuation.
+Final typecheck, lint, build and whitespace checks pass. These are local results; the complete roadmap remains open.
+
 - F03: signed file-history API and Code tab traverse real pinned Git objects. Changes compare each commit to its first
   parent, with bounded pagination; rename following is explicitly unsupported. Code search and blame integration remain open.
 - F05: durable triage, labels/assignees, atomic bulk changes, milestones/due dates/reassignment, relationships and templates

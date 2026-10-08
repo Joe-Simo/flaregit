@@ -80,3 +80,16 @@ test("stock npm publishes and installs a private scoped package containing binar
  for(const version of ["2.0.0","1.1.0"]){const body=await publishBody(name,version);expect((await handleNpmRegistryCall(registry,{method:"PUT",url,body,userId:"owner",namespaces:["alice"],canPublish:true})).status).toBe(201);}
  const result=await handleNpmRegistryCall(registry,{method:"GET",url,body:undefined,userId:"owner"});expect(JSON.parse(result.body as string)["dist-tags"].latest).toBe("1.1.0");
  });
+
+test('concurrent npm publications assign unique stored order and keep independent explicit tags',async()=>{
+ const store=new MemoryPackageStore(),registry=new PackageRegistry(store),name='@alice/concurrent-tags',url='http://registry/npm/'+encodeURIComponent(name),call={method:'PUT',url,userId:'owner',namespaces:['alice'],canPublish:true};
+ const bodies=await Promise.all(['9.0.0','1.0.0'].map(version=>publishBody(name,version)));
+ expect((await Promise.all(bodies.map(body=>handleNpmRegistryCall(registry,{...call,body})))).every(reply=>reply.status===201)).toBe(true);
+ const saved=store.versionsOf(name);expect(saved.map(version=>version.publication)).toEqual([1,2]);
+ const latest=(await handleNpmRegistryCall(registry,{method:'GET',url,body:undefined,userId:'owner'}));expect(JSON.parse(latest.body as string)['dist-tags'].latest).toBe(saved[1]!.version);
+ const beta=await publishBody(name,'2.0.0-beta.1');
+ const betaBody={...beta,'dist-tags':{beta:'2.0.0-beta.1'}};expect((await handleNpmRegistryCall(registry,{...call,body:betaBody})).status).toBe(201);
+ const packument=JSON.parse((await handleNpmRegistryCall(registry,{method:'GET',url,body:undefined,userId:'owner'})).body as string);expect(packument['dist-tags']).toEqual({latest:saved[1]!.version,beta:'2.0.0-beta.1'});
+ expect((await handleNpmRegistryCall(registry,{...call,body:{...betaBody,'dist-tags':{latest:'2.0.0-beta.1'}}})).status).toBe(409);
+ expect(JSON.parse((await handleNpmRegistryCall(registry,{method:'GET',url,body:undefined,userId:'owner'})).body as string)['dist-tags']).toEqual(packument['dist-tags']);
+});

@@ -166,10 +166,11 @@ test("resolve refuses version ranges outside the supported grammar", () => {
 
 test("package names and versions follow the registry grammar", async () => {
   const registry = new PackageRegistry();
-  for (const name of ["Widget", ".hidden", "has space", "", "x".repeat(101), "slash/name", "@scope/pkg"]) {
+  for (const name of ["Widget", ".hidden", "has space", "", "x".repeat(101), "slash/name", "@scope/", "@/pkg"]) {
     expect(await registry.publish({ ...base, name })).toMatchObject({ ok: false, status: 400 });
   }
   unwrap(await registry.publish({ ...base, name: "x".repeat(100) }));
+  unwrap(await registry.publish({ ...base, name: "@scope/pkg" }));
 
   for (const version of ["1.0", "01.0.0", "v1.0.0", "1.0.0+build.1", "1.0.0-", "1.0.0-01", "1.0.0 "]) {
     expect(await registry.publish({ ...base, name: "versions", version })).toMatchObject({ ok: false, status: 400 });

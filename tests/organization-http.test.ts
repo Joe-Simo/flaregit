@@ -41,20 +41,56 @@ test('organization HTTP grants teams access without direct ownership and revokes
     expect((await call(member,'/api/organizations/'+organization.id+'/invitations/'+organization.invitations[0]!.id+'/accept','POST',{expectedRevision:organization.revision})).status).toBe(409);
     await mutation(outsider,'/invitations/'+organization.invitations[0]!.id+'/accept','POST');
     await mutation(owner,'/teams','POST',{teamId:'engineering',name:'Engineering'});
-    await mutation(owner,'/teams/engineering/members/outsider','PUT',{present:true});
+    await mutation(owner,'/teams','POST',{teamId:'contributors',name:'Contributors'});
+    await mutation(owner,'/teams/contributors/members/outsider','PUT',{present:true});
+    await mutation(owner,'/teams/engineering/children/contributors','PUT',{present:true});
+    const cycle=await call(owner,'/api/organizations/'+organization.id+'/teams/contributors/children/engineering','PUT',{present:true,expectedRevision:organization.revision});expect(cycle.status).toBe(409);
+
     await mutation(owner,'/grants','PUT',{repositoryId:'p123456789abc',subject:{kind:'team',id:'engineering'},role:'read'});
     const page='/api/p/p123456789abc/wiki/home';
     expect((await call(outsider,'/api/p/p123456789abc/wiki')).status).toBe(200);
     expect((await call(outsider,page,'PUT',{body:'Read cannot write',expectedRevision:null})).status).toBe(403);
+    expect((await worker.fetch('http://fixture/fixture/contribution')).status).toBe(403);
+    expect((await call(outsider,'/api/p/p123456789abc/clone','POST',{})).status).toBe(200);
+
     await mutation(owner,'/grants','PUT',{repositoryId:'p123456789abc',subject:{kind:'team',id:'engineering'},role:'write'});
     expect((await call(outsider,page,'PUT',{body:'Team contribution',expectedRevision:null})).status).toBe(200);
     expect(await(await call(outsider,page)).json()).toMatchObject({body:'Team contribution',author:'outsider'});
+    expect((await worker.fetch('http://fixture/fixture/contribution')).status).toBe(200);
+    const replay=await call(outsider,'/api/p/p123456789abc/tasks','POST',{taskId:'team-contribution',goal:'Team contribution'});expect(replay.status).toBe(200);expect(await replay.json()).toMatchObject({replayed:true,task:'team-contribution',branch:'task/team-contribution'});
+    expect((await call(outsider,'/api/p/p123456789abc/tasks/team-contribution/token','POST',{})).status).toBe(200);
+    const forkPermission='/api/p/p123456789abc/tasks/team-contribution/fork-permission';
+    expect(await(await call(outsider,forkPermission)).json()).toMatchObject({enabled:false,revision:0,canConfigure:true,creatorId:'outsider'});
+    expect((await call(owner,'/api/p/p123456789abc/tasks/team-contribution/token','POST',{})).status).toBe(403);
+    expect((await call(owner,forkPermission,'PUT',{enabled:true,expectedRevision:0})).status).toBe(409);
+    expect((await call(outsider,forkPermission,'PUT',{enabled:true,expectedRevision:0})).status).toBe(200);
+    const maintainerTokenReply=await call(owner,'/api/p/p123456789abc/tasks/team-contribution/token','POST',{});expect(maintainerTokenReply.status).toBe(200);const maintainerToken=await maintainerTokenReply.json() as {token:string};
+    const verify=async(secret:string,write:boolean)=>await(await worker.fetch('http://fixture/fixture/verify-capability',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({secret,write})})).json();
+    expect(await verify(maintainerToken.token,true)).toEqual({valid:true});
+    expect((await call(outsider,forkPermission,'PUT',{enabled:false,expectedRevision:1})).status).toBe(200);
+    expect(await verify(maintainerToken.token,true)).toEqual({valid:false});
+    expect(await verify(maintainerToken.token,false)).toEqual({valid:true});
+    expect((await call(outsider,'/api/p/p123456789abc/tasks/team-contribution/token','POST',{})).status).toBe(200);
+    expect((await call(outsider,forkPermission,'PUT',{enabled:true,expectedRevision:2})).status).toBe(200);
+    expect(await verify(maintainerToken.token,true)).toEqual({valid:false});
+    expect((await call(outsider,forkPermission,'PUT',{enabled:false,expectedRevision:3})).status).toBe(200);
+    expect((await worker.fetch('http://fixture/fixture/cancel-contribution')).status).toBe(200);
+    expect((await call(owner,'/api/p/p123456789abc/tasks/cancel-contribution/token','POST',{})).status).toBe(403);
+    expect((await call(owner,'/api/p/p123456789abc/tasks/cancel-contribution/cancel','POST',{})).status).toBe(200);
+    expect((await worker.fetch('http://fixture/fixture/handoff')).status).toBe(200);
+    expect((await call(owner,'/api/p/p123456789abc/tasks/team-contribution/token','POST',{})).status).toBe(403);
+    expect(await(await call(outsider,forkPermission)).json()).toMatchObject({enabled:false,canConfigure:true});
+    const gateway=await(await worker.fetch('http://fixture/fixture/gateway')).json() as {id:string;scope:{organizationSource:{id:string;revision:number}}};expect(gateway.scope.organizationSource).toMatchObject({id:organization.id,revision:organization.revision});
+    const members=await(await worker.fetch('http://fixture/fixture/members')).json() as Array<{user_id:string}>;expect(members.some(member=>member.user_id==='outsider')).toBe(false);
+
     expect((await call(outsider,life,'POST',{action:'archive'})).status).toBe(403);
     await worker.fetch('http://fixture/fixture/synchronization?fail=true');
-    const uncertain=await call(owner,'/api/organizations/'+organization.id+'/teams/engineering/members/outsider','PUT',{present:false,expectedRevision:organization.revision});
+    const uncertain=await call(owner,'/api/organizations/'+organization.id+'/teams/engineering/children/contributors','PUT',{present:false,expectedRevision:organization.revision});
     expect(uncertain.status).toBe(409);expect(await uncertain.text()).toContain('fanout incomplete');
     // Canonical source changed already, so a stale cached inherited grant never authorizes new reads.
     expect((await call(outsider,page)).status).toBe(404);
+    expect(await(await worker.fetch('http://fixture/fixture/gateway-dispatch?id='+gateway.id)).json()).toEqual({allowed:false});
+    expect((await call(outsider,'/api/p/p123456789abc/tasks/team-contribution/token','POST',{})).status).toBe(404);
     organization=await(await call(owner,'/api/organizations/'+organization.id)).json() as typeof organization;
     await worker.fetch('http://fixture/fixture/synchronization?fail=false');
     await mutation(owner,'/reconcile','POST');

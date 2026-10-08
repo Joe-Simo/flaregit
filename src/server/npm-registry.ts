@@ -76,12 +76,10 @@ export async function handleNpmRegistryCall(registry: PackageRegistry, call: Npm
     if (!dist || dist.integrity !== integrity || dist.shasum !== shasum) return failure(400, "Tarball digest mismatch");
     if (input.access !== undefined && input.access !== "public" && input.access !== "restricted") return failure(400, "Invalid package access");
     const tags = object(input["dist-tags"]);
-    if (!tags || Object.values(tags).some(value => value !== version)) return failure(400, "Dist tags must identify the published version");
-    const prior = registry.metadata(name, viewer);
-    const publication = prior.ok ? prior.metadata.versions.length + 1 : 1;
+    if (!tags || Object.keys(tags).length>100 || Object.entries(tags).some(([tag,target])=>target!==version||!/^[a-zA-Z][a-zA-Z0-9._-]{0,99}$/.test(tag)||['__proto__','constructor','prototype'].includes(tag))) return failure(400, "Dist tags must identify the published version");
     const published = await registry.publishBinary({ name, version, ownerId: call.userId, private: input.access === "restricted", files: {
       [TARBALL]: bytes,
-      [MANIFEST]: new TextEncoder().encode(JSON.stringify({ manifest: { ...manifest, dist: { integrity, shasum } }, tags, publication })),
+      [MANIFEST]: new TextEncoder().encode(JSON.stringify({ manifest: { ...manifest, dist: { integrity, shasum } }, tags })),
     } });
     return published.ok ? json(201, { ok: true, id: name, rev: version }) : failure(published.status, published.error);
   }
@@ -90,6 +88,7 @@ export async function handleNpmRegistryCall(registry: PackageRegistry, call: Npm
   if (!metadata.ok) return failure(metadata.status, metadata.error);
   const versions: Record<string, unknown> = {};
   const tags: Record<string, string> = {};
+  const publicationOrder=registry.publicationOrder(name,viewer);
   const tagPublications: { publication: number; tags: Record<string, unknown> }[] = [];
   // Package versions keep semver order; tag updates follow publication order.
   for (const version of [...metadata.metadata.versions].reverse()) {
@@ -99,7 +98,7 @@ export async function handleNpmRegistryCall(registry: PackageRegistry, call: Npm
     const manifest = object(document?.manifest);
     if (!manifest) return failure(500, "Stored npm manifest is invalid");
     const storedTags = object(document?.tags);
-    tagPublications.push({ publication: typeof document?.publication === "number" ? document.publication : 0, tags: storedTags ?? {} });
+    tagPublications.push({ publication: publicationOrder.get(version.version)??0, tags: storedTags ?? {} });
     versions[version.version] = { ...manifest, ...(version.deprecated ? { deprecated: version.deprecated } : {}), dist: { ...object(manifest.dist), tarball: `${url.origin}/npm/${encodeURIComponent(name)}/-/${version.version}.tgz` } };
   }
   for (const item of tagPublications.sort((left, right) => left.publication - right.publication)) {

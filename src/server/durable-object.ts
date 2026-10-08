@@ -1,7 +1,14 @@
+import {ForkPermissions,type ForkPermissionScope,type ForkPermissionSource} from './fork-permissions';
+import {maintainerMayPush} from '../core/change-stacks';
+import {BrowserEdits,browserEditSchema,browserEditBytes,publishBrowserEdit,type BrowserEditInput} from "./browser-edit";
+import type {PublicLfsProof} from "./lfs-public";
+import {DurableLfsStore,LfsStorageError,type LfsScope} from "./lfs-store";
+import type {LfsCredential} from "./lfs-http";
+import type {LfsObjectRef} from "../core/git-lfs";
 import {captureOperationalBackup,encryptOperationalBackup,decryptOperationalBackup,operationalHash,OperationalBackupRetention,type BackupScope,type EncryptedOperationalBackup} from './operational-backup';
 import {SecurityStore} from './security-store';
 import {SecurityReportError,type SecurityImport,type SecurityTriage} from '../core/security-report';
-import {OrganizationAccessLedger,organizationDocumentSchema,type OrganizationAccessSnapshot,type OrganizationRepositoryRole} from './organization-access';
+import {OrganizationAccessLedger,organizationDocumentSchema,organizationTeamsFor,type OrganizationAccessSnapshot,type OrganizationRepositoryRole} from './organization-access';
 import {organizationMutationSchema,type OrganizationMutation} from './organization-requests';
 import {DurableSnippets,type SnippetWrite} from './snippet-store';
 import {InboxPreferences,type InboxPreference} from "./inbox-preferences";
@@ -155,7 +162,7 @@ import type { ImportJob } from "./import-job.js";
 import type { PublicRepositoryGrant } from "./public-repositories.js";
 import { AgentRunLedger, type AgentRunInput, type AgentRunRecord, type AgentRunClaim } from "./agent-run-ledger.js";
 import { actorName, RepositoryPublicCommunity, type PublicCommunityActor, type PublicCommunityPolicy, type PublicPost, type ContributionRequest } from "./public-community.js";
-export interface RepositoryReadContext { projectId:string; incarnation:string|null; canonicalRepoName:string; repoName:string; ownerId:string; accountKey:string; publicationVersion?:number; acceptedCommit?:string; taskBase?:string|null; taskCommit?:string|null; taskBranch?:string;taskContributorId?:string;taskInitiatorId?:string; candidateId?:string; candidateCommit?:string; candidateBase?:string|null; candidateInputCommit?:string; candidateInputBase?:string|null;retainedInputReceiptId?:string;organizationSource?:{id:string;revision:number} }
+export interface RepositoryReadContext { projectId:string; incarnation:string|null; canonicalRepoName:string; repoName:string; ownerId:string; accountKey:string; publicationVersion?:number; acceptedCommit?:string; taskBase?:string|null; taskCommit?:string|null; taskBranch?:string;taskContributorId?:string;taskInitiatorId?:string; candidateId?:string; candidateCommit?:string; candidateBase?:string|null; candidateInputCommit?:string; candidateInputBase?:string|null;retainedInputReceiptId?:string;organizationSource?:{id:string;revision:number};maintainerWriteSource?:ForkPermissionSource }
 export type OwnerRebaseRecoveryResult={ok:true;receipt:RebaseRecoveryReceipt}|{ok:false;status:409|503|429;error:string;report?:RebaseRecoveryReport};
 export type OwnerRebaseResumeResult={ok:true;attempt:RebaseResumeAttempt}|{ok:false;status:409|503|429;error:string;report?:RebaseRecoveryReport};
 export type OwnerRebaseApplication=RebaseRecoveryReport & {resumeAvailable:boolean;resume?:{id:string;generation:number;dispatch:RebaseResumeAttempt["dispatch"];nativeState:RebaseResumeAttempt["nativeState"];terminal?:RebaseResumeAttempt["terminal"];pauseReason?:string}};
@@ -605,6 +612,9 @@ export interface Ledger {
   organizationSource: RepositoryController['organizationSource'];
   synchronizeOrganization: RepositoryController['synchronizeOrganization'];
   repositoryAccess: RepositoryController['repositoryAccess'];
+  taskForkPermission: RepositoryController['taskForkPermission'];
+  taskForkPermissionUpdate: RepositoryController['taskForkPermissionUpdate'];
+  assertRetainedWorkspaceWrite: RepositoryController['assertRetainedWorkspaceWrite'];
   listProjects(): Promise<ProjectRow[]>;
   addProject(p: { id: string; name: string; role: "owner" | "member"; kind: string }): Promise<void>;
   removeProject(id: string): Promise<void>;
@@ -835,10 +845,19 @@ export interface Ledger {
   repositoryArtifactDeleted(name: string): Promise<boolean>;
   recordRepositoryArtifactDeleted(name: string): Promise<void>;
   initialize(init: { projectId: string; projectName: string; canonicalRepoName: string; head: string; tree?: string; verificationPolicy: Record<string, unknown>; kind?: "demo" | "import" | "empty" | "repository"; defaultBranch?: string; ownerId?: string; source?: string }): Promise<FlareGitProjectState>;
+  browserEdit(taskId:string,input:BrowserEditInput,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["browserEdit"]>;
   createTask(task: Task, actorId?: string,creationInput?:TaskCreationInput,internalTarget?:InternalTaskTargetOptions,credential?:TaskCreationCredential): Promise<Task & {creationReplayed?:boolean}>;
   taskCreationReplay(taskId:string,actorId:string,input:TaskCreationInput,internalTarget?:InternalTaskTargetOptions,credential?:TaskCreationCredential):Promise<Task|null>;
   mintGitCapability(userId: string, taskId: string | null, write: boolean, parentTokenHash?: string): Promise<{token: string; expiresInSeconds: number}>;
   verifyGitCapability(secret: string, taskId: string | null, write: boolean): Promise<{userId:string;parentTokenHash:string|null}|null>;
+  lfsPublicExpectedSizes(oids:string[],proof:Omit<PublicLfsProof,"objects">):Promise<LfsObjectRef[]>;
+  lfsPublicBatch(objects:LfsObjectRef[],proof:PublicLfsProof):Promise<{oid:string;size:number;error?:{code:number;message:string}}[]>;
+  lfsPublicDownload(oid:string,proof:PublicLfsProof):Promise<{size:number;body:ReadableStream<Uint8Array>}>;
+  lfsBatch(operation:"upload"|"download",objects:LfsObjectRef[],actor:LfsCredential):Promise<{oid:string;size:number;exists:boolean;error?:{code:number;message:string}}[]>;
+  lfsUpload(object:{oid:string;size?:number},body:ReadableStream<Uint8Array>,actor:LfsCredential):Promise<{stored:boolean}>;
+  lfsDownload(oid:string,actor:LfsCredential):Promise<{size:number;body:ReadableStream<Uint8Array>}>;
+  lfsReconcile(oid:string,actor:LfsCredential):Promise<{reconciled:boolean}>;
+  lfsVerify(object:LfsObjectRef,actor:LfsCredential):Promise<void>;
   canGitAccess(userId: string, taskId: string | null, write: boolean): Promise<boolean>;
   apiTokenHashActive(hash: string): Promise<boolean>;
   apiTokenHashCanRead(hash:string,userId:string,projectId:string,write?:boolean):Promise<boolean>;
@@ -941,6 +960,7 @@ export interface Ledger {
   completePublish(journalId: string,readbackScope?:string): Promise<void>;
   abortPublish(candidateId: string, journalId: string | undefined, reason: string, outcome: "failed" | "stale"): Promise<void>;
   cancelTask(taskId: string): Promise<void>;
+  cancelMemberTask: RepositoryController['cancelMemberTask'];
   failAgentTask(taskId: string, runId?: string): Promise<void>;
   beginAgentTask(taskId: string, runId?: string): Promise<boolean>;
   getBilling(): Promise<{ plan: "free" | "pro"; status: string; subscriptionId?: string; updatedAt: string }>;
@@ -1746,18 +1766,40 @@ export class RepositoryController extends DurableObject<Env> {
   async prepareBranchCreation(input:{operationId:string;name:string;sourceCommit:string},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const initial=await this.authorizeHumanDecision(actor,credentialHash,true);initial();const state=this.load();this.synchronizePrimaryAcceptedRegistry(state);const incarnation=new PrivateRecoveryOperations(this.ctx.storage).incarnation(),authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt),accountKey=await accountKeyFor(actor.userId),operations=new BranchCreationOperations(this.ctx.storage),existing=operations.get(input.operationId);if(!isSafeRef(input.name)||input.name==="HEAD"||input.name.startsWith("refs/")||input.name===(state.defaultBranch??"main")||!isSafeSha(input.sourceCommit)||/^0{40}$/.test(input.sourceCommit)||state.acceptedState.kind==="unborn"||!isSafeSha(state.acceptedState.currentCommit)||/^0{40}$/.test(state.acceptedState.currentCommit))throw Error("A new branch name and committed accepted source are required");const identity:BranchCreationIdentity={operationId:input.operationId,projectId:state.projectId,incarnation,canonicalRepoName:state.canonicalRepoName,actorId:actor.userId,accountKey,branch:input.name,sourceCommit:input.sourceCommit,acceptedCommit:existing?.acceptedCommit??state.acceptedState.currentCommit};return operations.prepare(identity,()=>{authorize();this.assertBranchCreationLocal(identity);});}
   async branchOperations(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authorize();new BranchCreationOperations(this.ctx.storage);new BranchNativeAttempts(this.ctx.storage);new BranchCredentialIncidents(this.ctx.storage);const projectId=this.load().projectId,incarnation=this.readRepositoryIncarnation()??"",pending="(json_extract(o.doc,'$.phase') IN ('prepared','unknown') OR EXISTS(SELECT id FROM branch_native_attempts a WHERE a.operation_id=o.id AND json_extract(a.doc,'$.state')!='stopped') OR EXISTS(SELECT id FROM branch_credential_incidents c WHERE json_extract(c.payload,'$.operationId')=o.id AND c.status!='revoked'))";const rows=this.ctx.storage.sql.exec<{doc:string}>(`SELECT o.doc FROM branch_creation_operations o WHERE json_extract(o.doc,'$.projectId')=? AND json_extract(o.doc,'$.incarnation')=? ORDER BY ${pending} DESC,o.rowid DESC LIMIT 21`,projectId,incarnation).toArray();const pendingCount=this.ctx.storage.sql.exec<{n:number}>(`SELECT COUNT(*) AS n FROM branch_creation_operations o WHERE json_extract(o.doc,'$.projectId')=? AND json_extract(o.doc,'$.incarnation')=? AND ${pending}`,projectId,incarnation).one().n;return{operations:rows.slice(0,20).map(row=>this.branchOperationView(JSON.parse(row.doc) as BranchCreationOperation)),truncated:rows.length>20,pendingTruncated:pendingCount>20,historyHasMore:rows.length>20};}
   async branchOperation(id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authorize();const operation=new BranchCreationOperations(this.ctx.storage).get(id);if(!operation)throw Error("Saved branch creation unavailable");this.assertBranchCreationLocal(operation);return this.branchOperationView(operation);}
+  async browserEdit(taskId:string,input:BrowserEditInput,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){
+    const parsed=browserEditSchema.parse(input),bytes=await browserEditBytes(parsed);
+    const creationCredential={viaToken:actor.viaToken,...(actor.viaToken?{credentialHash}:{sessionExpiresAt})};
+    const initial=await this.taskCreationCredentialFence(actor.userId,creationCredential);initial();
+    if(!await this.canGitAccess(actor.userId,taskId,true))throw Error("Only the contribution author or owner can edit");
+    const ledger=new BrowserEdits(this.ctx.storage),old=ledger.get(parsed.requestId);
+    const state=this.load(),task=state.tasks[taskId],incarnation=this.readRepositoryIncarnation();
+    if(!task||!task.allowedScope.some(scope=>scope==='*'||(scope.endsWith('/**/*')?parsed.path.startsWith(scope.slice(0,-4)):scope.endsWith('/')?parsed.path.startsWith(scope):parsed.path===scope))||task.contributor.type!=='human'||task.workspace.repoName===state.canonicalRepoName||task.workspace.branch!==`task/${taskId}`||!incarnation)throw Error("An existing private human contribution is required");
+    const creation=new TaskCreationIntents(this.ctx.storage).forTask(taskId);if(!creation?.providerRepoId||creation.phase!=='committed'||creation.workspaceRepoName!==task.workspace.repoName||creation.projectId!==state.projectId||creation.incarnation!==incarnation)throw Error('Original contribution fork allocation must be confirmed');
+    const maintainerWriteSource=old?old.identity.maintainerWriteSource:this.forkWriteSource(taskId,actor.userId);
+    const identity={projectId:state.projectId,incarnation,canonicalRepoName:state.canonicalRepoName,taskId,workspaceRepoName:task.workspace.repoName,providerRepoId:creation.providerRepoId,remote:task.workspace.remote,branch:task.workspace.branch,actorId:actor.userId,...(maintainerWriteSource?{maintainerWriteSource}:{}),authorName:old?.identity.authorName??actor.displayName,authorEmail:old?.identity.authorEmail??`${await accountKeyFor(actor.userId)}@users.flaregit.invalid`,createdAt:old?.identity.createdAt??new Date().toISOString(),input:parsed};
+    const assert=()=>{initial();this.assertForkWriteSource(taskId,actor.userId,maintainerWriteSource);const current=this.load().tasks[taskId];if(this.readRepositoryIncarnation()!==incarnation||this.load().canonicalRepoName!==state.canonicalRepoName||!current||current.workspace.repoName!==identity.workspaceRepoName||current.workspace.remote!==identity.remote||current.workspace.branch!==identity.branch||!['working','checkpointed'].includes(current.status)||current.currentCommit!==parsed.expectedHead&&current.currentCommit!==ledger.get(parsed.requestId)?.commit)throw Error("Contribution identity or expected head changed");};
+    const record=ledger.prepare(identity,bytes.blob,assert);
+    const authorize=async()=>{assert();await this.taskCreationCredentialFence(actor.userId,creationCredential);assert();if(!await this.canGitAccess(actor.userId,taskId,true))throw Error("Contribution writer access changed");assert();};
+    if(record.phase==='refused')return {requestId:parsed.requestId,taskId,phase:record.phase,commit:record.commit??null};
+    if(record.phase==='confirmed'){await authorize();await this.applyCheckpoint({eventId:`browser-edit:${parsed.requestId}`,taskId,commit:record.commit!,ready:false,filesChanged:[parsed.path]},assert);return {requestId:parsed.requestId,taskId,phase:record.phase,commit:record.commit!};}
+    try{
+      const result=await this.withBranchNative(parsed.requestId,record.phase==='push_unknown'?'inventory':'create',actor,authorize,JSON.stringify(identity),(executor,_remote,token)=>publishBrowserEdit(executor,record,token,async(commit,tree)=>{await authorize();ledger.update(identity,current=>{if(current.phase!=='prepared'||current.commit&&current.commit!==commit)throw Error("Original commit proposal changed");current.commit=commit;current.tree=tree;},assert);},async()=>{await authorize();ledger.update(identity,current=>{if(current.phase!=='prepared'||!current.commit)throw Error("Original commit proposal unavailable");current.phase='push_unknown';},assert);}),undefined,{repoName:identity.workspaceRepoName,remote:identity.remote,providerRepoId:identity.providerRepoId});
+      await authorize();if(result.confirmed&&result.commit){ledger.update(identity,current=>{if(current.commit!==result.commit||current.phase!=='push_unknown')throw Error("Original push readback differs");current.phase='confirmed';},assert);await this.applyCheckpoint({eventId:`browser-edit:${parsed.requestId}`,taskId,commit:result.commit,ready:false,filesChanged:[parsed.path]},assert);}
+    }catch{/* Saved preparation/proposal/push state is returned for retry, never replaced. */}
+    const current=ledger.get(parsed.requestId)!;return {requestId:parsed.requestId,taskId,phase:current.phase,commit:current.commit??null};
+  }
   protected branchNativeSandbox(nativeId:string){return this.env.INTEGRATOR.getByName(`native-${nativeId}`);}
   protected branchRepositoryProvider(){return this.env.ARTIFACTS;}
   protected branchInventoryFetcher():NonNullable<Parameters<typeof inspectHttpBranches>[0]["fetcher"]>{return fetch;}
   private async authorizeBranchRead(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<()=>void>{const state=this.load(),incarnation=new PrivateRecoveryOperations(this.ctx.storage).incarnation(),account=accountOf(this.env,await accountKeyFor(actor.userId));const assert=()=>{const current=this.load();if(this.repositoryDeleting()||!this.ctx.storage.sql.exec("SELECT user_id FROM members WHERE user_id=?",actor.userId).toArray().length||this.readRepositoryIncarnation()!==incarnation||current.projectId!==state.projectId||current.canonicalRepoName!==state.canonicalRepoName||(!actor.viaToken&&(!Number.isFinite(sessionExpiresAt)||Date.now()>=sessionExpiresAt!)))throw Error("Branch read authority changed");};assert();if(await account.accountLifecycle()!=="active"||(actor.viaToken&&(!credentialHash||!await account.apiTokenHashActive(credentialHash))))throw Error("Branch read authentication unavailable");assert();return assert;}
   private async revokeBranchCredential(attemptId:string,fundingAccountKey?:string):Promise<boolean>{const ledger=new BranchCredentialIncidents(this.ctx.storage);if(ledger.summary(attemptId)?.status==="revoked")return true;const credential=ledger.credentialForRevocation(attemptId);if(!credential)return false;const global=globalOf(this.env),accountKey=fundingAccountKey??credential.accountKey,http=new BranchHttpAttempts(this.ctx.storage).get(attemptId);const funding=await (http?global.reserveRepositoryReadOperation(`branch-read-cleanup-${crypto.randomUUID()}`,accountKey):global.reserveCoreGitOperation(`branch-cleanup-${crypto.randomUUID()}`,accountKey,this.currentGitBudget())).catch(()=>null);if(!funding?.allowed||!ledger.markAttempt(attemptId))return false;try{using repository=await this.branchRepositoryProvider().get(credential.repoName);if(!await repository.revokeToken(credential.token))return false;await ledger.markRevoked(attemptId,credential.token);return true;}catch{return false;}}
   private async retryBranchCredentials(){const ledger=new BranchCredentialIncidents(this.ctx.storage);for(const credential of ledger.pendingBatch())if(ledger.markAutomaticSweep(credential.attemptId))await this.revokeBranchCredential(credential.attemptId);const wake=ledger.nextWake();if(wake!==null)await this.ensureRecoveryAlarm(Math.max(1,wake-Date.now()));}
-  private async withBranchNative<T>(operationId:string,kind:"inventory"|"create",actor:HumanDecisionActor,authorize:()=>Promise<void>,snapshot:string,run:(executor:import("./branch-git.js").BranchGitExecutor,remote:string,token:string)=>Promise<T>,hooks?:{prepared(identity:BranchNativeAttemptIdentity):void;stopped(identity:BranchNativeAttemptIdentity):void}):Promise<T>{
+  private async withBranchNative<T>(operationId:string,kind:"inventory"|"create",actor:HumanDecisionActor,authorize:()=>Promise<void>,snapshot:string,run:(executor:import("./branch-git.js").BranchGitExecutor,remote:string,token:string)=>Promise<T>,hooks?:{prepared(identity:BranchNativeAttemptIdentity):void;stopped(identity:BranchNativeAttemptIdentity):void},target?:{repoName:string;remote:string;providerRepoId:string}):Promise<T>{
     const state=this.load(),incarnation=this.readRepositoryIncarnation();if(!incarnation)throw Error("Repository incarnation unavailable");const runtime=new BranchNativeAttempts(this.ctx.storage),credentials=new BranchCredentialIncidents(this.ctx.storage);if(this.ctx.storage.sql.exec("SELECT id FROM branch_credential_incidents WHERE json_extract(payload,'$.operationId')=? AND status!='revoked' LIMIT 1",operationId).toArray().length)throw Error("Earlier branch credential cleanup remains unconfirmed");
     const accountKey=await accountKeyFor(actor.userId),snapshotDigest=await this.sha256(snapshot);await authorize();const nativeId=crypto.randomUUID();let attempt:BranchNativeAttemptIdentity|undefined,completed=false;
     try{
-      await authorize();const preparedAttempt:BranchNativeAttemptIdentity={attemptId:crypto.randomUUID(),nativeId,operationId,kind,projectId:state.projectId,incarnation,canonicalRepoName:state.canonicalRepoName,actorId:actor.userId,accountKey,snapshotDigest};const identity=preparedAttempt;runtime.begin(identity,()=>{if(this.readRepositoryIncarnation()!==incarnation||this.load().canonicalRepoName!==state.canonicalRepoName)throw Error("Branch native scope changed");});attempt=preparedAttempt;hooks?.prepared(preparedAttempt);const assertPossible=()=>{const current=runtime.get(identity.attemptId);if(!current||current.state!=="possible"||current.nativeId!==identity.nativeId||current.operationId!==identity.operationId||current.snapshotDigest!==identity.snapshotDigest)throw Error("Branch native attempt was stopped or replaced");};const scopedAuthorize=async()=>{assertPossible();await authorize();assertPossible();};await this.ensureRecoveryAlarm();assertPossible();await admitNativeCompute(this.env,accountKey,`native-${nativeId}`,"native-essential");assertPossible();await scopedAuthorize();const sandbox=this.branchNativeSandbox(nativeId),deadline=Date.now()+60000;
-      const fund=async()=>{await scopedAuthorize();const admission=await globalOf(this.env).reserveCoreGitOperation(`branch-command-${crypto.randomUUID()}`,accountKey,this.currentGitBudget());await scopedAuthorize();if(!admission.allowed)throw Error("Branch operation read allowance unavailable");};await fund();using repository=await this.branchRepositoryProvider().get(state.canonicalRepoName);await scopedAuthorize();const remote=(await repository.info()).remote;assertPossible();validateRecoveryRemote(remote);await scopedAuthorize();const scope=kind==="inventory"?"read":"write";await fund();credentials.begin(identity,Date.now()+60000,()=>{assertPossible();if(this.readRepositoryIncarnation()!==incarnation)throw Error("Branch credential scope changed");});assertPossible();const issued=await repository.createToken(scope,60);await credentials.record(identity.attemptId,state.canonicalRepoName,issued.plaintext,Date.parse(issued.expiresAt),issued.scope);await scopedAuthorize();const credential=credentials.credentialForUse(identity);if(!credential)throw Error("Branch credential scope or expiry is unconfirmed");
+      await authorize();const preparedAttempt:BranchNativeAttemptIdentity={attemptId:crypto.randomUUID(),nativeId,operationId,kind,...(target?{credentialRepoName:target.repoName}:{}),projectId:state.projectId,incarnation,canonicalRepoName:state.canonicalRepoName,actorId:actor.userId,accountKey,snapshotDigest};const identity=preparedAttempt;runtime.begin(identity,()=>{if(this.readRepositoryIncarnation()!==incarnation||this.load().canonicalRepoName!==state.canonicalRepoName)throw Error("Branch native scope changed");});attempt=preparedAttempt;hooks?.prepared(preparedAttempt);const assertPossible=()=>{const current=runtime.get(identity.attemptId);if(!current||current.state!=="possible"||current.nativeId!==identity.nativeId||current.operationId!==identity.operationId||current.snapshotDigest!==identity.snapshotDigest)throw Error("Branch native attempt was stopped or replaced");};const scopedAuthorize=async()=>{assertPossible();await authorize();assertPossible();};await this.ensureRecoveryAlarm();assertPossible();await admitNativeCompute(this.env,accountKey,`native-${nativeId}`,"native-essential");assertPossible();await scopedAuthorize();const sandbox=this.branchNativeSandbox(nativeId),deadline=Date.now()+60000;
+      const fund=async()=>{await scopedAuthorize();const admission=await globalOf(this.env).reserveCoreGitOperation(`branch-command-${crypto.randomUUID()}`,accountKey,this.currentGitBudget());await scopedAuthorize();if(!admission.allowed)throw Error("Branch operation read allowance unavailable");};await fund();using repository=await this.branchRepositoryProvider().get(target?.repoName??state.canonicalRepoName);await scopedAuthorize();const metadata=await repository.info(),remote=metadata.remote;if(target&&(remote!==target.remote||metadata.id!==target.providerRepoId))throw Error("Contribution provider remote changed");assertPossible();validateRecoveryRemote(remote);await scopedAuthorize();const scope=kind==="inventory"?"read":"write";await fund();credentials.begin(identity,Date.now()+60000,()=>{assertPossible();if(this.readRepositoryIncarnation()!==incarnation)throw Error("Branch credential scope changed");});assertPossible();const issued=await repository.createToken(scope,60);await credentials.record(identity.attemptId,target?.repoName??state.canonicalRepoName,issued.plaintext,Date.parse(issued.expiresAt),issued.scope);await scopedAuthorize();const credential=credentials.credentialForUse(identity);if(!credential)throw Error("Branch credential scope or expiry is unconfirmed");
       const executor:import("./branch-git.js").BranchGitExecutor={beforeCommand:async phase=>{await scopedAuthorize();if(phase==="before"){if(!credentials.credentialForUse(identity))throw Error("Branch credential expired before command");await fund();}},exec:async(command,env)=>{assertPossible();if(!credentials.credentialForUse(identity))throw Error("Branch credential unavailable at native dispatch");const remaining=deadline-Date.now();if(remaining<=0)throw Error("Branch native deadline reached");return sandbox.exec(["sh","-c",command],{env:{...env,GIT_CONFIG_GLOBAL:"/dev/null",GIT_CONFIG_NOSYSTEM:"1",GIT_CONFIG_COUNT:"3",GIT_CONFIG_KEY_1:"core.hooksPath",GIT_CONFIG_VALUE_1:"/dev/null",GIT_CONFIG_KEY_2:"http.followRedirects",GIT_CONFIG_VALUE_2:"false"},timeoutMs:remaining});}};
       const proof=await run(executor,remote,credential.token);completed=true;return proof;
     }finally{
@@ -1991,6 +2033,7 @@ export class RepositoryController extends DurableObject<Env> {
   }
   private agentNativeSnapshot(task:Task):string{task=this.projectedTask(task);return JSON.stringify({id:task.id,goal:task.goal,base:task.baseCommit,commit:task.currentCommit,workspace:task.workspace,scope:task.allowedScope,...(effectiveTaskAcceptedTarget(task)?{acceptedTarget:effectiveTaskAcceptedTarget(task)}:{}),...(task.targetGeneration?{targetGeneration:task.targetGeneration}:{})});}
   private assertAgentNativeLocal(attempt:AgentNativeAttemptIdentity):void {
+    this.assertForkWriteSource(attempt.taskId,attempt.actorId,attempt.maintainerWriteSource);
     const state=this.load(),rawTask=state.tasks[attempt.taskId],task=rawTask?{...this.projectedTask(rawTask),acceptedTarget:effectiveTaskAcceptedTarget(this.projectedTask(rawTask))}:undefined,registered=this.ctx.storage.sql.exec<{actor_id:string|null;kind:string}>("SELECT actor_id,kind FROM project_workflows WHERE instance_id=?",attempt.workflowId).toArray()[0];
     if(task?.acceptedTarget&&task.acceptedTarget.policyVersion!==state.policyVersion)throw Error("Frozen task policy changed");this.gitTables();const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",attempt.actorId).toArray()[0]?.role;const writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",attempt.taskId).toArray()[0]?.user_id;const selected=task?.agentRunId?this.agentRuns().get(task.agentRunId):null;
     const activeStamp=task?.targetGeneration?{eventId:task.targetGeneration.eventId,generation:task.targetGeneration.generation}:undefined;if(JSON.stringify(this.agentRuns().get(attempt.runId)?.targetGeneration)!==JSON.stringify(activeStamp))throw Error("Agent target generation changed");
@@ -2002,6 +2045,7 @@ export class RepositoryController extends DurableObject<Env> {
   private agentRelayBasis(props:AgentEgressWorkerProps){
     this.agentRelayTables();const runtime=new AgentRuntimeLedger(this.ctx.storage).get(props.attemptId),state=this.load();
     if(!runtime||runtime.state!=="possible"||runtime.nativeId!==props.nativeId||state.projectId!==runtime.projectId||this.readRepositoryIncarnation()!==runtime.incarnation||this.repositoryDeleting()||this.ctx.storage.sql.exec("SELECT attempt_id FROM agent_relay_closed WHERE attempt_id=?",props.attemptId).toArray().length)throw Error("Original active restricted runtime required");
+    this.assertForkWriteSource(runtime.taskId,runtime.actorId,runtime.maintainerWriteSource);
     const {state:_state,createdAt:_created,stoppedAt:_stopped,...attempt}=runtime,raw=state.tasks[attempt.taskId];if(!raw)throw Error("Assigned agent task unavailable");const task=this.projectedTask(raw),scope=props.scope,registered=this.ctx.storage.sql.exec<{actor_id:string|null;kind:string}>("SELECT actor_id,kind FROM project_workflows WHERE instance_id=?",attempt.workflowId).toArray()[0];this.gitTables();
     const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",attempt.actorId).toArray()[0]?.role,writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",attempt.taskId).toArray()[0]?.user_id;
     const run=this.agentRuns().get(attempt.runId),head=this.ctx.storage.sql.exec<{run_id:string;generation:number}>("SELECT run_id,generation FROM agent_run_heads WHERE task_id=?",attempt.taskId).toArray()[0];
@@ -2068,7 +2112,8 @@ export class RepositoryController extends DurableObject<Env> {
     if(!run?.actorId||!task||!incarnation||(run.kind!=="agent"&&run.kind!=="scenario")||(run.kind==="agent"&&(task.agentWorkflowInstanceId!==input.workflowId||input.runId!==input.workflowId)))throw Error("Registered agent initiator required");
     const snapshot=this.agentNativeSnapshot(task),accountKey=await accountKeyFor(run.actorId),digest=await this.sha256(snapshot);
     if(await accountOf(this.env,accountKey).accountLifecycle()!=="active"||!await this.canGitAccess(run.actorId,input.taskId,true))throw Error("Agent account or task writer unavailable");
-    const attempt:AgentNativeAttemptIdentity={...input,projectId:state.projectId,incarnation,actorId:run.actorId,accountKey,generation:this.agentRuns().get(input.runId)?.generation??0,snapshotDigest:digest};
+    const maintainerWriteSource=this.forkWriteSource(input.taskId,run.actorId);
+    const attempt:AgentNativeAttemptIdentity={...input,...(maintainerWriteSource?{maintainerWriteSource}:{}),projectId:state.projectId,incarnation,actorId:run.actorId,accountKey,generation:this.agentRuns().get(input.runId)?.generation??0,snapshotDigest:digest};
     return new AgentRuntimeLedger(this.ctx.storage).begin(attempt,()=>{this.assertAgentNativeLocal(attempt);new AgentCredentialIncidents(this.ctx.storage);if(this.ctx.storage.sql.exec("SELECT id FROM agent_credential_incidents WHERE json_extract(payload,'$.taskId')=? AND status!='revoked' LIMIT 1",input.taskId).toArray().length)throw Error("Earlier agent credential cleanup remains unconfirmed");if(this.agentNativeSnapshot(this.load().tasks[input.taskId]!)!==snapshot)throw Error("Agent task changed during allocation");});
   }
   async beginAgentCredential(attemptId:string,id:string,scope:"read"|"write",expiresAt:number):Promise<AgentCredentialScope|null>{
@@ -2156,7 +2201,7 @@ export class RepositoryController extends DurableObject<Env> {
     if(!row)throw Error("Agent execution authority has no recorded native scope");
     const attempt=JSON.parse(row.doc) as AgentNativeAttemptIdentity,run=this.agentRuns().get(runId),incarnation=this.readRepositoryIncarnation();
     if(!run||run.taskId!==taskId)throw Error("Agent run unavailable");
-    const validate=()=>{const state=this.load(),rawTask=state.tasks[taskId],task=rawTask?{...this.projectedTask(rawTask),acceptedTarget:effectiveTaskAcceptedTarget(this.projectedTask(rawTask))}:undefined,current=this.agentRuns().get(runId);if(JSON.stringify(current?.targetGeneration)!==JSON.stringify(task?.targetGeneration?{eventId:task.targetGeneration.eventId,generation:task.targetGeneration.generation}:undefined))throw Error("Agent mutation target generation changed");if(Boolean(task?.acceptedTarget)!==Boolean(current?.acceptedTarget))throw Error("Agent mutation accepted target changed");if(task?.acceptedTarget&&current?.acceptedTarget){assertCompatibleAcceptedTargetBatch([task.acceptedTarget,current.acceptedTarget]);if(task.acceptedTarget.policyVersion!==state.policyVersion)throw Error("Agent mutation frozen policy changed");}const registered=this.ctx.storage.sql.exec<{actor_id:string|null}>("SELECT actor_id FROM project_workflows WHERE instance_id=?",attempt.workflowId).toArray()[0];this.gitTables();const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",attempt.actorId).toArray()[0]?.role,writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",taskId).toArray()[0]?.user_id;if(!task||task.agentRunId!==runId||!current||current.generation!==run.generation||this.readRepositoryIncarnation()!==incarnation||incarnation!==attempt.incarnation||registered?.actor_id!==attempt.actorId||(role!=="owner"&&writer!==attempt.actorId)||!role)throw Error("Agent mutation authority changed");};
+    const validate=()=>{this.assertForkWriteSource(taskId,attempt.actorId,attempt.maintainerWriteSource);const state=this.load(),rawTask=state.tasks[taskId],task=rawTask?{...this.projectedTask(rawTask),acceptedTarget:effectiveTaskAcceptedTarget(this.projectedTask(rawTask))}:undefined,current=this.agentRuns().get(runId);if(JSON.stringify(current?.targetGeneration)!==JSON.stringify(task?.targetGeneration?{eventId:task.targetGeneration.eventId,generation:task.targetGeneration.generation}:undefined))throw Error("Agent mutation target generation changed");if(Boolean(task?.acceptedTarget)!==Boolean(current?.acceptedTarget))throw Error("Agent mutation accepted target changed");if(task?.acceptedTarget&&current?.acceptedTarget){assertCompatibleAcceptedTargetBatch([task.acceptedTarget,current.acceptedTarget]);if(task.acceptedTarget.policyVersion!==state.policyVersion)throw Error("Agent mutation frozen policy changed");}const registered=this.ctx.storage.sql.exec<{actor_id:string|null}>("SELECT actor_id FROM project_workflows WHERE instance_id=?",attempt.workflowId).toArray()[0];this.gitTables();const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",attempt.actorId).toArray()[0]?.role,writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",taskId).toArray()[0]?.user_id;if(!task||task.agentRunId!==runId||!current||current.generation!==run.generation||this.readRepositoryIncarnation()!==incarnation||incarnation!==attempt.incarnation||registered?.actor_id!==attempt.actorId||(role!=="owner"&&writer!==attempt.actorId)||!role)throw Error("Agent mutation authority changed");};
     validate();const selectedTask=this.load().tasks[taskId],selectedTarget=selectedTask?effectiveTaskAcceptedTarget(this.projectedTask(selectedTask)):undefined;if(Boolean(selectedTarget)!==Boolean(run.acceptedTarget))throw Error("Agent run accepted target binding changed");if(selectedTarget&&run.acceptedTarget)assertCompatibleAcceptedTargetBatch([selectedTarget,run.acceptedTarget]);if(await accountOf(this.env,attempt.accountKey).accountLifecycle()!=="active"||!await this.canGitAccess(attempt.actorId,taskId,true))throw Error("Agent mutation writer unavailable");validate();return validate;
   }
   async saveAgentProposal(runId: string, taskId: string, files: Record<string, string>): Promise<boolean> { const validate=await this.authorizeAgentMutation(runId,taskId);return this.ctx.storage.transactionSync(()=>{validate();return this.agentRuns().propose(runId, taskId, files);}); }
@@ -2439,6 +2484,9 @@ export class RepositoryController extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS billing (id INTEGER PRIMARY KEY CHECK (id = 1), doc TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, kind TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS members (user_id TEXT PRIMARY KEY, role TEXT NOT NULL, label TEXT, added_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS repository_organization_sources(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,doc TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS human_fork_permissions(task_id TEXT PRIMARY KEY,scope TEXT NOT NULL,revision INTEGER NOT NULL,enabled INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS human_fork_permission_history(task_id TEXT NOT NULL,revision INTEGER NOT NULL,scope TEXT NOT NULL,enabled INTEGER NOT NULL,actor_id TEXT NOT NULL,at INTEGER NOT NULL,PRIMARY KEY(task_id,revision));
       CREATE TABLE IF NOT EXISTS invites (token TEXT PRIMARY KEY, created_by TEXT NOT NULL, expires_at INTEGER NOT NULL, used_by TEXT);
       CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, type TEXT NOT NULL, summary TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS webhooks (id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL, events TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
@@ -2631,18 +2679,77 @@ export class RepositoryController extends DurableObject<Env> {
     const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authorize();const state=this.load(),task=state.tasks[taskId],incarnation=this.readRepositoryIncarnation();if(!task)throw Error("Repository task recovery scope unavailable");if(!incarnation){authorize();return{coverage:"unknown" as const,pendingCount:null,quiescent:false,attempts:[],nextCursor:null,complete:false,source:"recorded-ledger" as const,providerVerified:false as const};}const scope={projectId:state.projectId,incarnation,taskId,repoName:task.workspace.repoName};const validate=()=>{authorize();const current=this.load(),saved=current.tasks[taskId];if(current.projectId!==scope.projectId||this.readRepositoryIncarnation()!==scope.incarnation||saved?.workspace.repoName!==scope.repoName)throw Error("Git recovery task scope changed");};return inspectGitGatewayRecovery(this.ctx.storage,scope,validate,options);
   }
 
+  private taskForkOrigin(taskId:string):{human:boolean;creatorId:string|null} {
+    const task=this.load().tasks[taskId];if(!task)throw Error('Contribution unavailable');this.gitTables();
+    const creatorId=this.ctx.storage.sql.exec<{user_id:string}>('SELECT user_id FROM git_task_writers WHERE task_id=?',taskId).toArray()[0]?.user_id??null;
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS task_fork_origins(task_id TEXT PRIMARY KEY,scope TEXT NOT NULL,human INTEGER NOT NULL,creator_id TEXT)');
+    const scope=JSON.stringify({projectId:this.load().projectId,incarnation:this.readRepositoryIncarnation(),repoName:task.workspace.repoName,branch:task.workspace.branch}),old=this.ctx.storage.sql.exec<{scope:string;human:number;creator_id:string|null}>('SELECT scope,human,creator_id FROM task_fork_origins WHERE task_id=?',taskId).toArray()[0];
+    if(old){if(old.scope!==scope||old.creator_id!==creatorId)throw Error('Original fork creator identity changed');return {human:old.human===1,creatorId:old.creator_id};}
+    const creation=new TaskCreationIntents(this.ctx.storage).forTask(taskId),human=creation?.phase==='committed'||task.contributor.type==='human'||task.initiatedBy?.type==='human';
+    if(creation?.phase==='committed'&&creatorId!==creation.actor.userId)throw Error('Original human fork creator receipt differs');
+    if(!this.readRepositoryIncarnation())return {human,creatorId};
+    this.ctx.storage.sql.exec('INSERT INTO task_fork_origins VALUES(?,?,?,?)',taskId,scope,human?1:0,creatorId);
+    return {human,creatorId};
+  }
+  private humanForkScope(taskId:string):ForkPermissionScope|null {
+    const task=this.load().tasks[taskId];if(!task)return null;const origin=this.taskForkOrigin(taskId),incarnation=this.readRepositoryIncarnation();
+    if(!origin.human||!origin.creatorId||!incarnation)return null;
+    return {projectId:this.load().projectId,incarnation,taskId,repoName:task.workspace.repoName,branch:task.workspace.branch,creatorId:origin.creatorId};
+  }
+  private forkWriteSource(taskId:string,actorId:string):ForkPermissionSource|undefined {
+    const task=this.load().tasks[taskId];if(!task)throw Error('Contribution unavailable');
+    this.gitTables();const creatorId=this.ctx.storage.sql.exec<{user_id:string}>('SELECT user_id FROM git_task_writers WHERE task_id=?',taskId).toArray()[0]?.user_id;
+    if(creatorId===actorId)return undefined;
+    const directOwner=this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',actorId).toArray()[0]?.role==='owner';
+    if(!directOwner)throw Error('Only the creator or direct repository maintainer may write this fork');
+    if(!this.taskForkOrigin(taskId).human)return undefined;
+    const scope=this.humanForkScope(taskId);if(!scope)throw Error('Original human fork creator unavailable');
+    const source=new ForkPermissions(this.ctx.storage).source(scope);
+    if(!maintainerMayPush(!!source,directOwner)||!source)throw Error('The human fork creator has not allowed maintainer edits');return source;
+  }
+  private assertForkWriteSource(taskId:string,actorId:string,expected?:ForkPermissionSource) {
+    const source=this.forkWriteSource(taskId,actorId);
+    if(JSON.stringify(source)!==JSON.stringify(expected))throw Error('Original human fork consent revision changed');
+  }
+  async taskForkPermission(taskId:string,userId:string){
+    const authority=await this.repositoryAccessFence(userId);authority.assert();const task=this.load().tasks[taskId];if(!task)throw Error('Contribution unavailable');const scope=this.humanForkScope(taskId);
+    const current=scope?new ForkPermissions(this.ctx.storage).read(scope):{enabled:false,revision:0};
+    return {...current,creatorId:scope?.creatorId??null,canConfigure:!!scope&&scope.creatorId===userId&&authority.role!=='read'&&!['accepted','cancelled','integrating','verifying'].includes(task.status)};
+  }
+  async taskForkPermissionUpdate(taskId:string,userId:string,input:{enabled:boolean;expectedRevision:number},credential:TaskCreationCredential){
+    const parsed=z.object({enabled:z.boolean(),expectedRevision:z.number().int().nonnegative().safe()}).strict().parse(input),authorize=await this.taskCreationCredentialFence(userId,credential);authorize();
+    const scope=this.humanForkScope(taskId),task=this.load().tasks[taskId];if(!scope||!task||['accepted','cancelled','integrating','verifying'].includes(task.status))throw Error('This human contribution is not open for permission changes');
+    const result=new ForkPermissions(this.ctx.storage).update(scope,userId,parsed.expectedRevision,parsed.enabled,()=>{authorize();if(JSON.stringify(this.humanForkScope(taskId))!==JSON.stringify(scope)||['accepted','cancelled','integrating','verifying'].includes(this.load().tasks[taskId]?.status??''))throw Error('Human fork permission authority changed');});
+    return {...result,creatorId:scope.creatorId,canConfigure:true};
+  }
+  private forkPermissionViews(userId:string){
+    return Object.fromEntries(Object.values(this.load().tasks).filter(task=>this.taskForkOrigin(task.id).human).map(task=>{
+      const scope=this.humanForkScope(task.id),current=scope?new ForkPermissions(this.ctx.storage).read(scope):{enabled:false,revision:0};
+      return [task.id,{...current,creatorId:scope?.creatorId??null,canConfigure:scope?.creatorId===userId&&!!this.localRepositoryMember(userId,true)&&!['accepted','cancelled','integrating','verifying'].includes(task.status)}];
+    }));
+  }
   private gitGatewayStamp(task:Task):string{const view=this.projectedTask(task);return view.targetGeneration?JSON.stringify({eventId:view.targetGeneration.eventId,generation:view.targetGeneration.generation}):"creation";}
   private async currentGitGatewayScope(taskId:string,userId:string,parentTokenHash:string|null):Promise<GitGatewayScope>{
-    if(!await this.canGitAccess(userId,taskId,true))throw Error("Git writer authority unavailable");const account=accountOf(this.env,await accountKeyFor(userId));if(await account.accountLifecycle()!=="active"||(parentTokenHash&&!await account.apiTokenHashActive(parentTokenHash)))throw Error("Git credential authority unavailable");if(!await this.canGitAccess(userId,taskId,true))throw Error("Git writer authority changed");const state=this.load(),task=state.tasks[taskId],incarnation=this.readRepositoryIncarnation()??new PrivateRecoveryOperations(this.ctx.storage).incarnation();if(!task)throw Error("Git task scope unavailable");return{projectId:state.projectId,incarnation,taskId,repoName:task.workspace.repoName,actorId:userId,parentTokenHash,generationStamp:this.gitGatewayStamp(task)};
+    if(!await this.canGitAccess(userId,taskId,true))throw Error("Git writer authority unavailable");
+    const account=accountOf(this.env,await accountKeyFor(userId));if(await account.accountLifecycle()!=="active"||(parentTokenHash&&!await account.apiTokenHashActive(parentTokenHash)))throw Error("Git credential authority unavailable");
+    if(!await this.canGitAccess(userId,taskId,true))throw Error("Git writer authority changed");
+    const permission=await this.repositoryAccessFence(userId,true);permission.assert();const state=this.load(),task=state.tasks[taskId],incarnation=this.readRepositoryIncarnation()??new PrivateRecoveryOperations(this.ctx.storage).incarnation();if(!task)throw Error("Git task scope unavailable");
+    const maintainerWriteSource=this.forkWriteSource(taskId,userId);
+    return{projectId:state.projectId,incarnation,taskId,repoName:task.workspace.repoName,actorId:userId,parentTokenHash,generationStamp:this.gitGatewayStamp(task),...(maintainerWriteSource?{maintainerWriteSource}:{}),...(permission.source?{organizationSource:permission.source}:{})};
   }
-  private assertGitGatewayScopeLocal(scope:GitGatewayScope):void{this.gitTables();const state=this.load(),task=state.tasks[scope.taskId],role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",scope.actorId).toArray()[0]?.role,writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",scope.taskId).toArray()[0]?.user_id;if(this.repositoryDeleting()||!task||["accepted","cancelled"].includes(task.status)||!role||(role!=="owner"&&writer!==scope.actorId)||state.projectId!==scope.projectId||this.readRepositoryIncarnation()!==scope.incarnation||task.workspace.repoName!==scope.repoName||this.gitGatewayStamp(task)!==scope.generationStamp)throw Error("Git gateway authority or generation changed");}
+  private assertGitGatewayScopeLocal(scope:GitGatewayScope):void{
+    this.gitTables();const state=this.load(),task=state.tasks[scope.taskId],role=this.localRepositoryMember(scope.actorId,true),writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",scope.taskId).toArray()[0]?.user_id;
+    if(scope.organizationSource)this.assertInheritedSource(scope.actorId,scope.organizationSource,true);
+    this.assertForkWriteSource(scope.taskId,scope.actorId,scope.maintainerWriteSource);
+    if(this.repositoryDeleting()||state.lifecycle?.state==='archived'||!task||["accepted","cancelled"].includes(task.status)||!role||(role!=="owner"&&writer!==scope.actorId)||state.projectId!==scope.projectId||this.readRepositoryIncarnation()!==scope.incarnation||task.workspace.repoName!==scope.repoName||this.gitGatewayStamp(task)!==scope.generationStamp)throw Error("Git gateway authority or generation changed");
+  }
   async beginGitGatewayAttempt(id:string,taskId:string|null,write:boolean,userId:string,parentTokenHash:string|null):Promise<GitGatewayScope>{
     if(!write||taskId===null)throw Error("Only contribution writes use gateway ownership");const scope=await this.currentGitGatewayScope(taskId,userId,parentTokenHash);this.assertGitGatewayScopeLocal(scope);new GitGatewayLedger(this.ctx.storage).begin(id,scope);return scope;
   }
   async recordGitGatewayCredential(id:string,token:string,expiresAt:number,providerScope:string):Promise<void>{
     const ledger=new GitGatewayLedger(this.ctx.storage),attempt=ledger.get(id);if(!attempt)throw Error("Git gateway issuance intent unavailable");ledger.issued(id,token);
     if(providerScope!=="write"||!Number.isSafeInteger(expiresAt)||expiresAt<=Date.now()||expiresAt>Date.now()+605000)throw Error("Git transport credential scope or expiry unavailable");
-    const scope=await this.currentGitGatewayScope(attempt.scope.taskId,attempt.scope.actorId,attempt.scope.parentTokenHash);this.assertGitGatewayScopeLocal(scope);if((["projectId","incarnation","taskId","repoName","actorId","generationStamp","parentTokenHash"] as const).some(key=>scope[key]!==attempt.scope[key]))throw Error("Git transport generation changed before use");
+    const scope=await this.currentGitGatewayScope(attempt.scope.taskId,attempt.scope.actorId,attempt.scope.parentTokenHash);this.assertGitGatewayScopeLocal(scope);if(JSON.stringify(scope.maintainerWriteSource)!==JSON.stringify(attempt.scope.maintainerWriteSource)||JSON.stringify(scope.organizationSource)!==JSON.stringify(attempt.scope.organizationSource)||(["projectId","incarnation","taskId","repoName","actorId","generationStamp","parentTokenHash"] as const).some(key=>scope[key]!==attempt.scope[key]))throw Error("Git transport generation changed before use");
   }
   async markGitGatewayDispatch(id:string):Promise<boolean>{
     try{const ledger=new GitGatewayLedger(this.ctx.storage),attempt=ledger.get(id);if(!attempt)return false;const scope=await this.currentGitGatewayScope(attempt.scope.taskId,attempt.scope.actorId,attempt.scope.parentTokenHash);this.assertGitGatewayScopeLocal(scope);ledger.dispatch(id,scope);return true;}catch{return false;}
@@ -2707,7 +2814,7 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   private initialForkScope(record:TaskCreationIntentRecord):InitialForkCredentialScope{return{eventId:record.eventId,allocationId:record.allocationId,taskId:record.taskId,projectId:record.projectId,incarnation:record.incarnation,canonicalRepoName:record.canonicalRepoName,workspaceRepoName:record.workspaceRepoName,accountKey:record.accountKey,actorId:record.actor.userId};}
-  private assertTaskCreationIntentLocal(record:TaskCreationIntentRecord,actorId:string):void{const state=this.load();if(this.repositoryDeleting()||record.actor.userId!==actorId||state.projectId!==record.projectId||state.canonicalRepoName!==record.canonicalRepoName||this.readRepositoryIncarnation()!==record.incarnation||!this.ctx.storage.sql.exec("SELECT user_id FROM members WHERE user_id=?",actorId).toArray().length)throw Error("Saved task creation scope changed");if(record.phase!=="committed"&&this.captureTaskCreationTarget(actorId,record.input).scope!==record.selection.scope)throw Error("Original task creation source changed");}
+  private assertTaskCreationIntentLocal(record:TaskCreationIntentRecord,actorId:string):void{const state=this.load();if(this.repositoryDeleting()||record.actor.userId!==actorId||state.projectId!==record.projectId||state.canonicalRepoName!==record.canonicalRepoName||this.readRepositoryIncarnation()!==record.incarnation||!this.localRepositoryMember(actorId,true))throw Error("Saved task creation scope changed");if(record.phase!=="committed"&&this.captureTaskCreationTarget(actorId,record.input).scope!==record.selection.scope)throw Error("Original task creation source changed");}
   async prepareTaskCreationIntent(taskId:string,actorId:string,input:TaskCreationInput,credential:TaskCreationCredential):Promise<TaskCreationIntentRecord>{
     const assert=await this.taskCreationCredentialFence(actorId,credential);assert();const ledger=new TaskCreationIntents(this.ctx.storage),old=ledger.forTask(taskId);if(old){this.assertTaskCreationIntentLocal(old,actorId);if(taskCreationPayload(old.input)!==taskCreationPayload(input))throw Error("Saved task creation request changed");return old;}
     if(this.load().tasks[taskId])throw Error("Saved task must be recovered through its creation receipt");const incarnation=new PrivateRecoveryOperations(this.ctx.storage).incarnation(),selection=await this.resolveTaskCreationTarget(actorId,input,credential),accountKey=await accountKeyFor(actorId);assert();const state=this.load();const intent=taskCreationIntentSchema.parse({eventId:crypto.randomUUID(),allocationId:crypto.randomUUID(),nativeProtocol:"sdk-only",taskId,actor:{userId:actorId,viaToken:credential.viaToken,credentialHash:credential.credentialHash??null,sessionExpiresAt:credential.sessionExpiresAt??null},accountKey,projectId:state.projectId,incarnation,canonicalRepoName:state.canonicalRepoName,workspaceRepoName:`t-${state.projectId}-${taskId}`,input,selection});return ledger.prepare(intent,()=>{assert();this.assertTaskCreationIntentLocal({...intent,phase:"prepared",createdAt:0,updatedAt:0},actorId);});
@@ -2738,9 +2845,12 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   private async taskCreationCredentialFence(actorId:string,credential?:TaskCreationCredential):Promise<()=>void>{
-    await this.requireTaskCreationActor(actorId);if(credential?.viaToken){if(!credential.credentialHash||!await accountOf(this.env,await accountKeyFor(actorId)).apiTokenHashActive(credential.credentialHash))throw Error("Task creation credential unavailable");}else if(credential&&(!Number.isFinite(credential.sessionExpiresAt)||Date.now()>=credential.sessionExpiresAt!))throw Error("Task creation session expired");
-    if(credential)new PrivateRecoveryOperations(this.ctx.storage).incarnation();const repositoryContext=credential?await this.repositoryReadContext(actorId):null;
-    const assert=()=>{if(repositoryContext&&(this.load().projectId!==repositoryContext.projectId||this.load().canonicalRepoName!==repositoryContext.canonicalRepoName||this.readRepositoryIncarnation()!==repositoryContext.incarnation||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==repositoryContext.ownerId))throw Error("Task creation repository owner changed");if(this.repositoryDeleting()||!this.ctx.storage.sql.exec("SELECT user_id FROM members WHERE user_id=?",actorId).toArray().length||(!credential?.viaToken&&credential&&(!Number.isFinite(credential.sessionExpiresAt)||Date.now()>=credential.sessionExpiresAt!)))throw Error("Task creation authority changed");};assert();return assert;
+    await this.requireTaskCreationActor(actorId);
+    if(credential?.viaToken){if(!credential.credentialHash||!await accountOf(this.env,await accountKeyFor(actorId)).apiTokenHashActive(credential.credentialHash))throw Error("Task creation credential unavailable");}
+    else if(credential&&(!Number.isFinite(credential.sessionExpiresAt)||Date.now()>=credential.sessionExpiresAt!))throw Error("Task creation session expired");
+    if(credential)new PrivateRecoveryOperations(this.ctx.storage).incarnation();
+    const repositoryContext=credential?await this.repositoryReadContext(actorId):null,permission=await this.repositoryAccessFence(actorId,true);
+    const assert=()=>{permission.assert();if(repositoryContext&&(this.load().projectId!==repositoryContext.projectId||this.load().canonicalRepoName!==repositoryContext.canonicalRepoName||this.readRepositoryIncarnation()!==repositoryContext.incarnation||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==repositoryContext.ownerId))throw Error("Task creation repository owner changed");if(this.repositoryDeleting()||!this.localRepositoryMember(actorId,true)||(!credential?.viaToken&&credential&&(!Number.isFinite(credential.sessionExpiresAt)||Date.now()>=credential.sessionExpiresAt!)))throw Error("Task creation authority changed");};assert();return assert;
   }
   async contributionTargets(actorId:string):Promise<{targets:Array<{ref:string;branch:string;acceptedCommit:string|null;acceptedVersion:number;policyVersion:number}>;truncated:boolean}>{
     const context=await this.repositoryReadContext(actorId);this.synchronizePrimaryAcceptedRegistry(this.load());const state=this.load(),incarnation=this.readRepositoryIncarnation();if(!incarnation)return{targets:[],truncated:false};
@@ -2758,11 +2868,10 @@ export class RepositoryController extends DurableObject<Env> {
   async assertTaskCreationTarget(actorId:string,input:TaskCreationInput,selection:TaskCreationSelection,credential?:TaskCreationCredential):Promise<boolean>{try{const current=await this.resolveTaskCreationTarget(actorId,input,credential);return current.scope===selection.scope&&current.baseCommit===selection.baseCommit&&current.sourceRepoName===selection.sourceRepoName;}catch{return false;}}
 
   private async requireTaskCreationActor(actorId:string):Promise<void>{
-    if(!actorId||!await this.roleOf(actorId)||this.repositoryDeleting())throw new Error("Task creation access changed");
-    const accountKey=await accountKeyFor(actorId);
-    if(await accountOf(this.env,accountKey).accountLifecycle()!=="active")throw new Error("Task creation account is unavailable");
-    const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId).toArray()[0]?.role;
-    if(this.repositoryDeleting()||(role!=="owner"&&role!=="member"))throw new Error("Task creation access changed");
+    if(!actorId)throw Error('Task creation actor required');
+    const permission=await this.repositoryAccessFence(actorId,true);permission.assert();
+    if(await accountOf(this.env,await accountKeyFor(actorId)).accountLifecycle()!=="active")throw Error("Task creation account is unavailable");
+    permission.assert();
   }
   async taskCreationReplay(taskId:string,actorId:string,input:TaskCreationInput,internalTarget?:InternalTaskTargetOptions,credential?:TaskCreationCredential):Promise<Task|null>{
     const assertCredential=await this.taskCreationCredentialFence(actorId,credential);assertCredential();
@@ -2781,10 +2890,12 @@ export class RepositoryController extends DurableObject<Env> {
     const next={...s,tasks:{...s.tasks,[task.id]:task}};
     this.ctx.storage.transactionSync(() => {
       assertCredential();
-      if((creationInput||boundIntent)&&this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId!).toArray()[0]?.role===undefined)throw new Error("Task creation access changed");
-      if(creationInput)assertExternalTaskProvenance(creationInput,actorId,this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId!).toArray()[0]?.role,task);
+      if((creationInput||boundIntent)&&!this.localRepositoryMember(actorId!,true))throw new Error("Task creation access changed");
+      if(creationInput)assertExternalTaskProvenance(creationInput,actorId,this.localRepositoryMember(actorId!,true)??undefined,task);
       if(task.acceptedTarget){const current=freezeAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),this.load(),new PrivateRecoveryOperations(this.ctx.storage).incarnation(),task.acceptedTarget.ref);assertCompatibleAcceptedTargetBatch([task.acceptedTarget,current]);}
       if(actorId) { this.gitTables(); this.ctx.storage.sql.exec("INSERT INTO git_task_writers(task_id,user_id) VALUES (?,?)",task.id,actorId); }
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS task_fork_origins(task_id TEXT PRIMARY KEY,scope TEXT NOT NULL,human INTEGER NOT NULL,creator_id TEXT)');
+      this.ctx.storage.sql.exec('INSERT INTO task_fork_origins VALUES(?,?,?,?)',task.id,JSON.stringify({projectId:s.projectId,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation(),repoName:task.workspace.repoName,branch:task.workspace.branch}),task.contributor.type==='human'?1:0,actorId??null);
       new GitGatewayLedger(this.ctx.storage).declareTask({projectId:s.projectId,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation(),taskId:task.id,repoName:task.workspace.repoName});
       if(payload){this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS task_creation_receipts(task_id TEXT PRIMARY KEY,actor_id TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL)");this.ctx.storage.sql.exec("INSERT INTO task_creation_receipts VALUES(?,?,?,?)",task.id,actorId!,payload,task.createdAt);}
       if(this.repositoryDeleting())throw new Error("Repository deletion is in progress");
@@ -2908,6 +3019,7 @@ export class RepositoryController extends DurableObject<Env> {
       case 'team':ledger.createTeam(...args,value.teamId,value.name);break;
       case 'remove-team':ledger.removeTeam(...args,value.teamId);break;
       case 'team-member':ledger.setTeamMember(...args,value.teamId,value.userId,value.present);break;
+      case 'team-child':ledger.setTeamChild(...args,value.teamId,value.childTeamId,value.present);break;
       case 'grant':ledger.grantRepository(...args,value.repositoryId,value.subject,value.role);break;
       case 'revoke-grant':ledger.revokeRepositoryGrant(...args,value.repositoryId,value.subject);break;
       case 'invite':ledger.invite(...args,{id:crypto.randomUUID(),userId:value.userId,role:value.role,expiresAt:Date.now()+7*86400000});break;
@@ -2932,9 +3044,25 @@ export class RepositoryController extends DurableObject<Env> {
   private inheritedRole(doc:OrganizationAccessSnapshot,userId:string):OrganizationRepositoryRole|null {
     if(!doc.repositories.includes(this.load().projectId))return null;
     if(doc.members.some(m=>m.userId===userId&&m.role==='owner'))return 'admin';
-    const teams=new Set(doc.members.some(m=>m.userId===userId)?doc.teams.filter(t=>t.members.includes(userId)).map(t=>t.id):[]);
+    const teams=organizationTeamsFor(doc,userId);
     const roles=doc.grants.filter(g=>g.repositoryId===this.load().projectId&&((g.subject.kind==='user'&&g.subject.id===userId)||(g.subject.kind==='team'&&teams.has(g.subject.id)))).map(g=>g.role);
     return roles.includes('admin')?'admin':roles.includes('write')?'write':roles.includes('read')?'read':null;
+  }
+  /** A final local fence only. Every caller must first await repositoryAccessFence or a source-bound read context. */
+  private localRepositoryMember(userId:string,write=false):"owner"|"member"|null {
+    const direct=this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',userId).toArray()[0]?.role;
+    if(direct==='owner'||direct==='member')return direct;
+    this.inheritedTable();
+    for(const row of this.ctx.storage.sql.exec<{doc:string}>('SELECT doc FROM repository_organization_sources').toArray()){
+      const role=this.inheritedRole(organizationDocumentSchema.parse(JSON.parse(row.doc)),userId);
+      if(role&&(!write||role!=='read'))return 'member';
+    }
+    return null;
+  }
+  private assertInheritedSource(userId:string,source:{id:string;revision:number},write=false) {
+    this.inheritedTable();const row=this.ctx.storage.sql.exec<{revision:number;doc:string}>('SELECT revision,doc FROM repository_organization_sources WHERE id=?',source.id).toArray()[0];
+    const role=row?this.inheritedRole(organizationDocumentSchema.parse(JSON.parse(row.doc)),userId):null;
+    if(!row||row.revision!==source.revision||!role||write&&role==='read')throw Error('Inherited repository source authority changed');
   }
   private async repositoryAccessFence(userId:string,write=false) {
     const scope=JSON.stringify([this.load().projectId,this.load().canonicalRepoName,this.readRepositoryIncarnation()]);
@@ -2943,14 +3071,20 @@ export class RepositoryController extends DurableObject<Env> {
     const direct=this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',userId).toArray()[0]?.role;
     if(direct){return {role:direct==='owner'?'admin' as const:'write' as const,direct:direct==='owner'?'owner' as const:'member' as const,source:undefined,assert:()=>{scopeCurrent();if(this.repositoryDeleting()||this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',userId).toArray()[0]?.role!==direct)throw Error('Direct repository authority changed');}};}
     this.inheritedTable();const rows=this.ctx.storage.sql.exec<{id:string;revision:number;doc:string}>('SELECT id,revision,doc FROM repository_organization_sources').toArray();
+    let selected:{role:OrganizationRepositoryRole;direct:null;source:{id:string;revision:number};assert:()=>void}|null=null;
     for(const row of rows){
       const fresh=await globalOf(this.env).organizationSource(row.id);if(!fresh||fresh.revision!==row.revision)continue;
       const role=this.inheritedRole(fresh,userId);if(!role||write&&role==='read')continue;
-      const assert=()=>{scopeCurrent();const current=this.ctx.storage.sql.exec<{revision:number;doc:string}>('SELECT revision,doc FROM repository_organization_sources WHERE id=?',row.id).toArray()[0];if(this.repositoryDeleting()||!current||current.revision!==fresh.revision||current.doc!==JSON.stringify(fresh))throw Error('Inherited repository authority changed');};assert();return {role,direct:null,source:{id:fresh.id,revision:fresh.revision},assert};
+      const assert=()=>{scopeCurrent();const current=this.ctx.storage.sql.exec<{revision:number;doc:string}>('SELECT revision,doc FROM repository_organization_sources WHERE id=?',row.id).toArray()[0];if(this.repositoryDeleting()||!current||current.revision!==fresh.revision||JSON.stringify(organizationDocumentSchema.parse(JSON.parse(current.doc)))!==JSON.stringify(fresh))throw Error('Inherited repository authority changed');};assert();const ranks={read:1,write:2,admin:3};if(!selected||ranks[role]>ranks[selected.role])selected={role,direct:null,source:{id:fresh.id,revision:fresh.revision},assert};
     }
+    if(selected){selected.assert();return selected;}
     throw Error('Repository access revoked');
   }
-  async repositoryAccess(userId:string) {try{const access=await this.repositoryAccessFence(userId);access.assert();return {role:access.role,direct:access.direct};}catch{return null;}}
+  async repositoryAccess(userId:string) {try{
+    const access=await this.repositoryAccessFence(userId);access.assert();
+    const writers=this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='git_task_writers'").toArray().length?this.ctx.storage.sql.exec<{task_id:string}>('SELECT task_id FROM git_task_writers WHERE user_id=?',userId).toArray().map(row=>row.task_id):[];
+    return {role:access.role,direct:access.direct,writableTaskIds:access.role==='read'?[]:Object.keys(this.load().tasks).filter(taskId=>{try{this.forkWriteSource(taskId,userId);return access.direct==='owner'||writers.includes(taskId);}catch{return false;}}),cancellableTaskIds:access.role==='read'?[]:access.direct==='owner'?Object.keys(this.load().tasks):writers,forkPermissions:this.forkPermissionViews(userId)};
+  }catch{return null;}}
 
   // ---- account registry (used on the per-account instance) ----
   async listProjects(): Promise<ProjectRow[]> {
@@ -3085,14 +3219,35 @@ export class RepositoryController extends DurableObject<Env> {
     await this.authorizeRetainedInput(input,!historical);
     return this.ctx.storage.transactionSync(()=>{if(historical&&!this.retainedReceiptHistorical(input))throw new Error("Historical retained input provenance changed");this.assertRetainedLocal(input,!historical);return new RetainedInputs(this.ctx.storage).record(input,proof);});
   }
+  async assertRetainedWorkspaceWrite(input:RetainedInput,actorId?:string,lineage?:string):Promise<void>{
+    const actor=actorId??input.actorId;
+    const local=()=>{
+      if(!actorId){this.assertRetainedLocal(input);return;}
+      const saved=new RetainedInputs(this.ctx.storage).application(input.id),task=this.load().tasks[input.taskId];
+      if(!saved||JSON.stringify(saved.input)!==JSON.stringify(input)||!task||task.workspace.repoName!==input.workspaceRepoName||task.workspace.branch!==input.branch||this.load().projectId!==input.projectId||this.readRepositoryIncarnation()!==input.incarnation||this.repositoryDeleting()||this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',actor).toArray()[0]?.role!=='owner')throw Error('Saved maintainer fork write scope changed');
+    };
+    if(!actorId)await this.authorizeRetainedInput(input);
+    else if(await accountOf(this.env,await accountKeyFor(actor)).accountLifecycle()!=='active')throw Error('Saved maintainer account unavailable');
+    local();const source=this.forkWriteSource(input.taskId,actor),snapshot=JSON.stringify({projectId:input.projectId,incarnation:input.incarnation,taskId:input.taskId,repoName:input.workspaceRepoName,branch:input.branch,actorId:actor,source:source??null}),key=lineage?`${input.id}:${z.string().min(1).max(200).parse(lineage)}`:input.id;
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS retained_workspace_write_sources(input_id TEXT PRIMARY KEY,snapshot TEXT NOT NULL)');
+    this.ctx.storage.transactionSync(()=>{
+      local();this.assertForkWriteSource(input.taskId,actor,source);
+      const old=this.ctx.storage.sql.exec<{snapshot:string}>('SELECT snapshot FROM retained_workspace_write_sources WHERE input_id=?',key).toArray()[0];
+      if(old&&old.snapshot!==snapshot)throw Error('Original retained workspace consent revision changed');
+      if(!old)this.ctx.storage.sql.exec('INSERT INTO retained_workspace_write_sources VALUES(?,?)',key,snapshot);
+    });
+  }
   async beginRetainedCredential(input:RetainedInput,purpose:"workspace"|"canonical",expiresAt:number,scope:"read"|"write"):Promise<boolean>{
     if(input.followup&&(purpose!=="canonical"||scope!=="read"))throw new Error("Accepted followup only permits canonical reads");
+    if(purpose==="workspace"&&scope==="write")await this.assertRetainedWorkspaceWrite(input);
     await this.ensureRecoveryAlarm();await this.authorizeRetainedInput(input);
-    const incidents=new RetainedCredentialIncidents(this.ctx.storage);if(incidents.summary(input.id,purpose))return incidents.begin(input,purpose,expiresAt,scope,()=>this.assertRetainedLocal(input));
+    const forkConsent=purpose==="workspace"&&scope==="write"?this.forkWriteSource(input.taskId,input.actorId):undefined;
+    const incidents=new RetainedCredentialIncidents(this.ctx.storage);if(incidents.summary(input.id,purpose))return incidents.begin(input,purpose,expiresAt,scope,()=>{this.assertRetainedLocal(input);if(purpose==="workspace"&&scope==="write")this.assertForkWriteSource(input.taskId,input.actorId,forkConsent);});
     const prepaid=new RetainedCleanupPrepayments(this.ctx.storage),record=prepaid.prepare(input,purpose,expiresAt,scope,()=>this.assertRetainedLocal(input));
     const global=globalOf(this.env),admission=await global.reserveCoreGitOperation(record.operationId,input.accountKey,this.currentGitBudget());if(!admission.allowed)throw Error('Credential cleanup capacity unavailable before issuance');await this.authorizeRetainedInput(input);
     const proof=await global.existingCoreGitReservation(record.operationId,record.accountKey,record.month);await this.authorizeRetainedInput(input);prepaid.confirm(record,proof,()=>this.assertRetainedLocal(input));
-    return incidents.begin(input,purpose,expiresAt,scope,()=>this.assertRetainedLocal(input));
+    if(purpose==="workspace"&&scope==="write")await this.assertRetainedWorkspaceWrite(input);
+    return incidents.begin(input,purpose,expiresAt,scope,()=>{this.assertRetainedLocal(input);if(purpose==="workspace"&&scope==="write")this.assertForkWriteSource(input.taskId,input.actorId,forkConsent);});
   }
   async recordRetainedCredential(inputId:string,purpose:"workspace"|"canonical",repoName:string,token:string,expiresAt:number):Promise<void>{
     await new RetainedCredentialIncidents(this.ctx.storage).record(inputId,purpose,repoName,token,expiresAt);
@@ -3735,6 +3890,7 @@ export class RepositoryController extends DurableObject<Env> {
   async beginRebaseResumeCredential(id:string,generation:number,purpose:SavedRebaseResumeCredentialPurpose,expiresAt:number,scope:"read"|"write"):Promise<boolean>{
     const attempt=new RebaseResumeAttempts(this.ctx.storage).get(id);if(!attempt)throw new RebaseRecoveryError("Saved resume missing",409);
     const {application,validate}=await this.authorizeSavedResume(id,generation,attempt.workflowId);
+    if(purpose==="workspace"&&scope==="write")await this.assertRetainedWorkspaceWrite(application.input,attempt.actor.userId,`${attempt.id}:${generation}`);
     if(scope!==(purpose==="canonical"?"read":"write"))throw new RebaseRecoveryError("Credential scope does not match saved recovery",409);
     const accountKey=await accountKeyFor(attempt.actor.userId);validate();await this.ensureRecoveryAlarm();validate();
     return new SavedRebaseResumeCredentials(this.ctx.storage).begin({attemptId:id,applicationId:attempt.applicationId,projectId:attempt.scope.projectId,incarnation:attempt.scope.incarnation!,accountKey,canonicalRepoName:application.input.canonicalRepoName,workspaceRepoName:application.input.workspaceRepoName,actorId:attempt.actor.userId},purpose,expiresAt,validate);
@@ -3774,7 +3930,7 @@ export class RepositoryController extends DurableObject<Env> {
     let result:RebaseResumeAttempt|null;try{result=await this.observeRebaseResume(attempt.id,attempt.generation,actor,credentialHash,sessionExpiresAt);}catch{validate();result=new RebaseResumeAttempts(this.ctx.storage).get(attempt.id);}validate();return result;
   }
   async rebaseResumeCurrent(id:string){return new RebaseResumeAttempts(this.ctx.storage).get(id);}
-  async assertRebaseResume(id:string,generation:number,workflowId:string){const {attempt,application,validate,receipt}=await this.authorizeSavedResume(id,generation,workflowId);const accountKey=await accountKeyFor(attempt.actor.userId);validate();return {application,snapshot:attempt.snapshot,actor:attempt.actor,accountKey,nativeRunId:attempt.nativeRunId,workflowId:attempt.workflowId,...(receipt?{receipt}:{})};}
+  async assertRebaseResume(id:string,generation:number,workflowId:string){const {attempt,application,validate,receipt}=await this.authorizeSavedResume(id,generation,workflowId);if(!receipt)await this.assertRetainedWorkspaceWrite(application.input,attempt.actor.userId,`${attempt.id}:${generation}`);const accountKey=await accountKeyFor(attempt.actor.userId);validate();return {application,snapshot:attempt.snapshot,actor:attempt.actor,accountKey,nativeRunId:attempt.nativeRunId,workflowId:attempt.workflowId,...(receipt?{receipt}:{})};}
   async markRebaseResumeDispatch(id:string,generation:number,state:RebaseResumeAttempt["dispatch"]){const attempt=new RebaseResumeAttempts(this.ctx.storage).get(id);if(!attempt)throw new RebaseRecoveryError("Saved resume missing",409);const {validate}=await this.authorizeSavedResume(id,generation,attempt.workflowId);validate();return new RebaseResumeAttempts(this.ctx.storage).dispatch(id,generation,state);}
   async rebaseResumeNativeIntent(id:string,generation:number,workflowId:string){const {validate}=await this.authorizeSavedResume(id,generation,workflowId);validate();return new RebaseResumeAttempts(this.ctx.storage).nativeIntent(id,generation);}
   async rebaseResumeNativeStopped(id:string,generation:number,nativeRunId:string){
@@ -3967,19 +4123,61 @@ export class RepositoryController extends DurableObject<Env> {
   async artifactStorageSnapshot():Promise<ReturnType<ArtifactStorageAdmission["snapshot"]>>{return new ArtifactStorageAdmission(this.ctx.storage).snapshot();}
   async artifactStorageCapacity(owner:string,namespace:string|undefined,policy:StorageAdmissionPolicy){return new ArtifactStorageAdmission(this.ctx.storage).capacity(owner,namespace,policy);}
 
+  private lfsStorageInstance?:DurableLfsStore;
+  private lfsStorage(){return this.lfsStorageInstance??=new DurableLfsStore(this.ctx.storage);}
+  private lfsWriteAuthority(actor:LfsCredential){if(!actor.taskId)throw new LfsStorageError("LFS writes require an original task writer",403);return{actorId:actor.userId,taskId:actor.taskId,source:this.forkWriteSource(actor.taskId,actor.userId)};}
+  private async lfsAuthorize(actor:LfsCredential,write:boolean,expected?:LfsScope,lineage?:{actorId:string;taskId:string;source?:ForkPermissionSource}):Promise<LfsScope>{
+    const assertSource=()=>{if(!lineage)return;if(!write||lineage.actorId!==actor.userId||lineage.taskId!==actor.taskId)throw new LfsStorageError("Original LFS writer lineage changed",403);try{this.assertForkWriteSource(lineage.taskId,lineage.actorId,lineage.source);}catch{throw new LfsStorageError("Original LFS fork consent was revoked or changed",403);}};
+    assertSource();
+    if(!actor.userId||!await this.canGitAccess(actor.userId,actor.taskId,write))throw new LfsStorageError("Repository LFS access denied",404);
+    assertSource();
+    const state=this.load(),scope={projectId:state.projectId,incarnation:this.readRepositoryIncarnation()??new PrivateRecoveryOperations(this.ctx.storage).incarnation()};
+    if(expected&&(expected.projectId!==scope.projectId||expected.incarnation!==scope.incarnation))throw new LfsStorageError("Repository incarnation changed",409);
+    const account=accountOf(this.env,await accountKeyFor(actor.userId));assertSource();
+    if(await account.accountLifecycle()!=="active")throw new LfsStorageError("Account unavailable",403);assertSource();
+    if(actor.gitCapability){const current=await this.verifyGitCapability(actor.gitCapability,actor.taskId,write);assertSource();if(!current||current.userId!==actor.userId||current.parentTokenHash!==(actor.credentialHash??null))throw new LfsStorageError("Git credential changed",401);}
+    if(actor.credentialHash){if(!await account.apiTokenHashCanRead(actor.credentialHash,actor.userId,scope.projectId,write))throw new LfsStorageError("LFS originating credential was revoked",401);assertSource();}
+    else if(!actor.gitCapability&&(!actor.sessionExpiresAt||actor.sessionExpiresAt<=Date.now()))throw new LfsStorageError("LFS session expired",401);
+    if(!await this.canGitAccess(actor.userId,actor.taskId,write)||this.repositoryDeleting()||this.readRepositoryIncarnation()!==scope.incarnation)throw new LfsStorageError("LFS access changed",403);
+    assertSource();return scope;
+  }
+  private async lfsPublicAuthorize(proof:Omit<PublicLfsProof,"objects">):Promise<LfsScope>{const context=await this.repositoryReadContext(null,null);if(context.acceptedCommit!==proof.acceptedCommit||context.incarnation!==proof.incarnation||context.publicationVersion!==proof.publicationVersion||!await this.assertRepositoryReadContext(context,null,null))throw new LfsStorageError("Public LFS publication changed",409);return{projectId:context.projectId,incarnation:proof.incarnation};}
+  async lfsPublicExpectedSizes(oids:string[],proof:Omit<PublicLfsProof,"objects">){if(oids.length>100||oids.some(oid=>! /^[a-f0-9]{64}$/.test(oid)))throw new LfsStorageError("Invalid public LFS size inspection",400);const scope=await this.lfsPublicAuthorize(proof),store=this.lfsStorage(),objects=oids.flatMap(oid=>{const object=store.get(scope,oid);return object?.phase==="verified"?[{oid:object.oid,size:object.size}]:[];});await this.lfsPublicAuthorize(proof);return objects;}
+  async lfsPublicBatch(objects:LfsObjectRef[],proof:PublicLfsProof){const scope=await this.lfsPublicAuthorize(proof),store=this.lfsStorage();const rows=objects.map(object=>{const accepted=proof.objects.find(pointer=>pointer.oid===object.oid&&pointer.size===object.size),stored=store.get(scope,object.oid);return{...object,...(!accepted||stored?.phase!=="verified"||stored.size!==object.size?{error:{code:404,message:"Accepted LFS object not found"}}:{})};});await this.lfsPublicAuthorize(proof);return rows;}
+  async lfsPublicDownload(oid:string,proof:PublicLfsProof){const scope=await this.lfsPublicAuthorize(proof),accepted=proof.objects.find(pointer=>pointer.oid===oid);if(!accepted)throw new LfsStorageError("Accepted LFS pointer not found",404);const stored=this.lfsStorage().get(scope,oid);if(stored?.size!==accepted.size)throw new LfsStorageError("Accepted LFS object size differs",404);return this.lfsStorage().download(scope,oid,this.env.EVIDENCE_BUCKET,async()=>{await this.lfsPublicAuthorize(proof);});}
+  async lfsBatch(operation:"upload"|"download",objects:LfsObjectRef[],actor:LfsCredential){
+    const scope=await this.lfsAuthorize(actor,operation==="upload"),lineage=operation==="upload"?this.lfsWriteAuthority(actor):undefined,store=this.lfsStorage();
+    if(objects.length>100)throw new LfsStorageError("LFS batch exceeds its object limit",413);
+    const rows=objects.map(object=>{
+      try{const stored=operation==="upload"?store.admitObject(scope,object):store.get(scope,object.oid);const exists=stored?.phase==="verified"&&stored.size===object.size;return{...object,exists,...(stored&&stored.size!==object.size?{error:{code:409,message:"LFS object size is immutable"}}:operation==="download"&&!exists?{error:{code:404,message:"LFS object not found"}}:{})};}
+      catch(error){return{...object,exists:false,error:{code:error instanceof LfsStorageError?error.status:503,message:error instanceof LfsStorageError?error.message:"LFS admission unavailable"}};}
+    });
+    await this.lfsAuthorize(actor,operation==="upload",scope,lineage);return rows;
+  }
+  async lfsUpload(object:{oid:string;size?:number},body:ReadableStream<Uint8Array>,actor:LfsCredential){
+    const scope=await this.lfsAuthorize(actor,true),lineage=this.lfsWriteAuthority(actor),store=this.lfsStorage(),reservation=store.get(scope,object.oid);
+    if(!reservation)throw new LfsStorageError("An authenticated LFS batch reservation is required before upload",409);
+    if(object.size!==undefined&&object.size!==reservation.size)throw new LfsStorageError("LFS content length differs from the admitted object size",409);
+    return store.upload(scope,{oid:reservation.oid,size:reservation.size},body,this.env.EVIDENCE_BUCKET,async()=>{await this.lfsAuthorize(actor,true,scope,lineage);});
+  }
+  async lfsDownload(oid:string,actor:LfsCredential){const scope=await this.lfsAuthorize(actor,false);return this.lfsStorage().download(scope,oid,this.env.EVIDENCE_BUCKET,async()=>{await this.lfsAuthorize(actor,false,scope);});}
+  async lfsReconcile(oid:string,actor:LfsCredential){if(!/^[a-f0-9]{64}$/.test(oid))throw new LfsStorageError("Invalid LFS object",400);const scope=await this.lfsAuthorize(actor,true),lineage=this.lfsWriteAuthority(actor);await this.lfsAuthorize(actor,true,scope,lineage);const result=await this.lfsStorage().reconcile(scope,oid,this.env.EVIDENCE_BUCKET);await this.lfsAuthorize(actor,true,scope,lineage);return result;}
+  async lfsVerify(object:LfsObjectRef,actor:LfsCredential){const scope=await this.lfsAuthorize(actor,true),lineage=this.lfsWriteAuthority(actor),stored=this.lfsStorage().get(scope,object.oid);if(!stored||stored.phase!=="verified"||stored.size!==object.size)throw new LfsStorageError("LFS object verification is unconfirmed",404);const actual=await this.env.EVIDENCE_BUCKET.head(stored.key);if(!actual||actual.size!==stored.size||actual.customMetadata?.oid!==stored.oid)throw new LfsStorageError("LFS object storage is unavailable",503);await this.lfsAuthorize(actor,true,scope,lineage);}
+
   private gitTables(): void {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS git_task_writers(task_id TEXT PRIMARY KEY,user_id TEXT NOT NULL)");
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS git_capabilities(hash TEXT PRIMARY KEY,user_id TEXT NOT NULL,task_id TEXT,write_access INTEGER NOT NULL,expires_at INTEGER NOT NULL,parent_token_hash TEXT)");
   }
-  async canGitAccess(userId: string, taskId: string | null, write: boolean): Promise<boolean> {
-    if (this.repositoryDeleting()) return false;
-    const role=await this.roleOf(userId); if(!role)return false;
-    if(taskId===null)return !write;
-    const task=this.load().tasks[taskId];if(!task)return false;
-    if(!write)return true;
-    if(task.status==="accepted"||task.status==="cancelled")return false;
-    this.gitTables();
-    return role==="owner"||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",taskId).toArray()[0]?.user_id===userId;
+  async canGitAccess(userId:string,taskId:string|null,write:boolean):Promise<boolean>{
+    try{
+      if(taskId===null&&write)return false;
+      const permission=await this.repositoryAccessFence(userId,write);permission.assert();
+      if(taskId===null)return true;
+      const task=this.load().tasks[taskId];if(!task)return false;if(!write)return true;
+      if(task.status==='accepted'||task.status==='cancelled')return false;
+      this.gitTables();permission.assert();
+      this.forkWriteSource(taskId,userId);return true;
+    }catch{return false;}
   }
   async mintGitCapability(userId: string, taskId: string | null, write: boolean, parentTokenHash?: string): Promise<{token:string;expiresInSeconds:number}> {
     if(!(await this.canGitAccess(userId,taskId,write)))throw new Error("Git access denied");
@@ -3988,13 +4186,16 @@ export class RepositoryController extends DurableObject<Env> {
     if((this.ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) AS n FROM git_capabilities WHERE user_id=?",userId).toArray()[0]?.n??0)>=50)throw new Error("Active Git capability limit reached; existing credentials remain usable until expiry");
     const token=`fgg_${this.load().projectId}_${crypto.randomUUID().replaceAll("-","")}${crypto.randomUUID().replaceAll("-","")}`;
     const hash=await this.sha256(token);if(!(await this.canGitAccess(userId,taskId,write)))throw new Error("Git access changed");
-    this.ctx.storage.sql.exec("INSERT INTO git_capabilities VALUES(?,?,?,?,?,?)",hash,userId,taskId,write?1:0,Date.now()+3600_000,parentTokenHash??null);
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS git_capability_fork_permissions(hash TEXT PRIMARY KEY,source TEXT NOT NULL)');
+    const consent=write&&taskId?this.forkWriteSource(taskId,userId):undefined;
+    this.ctx.storage.transactionSync(()=>{this.ctx.storage.sql.exec("INSERT INTO git_capabilities VALUES(?,?,?,?,?,?)",hash,userId,taskId,write?1:0,Date.now()+3600_000,parentTokenHash??null);if(consent)this.ctx.storage.sql.exec('INSERT INTO git_capability_fork_permissions VALUES(?,?)',hash,JSON.stringify(consent));});
     return {token,expiresInSeconds:3600};
   }
   async verifyGitCapability(secret:string,taskId:string|null,write:boolean):Promise<{userId:string;parentTokenHash:string|null}|null>{
     this.gitTables(); const hash=await this.sha256(secret);
     const row=this.ctx.storage.sql.exec<{user_id:string;task_id:string|null;write_access:number;expires_at:number;parent_token_hash:string|null}>("SELECT * FROM git_capabilities WHERE hash=?",hash).toArray()[0];
     if(!row||row.expires_at<=Date.now()||row.task_id!==taskId||(write&&!row.write_access)||!(await this.canGitAccess(row.user_id,taskId,write)))return null;
+    if(write&&taskId){try{const exists=this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='git_capability_fork_permissions'").toArray().length,source=exists?this.ctx.storage.sql.exec<{source:string}>('SELECT source FROM git_capability_fork_permissions WHERE hash=?',hash).toArray()[0]?.source:undefined;this.assertForkWriteSource(taskId,row.user_id,source?JSON.parse(source) as ForkPermissionSource:undefined);}catch{return null;}}
     return {userId:row.user_id,parentTokenHash:row.parent_token_hash};
   }
   async revokeGitCapabilities(userId:string):Promise<void>{
@@ -4197,6 +4398,7 @@ export class RepositoryController extends DurableObject<Env> {
     const active = task.agentRunId ? this.agentRuns().get(task.agentRunId) : null;
     if (active && !["checkpointed", "failed"].includes(active.phase) && active.runId !== runId) return false;
     if (runId) task.agentWorkflowInstanceId = runId;
+    new PrivateRecoveryOperations(this.ctx.storage).incarnation();this.taskForkOrigin(taskId);
     task.initiatedBy ??= task.contributor;
     task.contributor = { id: `agent-${taskId}`, name: "FlareGit agent", type: "agent" };
     task.status = "working";
@@ -4841,6 +5043,7 @@ export class RepositoryController extends DurableObject<Env> {
     if(new BranchNativeAttempts(this.ctx.storage).hasUnconfirmed()||new BranchCredentialIncidents(this.ctx.storage).hasPending())throw Error("Branch native or credential cleanup remains unconfirmed; metadata preserved");
     const agentRuntime=new AgentRuntimeLedger(this.ctx.storage),agentCredentials=new AgentCredentialIncidents(this.ctx.storage);agentCredentials.pendingBatch();if(agentRuntime.hasUnconfirmed()||this.ctx.storage.sql.exec("SELECT id FROM agent_credential_incidents WHERE status!='revoked' LIMIT 1").toArray().length)throw Error("Agent shutdown or credential cleanup remains unconfirmed; metadata preserved");
     const integrationNative=new IntegrationNativeRuntimeLedger(this.ctx.storage);if(integrationNative.hasUnconfirmed()||this.integrationNativeMissingCoverage().some(run=>run.native_protocol!==1||Object.values(this.load(true).candidates).some(candidate=>candidate.workflowInstanceId===run.instance_id)))throw new Error("Integration native shutdown remains unconfirmed; metadata was preserved");
+    if(this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='lfs_objects'").toArray().length){if(!this.repositoryDeleting())throw new LfsStorageError("Repository deletion must fence LFS writers first",409);await this.lfsStorage().cleanupForDeletion(this.load(true).projectId,this.env.EVIDENCE_BUCKET);}
     const tables = this.ctx.storage.sql.exec<{name:string}>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name!='repository_deletion'").toArray();
     this.ctx.storage.transactionSync(() => {
       for (const table of tables) this.ctx.storage.sql.exec(`DELETE FROM "${table.name.replaceAll('"','""')}"`);
@@ -4996,7 +5199,8 @@ export class RepositoryController extends DurableObject<Env> {
       retained=new RetainedInputs(this.ctx.storage).lookup(taskId,candidate.id,inputCommit);
       if(retained){if(retained.projectId!==latest.projectId||retained.incarnation!==incarnation||retained.canonicalRepoName!==latest.canonicalRepoName||retained.workflowId!==candidate.workflowInstanceId||(inputBase!==undefined&&retained.base!==inputBase))throw new Error("Retained input scope changed");inputBase=retained.base;repoName=latest.canonicalRepoName;}
     }
-    return {projectId:fresh.projectId,incarnation,canonicalRepoName:fresh.canonicalRepoName,repoName,ownerId,accountKey,...(authority?.source?{organizationSource:authority.source}:{}),...(retained?{retainedInputReceiptId:retained.id}:{}),...(candidate?{candidateId:candidate.id,candidateCommit:candidate.candidateCommit,candidateBase:candidate.expectedAcceptedBase,...(taskId?{candidateInputCommit:inputCommit,candidateInputBase:inputBase}:{})}:{}),...(taskId&&!retained?{taskBase:latest.tasks[taskId]!.baseCommit,taskCommit:latest.tasks[taskId]!.currentCommit,taskBranch:latest.tasks[taskId]!.workspace.branch,taskContributorId:latest.tasks[taskId]!.contributor.id,taskInitiatorId:latest.tasks[taskId]!.initiatedBy?.id}:{}),...(grant?{publicationVersion:grant.version,acceptedCommit:grant.acceptedCommit}:{})};
+    let maintainerWriteSource:ForkPermissionSource|undefined;if(userId&&taskId){try{maintainerWriteSource=this.forkWriteSource(taskId,userId);}catch{/* Read authority is independent of creator consent. */}}
+    return {projectId:fresh.projectId,incarnation,...(maintainerWriteSource?{maintainerWriteSource}:{}),canonicalRepoName:fresh.canonicalRepoName,repoName,ownerId,accountKey,...(authority?.source?{organizationSource:authority.source}:{}),...(retained?{retainedInputReceiptId:retained.id}:{}),...(candidate?{candidateId:candidate.id,candidateCommit:candidate.candidateCommit,candidateBase:candidate.expectedAcceptedBase,...(taskId?{candidateInputCommit:inputCommit,candidateInputBase:inputBase}:{})}:{}),...(taskId&&!retained?{taskBase:latest.tasks[taskId]!.baseCommit,taskCommit:latest.tasks[taskId]!.currentCommit,taskBranch:latest.tasks[taskId]!.workspace.branch,taskContributorId:latest.tasks[taskId]!.contributor.id,taskInitiatorId:latest.tasks[taskId]!.initiatedBy?.id}:{}),...(grant?{publicationVersion:grant.version,acceptedCommit:grant.acceptedCommit}:{})};
   }
   private assertReadLocal(context:RepositoryReadContext,userId:string|null,taskId:string|null,write=false):void {
     const state=this.load(),task=taskId?state.tasks[taskId]:null;
@@ -5006,7 +5210,9 @@ export class RepositoryController extends DurableObject<Env> {
     if(taskId&&(!task||(!context.retainedInputReceiptId&&(task.workspace.repoName!==context.repoName||task.baseCommit!==context.taskBase||task.currentCommit!==context.taskCommit||task.workspace.branch!==context.taskBranch||task.contributor.id!==context.taskContributorId||task.initiatedBy?.id!==context.taskInitiatorId))))throw new Error("Contribution checkpoint changed");
     if(context.candidateId){const candidate=state.candidates[context.candidateId];if(!candidate||candidate.candidateCommit!==context.candidateCommit||candidate.expectedAcceptedBase!==context.candidateBase)throw new Error("Candidate review changed");if(taskId&&( !candidate.participatingTaskIds.includes(taskId)||candidate.participatingCommits[taskId]!==context.candidateInputCommit||((candidate.frozenContributorProofs?.find(proof=>proof.id===taskId&&proof.commit===context.candidateInputCommit)?.baseCommit!==undefined||!context.retainedInputReceiptId)&&candidate.frozenContributorProofs?.find(proof=>proof.id===taskId&&proof.commit===context.candidateInputCommit)?.baseCommit!==context.candidateInputBase)))throw new Error("Frozen candidate input changed");}
     if(context.retainedInputReceiptId){const retained=new RetainedInputs(this.ctx.storage).get(context.retainedInputReceiptId);if(!retained||retained.projectId!==context.projectId||retained.incarnation!==context.incarnation||retained.canonicalRepoName!==context.repoName||retained.taskId!==taskId||retained.candidateId!==context.candidateId||retained.commit!==context.candidateInputCommit||retained.base!==context.candidateInputBase)throw new Error("Retained input read scope changed");}
-    if(write){this.gitTables();if(!task||["accepted","cancelled"].includes(task.status)||(role!=="owner"&&!this.ctx.storage.sql.exec("SELECT task_id FROM git_task_writers WHERE task_id=? AND user_id=?",taskId!,userId!).toArray().length))throw new Error("Contribution writer authority changed");}
+    if(write&&context.organizationSource&&userId)this.assertInheritedSource(userId,context.organizationSource,true);
+    if(write&&userId&&taskId)this.assertForkWriteSource(taskId,userId,context.maintainerWriteSource);
+    if(write){this.gitTables();if(state.lifecycle?.state==='archived'||!task||["accepted","cancelled"].includes(task.status)||(role!=="owner"&&!this.ctx.storage.sql.exec("SELECT task_id FROM git_task_writers WHERE task_id=? AND user_id=?",taskId!,userId!).toArray().length))throw new Error("Contribution writer authority changed");}
     if(userId===null){this.requirePublicRepository();const visibility=this.ctx.storage.sql.exec<{version:number}>("SELECT version FROM repository_visibility WHERE id=1").toArray()[0];if(visibility?.version!==context.publicationVersion||state.acceptedState.currentCommit!==context.acceptedCommit)throw new Error("Public read scope changed");}
   }
   async assertRepositoryReadContext(context:RepositoryReadContext,userId:string|null,taskId:string|null=null,credentialHash?:string,candidateId:string|null=null):Promise<boolean>{try{
@@ -5081,6 +5287,18 @@ export class RepositoryController extends DurableObject<Env> {
     });
   }
 
+  async cancelMemberTask(taskId:string,userId:string,credentialHash?:string,sessionExpiresAt?:number):Promise<void>{
+    const context=await this.repositoryReadContext(userId,taskId);
+    const authorize=await this.taskCreationCredentialFence(userId,{viaToken:!!credentialHash,...(credentialHash?{credentialHash}:{sessionExpiresAt})});authorize();
+    const eligible=()=>{this.gitTables();const owner=this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',userId).toArray()[0]?.role==='owner',creator=this.ctx.storage.sql.exec<{user_id:string}>('SELECT user_id FROM git_task_writers WHERE task_id=?',taskId).toArray()[0]?.user_id;if(!owner&&creator!==userId)throw Error('Only the creator or direct repository owner may cancel');};
+    const current=await this.repositoryReadContext(userId,taskId),readScope=({maintainerWriteSource:_consent,...scope}:RepositoryReadContext)=>JSON.stringify(scope);
+    if(readScope(current)!==readScope(context))throw Error('Contribution cancellation authority changed');
+    try{this.ctx.storage.transactionSync(()=>{
+      authorize();this.assertReadLocal(context,userId,taskId);eligible();
+      const task=this.load().tasks[taskId];if(!task||['accepted','integrating','verifying'].includes(task.status))throw Error('Contribution is no longer cancellable');
+      task.status='cancelled';task.updatedAt=new Date().toISOString();this.save();
+    });}catch(error){this.state=null;throw error;}
+  }
   async cancelTask(taskId: string): Promise<void> {
     const task = this.load().tasks[taskId];
     if (!task || task.status === "accepted") throw new Error("Cannot cancel");
@@ -5584,6 +5802,14 @@ export class RepositoryController extends DurableObject<Env> {
       // SQL rolled back, so discard the mutated cache before the next RPC retries.
       this.state = null;
       throw error;
+    }
+    if(!alreadyAccepted&&!nonprimary){
+      try{
+        const planning=new PlanningStore(this.ctx.storage);
+        for(const issueNumber of new Set(c.participatingTaskIds.flatMap(id=>{const task=s.tasks[id];return task?.status==='accepted'&&task.issue?[task.issue]:[];}))){
+          try{planning.recordAccepted(j.id,issueNumber,j.newHead);}catch{console.warn('Accepted planning follow-up unavailable; accepted Git history remains preserved');}
+        }
+      }catch{console.warn('Accepted planning storage unavailable; accepted Git history remains preserved');}
     }
     for (const deliveryId of deliveries) await this.enqueueWebhookDelivery(deliveryId);
     if(nonprimary){await this.logActivity("FlareGit","integration.branch_accepted",`Accepted ${j.newHead.slice(0,7)} on ${c.acceptedTarget!.ref}`);return;}

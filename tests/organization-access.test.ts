@@ -57,3 +57,23 @@ test('invitations are identity-bound, expire, cannot replay and never demote own
     expect(() => f.ledger.acceptInvitation('org', 'another', 'revoked', 1500)).toThrow('unavailable');
   } finally { f.db.close(); }
 });
+test('nested teams inherit parent grants, reject cycles atomically, and remove inherited paths on child deletion',()=>{
+ const f=fixture();try{
+  f.ledger.createOrganization('org','Organization','owner');
+  f.ledger.setMember('org','owner',1,'member','member');
+  f.ledger.createTeam('org','owner',2,'parent','Parent');
+  f.ledger.createTeam('org','owner',3,'child','Child');
+  f.ledger.createTeam('org','owner',4,'leaf','Leaf');
+  f.ledger.setTeamMember('org','owner',5,'leaf','member',true);
+  f.ledger.setTeamChild('org','owner',6,'parent','child',true);
+  f.ledger.setTeamChild('org','owner',7,'child','leaf',true);
+  f.ledger.grantRepository('org','owner',8,'repo',{kind:'team',id:'parent'},'write');
+  expect(f.ledger.resolveAccess('org','repo','member')?.role).toBe('write');
+  expect(()=>f.ledger.setTeamChild('org','owner',9,'leaf','parent',true)).toThrow('cycles');
+  expect(()=>f.ledger.setTeamChild('org','owner',9,'parent','parent',true)).toThrow('cycles');
+  expect(f.ledger.snapshot('org')?.revision).toBe(9);
+  f.ledger.removeTeam('org','owner',9,'child');
+  expect(f.ledger.snapshot('org')?.teams.find(team=>team.id==='parent')?.childTeams).toEqual([]);
+  expect(f.ledger.resolveAccess('org','repo','member')?.role).toBeNull();
+ }finally{f.db.close();}
+});
