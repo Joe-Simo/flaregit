@@ -3322,6 +3322,9 @@ References: `https://docs.github.com/en/account-and-profile` and `https://docs.g
 
 ### F09 — organizations and access (R1; after C01/C05)
 
+**Progress (source-tested only, October 8):** `src/core/org-access.ts` (`tests/org-access.test.ts`, 3 pass). Effective role is the
+highest of direct and team grants; org owners are admin; the last owner cannot be removed. Open: invitations, teams UI, audit log, SSO.
+
 Build true organization ownership, teams/nesting, inherited roles, outside collaborators, multiple owners, invitations, access reviews, scoped application/token controls, and audit trails. Reserve enterprise SSO/managed-user expansion for F19; implement those paths only through maintained standards-based implementations and approved providers. R1 must already provide secure session/account recovery and key/token revocation.
 
 Acceptance: transfer a repo into an organization, grant/revoke team access, remove an employee, and verify every read, clone, preview, notification, search and app token respects the change. Invitations cannot downgrade an owner or be consumed twice. Business account continuity must survive one owner leaving.
@@ -3329,6 +3332,9 @@ Acceptance: transfer a repo into an organization, grant/revoke team access, remo
 References: `https://docs.github.com/en/organizations` and `https://docs.github.com/en/authentication`.
 
 ### F10 — CI engine and runner compatibility (R2; after C02/C08/F09)
+
+**Progress (source-tested only, October 8):** `src/core/ci-gate.ts` (`tests/ci-gate.test.ts`, 2 pass). A required check passes only with
+a successful latest run on the exact commit; missing checks block. Open: the engine, runners, workflows (hosted/Containers blocked).
 
 Implement triggers, job dependencies, matrices, conditions, reusable workflows, logs, artifacts/caches, timeouts, cancellation/retry, secret scopes, environment approval, workload identity, resource quotas and billable usage. Publish a precise workflow dialect/compatibility matrix. Test imported workflows through actual execution; an Actions YAML parser alone is not compatibility.
 
@@ -3364,6 +3370,9 @@ Reference: `https://docs.github.com/en/code-security`.
 
 ### F14 — APIs, apps and ecosystem interoperability (R1 core; R2 expansion; after C08/F09)
 
+**Progress (source-tested only, October 8):** `src/core/token-scopes.ts` (`tests/token-scopes.test.ts`, 2 pass). Least-privilege scopes;
+write implies read of the same resource only; unknown scopes are refused. Open: apps, webhooks expansion, OAuth.
+
 Publish stable versioned contracts, pagination, rate limits, resource IDs, webhook events and replay rules. Complete app installation/consent, scoped authentication, revocation, check/report APIs, and a trustworthy integration discovery surface. Expose REST and GraphQL equivalents where included; disclose exact incompatibilities rather than claiming drop-in GitHub API support.
 
 Acceptance: an external test client reads and updates issues, requests checks for an exact candidate, handles pagination/limits/retries, and is immediately denied after revocation. A real app completes install/use/uninstall. A vendor name in metadata is not a connected account or certified integration.
@@ -3371,6 +3380,9 @@ Acceptance: an external test client reads and updates issues, requests checks fo
 References: `https://docs.github.com/en/rest`, `https://docs.github.com/en/graphql`, `https://docs.github.com/en/apps`, `https://docs.github.com/en/webhooks`.
 
 ### F15 — complete migration and exit (R1; after F01–F09/C08; extend for R2 objects)
+
+**Progress (source-tested only, October 8):** `src/core/export-bundle.ts` (`tests/export-bundle.test.ts`, 2 pass). SHA-256 manifest per
+object; private objects excluded without access; tampered or missing content reported. Open: import, Git data, redirects.
 
 Inventory and transfer all in-scope heads/tags/reachable objects and LFS bytes; map issues, PRs, inline reviews, discussions, reactions, attachments, releases, wiki and project metadata. Support authorized private sources, resumable jobs, deletions, idempotent restart, and provenance. Imported authors retain attribution without impersonating local accounts. Produce a coverage and discrepancy report.
 
