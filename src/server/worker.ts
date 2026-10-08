@@ -927,12 +927,12 @@ export default {
             const [role, deleting] = await Promise.all([repository.roleOf(userId), repository.repositoryDeletionPending()]);
             return role !== null && !deleting;
           }, freshPrincipal, async row => {
-            const thread=/^thread\.comment\.([a-f0-9-]{36})\.(issue|change|candidate)\.([a-z0-9_-]+)\.([1-9][0-9]*)\.([1-9][0-9]*)$/.exec(row.type);
+            const thread=/^thread\.(comment|mention)\.([a-f0-9-]{36})\.(issue|change|candidate)\.([a-z0-9_-]+)\.([1-9][0-9]*)\.(0|[1-9][0-9]*)$/.exec(row.type);
             if(thread){
-              const commentId=Number(thread[4]),version=Number(thread[5]);
+              const commentId=Number(thread[5]),version=Number(thread[6]);
               if(!Number.isSafeInteger(commentId)||!Number.isSafeInteger(version))return null;
-              const source=await projectOf(env,row.project_id).memberThreadNotification(userId,thread[1]!,`${thread[2]}:${thread[3]}`,commentId,version);
-              return source?{...row,project_name:source.projectName,title:'New comment in a subscribed thread'}:null;
+              const source=await projectOf(env,row.project_id).memberThreadNotification(userId,thread[2]!,`${thread[3]}:${thread[4]}`,commentId,version,thread[1]==='mention'?'mention':'subscription');
+              return source?{...row,project_name:source.projectName,title:thread[1]==='mention'?'You were mentioned in a thread':'New comment in a subscribed thread'}:null;
             }
             const match=/^discussion\.reply\.public\.(discussion_[a-f0-9-]{36})\.(discussion_[a-f0-9-]{36})$/.exec(row.type);
             if(!match)return null;
@@ -1172,7 +1172,7 @@ export default {
         if(!effectiveAccess)return text('Not found',404);
         if(method!=='GET'&&!effectiveAccess.direct&&sub!=='/issue-filters'){
           if(effectiveAccess.role==='read'&&sub!=='/clone')return text('Repository access is read-only',403);
-          if(sub!=='/clone'&&!sub.startsWith('/wiki/')&&sub!=='/planning'&&sub!=='/issues'&&!/^\/issues\/\d{1,7}\/attachments(?:\/(?:[a-f0-9-]{36})(?:\/(?:content|reconcile))?)?$/.test(sub)&&sub!=='/comments'&&sub!=='/tasks'&&!/^\/tasks\/[a-z0-9-]+\/(token|ready|cancel|browser-edit|fork-permission)$/.test(sub))return text('This operation requires direct repository membership',403);
+          if(sub!=='/clone'&&!sub.startsWith('/wiki/')&&sub!=='/planning'&&sub!=='/issues'&&!(method==='PATCH'&&/^\/issues\/\d{1,7}$/.test(sub))&&!/^\/issues\/\d{1,7}\/attachments(?:\/(?:[a-f0-9-]{36})(?:\/(?:content|reconcile))?)?$/.test(sub)&&sub!=='/comments'&&sub!=='/tasks'&&!/^\/tasks\/[a-z0-9-]+\/(token|ready|cancel|browser-edit|fork-permission)$/.test(sub))return text('This operation requires direct repository membership',403);
         }
         const state = await project.getState().catch(() => null);
         if (!state) return text("Not found", 404);
@@ -2525,7 +2525,7 @@ export default {
         }
 
         if(sub==='/issue-features'){
-          if(method==='GET')return repositoryReadJson({...await project.issueFeatures(userId),canManage:isOwner});
+          if(method==='GET')return repositoryReadJson({...await project.issueFeatures(userId),canManage:isOwner,canTriage:effectiveAccess.role!=='read'&&!(auth.viaToken&&auth.tokenScope==='read')&&state.lifecycle?.state!=='archived'});
           if(method!=='PATCH')return text('Method not allowed',405);
           const input=issueFeatureWrite.safeParse(await body<unknown>());if(!input.success)return text('Invalid issue planning action',400);
           if((input.data.action.kind==='templates'||input.data.action.kind.startsWith('milestone-'))&&!isOwner)return text('Milestones and templates require repository owner administration access',403);
@@ -2596,23 +2596,38 @@ export default {
           }catch(error){if(error instanceof RequestBodyError)throw error;const status=error instanceof LfsStorageError?error.status:503;return repositoryReadJson({error:error instanceof LfsStorageError?error.message.replace(/LFS/g,"Attachment"):"Attachment outcome was not confirmed. Retry the original file and request identity."},status);}
         }
 
+        const issueRelationsRoute=/^\/issues\/(\d{1,7})\/relations$/.exec(sub);
+        if(issueRelationsRoute){
+          if(method!=='GET')return text('Method not allowed',405);
+          if([...url.searchParams.keys()].some(key=>key!=='cursor')||url.searchParams.getAll('cursor').length>1)return repositoryReadJson({error:'Invalid relationship page query'},400);
+          const cursor=url.searchParams.get('cursor')??undefined;if(cursor!==undefined&&(!cursor||cursor.length>256))return repositoryReadJson({error:'Invalid relationship cursor'},400);
+          const freshRelationActor=async()=>{const current=await authenticate(request,env);if(current instanceof Response||current.id!==userId||current.viaToken!==auth.viaToken||await account.accountLifecycle()!=='active'||!await project.repositoryAccess(userId))throw Error('Issue relationship authorization changed');};
+          try{await freshRelationActor();const outcome=await project.issueRelationships(userId,Number(issueRelationsRoute[1]),cursor);await freshRelationActor();return repositoryReadJson(outcome.ok?{...outcome.value,canRemove:outcome.value.canRemove&&!(auth.viaToken&&auth.tokenScope==='read')}:{error:outcome.error},outcome.ok?200:outcome.status);}catch{return repositoryReadJson({error:'Issue relationship access is unavailable'},403);}
+        }
+
         const issueRoute = /^\/issues\/(\d{1,7})$/.exec(sub);
         if (issueRoute && method === "GET") {
+          const context=await project.repositoryReadContext(userId,null,null);
           const issue = await project.getIssue(Number(issueRoute[1]));
-          if (!issue) return text("Unknown issue", 404);
-          const linked = Object.values(state.tasks).filter((t) => t.issue === issue.number).map((t) => ({ id: t.id, goal: t.goal, status: t.status }));
-          const comments=await project.listComments(`issue:${issue.number}`);
-          if(auth.oauthClientId){const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;}
-          return json({ ...issue, linked: auth.oauthClientId ? [] : linked, comments });
+          const currentState=await project.getState();
+          const linked = issue?Object.values(currentState.tasks).filter((t) => t.issue === issue.number).map((t) => ({ id: t.id, goal: t.goal, status: t.status })):[];
+          const comments=issue?await project.listComments(`issue:${issue.number}`):[];
+          const currentAccess=await project.repositoryAccess(userId);
+          const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;
+          if(fresh.id!==userId||Boolean(fresh.viaToken)!==Boolean(auth.viaToken)||fresh.oauthClientId!==auth.oauthClientId||await account.accountLifecycle()!=='active'||fresh.expiresAt!==undefined&&fresh.expiresAt<=Date.now())return repositoryReadText('Issue access changed; reload before continuing',403);
+          const hash=fresh.viaToken?await gitParentTokenHash(request):undefined;
+          if(!await project.assertRepositoryReadContext(context,userId,null,hash))return repositoryReadText('Issue access changed; reload before continuing',403);
+          if(fresh.expiresAt!==undefined&&fresh.expiresAt<=Date.now())return repositoryReadText('Your session expired; sign in again',403);
+          const canStateWrite=currentAccess!==null&&currentAccess.role!=='read'&&currentState.lifecycle?.state!=='archived'&&(fresh.oauthClientId?fresh.oauthScopes?.includes('issues:write')===true:!(fresh.viaToken&&fresh.tokenScope==='read'));
+          return issue?repositoryReadJson({ ...issue, linked: auth.oauthClientId ? [] : linked, comments,canStateWrite }):repositoryReadText('Unknown issue',404);
         }
         if (issueRoute && method === "PATCH") {
-          const b = await body<{ state?: string }>();
-          if (b.state !== "open" && b.state !== "closed") return text("state must be open or closed", 400);
-          const author=await me();
-          if(auth.oauthClientId){const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;}
-          const issue = await project.setIssueState(Number(issueRoute[1]), b.state, author);
-          if(auth.oauthClientId){const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;}
-          return issue ? json(issue) : text("Unknown issue", 404);
+          const input=await body<unknown>(4096),current=await authenticate(request,env);if(current instanceof Response)return current;
+          if(current.id!==userId||current.viaToken!==auth.viaToken||current.oauthClientId!==auth.oauthClientId||current.tokenRepo&&current.tokenRepo!==projectId)return text("Issue writer authentication changed",403);
+          const profile=await account.getProfile(),actor={userId,displayName:clean(profile.displayName,120)||"Issue member",viaToken:current.viaToken===true};
+          const credential=current.oauthClientId?{oauth:{token:request.headers.get("Authorization")!.slice(7),clientId:current.oauthClientId,repositoryId:projectId}}:current.viaToken?{personalTokenHash:await gitParentTokenHash(request)}:{sessionExpiresAt:current.expiresAt};
+          const reply=await project.issueStateMutation(Number(issueRoute[1]),input,actor,credential);if(!reply.ok)return repositoryReadJson({error:reply.error},reply.status);
+          const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;if(fresh.id!==userId||fresh.viaToken!==current.viaToken||fresh.oauthClientId!==current.oauthClientId)return text("Issue status response access changed",403);return repositoryReadJson(reply.value);
         }
 
         // ----- conversations on issues, changes and candidates (optionally anchored to a file line) -----
@@ -2666,7 +2681,7 @@ export default {
           }
           const author=await me();
           if(!await authorizeCommentAccess())return text("Comment access was revoked",403);
-          let saved;try{saved=await project.addMemberComment(userId,{subject,author,body:text_,path:path_,line,commit:b.commit,idempotencyKey:b.idempotencyKey});}catch(error){const message=String(error);return text(message.includes("different content")?"Comment request key was used for different content":message.includes("cannot be recreated")?"The recorded comment is unavailable; it cannot be recreated with this request key":"Comment access unavailable",message.includes("different content")?409:message.includes("cannot be recreated")?410:message.includes("Unknown comment subject")?404:message.includes("revision is no longer recorded")?409:message.includes("access was revoked")?403:503);}
+          let saved;try{saved=await project.addMemberComment(userId,{subject,author,body:text_,path:path_,line,commit:b.commit,idempotencyKey:b.idempotencyKey},{viaToken:auth.viaToken===true,...(auth.viaToken?{hash:await gitParentTokenHash(request)}:{expiresAt:auth.expiresAt})});}catch(error){const message=String(error);if(message.includes("A comment can mention at most 20 distinct handles"))return text("A comment can mention at most 20 distinct handles",400);return text(message.includes("different content")?"Comment request key was used for different content":message.includes("cannot be recreated")?"The recorded comment is unavailable; it cannot be recreated with this request key":"Comment access unavailable",message.includes("different content")?409:message.includes("cannot be recreated")?410:message.includes("Unknown comment subject")?404:message.includes("revision is no longer recorded")?409:message.includes("access was revoked")?403:503);}
           if(!await authorizeCommentAccess())return text("Comment result unavailable because access was revoked",403);
           return json(saved,201);
         }

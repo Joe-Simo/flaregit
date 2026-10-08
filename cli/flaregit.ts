@@ -3,6 +3,7 @@
  * flaregit — scriptable CLI. Output is JSON by default (add --pretty for humans); errors go to stderr as
  * JSON with a non-zero exit code. No interactive prompts anywhere.
  */
+import {prepareIssueStateCommand} from "../src/cli/issue-state-command";
 import { isSafePushOption } from "../src/core/sanitize.js";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -123,7 +124,7 @@ const HELP = `flaregit — JSON by default (--pretty for humans)
   integrate <repo> <change> [<change> ...]       compose, verify and queue 1-8 changes for review
   workflow status|pause|resume <repo> <instance>  inspect or preserve/resume a running workflow
   log <repo> [--limit N] | tree <repo> [path] | cat <repo> <path>
-  issues <repo> [--state closed] | issue new <repo> "<title>" [--body T] | issue view|close|reopen <repo> <n>
+  issues <repo> [--state closed] | issue new <repo> "<title>" [--body T] | issue view <repo> <n> | issue close|reopen <repo> <n> [--request UUID --revision N]
   comment <repo> "<text>" (--issue N | --change ID | --candidate ID) [--path P --line N] [--request UUID]
   candidates <repo> [--all]                      verified candidates waiting for review
   accept|reject <repo> <candidate> [--note T]    decide what becomes history
@@ -275,7 +276,11 @@ async function main() {
     const id = await repo(rest[0]);
     if (sub === "new") return out(await api("POST", `/p/${id}/issues`, { title: rest[1] ?? fail('Usage: flaregit issue new <repo> "<title>" [--body TEXT]'), body: flag("body") ?? "" }));
     if (sub === "view") return out(await api("GET", `/p/${id}/issues/${rest[1] ?? fail("Specify an issue number")}`));
-    if (sub === "close" || sub === "reopen") return out(await api("PATCH", `/p/${id}/issues/${rest[1] ?? fail("Specify an issue number")}`, { state: sub === "close" ? "closed" : "open" }));
+    if(sub==="close"||sub==="reopen"){
+      const command=await prepareIssueStateCommand({repositoryId:id,issue:rest[1],action:sub,request:flags.get("request"),revision:flags.get("revision")},()=>api("GET",`/p/${id}/issues/${rest[1]}`));
+      console.error(JSON.stringify(command.metadata));
+      return out(await api("PATCH",command.route,command.body));
+    }
     fail("Usage: flaregit issue new|view|close|reopen <repo> ...");
   }
   if (cmd === "comment") {

@@ -3463,9 +3463,12 @@ retention ownership, same-hash admission holds and late deletion of an old physi
 Desktop/mobile actual-component fixtures pass.
 Still open: complete duplicate/sub-issue workflows,
 moderation and deleted/transferred-resource routes; this does not close the full ticket.
-The existing issue-state PATCH path still needs actor/session/current-membership fencing and conflict checks at the
-actual canonical write; that prerequisite precedes transfer/deletion work. Relationship controls also need current
-title/status navigation using the existing link store.
+Issue-state PATCH now checks the current actor, credential/session, lifecycle and direct/inherited writer authority
+at the canonical transaction. Durable revisions observe internal and raw SQL updates; original UUID/CAS receipts
+reconcile lost responses without repeating a status change. Signed HTTP withdrawal/conflict/replay and actual CLI
+retry checks pass. Issue detail reads withhold titles/comments after membership, credential or account withdrawal.
+Relationships now show current title/status navigation, unavailable peers, bounded complete pages and version-bound
+removal through the canonical link store. SQLite, signed HTTP and desktop/mobile interaction checks pass.
 
 Complete labels, assignees, milestones, templates/forms, attachment handling, linking/closing through accepted work, duplicate/transfer workflows, relationships/subissues, saved filtering, bulk actions, and moderation. Preserve discussion context when tasks are assigned to agents.
 
@@ -3516,8 +3519,12 @@ Source comment and recipient outbox commit atomically; alarm retries use account
 inbox entries revalidate their exact source, repository incarnation and preference revision. Public discussion
 subscribers can receive reply events without membership; their exact public source never releases private activity
 from the same repository. Native storage and actual Worker HTTP cover lost acknowledgements, withdrawal, removal,
-and publication revocation. Actual-component desktop/mobile fixtures pass. Mentions, state-event subscriptions,
-historical/system comment delivery, email delivery and full hosted acceptance remain open.
+and publication revocation. Authenticated new member comments now resolve literal mentions to proven direct or
+inherited readers, freeze recipient identities and union mentions/subscriptions into one direct delivery.
+Profile changes cannot reroute mentions; subscribe/unsubscribe preserves them, while a durable mute epoch prevents
+old events resurfacing after unmute. Per-user membership epochs prevent same-timestamp remove/regrant resurrection.
+Parser, SQLite and signed Worker HTTP checks pass. Public outsider/historical/system mentions, state-event
+subscriptions, email delivery, discovery completeness and full hosted acceptance remain open.
 
 Complete profiles, contribution visibility controls, follows, stars/watch subscriptions, repository discovery/topics, notifications, mentions, mute/unsubscribe, read/unread state, email preferences, and delivery diagnostics. Use existing profile/community/inbox modules where they work. Prevent name/namespace impersonation through a defined reporting and review process.
 

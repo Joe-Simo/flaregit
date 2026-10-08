@@ -28,7 +28,10 @@ test('external OAuth client installs, uses scoped issues and exact checks, then 
     const created=await appCall('/api/p/p123456789abc/issues','POST',{title:'External client issue',body:'Owned by the client',idempotencyKey:crypto.randomUUID()});expect(created.status).toBe(201);
     const issue=await created.json() as {number:number};
     expect((await appCall('/api/p/p123456789abc/issues')).status).toBe(200);
-    expect((await appCall('/api/p/p123456789abc/issues/'+issue.number,'PATCH',{state:'closed'})).status).toBe(200);
+    const issuePath='/api/p/p123456789abc/issues/'+issue.number;
+    const viewed=await appCall(issuePath);expect(viewed.status).toBe(200);
+    const currentIssue=await viewed.json() as {stateRevision:number};
+    expect((await appCall(issuePath,'PATCH',{state:'closed',expectedRevision:currentIssue.stateRevision,requestId:crypto.randomUUID()})).status).toBe(200);
     expect((await appCall('/api/p/p123456789abc/candidates/candidate-one/checks','POST',{checkId:'build',commit:'c'.repeat(40)})).status).toBe(409);
     expect((await appCall('/api/p/p123456789abc/candidates/candidate-one/checks','POST',{checkId:'build',commit:'a'.repeat(40)})).status).toBe(201);
     expect((await appCall('/api/p/p123456789abc/candidates/candidate-one/checks')).status).toBe(200);
@@ -38,6 +41,9 @@ test('external OAuth client installs, uses scoped issues and exact checks, then 
     for (const path of ['/api/p/p123456789abc/native/git-credentials','/api/p/p123456789abc/members','/api/oauth/apps','/api/registry/owned','/npm/owned','/v2/owned/manifests/latest']) expect([403,404]).toContain((await appCall(path)).status);
     const readOnly=await exchange('issues:read');
     expect((await appCall('/api/p/p123456789abc/issues','POST',{title:'Denied'},readOnly.access_token)).status).toBe(403);
+    const readOnlyView=await appCall(issuePath,'GET',undefined,readOnly.access_token);expect(readOnlyView.status).toBe(200);
+    const readOnlyIssue=await readOnlyView.json() as {stateRevision:number};
+    expect((await appCall(issuePath,'PATCH',{state:'open',expectedRevision:readOnlyIssue.stateRevision,requestId:crypto.randomUUID()},readOnly.access_token)).status).toBe(403);
     expect((await appCall('/api/p/p123456789abc/candidates/candidate-one/checks','GET',undefined,readOnly.access_token)).status).toBe(403);
     const installed=await target.fetch('http://fixture/api/oauth/installations?repositoryId=p123456789abc',{headers:{Authorization:'Bearer '+token}});
     const catalog=await installed.json() as {installations:Array<{id:string}>};expect(catalog.installations.length).toBe(2);

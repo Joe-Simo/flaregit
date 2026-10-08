@@ -1,3 +1,4 @@
+import {z} from 'zod';
 import {IssueFilters} from '../components/IssueFilters';
 import type {IssueFilterCriteria} from '../../server/issue-feature-store';
 import {IssueAttachments} from '../components/IssueAttachments';
@@ -14,7 +15,7 @@ import {Input} from "@/components/ui/input";
 import {Textarea} from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { apiJson, apiSessionIdentity } from "../api";
+import { ApiError, apiJson, apiSessionIdentity } from "../api";
 import {readIssueDraft,saveIssueDraft,clearIssueDraft,type IssueDraftScope} from "../issue-draft-recovery";
 import {recoverIssueChange,persistIssueChange,type IssueChangeIntent} from "../issue-change-recovery";
 import { navigate, timeAgo } from "../router";
@@ -22,7 +23,11 @@ import { changeCreationFollowup, type ChangeCreationResponse } from "../change-c
 import { Conversation } from "../components/Conversation";
 
 interface Issue { discussionOrigin?:{discussionId:string;scope:'public'|'members';author:string;createdAt:string;convertedBy:string}; number: number; title: string; body: string; state: "open" | "closed"; author: string; created_at: string; updated_at: string; closed_by: string | null; comments: number; importedOrigin?:ImportedConversationOrigin|null }
-interface IssueDetail extends Omit<Issue, "comments"> { linked: Array<{ id: string; goal: string; status: string }> }
+interface IssueDetail extends Omit<Issue, "comments"> { stateRevision:number;canStateWrite?:boolean; linked: Array<{ id: string; goal: string; status: string }> }
+const stateChangeSchema=z.object({state:z.enum(['open','closed']),expectedRevision:z.number().int().nonnegative().safe(),requestId:z.uuid()}).strict();
+type StateChangeIntent=z.infer<typeof stateChangeSchema>;
+type StateChangeReceipt={issue:{number:number;state:'open'|'closed';stateRevision:number;updated_at:string;closed_by:string|null};requestId:string;replayed:boolean;changedSince:boolean;originalState:'open'|'closed';originalRevision:number};
+const stateChangeKey=(identity:string,projectId:string,number:number)=>`flaregit.issue-draft.${JSON.stringify([identity,projectId,number,'state'])}`;
 const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm";
 const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive";
 const okCls = "rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-200";
@@ -136,13 +141,13 @@ function IssueList({ projectId }: { projectId: string }) {
           {issues.map((i) => (
             <li key={i.number}>
               <div className="flex items-start"><Checkbox className="m-3 shrink-0" aria-label={`Select issue ${i.number}`} checked={selected.includes(i.number)} disabled={!selected.includes(i.number)&&selected.length>=100} onCheckedChange={checked=>setSelected(previous=>checked===true?[...previous,i.number]:previous.filter(n=>n!==i.number))}/>
-              <button className="w-full text-left px-3 py-2 flex items-start gap-2 hover:bg-muted/40" onClick={() => navigate(`/p/${projectId}/issues?n=${i.number}`)}>
+              <Button variant="ghost" className="h-auto w-full rounded-none text-left whitespace-normal px-3 py-2 items-start justify-start gap-2 hover:bg-muted/40" onClick={() => navigate(`/p/${projectId}/issues?n=${i.number}`)}>
                 {i.state === "open" ? <CircleDot className="h-4 w-4 mt-0.5 text-emerald-400 shrink-0" aria-label="open" /> : <CircleCheck className="h-4 w-4 mt-0.5 text-purple-400 shrink-0" aria-label="closed" />}
                 <span className="min-w-0">
                   <span className="block text-sm font-medium break-words">{i.title}</span>
                   <span className="block text-xs text-muted-foreground">#{i.number}{!i.importedOrigin&&<> by {i.author}</>} · updated {timeAgo(i.updated_at)}{i.comments ? ` · ${i.comments} comment${i.comments === 1 ? "" : "s"}` : ""}</span>
                 </span>
-              </button>
+              </Button>
               </div>
               {i.importedOrigin&&<div className="px-3 pb-2"><ImportedOrigin sourceUrl={i.importedOrigin.sourceUrl} login={i.importedOrigin.login} createdAt={i.importedOrigin.createdAt}/></div>}
             </li>
@@ -156,6 +161,7 @@ function IssueList({ projectId }: { projectId: string }) {
 }
 
 function IssueView({ projectId, number }: { projectId: string; number: number }) {
+  const activeIdentity=apiSessionIdentity();
   const [issue, setIssue] = useState<IssueDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -163,6 +169,8 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
   const [busy, setBusy] = useState<null | "toggle" | "change" | "agent">(null);
 
   const lifetime=useRef(0), readSequence=useRef(0), readController=useRef<AbortController | null>(null), actionLock=useRef(false);
+  const [stateIntent,setStateIntent]=useState<StateChangeIntent|null>(null);
+  const stateIntentRef=useRef<{identity:string;intent:StateChangeIntent}|null>(null),detailIdentity=useRef<string|null>(null);
   const creationIntent=useRef<{identity:string;projectId:string;issue:number;payload:IssueChangeIntent} | null>(null);
   const [savedChange,setSavedChange]=useState<string | null>(null);
   const [originalChange,setOriginalChange]=useState<IssueChangeIntent|null>(null);
@@ -174,35 +182,40 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
     try {
       const next=await apiJson<IssueDetail>(`/p/${projectId}/issues/${number}`,{signal:controller.signal});
       if(generation===lifetime.current && sequence===readSequence.current&&apiSessionIdentity()===identity){
-        setIssue(next);setSavedChange(null);setOriginalChange(null);
+        detailIdentity.current=identity;setIssue(next);setSavedChange(null);setOriginalChange(null);
+        if(identity)try{const raw=sessionStorage.getItem(stateChangeKey(identity,projectId,number));if(raw&&raw.length>1000)throw Error('Saved status change is invalid.');const saved=raw?stateChangeSchema.parse(JSON.parse(raw)):null;stateIntentRef.current=saved?{identity,intent:saved}:null;setStateIntent(saved);}catch{setError('Your saved status change could not be read. Restore browser storage before changing this issue.');}
+        else{stateIntentRef.current=null;setStateIntent(null);}
         if(identity)try{
           const scope={identity,projectId,issue:number},saved=recoverIssueChange(sessionStorage,scope);
           if(saved){creationIntent.current={...scope,payload:saved};setSavedChange(saved.taskId);setOriginalChange(saved);}
         }catch{/* Recovery errors must not block reading the issue. Dispatch validates again. */}
       }
     } catch (e) {
-      if(generation===lifetime.current && sequence===readSequence.current && !controller.signal.aborted)setLoadError(errText(e, "Could not load the issue"));
+      if(generation===lifetime.current && sequence===readSequence.current && apiSessionIdentity()===identity && !controller.signal.aborted){if(e instanceof ApiError&&[401,403,404].includes(e.status)){detailIdentity.current=null;setIssue(null);}setLoadError(errText(e, "Could not load the issue"));}
     }
   }, [projectId, number]);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { detailIdentity.current=null;setIssue(null);void load(); }, [load,activeIdentity]);
 
+  const discardStateIntent=()=>{
+    const identity=apiSessionIdentity();if(actionLock.current||!identity||detailIdentity.current!==identity)return;
+    try{const key=stateChangeKey(identity,projectId,number);sessionStorage.removeItem(key);if(sessionStorage.getItem(key)!==null)throw Error();stateIntentRef.current=null;setStateIntent(null);setError(null);setNotice('Saved status change cleared.');detailIdentity.current=null;void load();}catch{setError('The saved status change could not be cleared.');}
+  };
   const toggle = async () => {
-    if (!issue || actionLock.current) return;
-    actionLock.current=true;const generation=lifetime.current;
-    const next = issue.state === "open" ? "closed" : "open";
-    setBusy("toggle");
-    setError(null);
-    setNotice(null);
-    try {
-      await apiJson(`/p/${projectId}/issues/${number}`, { method: "PATCH", json: { state: next } });
-      if(generation!==lifetime.current)return;
-      setNotice(next === "closed" ? "Issue closed." : "Issue reopened.");
-      await load();
-    } catch (e) {
-      if(generation===lifetime.current)setError(errText(e, "Issue not updated"));
-    } finally {
-      actionLock.current=false;if(generation===lifetime.current)setBusy(null);
-    }
+    const identity=apiSessionIdentity();if(!issue||actionLock.current||!identity||detailIdentity.current!==identity||issue.canStateWrite===false)return;
+    const generation=lifetime.current;const current=()=>generation===lifetime.current&&apiSessionIdentity()===identity;
+    try{
+      let original=stateIntentRef.current;if(original&&original.identity!==identity)return;
+      if(!original){const raw=sessionStorage.getItem(stateChangeKey(identity,projectId,number));if(raw&&raw.length>1000)throw Error('Saved status change is invalid.');const intent=raw?stateChangeSchema.parse(JSON.parse(raw)):stateChangeSchema.parse({state:issue.state==='open'?'closed':'open',expectedRevision:issue.stateRevision,requestId:crypto.randomUUID()});original={identity,intent};stateIntentRef.current=original;setStateIntent(intent);}
+      const serialized=JSON.stringify(original.intent),key=stateChangeKey(identity,projectId,number);sessionStorage.setItem(key,serialized);if(sessionStorage.getItem(key)!==serialized)throw Error('Browser recovery is unavailable.');
+    }catch(cause){setError(`No status change was sent. ${errText(cause,'Restore browser storage before retrying.')}`);return;}
+    const savedIntent=stateIntentRef.current;if(!savedIntent||savedIntent.identity!==identity)return;const intent=savedIntent.intent;actionLock.current=true;setBusy('toggle');setError(null);setNotice(null);
+    try{
+      const receipt=await apiJson<StateChangeReceipt>(`/p/${projectId}/issues/${number}`,{method:'PATCH',json:intent});if(!current())return;
+      if(receipt.requestId!==intent.requestId)throw Error('The original status change could not be confirmed.');
+      setNotice(receipt.changedSince?'Your original status change was saved. The issue changed again afterward; its current status is shown below.':intent.state==='closed'?'Issue closed.':'Issue reopened.');
+      const key=stateChangeKey(identity,projectId,number);sessionStorage.removeItem(key);if(sessionStorage.getItem(key)!==null)throw Error('Saved status change remains available to check again.');stateIntentRef.current=null;setStateIntent(null);await load();
+    }catch(cause){if(current())setError(`Status change could not be confirmed. Retry the saved change or refresh before choosing a new status. ${errText(cause,'')}`);}
+    finally{actionLock.current=false;if(current())setBusy(null);}
   };
   const startChange = async (agent: boolean) => {
     if (!issue || actionLock.current) return;
@@ -242,17 +255,17 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
   };
 
   if (loadError && !issue) return <LoadError message={loadError} onRetry={() => void load()} />;
-  if (!issue) return <p role="status" className="text-sm text-muted-foreground">Loading issue…</p>;
+  if (!issue||detailIdentity.current!==activeIdentity) return loadError?<LoadError message={loadError} onRetry={()=>void load()}/>:<p role="status" className="text-sm text-muted-foreground">Loading issue…</p>;
   return (
     <div className="space-y-4 max-w-3xl min-w-0">
-      <button className="text-sm text-muted-foreground hover:text-foreground" onClick={() => navigate(`/p/${projectId}/issues`)}>← All issues</button>
+      <Button size="sm" variant="link" className="h-auto p-0 justify-start text-muted-foreground" onClick={() => navigate(`/p/${projectId}/issues`)}>← All issues</Button>
       <div>
         <h2 className="text-lg font-semibold break-words">{issue.title} <span className="text-muted-foreground font-normal">#{issue.number}</span></h2>
-        <p className="text-xs text-muted-foreground">
+        <div className="text-xs text-muted-foreground">
           <Badge variant={issue.state === "open" ? "success" : "purple"}>{issue.state}</Badge> {issue.importedOrigin?<ImportedOrigin sourceUrl={issue.importedOrigin.sourceUrl} login={issue.importedOrigin.login} createdAt={issue.importedOrigin.createdAt}/>:<>opened by {issue.author} {timeAgo(issue.created_at)}</>}
           {issue.discussionOrigin&&<p className="mt-2 text-xs text-muted-foreground">Converted by {issue.discussionOrigin.convertedBy} from a {issue.discussionOrigin.scope==='members'?'member':'public'} discussion. <a className="underline" href={issue.discussionOrigin.scope==='members'?`/#/p/${projectId}/discussions?topic=${encodeURIComponent(issue.discussionOrigin.discussionId)}`:`/#/community?repo=${encodeURIComponent(projectId)}&topic=${encodeURIComponent(issue.discussionOrigin.discussionId)}`}>View original discussion</a></p>}
           {issue.closed_by && issue.state === "closed" ? ` · closed by ${issue.closed_by}` : ""}
-        </p>
+        </div>
       </div>
       {issue.body && <p className="text-sm whitespace-pre-wrap break-words rounded-md border border-border p-3">{issue.body}</p>}
       {loadError && <LoadError message={loadError} onRetry={()=>void load()} />}
@@ -263,12 +276,13 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
       <div className="flex flex-wrap gap-2">
         {issue.state === "open" && <Button size="sm" variant="orange" disabled={busy !== null} onClick={() => void startChange(false)}>{busy === "change" ? "Checking…" : savedChange ? "Check saved change" : "Start a change"}</Button>}
         {issue.state === "open" && <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void startChange(true)}>{busy === "agent" ? "Checking…" : savedChange ? "Check or request agent" : "Ask an agent"}</Button>}
-        <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void toggle()}>{busy === "toggle" ? (issue.state === "open" ? "Closing…" : "Reopening…") : issue.state === "open" ? "Close issue" : "Reopen"}</Button>
+        <Button size="sm" variant="ghost" disabled={busy !== null||issue.canStateWrite===false||!apiSessionIdentity()} onClick={() => void toggle()}>{busy === "toggle" ? 'Saving…' : stateIntent ? 'Retry original status change' : issue.state === "open" ? "Close issue" : "Reopen"}</Button>
+        {stateIntent&&<><Button size="sm" variant="ghost" disabled={busy!==null} onClick={()=>void load()}>Refresh issue</Button><Button size="sm" variant="ghost" disabled={busy!==null} onClick={discardStateIntent}>Clear saved status change</Button></>}
       </div>
       {issue.linked.length > 0 && (
         <div className="text-sm">
           <h3 className="font-semibold mb-1">Changes for this issue</h3>
-          <ul className="space-y-1">{issue.linked.map((t) => <li key={t.id} className="break-words"><button className="hover:underline text-left" onClick={() => navigate(`/p/${projectId}/review?task=${t.id}`)}>{t.goal}</button> <span className="text-xs text-muted-foreground">{t.status}</span></li>)}</ul>
+          <ul className="space-y-1">{issue.linked.map((t) => <li key={t.id} className="break-words"><Button size="sm" variant="link" className="h-auto max-w-full p-0 text-left whitespace-normal" onClick={() => navigate(`/p/${projectId}/review?task=${t.id}`)}>{t.goal}</Button> <span className="text-xs text-muted-foreground">{t.status}</span></li>)}</ul>
         </div>
       )}
       <IssuePlanning key={`${projectId}:${number}`} projectId={projectId} number={number}/>

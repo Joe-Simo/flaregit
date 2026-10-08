@@ -59,6 +59,13 @@ test('issue planning HTTP enforces member privacy, owner milestone/template auth
     expect((await update({kind:'milestone-delete',id:1,reassignTo:2},owner)).status).toBe(200);
     expect((await update({kind:'relation-add',relation:'sub-issue-of',from:1,to:2})).status).toBe(200);
     expect((await update({kind:'relation-add',relation:'sub-issue-of',from:2,to:1})).status).toBe(400);
+    const relationshipRoute='/api/p/p123456789abc/issues/2/relations';
+    const relationships=await call(member,relationshipRoute);expect(relationships.status).toBe(200);
+    const graph=await relationships.json() as {items:Array<{kind:string;number:number;issue:{title:string;state:string}}>};expect(graph.items[0]).toMatchObject({kind:'sub-issue',number:1,issue:{title:'First issue',state:'open'}});expect(graph).not.toHaveProperty('sourceFingerprint');
+    expect(await (await call(readToken,relationshipRoute)).json()).toMatchObject({canRemove:false});
+    const privateGraph=await call(outsider,relationshipRoute);expect(privateGraph.status).toBe(404);expect(await privateGraph.text()).not.toContain('First issue');
+    expect((await call(member,relationshipRoute+'?cursor=a&cursor=b')).status).toBe(400);
+
     expect((await update({kind:'templates',templates:[{name:'Bug',fields:[{id:'Steps',type:'text',required:true},{id:'Confirmed',type:'checkbox',required:true}]}]},owner)).status).toBe(200);
     const preview='/api/p/p123456789abc/issue-template-preview';
     expect((await call(member,preview,'POST',{name:'Bug',values:{Confirmed:true}})).status).toBe(400);
@@ -92,6 +99,7 @@ test('issue planning HTTP enforces member privacy, owner milestone/template auth
     expect((await update({kind:'bulk-label',numbers:[1],label:'blocked'})).status).toBe(409);
     expect((await call(member,features)).status).toBe(200);
     await worker.fetch('http://fixture/fixture/revoke-member');
+    const revokedRelations=await call(member,relationshipRoute);expect([403,404]).toContain(revokedRelations.status);expect(await revokedRelations.text()).not.toContain('First issue');
     const revokedViews=await call(member,savedViews);expect([403,404]).toContain(revokedViews.status);expect(await revokedViews.text()).not.toContain(save.name);
     const revokedWrite=await call(member,savedViews,'POST',save);expect([403,404]).toContain(revokedWrite.status);expect(await revokedWrite.text()).not.toContain(save.name);
 

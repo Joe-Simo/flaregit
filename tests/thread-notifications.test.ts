@@ -26,3 +26,26 @@ test('deleted comments, other threads and self-authored comments cannot produce 
   expect(()=>f.ledger.update(incarnation,'change:task-one','reader',{mode:'muted',expectedVersion:1},()=>{throw Error('Access revoked');})).toThrow('revoked');expect(f.ledger.read(incarnation,'change:task-one','reader').version).toBe(1);
  }finally{f.db.close();}
 });
+test('mentions override subscriptions once, reach unsubscribed readers and remain fenced after mute/regrant',()=>{
+ const f=fixture(),incarnation=crypto.randomUUID(),subject='issue:12';try{
+  f.db.exec("INSERT INTO comments VALUES(1,'issue:12')");f.ledger.update(incarnation,subject,'reader',{mode:'subscribed',expectedVersion:0},()=>{});
+  f.ledger.stage(incarnation,subject,1,'writer',[{userId:'reader',handle:'reader',accountKey:'reader-key',profileVersion:1,authoritySource:'synthetic-authority'},{userId:'other',handle:'other',accountKey:'other-key',profileVersion:1,authoritySource:'synthetic-authority'}]);
+  expect(f.ledger.pending()).toHaveLength(2);const events=f.ledger.pending();expect(events.every(item=>item.delivery_kind==='mention')).toBe(true);
+  const other=events.find(item=>item.actor_id==='other')!;expect(other.preference_version).toBe(0);expect(f.ledger.available(other)).toBe(true);
+  f.ledger.update(incarnation,subject,'other',{mode:'subscribed',expectedVersion:0},()=>{});expect(f.ledger.available(other)).toBe(true);
+  f.ledger.update(incarnation,subject,'other',{mode:'unsubscribed',expectedVersion:1},()=>{});expect(f.ledger.available(other)).toBe(true);
+  f.ledger.update(incarnation,subject,'other',{mode:'muted',expectedVersion:2},()=>{});expect(f.ledger.available(other)).toBe(false);
+  f.ledger.update(incarnation,subject,'other',{mode:'unsubscribed',expectedVersion:3},()=>{});expect(f.ledger.available(other)).toBe(false);
+  expect(new ThreadNotifications(f.storage).available(other)).toBe(false);
+ }finally{f.db.close();}
+});
+test('legacy preference migration conservatively preserves old mention withdrawal',()=>{
+ const f=fixture(),incarnation=crypto.randomUUID(),subject='issue:12';try{
+  f.db.exec("INSERT INTO comments VALUES(1,'issue:12')");f.ledger.update(incarnation,subject,'reader',{mode:'subscribed',expectedVersion:0},()=>{});
+  f.ledger.stage(incarnation,subject,1,'writer',[{userId:'reader',handle:'reader',accountKey:'reader-key',profileVersion:1,authoritySource:'synthetic-authority'}]);const event=f.ledger.pending()[0]!;
+  f.db.exec('DROP TABLE thread_preferences; CREATE TABLE thread_preferences(incarnation TEXT,subject TEXT,actor_id TEXT,mode TEXT,version INTEGER,PRIMARY KEY(incarnation,subject,actor_id))');
+  f.db.query('INSERT INTO thread_preferences VALUES(?,?,?,?,?)').run(incarnation,subject,'reader','unsubscribed',3);
+  const migrated=new ThreadNotifications(f.storage);expect(migrated.available(event)).toBe(false);
+  migrated.update(incarnation,subject,'reader',{mode:'subscribed',expectedVersion:3},()=>{});expect(migrated.available(event)).toBe(false);
+ }finally{f.db.close();}
+});

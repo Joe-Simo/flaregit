@@ -1,3 +1,4 @@
+import {IssueRelationships} from './IssueRelationships';
 import {Collapsible,CollapsibleContent,CollapsibleTrigger} from '@/components/ui/collapsible';
 import React,{useEffect,useRef,useState} from 'react';
 import {Button} from '@/components/ui/button';
@@ -6,14 +7,14 @@ import {Select,SelectContent,SelectGroup,SelectItem,SelectTrigger,SelectValue} f
 import {Badge} from '@/components/ui/badge';
 import {apiJson,apiSessionIdentity} from '../api';
 import type {IssueFeatures,IssueFeatureWrite} from '../../server/issue-feature-store';
-type Planning=IssueFeatures&{issuesComplete:boolean;canManage:boolean;members:Array<{user_id:string;label:string}>;progress:Array<{id:number;open:number;closed:number}>};
+type Planning=IssueFeatures&{issuesComplete:boolean;canManage:boolean;canTriage?:boolean;members:Array<{user_id:string;label:string}>;progress:Array<{id:number;open:number;closed:number}>};
 export function IssuePlanning({projectId,number}:{projectId:string;number:number}){
  const [data,setData]=useState<Planning|null>(null),[error,setError]=useState<string|null>(null),[busy,setBusy]=useState(false),[label,setLabel]=useState(''),[milestone,setMilestone]=useState(''),[dueDate,setDueDate]=useState(''),[reassign,setReassign]=useState('none'),[templateName,setTemplateName]=useState(''),[templateField,setTemplateField]=useState('Details'),[target,setTarget]=useState(''),[relation,setRelation]=useState<'duplicate-of'|'sub-issue-of'>('sub-issue-of');
  const generation=useRef(0),lock=useRef(false);
  useEffect(()=>{const version=++generation.current,identity=apiSessionIdentity(),controller=new AbortController();setData(null);void apiJson<Planning>(`/p/${projectId}/issue-features`,{signal:controller.signal}).then(value=>{if(version===generation.current&&identity===apiSessionIdentity())setData(value);}).catch(e=>{if(!controller.signal.aborted&&version===generation.current)setError(e instanceof Error?e.message:'Could not load issue planning');});return()=>{generation.current++;controller.abort();};},[projectId,number]);
- const act=async(action:IssueFeatureWrite['action'])=>{
+ const act=async(action:IssueFeatureWrite['action'],expectedRevision=data?.revision)=>{
   if(!data||lock.current)return;lock.current=true;setBusy(true);setError(null);const version=generation.current,identity=apiSessionIdentity();
-  try{await apiJson(`/p/${projectId}/issue-features`,{method:'PATCH',json:{expectedRevision:data.revision,action}});const fresh=await apiJson<Planning>(`/p/${projectId}/issue-features`);if(version===generation.current&&identity===apiSessionIdentity())setData(fresh);}
+  try{await apiJson(`/p/${projectId}/issue-features`,{method:'PATCH',json:{expectedRevision,action}});const fresh=await apiJson<Planning>(`/p/${projectId}/issue-features`);if(version===generation.current&&identity===apiSessionIdentity())setData(fresh);}
   catch(e){if(version===generation.current){setError(`Update could not be confirmed. Reload planning before retrying. ${e instanceof Error?e.message:''}`);try{const fresh=await apiJson<Planning>(`/p/${projectId}/issue-features`);if(version===generation.current&&identity===apiSessionIdentity())setData(fresh);}catch{/* Keep existing context visible. */}}}
   finally{lock.current=false;if(version===generation.current)setBusy(false);}
  };
@@ -32,7 +33,7 @@ export function IssuePlanning({projectId,number}:{projectId:string;number:number
   {data.canManage&&<div className="flex flex-col gap-2"><div className="flex flex-wrap items-end gap-2"><label className="text-sm">New issue template<Input value={templateName} maxLength={100} disabled={busy} onChange={e=>setTemplateName(e.target.value)}/></label><label className="text-sm">Required text field<Input value={templateField} maxLength={60} disabled={busy} onChange={e=>setTemplateField(e.target.value)}/></label><Button size="sm" variant="outline" disabled={busy||!templateName.trim()||!templateField.trim()} onClick={()=>void act({kind:'templates',templates:[...templates,{name:templateName.trim(),fields:[{id:templateField.trim(),type:'text',required:true}]}]})}>Create template</Button></div>{data.templates.map(template=><div key={template.name} className="flex items-center gap-2 text-sm"><span>{template.name}</span><Button size="sm" variant="ghost" disabled={busy} onClick={()=>void act({kind:'templates',templates:templates.filter(t=>t.name!==template.name)})}>Remove template</Button></div>)}</div>}
   </CollapsibleContent></Collapsible>}
   <div className="flex flex-wrap items-end gap-2"><Select disabled={busy} value={relation} onValueChange={value=>setRelation(value==='duplicate-of'?'duplicate-of':'sub-issue-of')}><SelectTrigger className="w-44" aria-label="Relationship"><SelectValue/></SelectTrigger><SelectContent><SelectGroup><SelectItem value="sub-issue-of">Sub-issue of</SelectItem><SelectItem value="duplicate-of">Duplicate of</SelectItem></SelectGroup></SelectContent></Select><label className="text-sm">Issue number<Input type="number" min={1} value={target} disabled={busy} onChange={e=>setTarget(e.target.value)}/></label><Button size="sm" variant="outline" disabled={busy||!Number.isSafeInteger(Number(target))||Number(target)<1} onClick={()=>void act({kind:'relation-add',relation,from:number,to:Number(target)})}>Link issue</Button></div>
-  {data.links.filter(link=>link.from===number||link.to===number).map(link=><div key={`${link.kind}:${link.from}:${link.to}`} className="flex items-center gap-2 text-sm"><span>#{link.from} {link.kind==='duplicate-of'?'duplicates':'is a sub-issue of'} #{link.to}</span><Button size="sm" variant="ghost" disabled={busy} onClick={()=>void act({kind:'relation-remove',relation:link.kind,from:link.from,to:link.to})}>Remove link</Button></div>)}
+  <IssueRelationships projectId={projectId} number={number} planningRevision={data.revision} disabled={busy} canRemove={data.canTriage??data.canManage} onRemove={(link,revision)=>act({kind:'relation-remove',relation:link.kind,from:link.from,to:link.to},revision)}/>
   {error&&<p role="alert" className="text-sm text-destructive">{error}</p>}
  </section>;
 }

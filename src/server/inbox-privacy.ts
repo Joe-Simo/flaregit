@@ -23,7 +23,7 @@ export async function projectInbox(
   for (const row of rows) {
     // Public discussion authority applies only to this exact source event, never
     // to private notifications from the same repository. Legacy rows stay private.
-    if (/^discussion\.reply\.public\.discussion_[a-f0-9-]{36}\.discussion_[a-f0-9-]{36}$/.test(row.type) || row.type.startsWith('thread.comment.')) {
+    if (/^discussion\.reply\.public\.discussion_[a-f0-9-]{36}\.discussion_[a-f0-9-]{36}$/.test(row.type) || (row.type.startsWith('thread.comment.')||row.type.startsWith('thread.mention.'))) {
       try {
         if (await sourceEvent(row)) {
           const current = await sourceEvent(row);

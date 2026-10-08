@@ -37,7 +37,7 @@ export const savedIssueFilterWrite=z.discriminatedUnion('action',[
 export type SavedIssueFilterWrite=z.infer<typeof savedIssueFilterWrite>;
 const savedFilterSchema=z.object({id:z.uuid(),name:z.string().trim().min(1).max(80),version:z.number().int().positive().safe(),filter:issueFilterSchema}).strict();
 export type SavedIssueFilter=z.infer<typeof savedFilterSchema>;
-export class IssueFilterError extends Error{constructor(message:string,readonly status:400|409|410|413){super(message);}}
+export class IssueFilterError extends Error{constructor(message:string,readonly status:400|404|409|410|413){super(message);}}
 type IssueFilterRow={number:number;title:string;author:string;state:'open'|'closed';created_at:string;updated_at:string;closed_by:string|null;comments:number;text_match:number};
 export class IssueFeatureStore{
  constructor(private readonly storage:DurableObjectStorage){storage.sql.exec('CREATE TABLE IF NOT EXISTS issue_features(id INTEGER PRIMARY KEY CHECK(id=1),document TEXT NOT NULL)');storage.sql.exec('CREATE TABLE IF NOT EXISTS issue_saved_filters(scope TEXT NOT NULL,actor_id TEXT NOT NULL,id TEXT NOT NULL,version INTEGER NOT NULL,document TEXT NOT NULL,removed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(scope,actor_id,id))');}
@@ -108,6 +108,24 @@ export class IssueFeatureStore{
   if(cursor){try{if(cursor.length>256||!/^[A-Za-z0-9_-]+$/.test(cursor))throw Error();const parsed=z.object({version:z.string().regex(/^[a-f0-9]{64}$/),offset:z.number().int().nonnegative().safe()}).strict().parse(JSON.parse(atob(cursor.replaceAll('-','+').replaceAll('_','/'))));if(parsed.version!==version||parsed.offset>snapshot.matching.length)throw Error();offset=parsed.offset;}catch{throw new IssueFilterError('Issue page no longer matches this principal, query or current issue version; reload the view',409);}}
   const issues=snapshot.matching.slice(offset,offset+50),next=offset+50<snapshot.matching.length?offset+50:null,nextCursor=next===null?null:btoa(JSON.stringify({version,offset:next})).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
   return {sourceFingerprint:snapshot.source,issues,nextCursor,version,complete:next===null,total:snapshot.matching.length,offset,limit:50,inspectedIssues:snapshot.inspectedIssues,facets:snapshot.facets};
+ }
+
+ relationshipSnapshot(number:number){
+  id.parse(number);const features=this.read(),rows=this.storage.sql.exec<{number:number;title:string;state:'open'|'closed';updated_at:string}>('SELECT number,title,state,updated_at FROM issues ORDER BY number LIMIT 10001').toArray();
+  if(rows.length>10000)throw new IssueFilterError('Issue relationships support at most 10000 issues; no partial graph was returned',413);
+  const byNumber=new Map(rows.map(row=>[row.number,row])),subject=byNumber.get(number);if(!subject)throw new IssueFilterError('Issue unavailable',404);
+  const links=features.links.filter(link=>link.from===number||link.to===number);if(links.length>10000)throw new IssueFilterError('This issue exceeds the 10000-relationship inspection bound',413);
+  const counts={parent:0,'sub-issue':0,'duplicate-target':0,duplicate:0};
+  const items=links.map(link=>{const outgoing=link.from===number,kind=link.kind==='sub-issue-of'?outgoing?'parent' as const:'sub-issue' as const:outgoing?'duplicate-target' as const:'duplicate' as const,peer=outgoing?link.to:link.from,issue=byNumber.get(peer)??null;counts[kind]++;return {kind,link,number:peer,available:issue!==null,issue:issue?{number:issue.number,title:issue.title,state:issue.state}:null};});
+  const rank={parent:0,'sub-issue':1,'duplicate-target':2,duplicate:3};items.sort((a,b)=>rank[a.kind]-rank[b.kind]||a.number-b.number);
+  return {subject:{number:subject.number,title:subject.title,state:subject.state},featureRevision:features.revision,items,counts,source:JSON.stringify([features.revision,subject,items,links.map(link=>byNumber.get(link.from===number?link.to:link.from)??null)])};
+ }
+ async issueRelationships(scope:string,actorId:string,number:number,cursor?:string){
+  const snapshot=this.relationshipSnapshot(number),version=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([scope,actorId,number,snapshot.source])))),byte=>byte.toString(16).padStart(2,'0')).join('');
+  if(this.relationshipSnapshot(number).source!==snapshot.source)throw new IssueFilterError('Issue relationships changed during inspection; reload the current issue',409);
+  let offset=0;if(cursor){try{if(cursor.length>256||!/^[A-Za-z0-9_-]+$/.test(cursor))throw Error();const parsed=z.object({version:z.string().regex(/^[a-f0-9]{64}$/),offset:z.number().int().nonnegative().safe()}).strict().parse(JSON.parse(atob(cursor.replaceAll('-','+').replaceAll('_','/'))));if(parsed.version!==version||parsed.offset>snapshot.items.length)throw Error();offset=parsed.offset;}catch{throw new IssueFilterError('Relationship page no longer matches this principal, issue or current relationship version',409);}}
+  const next=offset+50<snapshot.items.length?offset+50:null,nextCursor=next===null?null:btoa(JSON.stringify({version,offset:next})).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
+  return {sourceFingerprint:snapshot.source,issue:snapshot.subject,items:snapshot.items.slice(offset,offset+50),counts:snapshot.counts,featureRevision:snapshot.featureRevision,version,total:snapshot.items.length,offset,limit:50,nextCursor,complete:next===null};
  }
 
 }
