@@ -3263,7 +3263,11 @@ Only a participant who has published can resolve a thread, and a resolved thread
 queue head only on the current base with passing checks and otherwise requeues it; a revert is a new change naming its target and
 reason. `src/core/review-requests.ts` (1 pass) refuses self-requests and non-readers and deduplicates.
 
-**Still open for F04 (local):** suggested edits, base-branch changes, fork permissions and stacked changes. Hosted merge into Artifacts-backed branches needs owner confirmation.
+**Stacks, suggestions and forks (source-tested, October 8):** `src/core/change-stacks.ts` (`tests/change-stacks.test.ts`, 3 pass). A
+stacked change merges only after every ancestor; missing parents and cycles are refused. A suggestion replaces exactly one existing
+line and fails when the line is outside the file. Maintainer pushes to a fork need the fork owner's opt-in.
+
+**Still open for F04 (local):** base-branch changes. Hosted proof remains blocked on owner confirmation. Hosted merge into Artifacts-backed branches needs owner confirmation.
 
 Complete drafts, review requests, required approvals, CODEOWNERS, multiline/inline threads, suggested edits, resolution, stale approvals, base changes, fork permissions, stacked changes, merge queues, merge/squash/rebase policies, and explicit revert. Retain original contributor attribution and verifiable repair intent. Platform policy—not an agent—controls gate satisfaction.
 
