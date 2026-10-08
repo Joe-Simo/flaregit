@@ -2122,6 +2122,13 @@ migration, destructive action, or legal acceptance is authorized by this tracker
 - F03: `blame.ts`: line-level blame and file history over an in-memory commit list, plus permalinks.
 - F15: `import-bundle.ts`: verifies every digest before any write; conflicts reported as kind:id; store failures report partial writes.
 
+## Modules added October 8, second batch (source-tested; no hosted proof)
+
+- F14: `oauth-server.ts`: app registration, PKCE S256 codes, single-use codes, refresh rotation with family revocation, hashed secrets. Refresh tokens have no expiry yet.
+- F12: `package-registry.ts`: publish with immutable versions, digest verification on fetch, private visibility, deprecation, exact/caret/x-range resolution.
+- F09: `org-invitations.ts`: email-matched single-use invitations with 7-day expiry, no privilege escalation, teams. Team membership does not yet change permissions.
+- F11: `deployments.ts`: one live deployment per environment, rollback, digest-verified serving. Not yet wired to the server.
+
 ## Active ticket ledger
 
 | Ticket | Status | Primary owner | Next acceptance action |
