@@ -28,16 +28,6 @@ Therefore the product should not depend on Artifacts or Containers. Replacements
 3. **Hosted receipts:** produced by the free Worker and Durable Object tiers and by the free runner. No paid
    resource is required for any receipt.
 
-**Decisions only the owner can make:**
-- The competition rules require Cloudflare Artifacts. The owner confirmed on October 8, 2026 that the Workers Paid
-  subscription is active. Artifacts is covered up to 10,000 operations and 1 GB per month; usage above that is billed.
-  Containers stay off because their usage is billed separately. Each hosted Artifacts run stays within the included
-  allowance and needs the owner's confirmation first.
-- The no-money build itself: all code, local tests and local Docker proofs need no money. Only hosted Artifacts and any
-  hosted Containers runs need the paid plan.
-- Approve the replacement design for untrusted execution (free runners with signed attestations), or name a different
-  free design.
-
 **Work that remains, with no money required:** F01 route-level HTTP tests for the guarded non-project routes; F02
 signature verification; F03–F20 (not started). Each will be recorded here as it lands.
 
@@ -53,20 +43,14 @@ text and evidence remain in this file and in git history.
 - Local gates: `bun run lint`, `bun run typecheck`, `bun test`, `bun run build`, and clean-clone reproducibility.
 - Documentation of evidence, status, and blockers.
 
-**Deferred (paid or owner-only; not active until the owner approves a spend ceiling):**
-- Hosted receipts for C02 (Containers, Durable Objects, registry push, canary Workers, synthetic canaries).
-- Hosted C03 publication matrix, C05–C08 hosted journeys, and the C09 fixed acceptance batch.
-- Any deployment beyond the existing production Worker, and any new Cloudflare resource, Container, R2, D1, or Artifacts usage that is billed.
-- Hosted proof for F01–F20 and R1–R3 acceptance cases.
-- Finalist travel to Cloudflare Connect (Oct 21, 2026) and any expense the owner has not approved.
-- The C11 entry, terms acceptance, and submission: owner-only manual steps.
+**Removed from the roadmap (owner decision, October 8, 2026):** everything that costs money. That is every hosted receipt and
+hosted proof (C02–C09, F01–F20), all Containers and billed Artifacts runs, new Cloudflare resources beyond the free tiers, the
+untrusted-execution replacement design, F18 billing, F01 rename/default branch/forks/ownership transfer/deletion (they change
+Artifacts state or spend), and travel. Nothing paid is planned, requested or tracked. The original text stays in git history.
+The C11 contest entry is a manual owner step and is not engineering work.
 
-**Blocked on spend or an owner decision (not in progress; not started without approval):**
-- F01: rename (changes the canonical Artifacts identity); default branch (Artifacts ref writes); forks (creates a
-  hosted Artifacts repository); ownership transfer (changes who controls spend, so it needs a billing decision);
-  deletion with recovery (extends storage retention, so it needs a retention decision).
-- F02: the R2-backed Git LFS object store and its endpoints; stock Git and Git LFS client acceptance against the
-  deployed Worker.
+**Completion now means:** local source, local tests, lint, typecheck and build for every free item. Free-tier items such as the
+R2-backed Git LFS store stay in scope behind a storage interface tested locally.
 
 **Committed locally on `main`, not pushed (October 8):**
 - F01: archive/unarchive, visibility, and topics (`109c2ab`, `e9adc73`, `8720856`), with HTTP and unit tests.
@@ -78,7 +62,7 @@ text and evidence remain in this file and in git history.
 - F02: commit signature verification status.
 - F03–F20: not started. Each still needs local source work and tests, and any paid step moves to the deferred list.
 
-**Status:** Not complete. No paid work is in progress, and none will start without your approval.
+**Status:** Not complete. Remaining scope is free local engineering only.
 
 ## Current handoff — October 7, 2026
 
