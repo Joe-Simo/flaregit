@@ -6,6 +6,28 @@ checklist while preserving its evidence below. No competing tracker is created.
 
 **Product:** Work in parallel. Integration happens automatically.
 
+## No-spend scope — owner decision, October 8, 2026
+
+The owner has ruled out spending money. The active scope is therefore limited to work that costs nothing:
+local source, local tests, local Docker images, and reading public documents. Everything that needs paid
+Cloudflare resources or a paid decision is moved to the deferred list below. Nothing is deleted; the original
+text and evidence remain in this file and in git history.
+
+**Active (no-spend):**
+- Source implementation and local tests for C02–C09 and F01–F20 where no paid resource is needed.
+- Local gates: `bun run lint`, `bun run typecheck`, `bun test`, `bun run build`, and clean-clone reproducibility.
+- Documentation of evidence, status, and blockers.
+
+**Deferred (paid or owner-only; not active until the owner approves a spend ceiling):**
+- Hosted receipts for C02 (Containers, Durable Objects, registry push, canary Workers, synthetic canaries).
+- Hosted C03 publication matrix, C05–C08 hosted journeys, and the C09 fixed acceptance batch.
+- Any deployment beyond the existing production Worker, and any new Cloudflare resource, Container, R2, D1, or Artifacts usage that is billed.
+- Hosted proof for F01–F20 and R1–R3 acceptance cases.
+- Finalist travel to Cloudflare Connect (Oct 21, 2026) and any expense the owner has not approved.
+- The C11 entry, terms acceptance, and submission: owner-only manual steps.
+
+**Status:** The goal is not complete under this no-spend scope. Local work continues on the active list.
+
 ## Current handoff — October 7, 2026
 
 - The owner authorization/device blocker is resolved. The bounded native run
