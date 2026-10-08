@@ -3250,8 +3250,12 @@ outstanding "request changes" blocks the merge. Required approval counts are enf
 specific path prefix; an owner's approval is needed for each changed path under that rule, and an author cannot satisfy their own
 code-owner rule. The gate reports every blocker. Lint and typecheck pass.
 
+**Merge-method policy (source-tested, October 8):** `src/core/merge-method-policy.ts` (`tests/merge-method-policy.test.ts`,
+4 pass) resolves merge, squash or rebase against the repository policy. An omitted method uses the default; a disabled method
+is refused even when requested explicitly; a policy with no enabled method, or a disabled default, is refused.
+
 **Still open for F04 (local):** drafts, review requests, multiline and inline threads, suggested edits, resolution, base-branch
-changes, fork permissions, stacked changes, merge queues, merge, squash and rebase policies, and explicit revert. These are
+changes, fork permissions, stacked changes, merge queues, and explicit revert. These are
 local engineering and are scheduled after this slice. Hosted merge into Artifacts-backed branches needs owner confirmation.
 
 Complete drafts, review requests, required approvals, CODEOWNERS, multiline/inline threads, suggested edits, resolution, stale approvals, base changes, fork permissions, stacked changes, merge queues, merge/squash/rebase policies, and explicit revert. Retain original contributor attribution and verifiable repair intent. Platform policy—not an agent—controls gate satisfaction.
