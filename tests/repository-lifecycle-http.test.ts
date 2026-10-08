@@ -80,6 +80,27 @@ test('signed HTTP archive state is owner-only, read-only while archived, and res
     const notArchived = await call(owner, life, 'POST', {action: 'unarchive'});
     expect(notArchived.status).toBe(409);
     expect(await notArchived.text()).toBe('Repository is not archived');
+
+    // F01 visibility: owner-only; going public needs explicit confirmation; invalid values are refused.
+    const visibility = '/api/p/p123456789abc/visibility';
+    const setVisibility = (token: string, value: unknown) => call(token, visibility, 'POST', value);
+    const memberVisibility = await setVisibility(member, {visibility: 'private'});
+    expect(memberVisibility.status).toBe(403);
+    expect(await memberVisibility.text()).toBe('Only the owner can change visibility');
+    expect((await setVisibility(owner, {visibility: 'sideways'})).status).toBe(400);
+    const unconfirmed = await setVisibility(owner, {visibility: 'public'});
+    expect(unconfirmed.status).toBe(400);
+    expect(await unconfirmed.text()).toBe('Confirm that all accepted source and history will become public');
+    const privateNow = await setVisibility(owner, {visibility: 'private'});
+    expect(privateNow.status).toBe(200);
+    expect(await privateNow.json()).toEqual({visibility: 'private'});
+
+    // Archived repositories are read-only for visibility changes too.
+    const archivedAgain = await call(owner, life, 'POST', {action: 'archive'});
+    expect(archivedAgain.status).toBe(200);
+    const archivedVisibility = await setVisibility(owner, {visibility: 'private'});
+    expect(archivedVisibility.status).toBe(409);
+    expect(await archivedVisibility.text()).toBe('Repository is archived and read-only; unarchive it to change anything');
   } finally {
     await mf.dispose();
     issuer.stop(true);

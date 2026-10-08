@@ -3093,8 +3093,9 @@ Each ticket below is a finite workstream. Split it into approximately one-day ve
 `repositoryLifecycle` and `repositoryLifecycleTransition`; route `/api/p/:id/lifecycle` (GET for members, POST
 archive/unarchive for owners only); and a central read-only guard on archived repositories for every non-GET
 project route except the lifecycle route and repository deletion. Evidence: `tests/repository-lifecycle.test.ts`
-(5 pass) and `tests/repository-lifecycle-http.test.ts` (1 pass; 25 assertions in child mode), with lint, typecheck
-and build passing. Still open for F01: visibility, default branch, rename, topics, forks, ownership transfer, and
+(5 pass) and `tests/repository-lifecycle-http.test.ts` (1 pass; 35 assertions in child mode, including the visibility
+route: owner-only, public needs confirmation, invalid values refused, and refused while archived), with lint,
+typecheck and build passing. Still open for F01: default branch, rename, topics, forks, ownership transfer, and
 deletion with recovery; and non-project routes are not yet guarded.
 
 Cover repository visibility, README/license/gitignore initialization, template creation, independent forks, fork relationships, default branch changes, topics, archive/unarchive, rename, ownership transfer, deletion and recovery. Preserve source identity and permission boundaries during every transition. Imported data stays attributed and source repos are never mutated by an import.
