@@ -2115,6 +2115,13 @@ migration, destructive action, or legal acceptance is authorized by this tracker
 - F07/F08: `polls.ts`, `snippets.ts`, `follows.ts`, `contribution-visibility.ts`.
 - F10/F13/F14: `workflow-parser.ts`, `dependency-advisories.ts`, `webhook-signature.ts` (5-minute replay window), `oauth-scopes.ts` (exact redirect, PKCE S256).
 
+## Engines added October 8 (source-tested; no hosted proof)
+
+- F10: `ci-engine.ts`: runs a parsed workflow by topological waves; failed jobs skip dependents; `cancel` stops scheduling but does not interrupt running jobs (no timeout yet).
+- F07: `wiki.ts`: revisions are append-only, saves require the expected revision, line diffs (LCS), revert appends a copy.
+- F03: `blame.ts`: line-level blame and file history over an in-memory commit list, plus permalinks.
+- F15: `import-bundle.ts`: verifies every digest before any write; conflicts reported as kind:id; store failures report partial writes.
+
 ## Active ticket ledger
 
 | Ticket | Status | Primary owner | Next acceptance action |
