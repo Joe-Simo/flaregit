@@ -29,9 +29,10 @@ Therefore the product should not depend on Artifacts or Containers. Replacements
    resource is required for any receipt.
 
 **Decisions only the owner can make:**
-- The competition rules require Cloudflare Artifacts, which requires the Workers Paid plan ($5/month minimum plus
-  usage). This is the one unavoidable cost for a contest entry. Accept it, or enter without Artifacts (which breaks the
-  rules). Nothing has been changed on your behalf.
+- The competition rules require Cloudflare Artifacts. The owner confirmed on October 8, 2026 that the Workers Paid
+  subscription is active. Artifacts is covered up to 10,000 operations and 1 GB per month; usage above that is billed.
+  Containers stay off because their usage is billed separately. Each hosted Artifacts run stays within the included
+  allowance and needs the owner's confirmation first.
 - The no-money build itself: all code, local tests and local Docker proofs need no money. Only hosted Artifacts and any
   hosted Containers runs need the paid plan.
 - Approve the replacement design for untrusted execution (free runners with signed attestations), or name a different
