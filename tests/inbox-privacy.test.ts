@@ -25,3 +25,42 @@ test('pending repository lookups cannot preserve an earlier permission after the
   expect(projection.unread.direct).toBe(1);
   await expect(projectInbox(rows,'direct',async()=>true,async()=>{throw Error('Session revoked');})).rejects.toThrow('Session revoked');
 });
+
+test('public discussion authority releases only the exact event and replaces stored private prose',async()=>{
+  const topic='discussion_11111111-1111-1111-1111-111111111111',entry='discussion_22222222-2222-2222-2222-222222222222';
+  const publicRow={...row(3,'public'),kind:'activity' as const,type:`discussion.reply.public.${topic}.${entry}`};
+  const legacy={...publicRow,id:2,type:`discussion.reply.public.${topic}`};
+  const result=await projectInbox([publicRow,legacy,row(1,'public')],'activity',async()=>false,async()=>{},async item=>({...item,project_name:'Current public name',title:'New reply in a subscribed discussion'}));
+  expect(result.items).toEqual([{...publicRow,project_name:'Current public name',title:'New reply in a subscribed discussion'}]);
+  expect(result.unread).toEqual({direct:0,activity:1});
+  expect(JSON.stringify(result)).not.toContain('Secret');
+});
+
+test('public notification projection rechecks removal and does not swallow final session revocation',async()=>{
+  const source={...row(1,'public'),type:'discussion.reply.public.discussion_11111111-1111-1111-1111-111111111111.discussion_22222222-2222-2222-2222-222222222222'};
+  let calls=0;
+  expect((await projectInbox([source],'direct',async()=>false,async()=>{},async item=>++calls===1?item:null)).items).toEqual([]);
+  let principal=0;
+  await expect(projectInbox([source],'direct',async()=>false,async()=>{if(++principal>1)throw Error('Revoked');},async item=>item)).rejects.toThrow('Revoked');
+});
+
+test('later source projection withdrawal hides an earlier event at release',async()=>{
+ const type='discussion.reply.public.discussion_11111111-1111-1111-1111-111111111111.discussion_22222222-2222-2222-2222-222222222222';
+ const first={...row(2,'first'),type,kind:'activity' as const},second={...row(1,'second'),type,kind:'activity' as const};
+ let firstAvailable=true;
+ const projection=await projectInbox([first,second],'activity',async()=>false,async()=>{},async item=>{
+  if(item.id===second.id)firstAvailable=false;
+  if(item.id===first.id&&!firstAvailable)return null;
+  return {...item,project_name:'Current public name',title:'Public reply'};
+ });
+ expect(projection.items.map(item=>item.id)).toEqual([second.id]);expect(projection.unread).toEqual({direct:0,activity:1});
+});
+
+test('final source release uses current sanitized prose and catches principal revocation during that lookup',async()=>{
+ const source={...row(1,'public'),type:'discussion.reply.public.discussion_11111111-1111-1111-1111-111111111111.discussion_22222222-2222-2222-2222-222222222222',kind:'activity' as const};
+ let calls=0;
+ const projection=await projectInbox([source],'activity',async()=>false,async()=>{},async item=>({...item,project_name:++calls===3?'Current public name':'Earlier public name',title:'Public reply'}));
+ expect(projection.items[0]?.project_name).toBe('Current public name');expect(JSON.stringify(projection)).not.toContain('Earlier public name');
+ let authorized=true;calls=0;
+ await expect(projectInbox([source],'activity',async()=>false,async()=>{if(!authorized)throw Error('Principal revoked during release');},async item=>{if(++calls===3)authorized=false;return item;})).rejects.toThrow('Principal revoked during release');
+});

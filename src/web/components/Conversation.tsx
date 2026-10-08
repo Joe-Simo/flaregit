@@ -1,3 +1,4 @@
+import {ThreadPreference} from './ThreadPreference';
 import {ImportedOrigin} from "./ImportedOrigin";
 import type {ImportedConversationOrigin} from "../../server/migration-conversation-publication";
 import React, { useCallback, useEffect, useId, useRef, useState } from "react";
@@ -143,6 +144,7 @@ export function Conversation({ projectId, subject, anchor, onAnchorUsed, onLoade
   return (
     <section aria-label={title ?? "Conversation"} className="space-y-3 min-w-0">
       {title && <h3 className="text-sm font-semibold">{title}</h3>}
+      <ThreadPreference key={`${apiSessionIdentity()}:${projectId}:${subject}`} projectId={projectId} subject={subject}/>
       {loadError && (
         <div role="alert" className={`${alertCls} flex flex-wrap items-center justify-between gap-2`}>
           <span className="break-words min-w-0">{loadError}</span>

@@ -1,3 +1,6 @@
+import {IssueFilters} from '../components/IssueFilters';
+import type {IssueFilterCriteria} from '../../server/issue-feature-store';
+import {IssueAttachments} from '../components/IssueAttachments';
 import {IssueBulkControls} from '../components/IssueBulkControls';
 import {Checkbox} from '@/components/ui/checkbox';
 import {IssueTemplatePicker} from '../components/IssueTemplatePicker';
@@ -41,8 +44,13 @@ export function IssuesTab({ projectId, issue }: { projectId: string; issue?: num
 
 function IssueList({ projectId }: { projectId: string }) {
   const [selected,setSelected]=useState<number[]>([]);
-  const [state, setState] = useState<"open" | "closed">("open");
-  const [issues, setIssues] = useState<Issue[] | null>(null);
+  const [state, setState] = useState<IssueFilterCriteria["state"]>("open");
+  const [issues, setIssues] = useState<Omit<Issue,"body">[] | null>(null);
+  const [criteria,setCriteria]=useState<Omit<IssueFilterCriteria,'state'>>({q:'',sort:'updated-desc'}),[cursor,setCursor]=useState<string|null>(null);
+  type Page={nextCursor:string|null;version:string;complete:boolean;total:number;offset:number;limit:number;inspectedIssues:number;facets:{labels:string[];assignees:string[];milestones:Array<{id:number;title:string}>};members:Array<{user_id:string;label:string}>};
+  const [page,setPage]=useState<Page|null>(null),[issuesIdentity,setIssuesIdentity]=useState<string|null>(null),identity=apiSessionIdentity();
+  const filterPrincipal=useRef(identity);
+  const applyFilter=(next:IssueFilterCriteria)=>{const {state:nextState,...filter}=next;setState(nextState);setCriteria(filter);setCursor(null);};
   const [loadError, setLoadError] = useState<string | null>(null);
   const [composing, setComposing] = useState(false);
   const [title, setTitle] = useState("");
@@ -60,15 +68,17 @@ function IssueList({ projectId }: { projectId: string }) {
 
   const load = useCallback(async () => {
     const generation=lifetime.current, sequence=++readSequence.current; readController.current?.abort(); const controller=new AbortController();readController.current=controller;
-    setIssues(null);setSelected([]);
+    setIssues(null);setPage(null);setSelected([]);
     setLoadError(null);
+    if(filterPrincipal.current!==identity){filterPrincipal.current=identity;setState('open');setCriteria({q:'',sort:'updated-desc'});setCursor(null);return;}
     try {
-      const rows=await apiJson<Issue[]>(`/p/${projectId}/issues?state=${state}`,{signal:controller.signal});
-      if(generation===lifetime.current && sequence===readSequence.current)setIssues(rows);
+      const query=new URLSearchParams();for(const [key,value] of Object.entries({...criteria,state,...(cursor?{cursor}:{})}))if(value!==undefined)query.set(key,String(value));
+      const result=await apiJson<Page&{issues:Omit<Issue,'body'>[]}>(`/p/${projectId}/issues/query?${query}`,{signal:controller.signal});
+      if(generation===lifetime.current&&sequence===readSequence.current&&identity===apiSessionIdentity()){const {issues:rows,...details}=result;setIssues(rows);setPage(details);setIssuesIdentity(identity);}
     } catch (e) {
       if(generation===lifetime.current && sequence===readSequence.current && !controller.signal.aborted)setLoadError(errText(e, "Could not load issues"));
     }
-  }, [projectId, state]);
+  }, [projectId,state,criteria,cursor,identity]);
   useEffect(() => { void load(); }, [load]);
 
   const create = async () => {
@@ -91,16 +101,17 @@ function IssueList({ projectId }: { projectId: string }) {
   };
 
   return (
-    <Tabs value={state} onValueChange={value => { if(value === "open" || value === "closed")setState(value); }} className="space-y-3 min-w-0">
+    <Tabs value={state} onValueChange={value => { if(value === "open" || value === "closed"||value === "all"){setState(value);setCursor(null);} }} className="space-y-3 min-w-0">
       <h2 className="sr-only">Issues</h2>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <TabsList aria-label="Issue state">
-          {(["open", "closed"] as const).map((s) => (
+          {(["open", "closed","all"] as const).map((s) => (
             <TabsTrigger key={s} value={s} className="capitalize">{s}</TabsTrigger>
           ))}
         </TabsList>
         <Button size="sm" variant="orange" disabled={saving} aria-expanded={composing} aria-controls="new-issue" onClick={() => setComposing((v) => !v)}><Plus className="h-3.5 w-3.5 mr-1.5" aria-hidden /> New issue</Button>
       </div>
+      <IssueFilters projectId={projectId} criteria={{...criteria,state}} facets={issuesIdentity===identity?page?.facets:undefined} members={issuesIdentity===identity?page?.members:undefined} onApply={applyFilter}/>
       {composing && (
         <form id="new-issue" className="rounded-lg border border-border p-3 space-y-2" onSubmit={(e) => { e.preventDefault(); if (title.trim() && !saving) void create(); }}>
           <h3 className="text-sm font-semibold">New issue</h3>
@@ -116,10 +127,10 @@ function IssueList({ projectId }: { projectId: string }) {
         </form>
       )}
       <TabsContent value={state}>
-      {selected.length>0&&<IssueBulkControls key={`${projectId}:${state}`} projectId={projectId} numbers={selected} onSaved={()=>{setSelected([]);void load();}}/>}
-      {loadError && <LoadError message={loadError} onRetry={() => void load()} />}
+      {selected.length>0&&issuesIdentity===identity&&<IssueBulkControls key={`${projectId}:${state}`} projectId={projectId} numbers={selected} onSaved={()=>{setSelected([]);void load();}}/>}
+      {loadError && <LoadError message={loadError} onRetry={()=>{if(cursor)setCursor(null);else void load();}} />}
       {!issues && !loadError && <p role="status" className="text-sm text-muted-foreground">Loading issues…</p>}
-      {issues && (
+      {issues&&issuesIdentity===identity && (
         <ul className="divide-y divide-border rounded-md border border-border">
           {issues.length === 0 && <li className="px-3 py-6 text-center text-sm text-muted-foreground">No {state} issues.</li>}
           {issues.map((i) => (
@@ -138,6 +149,7 @@ function IssueList({ projectId }: { projectId: string }) {
           ))}
         </ul>
       )}
+      {page&&issuesIdentity===identity&&<div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>{page.total===0?'No matching issues':`${page.offset+1}–${page.offset+(issues?.length??0)} of ${page.total} matching issues`}</span><div className="flex gap-2">{cursor&&<Button size="sm" variant="ghost" onClick={()=>setCursor(null)}>First page</Button>}{page.nextCursor&&<Button size="sm" variant="outline" onClick={()=>setCursor(page.nextCursor)}>Next page</Button>}</div></div>}
       </TabsContent>
     </Tabs>
   );
@@ -260,6 +272,7 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
         </div>
       )}
       <IssuePlanning key={`${projectId}:${number}`} projectId={projectId} number={number}/>
+      <IssueAttachments key={`${projectId}:attachments:${number}`} projectId={projectId} number={number}/>
       <Conversation key={`${projectId}:issue:${number}`} projectId={projectId} subject={`issue:${number}`} title="Conversation" />
     </div>
   );

@@ -13,6 +13,10 @@ export class RepositoryLifecycleFixture extends RepositoryController {
 export default {
   async fetch(request: Request, env: Env & {FIXTURE_ISSUER: string}, ctx: ExecutionContext) {
     const url = new URL(request.url);
+    if(url.pathname==='/fixture/revoke-member'){
+      await (env.REPOSITORY_CONTROLLER.getByName('project:p123456789abc') as unknown as RepositoryLifecycleFixture).removeMember('member');
+      return Response.json({revoked:true});
+    }
     if (url.pathname === '/fixture/owner-write-token') {
       const key=await accountKeyFor('owner'),token=`fgt_${key}_${'1'.repeat(32)}`;
       await accountOf(env,key).createApiToken('owner','Synthetic scoped writer',token,{scope:'write',repo:'p123456789abc'});

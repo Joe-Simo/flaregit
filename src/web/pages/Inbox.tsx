@@ -3,6 +3,7 @@ import { apiJson } from "../api";
 import { navigate, timeAgo } from "../router";
 import {RepositoryNotifications} from "../components/RepositoryNotifications";
 import {Button} from "@/components/ui/button";
+import {Tabs,TabsContent,TabsList,TabsTrigger} from "@/components/ui/tabs";
 import {inboxDestination,inboxShortcutAllowed,INBOX_INTERACTIVE_TARGETS} from "../inbox-navigation";
 
 interface Item { id: number; project_id: string; project_name: string; kind: "direct" | "activity"; type: string; title: string; created_at: string }
@@ -57,31 +58,35 @@ export function Inbox({ onCount }: { onCount: (n: number) => void }) {
     <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8 space-y-4">
       <h1 className="text-xl font-bold">Inbox</h1>
       {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>}
-      <div className="flex gap-1 text-sm" role="tablist">
+      <Tabs value={filter} onValueChange={value=>{const next=FILTERS.find(([key])=>key===value)?.[0];if(next){setFilter(next);setCursor(0);}}}>
+      <TabsList className="flex w-full sm:w-fit">
         {FILTERS.map(([key, label], i) => (
-          <button key={key} role="tab" aria-selected={filter === key} className={`px-3 py-1 rounded-md ${filter === key ? "bg-muted font-medium" : "text-muted-foreground hover:text-foreground"}`} onClick={() => { setFilter(key); setCursor(0); }}>
+          <TabsTrigger key={key} value={key} className="flex-1 gap-1 px-2 sm:flex-none sm:px-3">
             {label} <kbd className="text-xs opacity-60">{i + 1}</kbd>
-          </button>
+          </TabsTrigger>
         ))}
-      </div>
+      </TabsList>
+      <TabsContent value={filter}>
       <div className="divide-y divide-border rounded-md border border-border" aria-label="Notifications">
         {loading&&<p role="status" className="px-3 py-6 text-sm text-center text-muted-foreground">Loading notifications…</p>}
         {!loading&&!error&&items.length === 0 && <p className="px-3 py-6 text-sm text-center text-muted-foreground">{filter === "direct" ? "Inbox zero. Nothing needs you." : "Nothing here."}</p>}
         {items.map((it, i) => (
           <div key={it.id} className={`px-3 py-2 flex flex-wrap items-center gap-3 text-sm ${i === cursor ? "bg-muted/60" : ""}`} onClick={() => setCursor(i)}>
-            <div className="min-w-0 flex-1">
+            <div className="min-w-0 flex-1 basis-full sm:basis-0">
               <div className="truncate">{it.title}</div>
               <div className="text-xs text-muted-foreground">{it.project_name} · {timeAgo(it.created_at)}</div>
             </div>
-            <div className="flex flex-wrap gap-1 shrink-0">
-              <RepositoryNotifications key={it.project_id} projectId={it.project_id} projectName={it.project_name}/>
+            <div className="flex w-full flex-wrap gap-1 shrink-0 sm:w-auto">
+              {!it.type.startsWith('discussion.reply.public.')&&<RepositoryNotifications key={it.project_id} projectId={it.project_id} projectName={it.project_name}/>}
               <Button size="sm" variant="ghost" onClick={(e)=>{e.stopPropagation();navigate(inboxDestination(it));}} aria-label={`Open ${it.title}`}>Open</Button>
-              <button className="px-2 py-1 rounded border border-border text-xs hover:bg-muted" onClick={(e) => { e.stopPropagation(); void act(it, "archived"); }}>Archive</button>
-              {filter !== "snoozed" && <button className="px-2 py-1 rounded border border-border text-xs hover:bg-muted" onClick={(e) => { e.stopPropagation(); void act(it, "snoozed"); }}>Snooze</button>}
+              <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); void act(it, "archived"); }}>Archive</Button>
+              {filter !== "snoozed" && <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); void act(it, "snoozed"); }}>Snooze</Button>}
             </div>
           </div>
         ))}
       </div>
+      </TabsContent>
+      </Tabs>
       <p className="text-xs text-muted-foreground"><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>e</kbd> archive · <kbd>s</kbd> snooze until the next activity in that repository · <kbd>u</kbd> move back · <kbd>Enter</kbd> open · <kbd>1</kbd>–<kbd>4</kbd> switch list</p>
     </div>
   );

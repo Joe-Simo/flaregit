@@ -1,3 +1,5 @@
+import {IssueAttachments,type IssueAttachmentScope,type IssueAttachmentView,type IssueAttachmentInput,type IssueAttachmentReply} from './issue-attachments';
+import {ThreadNotifications,threadSubjectSchema,type ThreadPreference} from './thread-notifications';
 import {TaskRetargets,taskRetargetRequestSchema,type TaskRetargetRequest,type TaskRetargetRecord} from './task-retarget';
 import {inspectTaskRetarget} from './task-retarget-git';
 import {retargetBaseBranch} from '../core/base-branch-change';
@@ -16,7 +18,7 @@ import {organizationMutationSchema,type OrganizationMutation} from './organizati
 import {DurableSnippets,type SnippetWrite} from './snippet-store';
 import {InboxPreferences,type InboxPreference} from "./inbox-preferences";
 import {MetadataArchives,MetadataArchiveError,type MetadataArchive} from "./metadata-archive";
-import {IssueFeatureStore,type IssueFeatureWrite} from './issue-feature-store';
+import {IssueFeatureStore,IssueFilterError,issueFilterSchema,type IssueFilterCriteria,type SavedIssueFilterWrite,type IssueFeatureWrite} from './issue-feature-store';
 import {PlanningStore,PlanningError,type PlanningMutation} from './planning-store';
 import {DurableWikiStore} from './wiki-store';
 import type {SaveRequest,HistoryOptions} from '../core/wiki';
@@ -508,6 +510,7 @@ export interface Ledger {
   discussionPermissions(actor:PublicCommunityActor,id:string,publicOnly:boolean,canAdminister?:boolean):Promise<ReturnType<RepositoryDiscussions["permissions"]>>;
   discussionFeature(actor:PublicCommunityActor,operation:'poll'|'subscription'|'convert',id:string,input:unknown,publicOnly:boolean,canAdminister?:boolean):Promise<ReturnType<RepositoryDiscussions['pollMutate']>|ReturnType<RepositoryDiscussions['subscribe']>|ReturnType<RepositoryDiscussions['convert']>>;
   discussionSubscriptions(actor:PublicCommunityActor,publicOnly:boolean):Promise<ReturnType<RepositoryDiscussions['subscriptions']>>;
+  publicDiscussionNotification(actorId:string,topicId:string,entryId:string):Promise<{projectName:string}|null>;
   discussionMutate(actor:PublicCommunityActor,operation:"create"|"reply"|"edit"|"remove"|"control",input:unknown,id:string|undefined,publicOnly:boolean,canAdminister?:boolean):Promise<ReturnType<RepositoryDiscussions["create"]>>;
   publicCommunity(publicOnly?: boolean): Promise<{ policy: PublicCommunityPolicy; posts: PublicPost[] }>;
   configurePublicCommunity(policy: PublicCommunityPolicy, confirmed: boolean, actor: PublicCommunityActor): Promise<PublicCommunityPolicy>;
@@ -652,6 +655,8 @@ export interface Ledger {
   createInvite(createdBy: string): Promise<string>;
   acceptInvite(token: string, userId: string, label?: string): Promise<boolean>;
   logActivity(actor: string, type: string, summary: string, opts?: { exceptUser?: string }): Promise<void>;
+  threadPreference(userId:string,subject:string,input?:unknown,sessionExpiresAt?:number):Promise<ThreadPreference>;
+  memberThreadNotification(userId:string,incarnation:string,subject:string,commentId:number,preferenceVersion:number):Promise<{projectName:string}|null>;
   addInbox(item: { projectId: string; projectName: string; kind: "direct" | "activity"; type: string; title: string; eventKey?:string }): Promise<void>;
   inboxPreference(projectId:string):Promise<InboxPreference>;
   updateInboxPreference(projectId:string,input:unknown):Promise<InboxPreference>;
@@ -683,11 +688,22 @@ export interface Ledger {
   publicAcceptedActivity(userId:string):Promise<{directory:DirectoryState;grant:PublicGrantMetadata|null;contributions:Array<{commit:string;acceptedAt:string}>}>;
   publicActivityProjects():Promise<Array<{id:string}>>;
   setPublicProfileVisibility(visibility: "public" | "private", confirmed: boolean, ownerId: string, expectedVersion?: number): Promise<void>;
+  savedIssueFilters(userId:string):ReturnType<RepositoryController['savedIssueFilters']>;
+  saveIssueFilter(userId:string,input:SavedIssueFilterWrite):ReturnType<RepositoryController['saveIssueFilter']>;
+  filteredIssues(userId:string,input:IssueFilterCriteria,cursor?:string):ReturnType<RepositoryController['filteredIssues']>;
   issueFeatures(userId:string):Promise<ReturnType<IssueFeatureStore['view']>&{canManage:boolean;members:Array<{user_id:string;label:string}>}>;
   issueFeatureUpdate(userId:string,input:IssueFeatureWrite):Promise<ReturnType<IssueFeatureStore['update']>>;
   issueTemplatePreview(userId:string,name:string,values:Record<string,unknown>):Promise<ReturnType<IssueFeatureStore['preview']>>;
   createTemplateIssue(userId:string,input:{title:string;name:string;values:Record<string,string|boolean>;idempotencyKey:string;expectedRevision:number;author:string}):Promise<IssueRow>;
 
+  issueAttachmentList(number:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<IssueAttachmentReply<{attachments:IssueAttachmentView[];canUpload:boolean}>>;
+  issueAttachmentPrepare(number:number,value:unknown,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<IssueAttachmentReply<IssueAttachmentView>>;
+  issueAttachmentUpload(number:number,id:string,body:ReadableStream<Uint8Array>,declaredSize:number|undefined,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<IssueAttachmentReply<IssueAttachmentView>>;
+  issueAttachmentDownload(number:number,id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<IssueAttachmentReply<{name:string;size:number;body:ReadableStream<Uint8Array>}>>;
+  issueAttachmentReconcile(number:number,id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<IssueAttachmentReply<IssueAttachmentView&{reconciled:boolean}>>;
+  issueAttachmentRemove(number:number,id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<IssueAttachmentReply<IssueAttachmentView>>;
+  issueAttachmentReferences(number:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<IssueAttachmentReply<ReturnType<IssueAttachments['references']>>>;
+  issueAttachmentRetention(number:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<IssueAttachmentReply<{retired:number;bytesDeletionConfirmed:boolean}>>;
   listIssues(state: "open" | "closed"): Promise<IssueRow[]>;
   getIssue(n: number): Promise<IssueRow | null>;
   createIssue(i: { title: string; body: string; author: string }): Promise<IssueRow>;
@@ -1583,6 +1599,13 @@ export class RepositoryController extends DurableObject<Env> {
   async discussionTopic(id:string,publicOnly:boolean,actor?:PublicCommunityActor){await this.assertDiscussionAccess(publicOnly,actor);return this.discussions(publicOnly).topic(id);}
   async discussionPermissions(actor:PublicCommunityActor,id:string,publicOnly:boolean,canAdminister=false){const owner=canAdminister&&await this.roleOf(actor.userId)==="owner";await this.assertDiscussionAccess(publicOnly,actor);return {...this.discussions(publicOnly).permissions(actor,id,owner),canConvert:!!this.ctx.storage.sql.exec('SELECT 1 FROM members WHERE user_id=?',actor.userId).toArray().length};}
   async discussionSubscriptions(actor:PublicCommunityActor,publicOnly:boolean){await this.assertDiscussionAccess(publicOnly,actor);return this.discussions(publicOnly).subscriptions(actor);}
+  async publicDiscussionNotification(actorId:string,topicId:string,entryId:string){
+    try{
+      if(!/^discussion_[a-f0-9-]{36}$/.test(topicId)||!/^discussion_[a-f0-9-]{36}$/.test(entryId)||!actorId)return null;
+      if(!this.discussionEnabled(true)||!this.discussions(true).notificationAvailable(topicId,entryId,actorId))return null;
+      return {projectName:this.load().projectName};
+    }catch{return null;}
+  }
   async discussionFeature(actor:PublicCommunityActor,operation:'poll'|'subscription'|'convert',id:string,input:unknown,publicOnly:boolean,canAdminister=false){
     await this.assertDiscussionAccess(publicOnly,actor);
     return this.ctx.storage.transactionSync(()=>{
@@ -1601,12 +1624,13 @@ export class RepositoryController extends DurableObject<Env> {
       const ledger=this.discussions(publicOnly);
       for(const pending of ledger.pendingNotifications()){
         try{
-          const available=()=>{if(this.repositoryDeleting()||!this.ctx.storage.sql.exec('SELECT 1 FROM members WHERE user_id=?',pending.actor_id).toArray().length)return false;try{return this.discussionEnabled(publicOnly)&&ledger.notificationAvailable(pending.topic_id,pending.entry_id,pending.actor_id);}catch{return false;}};
+          const role=publicOnly?true:await this.roleOf(pending.actor_id)!==null;
+          const available=()=>{if(this.repositoryDeleting()||!role)return false;try{return this.discussionEnabled(publicOnly)&&ledger.notificationAvailable(pending.topic_id,pending.entry_id,pending.actor_id);}catch{return false;}};
           if(!available()){ledger.acknowledgeNotification(pending.event_id,pending.actor_id);continue;}
           const account=accountOf(this.env,await accountKeyFor(pending.actor_id));
-          if(!available()){ledger.acknowledgeNotification(pending.event_id,pending.actor_id);continue;}
+          if(!publicOnly&&!await this.roleOf(pending.actor_id)||!available()){ledger.acknowledgeNotification(pending.event_id,pending.actor_id);continue;}
           const state=this.load();
-          await account.addInbox({projectId:state.projectId,projectName:state.projectName,kind:'activity',type:`discussion.reply.${publicOnly?'public':'members'}.${pending.topic_id}`,title:'New reply in a subscribed discussion',eventKey:`discussion:${publicOnly?'public':'members'}:${pending.event_id}`});
+          await account.addInbox({projectId:state.projectId,projectName:state.projectName,kind:'activity',type:`discussion.reply.${publicOnly?'public':'members'}.${pending.topic_id}${publicOnly?`.${pending.entry_id}`:''}`,title:'New reply in a subscribed discussion',eventKey:`discussion:${publicOnly?'public':'members'}:${pending.event_id}`});
           ledger.acknowledgeNotification(pending.event_id,pending.actor_id);
         }catch{/* A lost acknowledgement retains the original event for deduplicated delivery. */}
       }
@@ -4152,6 +4176,7 @@ export class RepositoryController extends DurableObject<Env> {
   private async retryInvitationProjections(){if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='repository_invitation_receipts'").toArray().length)return;const ledger=new RepositoryInvitations(this.ctx.storage),state=this.load(),incarnation=this.readRepositoryIncarnation(),rows=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM repository_invitation_receipts WHERE json_extract(doc,'$.projection')='pending' AND json_extract(doc,'$.scope.projectId')=? AND json_extract(doc,'$.scope.incarnation')=? ORDER BY invitation_id LIMIT 20",state.projectId,incarnation??"").toArray();for(const row of rows){const receipt=JSON.parse(row.doc) as import("./repository-invitations").InvitationJoinReceipt,role=await this.roleOf(receipt.userId);if(!role)continue;try{const account=accountOf(this.env,await accountKeyFor(receipt.userId));if(await account.accountLifecycle()!=="active")continue;await account.addProject({id:state.projectId,name:state.projectName,role,kind:state.kind??"demo"});const projection=(await account.listProjects()).find(project=>project.id===state.projectId&&project.role===role);ledger.confirmProjection(receipt,()=>!!projection&&!this.repositoryDeleting()&&this.readRepositoryIncarnation()===receipt.scope.incarnation&&this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",receipt.userId).toArray()[0]?.role===role);}catch{/* Pending projection remains visible and never restores removed membership. */}}}
   private async retryRepositoryInitializationCredentials():Promise<void>{if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='repository_initialization_intents'").toArray().length)return;const intents=new RepositoryInitializationIntents(this.ctx.storage);for(const ledger of [intents.credentials,intents.readCredentials]){for(const pending of ledger.pendingBatch()){if(!ledger.markAutomaticSweep(pending.scope.eventId))continue;const record=intents.get(pending.scope.eventId);if(!record?.metadata||record.scope.canonicalRepoName!==pending.scope.canonicalRepoName)continue;const funding=await globalOf(this.env).reserveCoreGitOperation(`repository-init-cleanup-${crypto.randomUUID()}`,pending.scope.accountKey,this.currentGitBudget()).catch(()=>null);if(!funding?.allowed||!ledger.markAttempt(pending.scope.eventId))continue;try{using repository=await this.env.ARTIFACTS.get(pending.scope.canonicalRepoName);const info=await repository.info();if(info.id!==record.metadata.id||info.name!==record.metadata.name||info.remote!==record.metadata.remote)continue;if(await repository.revokeToken(pending.token))await ledger.markRevoked(pending.scope,pending.token,{repoName:pending.scope.canonicalRepoName,revoked:true});}catch{/* Unconfirmed cleanup retains its exact private capability and hold. */}}const wake=ledger.nextWake();if(wake!==null)await this.ensureRecoveryAlarm(Math.max(1,wake-Date.now()));}}
   override async alarm(): Promise<void> {
+    await this.deliverThreadNotifications();
     await this.deliverDiscussionNotifications();
     await this.retryRepositoryInitializationCredentials();
     await this.retryInvitationProjections();
@@ -4559,6 +4584,22 @@ export class RepositoryController extends DurableObject<Env> {
     if(write&&this.load().lifecycle?.state==='archived')throw Error('Repository is archived and read-only');
     return {store:new IssueFeatureStore(this.ctx.storage),owner:authority.role==='admin',assert:authority.assert};
   }
+  private async issueFilterAccess(userId:string){
+    let access=await this.issueFeatureAccess(userId);access.assert();
+    if(!this.readRepositoryIncarnation()){new PrivateRecoveryOperations(this.ctx.storage).incarnation();access=await this.issueFeatureAccess(userId);access.assert();}
+    const scope=JSON.stringify([this.load().projectId,this.readRepositoryIncarnation(),this.load().canonicalRepoName]);
+    return {...access,scope,assert:()=>{access.assert();if(scope!==JSON.stringify([this.load().projectId,this.readRepositoryIncarnation(),this.load().canonicalRepoName]))throw Error('Issue filter repository scope changed');}};
+  }
+  async savedIssueFilters(userId:string){const access=await this.issueFilterAccess(userId),scope=await this.sha256(JSON.stringify([access.scope,userId]));access.assert();return {scope,filters:access.store.savedFilters(access.scope,userId),complete:true as const};}
+  async saveIssueFilter(userId:string,input:SavedIssueFilterWrite){try{const access=await this.issueFilterAccess(userId),scope=await this.sha256(JSON.stringify([access.scope,userId]));access.assert();if(input.expectedScope!==scope)throw new IssueFilterError('Personal issue view repository scope changed; refresh before saving',409);return {ok:true as const,value:access.store.savedFilterUpdate(access.scope,userId,input,access.assert)};}catch(error){if(error instanceof IssueFilterError)return {ok:false as const,status:error.status,error:error.message};throw error;}}
+  async filteredIssues(userId:string,input:IssueFilterCriteria,cursor?:string){try{
+    const access=await this.issueFilterAccess(userId);access.assert();const result=await access.store.filteredIssues(access.scope,userId,issueFilterSchema.parse(input),cursor);access.assert();
+    const fresh=await this.issueFilterAccess(userId);fresh.assert();if(fresh.scope!==access.scope)throw Error('Issue filter access changed');
+    if(fresh.store.filterSnapshot(input).source!==result.sourceFingerprint)throw new IssueFilterError('Issues changed during access validation; reload this view',409);
+    const {sourceFingerprint:_source,...page}=result;
+    const issues=result.issues.map(summary=>{const origin=this.issueRow(summary.number);return {...summary,...(origin?.importedOrigin?{importedOrigin:origin.importedOrigin}:{}),...(origin?.discussionOrigin?{discussionOrigin:origin.discussionOrigin}:{})};});
+    fresh.assert();return {ok:true as const,value:{...page,issues,members:this.ctx.storage.sql.exec<{user_id:string;label:string}>('SELECT user_id,label FROM members ORDER BY user_id LIMIT 100').toArray()}};
+  }catch(error){if(error instanceof IssueFilterError)return {ok:false as const,status:error.status,error:error.message};throw error;}}
   async issueFeatures(userId:string){const access=await this.issueFeatureAccess(userId);access.assert();return {...access.store.view(),canManage:access.owner,members:this.ctx.storage.sql.exec<{user_id:string;label:string}>('SELECT user_id,label FROM members ORDER BY user_id LIMIT 100').toArray()};}
   async issueFeatureUpdate(userId:string,input:IssueFeatureWrite){const access=await this.issueFeatureAccess(userId,true);access.assert();return access.store.update(input,this.ctx.storage.sql.exec<{user_id:string}>('SELECT user_id FROM members').toArray().map(m=>m.user_id),access.owner);}
   async issueTemplatePreview(userId:string,name:string,values:Record<string,unknown>){const access=await this.issueFeatureAccess(userId);access.assert();return access.store.preview(name,values);}
@@ -4587,6 +4628,29 @@ export class RepositoryController extends DurableObject<Env> {
       .toArray()[0];
     if(!row)return null;const discussionOrigin=this.discussions(false).conversionOrigin(n)??this.discussions(true).conversionOrigin(n);const origin=new MigrationConversationPublication(this.ctx.storage).issueOrigin(n),archiveOrigin=new MetadataArchives(this.ctx.storage).origin("issues",String(n));return {...(row as unknown as IssueRow),...(discussionOrigin?{discussionOrigin}:{}),...(origin?{importedOrigin:origin}:{}),...(archiveOrigin?{archiveOrigin}:{})};
   }
+  private async issueAttachmentReply<T>(operation:()=>Promise<T>):Promise<IssueAttachmentReply<T>>{try{return{ok:true,value:await operation()};}catch(error){if(error instanceof z.ZodError)return{ok:false,status:400,error:"Invalid attachment request"};if(error instanceof LfsStorageError&&[400,401,403,404,409,410,413,415,422,429,503].includes(error.status))return{ok:false,status:error.status,error:error.message.replace(/LFS/g,"Attachment")};return{ok:false,status:503,error:"Attachment outcome was not confirmed. Retry the original file and request identity."};}}
+  private issueAttachmentsInstance?:IssueAttachments;
+  private issueAttachments(){return this.issueAttachmentsInstance??=new IssueAttachments(this.ctx.storage);}
+  private issueAttachmentScope(number:number):IssueAttachmentScope{if(!Number.isSafeInteger(number)||number<1)throw new LfsStorageError("Invalid issue",400);const issue=this.issueRow(number);if(!issue)throw new LfsStorageError("Issue not found",404);return{projectId:this.load().projectId,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation(),issue:number,issueCreatedAt:issue.created_at,issueAuthor:issue.author};}
+  private async issueAttachmentAuthority(number:number,actor:HumanDecisionActor,write:boolean,credentialHash?:string,sessionExpiresAt?:number){
+    const initial=await this.repositoryAccessFence(actor.userId,write);initial.assert();const scope=this.issueAttachmentScope(number);const permission=await this.repositoryAccessFence(actor.userId,write);permission.assert();
+    const assert=()=>{try{permission.assert();if(JSON.stringify(this.issueAttachmentScope(number))!==JSON.stringify(scope)||write&&this.load().lifecycle?.state==='archived'||!actor.viaToken&&(!sessionExpiresAt||sessionExpiresAt<=Date.now()))throw Error("Issue attachment authority changed");}catch{throw new LfsStorageError("Issue attachment access changed",403);}};
+    const account=accountOf(this.env,await accountKeyFor(actor.userId));assert();
+    const authorize=async()=>{assert();if(await account.accountLifecycle()!=="active")throw new LfsStorageError("Account unavailable",403);assert();if(actor.viaToken&&(!credentialHash||!await account.apiTokenHashCanRead(credentialHash,actor.userId,scope.projectId,write)))throw new LfsStorageError("Attachment credential changed",401);assert();};await authorize();
+    const canUpload=permission.role!=='read'&&this.load().lifecycle?.state!=='archived'&&(!actor.viaToken||!!credentialHash&&await account.apiTokenHashCanRead(credentialHash,actor.userId,scope.projectId,true));assert();
+    const canAdminister=permission.role==='admin'&&(!actor.viaToken||!!credentialHash&&await account.apiTokenHashCanAdminister(credentialHash,actor.userId,scope.projectId));assert();
+    return{scope,assert,authorize,canUpload,canManage:(authorId:string)=>canUpload&&(authorId===actor.userId||canAdminister)};
+  }
+  private attachmentView(attachment:IssueAttachmentInput&{authorId:string;author:string;createdAt:string;phase:IssueAttachmentView['phase']},canManage:(authorId:string)=>boolean):IssueAttachmentView{const{id,name,sha256,size,authorId,author,createdAt,phase}=attachment;return{id,name,sha256,size,authorId,author,createdAt,phase,canRemove:canManage(authorId),canReconcile:canManage(authorId)};}
+  async issueAttachmentList(number:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){return this.issueAttachmentReply(async()=>{const authority=await this.issueAttachmentAuthority(number,actor,false,credentialHash,sessionExpiresAt),attachments=this.issueAttachments().list(authority.scope).filter(row=>row.phase!=='removed').map(row=>this.attachmentView(row,authority.canManage));await authority.authorize();return{attachments,canUpload:authority.canUpload};});}
+  async issueAttachmentPrepare(number:number,value:unknown,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){return this.issueAttachmentReply(async()=>{const authority=await this.issueAttachmentAuthority(number,actor,true,credentialHash,sessionExpiresAt),saved=this.issueAttachments().prepare(authority.scope,value,actor,authority.assert);await authority.authorize();return this.attachmentView(saved,authority.canManage);});}
+  async issueAttachmentUpload(number:number,id:string,body:ReadableStream<Uint8Array>,declaredSize:number|undefined,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){return this.issueAttachmentReply(async()=>{const authority=await this.issueAttachmentAuthority(number,actor,true,credentialHash,sessionExpiresAt),saved=await this.issueAttachments().upload(authority.scope,id,body,declaredSize,this.env.EVIDENCE_BUCKET,authority.authorize,actor.userId);await authority.authorize();return this.attachmentView(saved,authority.canManage);});}
+  async issueAttachmentDownload(number:number,id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){return this.issueAttachmentReply(async()=>{const authority=await this.issueAttachmentAuthority(number,actor,false,credentialHash,sessionExpiresAt),result=await this.issueAttachments().download(authority.scope,id,this.env.EVIDENCE_BUCKET,authority.authorize);return{name:result.attachment.name,size:result.attachment.size,body:result.body};});}
+  async issueAttachmentReconcile(number:number,id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){return this.issueAttachmentReply(async()=>{const authority=await this.issueAttachmentAuthority(number,actor,true,credentialHash,sessionExpiresAt),store=this.issueAttachments(),saved=store.current(authority.scope,id);if(!authority.canManage(saved.authorId))throw new LfsStorageError("Only the uploader or owner can check this upload",403);const result=await store.reconcile(authority.scope,id,this.env.EVIDENCE_BUCKET,authority.authorize);await authority.authorize();return{...this.attachmentView(result.attachment,authority.canManage),reconciled:result.reconciled};});}
+  async issueAttachmentRemove(number:number,id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){return this.issueAttachmentReply(async()=>{const authority=await this.issueAttachmentAuthority(number,actor,true,credentialHash,sessionExpiresAt),store=this.issueAttachments(),saved=store.list(authority.scope).find(row=>row.id===id);if(!saved||!authority.canManage(saved.authorId))throw new LfsStorageError("Only the uploader or owner can remove this attachment",403);await authority.authorize();const removed=store.remove(authority.scope,id,authority.assert);return this.attachmentView(removed,authority.canManage);});}
+  async issueAttachmentReferences(number:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){return this.issueAttachmentReply(async()=>{const authority=await this.issueAttachmentAuthority(number,actor,false,credentialHash,sessionExpiresAt),result=this.issueAttachments().references(authority.scope);await authority.authorize();return result;});}
+  async issueAttachmentRetention(number:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){return this.issueAttachmentReply(async()=>{const authority=await this.issueAttachmentAuthority(number,actor,true,credentialHash,sessionExpiresAt);if(await this.roleOf(actor.userId)!=='owner')throw new LfsStorageError("Only the owner can release expired attachment storage",403);const owner=await this.authorizeHumanDecision(actor,credentialHash,true);owner();return this.issueAttachments().retention(authority.scope,this.env.EVIDENCE_BUCKET,async()=>{await authority.authorize();owner();});});}
+
   async listIssues(state: "open" | "closed"): Promise<IssueRow[]> {
     return this.ctx.storage.sql
       .exec("SELECT i.*, (SELECT COUNT(*) FROM comments c WHERE c.subject = 'issue:' || i.number) AS comments FROM issues i WHERE state = ? ORDER BY number DESC LIMIT 200", state)
@@ -4646,8 +4710,52 @@ export class RepositoryController extends DurableObject<Env> {
     const nextCursor = rows.length > 100 ? btoa(JSON.stringify([subject,page.at(-1)!.id])).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "") : null;
     return { comments: page.reverse(), nextCursor, hasMore: nextCursor !== null };
   }
+  private threadExists(subject:string):boolean{
+    const [kind,id]=threadSubjectSchema.parse(subject).split(':');
+    return kind==='issue'?Boolean(this.issueRow(Number(id))):kind==='change'?Boolean(this.load().tasks[id!]):Boolean(this.load().candidates[id!]);
+  }
+  async threadPreference(userId:string,subject:string,input?:unknown,sessionExpiresAt?:number):Promise<ThreadPreference>{
+    const sessionCurrent=()=>{if(!Number.isFinite(sessionExpiresAt)||Date.now()>=sessionExpiresAt!)throw Error('Thread preference session expired');};sessionCurrent();
+    if(await accountOf(this.env,await accountKeyFor(userId)).accountLifecycle()!=='active')throw Error('Thread preference account unavailable');sessionCurrent();
+    const initial=await this.repositoryAccessFence(userId);initial.assert();if(!this.threadExists(subject))throw Error('Thread unavailable');
+    const incarnation=this.readRepositoryIncarnation()??new PrivateRecoveryOperations(this.ctx.storage).incarnation(),ledger=new ThreadNotifications(this.ctx.storage),authority=await this.repositoryAccessFence(userId);authority.assert();
+    const assert=()=>{sessionCurrent();authority.assert();if(this.readRepositoryIncarnation()!==incarnation||!this.threadExists(subject))throw Error('Thread access changed');};assert();
+    return input===undefined?ledger.read(incarnation,subject,userId):ledger.update(incarnation,subject,userId,input,assert);
+  }
+  async memberThreadNotification(userId:string,incarnation:string,subject:string,commentId:number,preferenceVersion:number):Promise<{projectName:string}|null>{
+    try{
+      const authority=await this.repositoryAccessFence(userId);authority.assert();
+      if(this.readRepositoryIncarnation()!==incarnation||!threadSubjectSchema.safeParse(subject).success||!this.threadExists(subject)||!Number.isSafeInteger(commentId)||commentId<1||!Number.isSafeInteger(preferenceVersion)||preferenceVersion<1)return null;
+      if(!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_preferences'").toArray().length)return null;
+      const ledger=new ThreadNotifications(this.ctx.storage);if(!ledger.available({incarnation,subject,comment_id:commentId,actor_id:userId,preference_version:preferenceVersion}))return null;
+      authority.assert();return{projectName:this.load().projectName};
+    }catch{return null;}
+  }
+  private async deliverThreadNotifications(){
+    if(!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_notification_outbox'").toArray().length)return;
+    const ledger=new ThreadNotifications(this.ctx.storage);
+    for(const item of ledger.pending()){
+      try{
+        const available=()=>!this.repositoryDeleting()&&this.readRepositoryIncarnation()===item.incarnation&&this.threadExists(item.subject)&&ledger.available(item);
+        if(!available()){ledger.acknowledge(item);continue;}
+        const authority=await this.repositoryAccessFence(item.actor_id);authority.assert();if(!available()){ledger.acknowledge(item);continue;}
+        const account=accountOf(this.env,await accountKeyFor(item.actor_id));authority.assert();if(!available()){ledger.acknowledge(item);continue;}
+        const state=this.load();
+        await account.addInbox({projectId:state.projectId,projectName:state.projectName,kind:'activity',type:`thread.comment.${item.incarnation}.${item.subject.replace(':','.')}.${item.comment_id}.${item.preference_version}`,title:'New comment in a subscribed thread',eventKey:`thread:${item.incarnation}:${item.comment_id}`});
+        authority.assert();
+        ledger.acknowledge(item);
+      }catch(error){
+        // A confirmed revocation drops its queued private event. An unavailable
+        // access source remains pending for bounded, idempotent retry.
+        if(this.repositoryDeleting()||this.readRepositoryIncarnation()!==item.incarnation||String(error).includes('Repository access revoked'))ledger.acknowledge(item);
+      }
+    }
+    if(ledger.hasPending())await this.ensureRecoveryAlarm(60000);
+  }
   async addMemberComment(userId: string, input: MemberCommentInput): Promise<CommentRow> {
-    const authority=await this.repositoryAccessFence(userId,true);
+    const initial=await this.repositoryAccessFence(userId,true);initial.assert();
+    const incarnation=this.readRepositoryIncarnation()??new PrivateRecoveryOperations(this.ctx.storage).incarnation(),notifications=new ThreadNotifications(this.ctx.storage),authority=await this.repositoryAccessFence(userId,true);
+    await this.ensureRecoveryAlarm(60000);
     return this.ctx.storage.transactionSync(() => {
       authority.assert();
       const payload = JSON.stringify([input.subject,input.body,input.path ?? null,input.line ?? null,input.commit ?? null]);
@@ -4673,6 +4781,7 @@ export class RepositoryController extends DurableObject<Env> {
       const at=new Date().toISOString();
       const id=this.ctx.storage.sql.exec<{id:number}>('INSERT INTO comments(subject,author,body,path,line,"commit",created_at) VALUES(?,?,?,?,?,?,?) RETURNING id',input.subject,input.author,input.body,input.path ?? null,input.line ?? null,input.commit ?? null,at).one().id;
       if(input.idempotencyKey)this.ctx.storage.sql.exec("INSERT INTO member_comment_receipts VALUES(?,?,?,?)",userId,input.idempotencyKey,payload,id);
+      if(threadSubjectSchema.safeParse(input.subject).success)notifications.stage(incarnation,input.subject,id,userId);
       if(input.subject.startsWith("issue:"))this.ctx.storage.sql.exec("UPDATE issues SET updated_at=? WHERE number=?",at,Number(input.subject.slice(6)));
       this.ctx.storage.sql.exec("INSERT INTO activity(at,actor,type,summary) VALUES(?,?,?,?)",at,input.author,"comment.added",input.author+" commented on "+input.subject.replace(":"," "));
       return this.ctx.storage.sql.exec('SELECT id,subject,author,body,path,line,"commit",created_at FROM comments WHERE id=?',id).one() as unknown as CommentRow;
@@ -5137,6 +5246,7 @@ export class RepositoryController extends DurableObject<Env> {
     const agentRuntime=new AgentRuntimeLedger(this.ctx.storage),agentCredentials=new AgentCredentialIncidents(this.ctx.storage);agentCredentials.pendingBatch();if(agentRuntime.hasUnconfirmed()||this.ctx.storage.sql.exec("SELECT id FROM agent_credential_incidents WHERE status!='revoked' LIMIT 1").toArray().length)throw Error("Agent shutdown or credential cleanup remains unconfirmed; metadata preserved");
     const integrationNative=new IntegrationNativeRuntimeLedger(this.ctx.storage);if(integrationNative.hasUnconfirmed()||this.integrationNativeMissingCoverage().some(run=>run.native_protocol!==1||Object.values(this.load(true).candidates).some(candidate=>candidate.workflowInstanceId===run.instance_id)))throw new Error("Integration native shutdown remains unconfirmed; metadata was preserved");
     if(this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='lfs_objects'").toArray().length){if(!this.repositoryDeleting())throw new LfsStorageError("Repository deletion must fence LFS writers first",409);await this.lfsStorage().cleanupForDeletion(this.load(true).projectId,this.env.EVIDENCE_BUCKET);}
+    if(this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_attachment_refs'").toArray().length){if(!this.repositoryDeleting())throw new LfsStorageError("Repository deletion must fence attachment writers first",409);await this.issueAttachments().cleanupForDeletion(this.load(true).projectId,this.env.EVIDENCE_BUCKET);}
     const tables = this.ctx.storage.sql.exec<{name:string}>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name!='repository_deletion'").toArray();
     this.ctx.storage.transactionSync(() => {
       for (const table of tables) this.ctx.storage.sql.exec(`DELETE FROM "${table.name.replaceAll('"','""')}"`);

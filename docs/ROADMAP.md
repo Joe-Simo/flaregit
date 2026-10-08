@@ -3453,8 +3453,19 @@ transferred issue keeps a tombstone with its destination and refuses further cha
 
 **Integrated locally for F05:** `issue-feature-store.ts`, member-authorized `/issue-features` and `/issues/from-template`
 routes, plus issue planning/template/bulk UI. SQLite reopen, actual signed Worker HTTP, required-field/retry and
-rendered desktop/mobile flows pass. Still open: attachments, complete duplicate/sub-issue workflows, saved filters,
+rendered desktop/mobile flows pass. Personal saved filters now retain canonical state/text/label/assignee/milestone/sort
+criteria with per-principal and repository-incarnation isolation, versioned writes, replay-safe delete tombstones,
+and complete bounded query paging; native SQLite and actual signed Worker HTTP pass. Issue attachments now have
+immutable issue/incarnation-bound request receipts, bounded SHA-256-verified R2 streaming, protected download/removal,
+and explicit per-issue reference manifests that do not pretend to restore bytes. Actual local Worker/R2 binary,
+retry, quota, token revocation and inherited team-access checks pass. Removal during reconciliation, overlapping
+retention ownership, same-hash admission holds and late deletion of an old physical generation are also verified.
+Desktop/mobile actual-component fixtures pass.
+Still open: complete duplicate/sub-issue workflows,
 moderation and deleted/transferred-resource routes; this does not close the full ticket.
+The existing issue-state PATCH path still needs actor/session/current-membership fencing and conflict checks at the
+actual canonical write; that prerequisite precedes transfer/deletion work. Relationship controls also need current
+title/status navigation using the existing link store.
 
 Complete labels, assignees, milestones, templates/forms, attachment handling, linking/closing through accepted work, duplicate/transfer workflows, relationships/subissues, saved filtering, bulk actions, and moderation. Preserve discussion context when tasks are assigned to agents.
 
@@ -3500,7 +3511,13 @@ unsubscribed readers but not muted ones. Follow/contribution-visibility rules an
 modules are present. Complete discovery, subscription/preferences, delivery diagnostics and end-to-end privacy
 verification remain open. Durable repository delivery preferences and current-access inbox projection are now
 integrated and locally verified, including revoked membership, stale writes, reversed responses and failed refreshes.
-True thread subscriptions, mentions and email delivery remain open.
+Canonical issue/change/candidate comment subscriptions now persist subscribed/unsubscribed/muted preferences.
+Source comment and recipient outbox commit atomically; alarm retries use account delivery receipts, and delivered
+inbox entries revalidate their exact source, repository incarnation and preference revision. Public discussion
+subscribers can receive reply events without membership; their exact public source never releases private activity
+from the same repository. Native storage and actual Worker HTTP cover lost acknowledgements, withdrawal, removal,
+and publication revocation. Actual-component desktop/mobile fixtures pass. Mentions, state-event subscriptions,
+historical/system comment delivery, email delivery and full hosted acceptance remain open.
 
 Complete profiles, contribution visibility controls, follows, stars/watch subscriptions, repository discovery/topics, notifications, mentions, mute/unsubscribe, read/unread state, email preferences, and delivery diagnostics. Use existing profile/community/inbox modules where they work. Prevent name/namespace impersonation through a defined reporting and review process.
 

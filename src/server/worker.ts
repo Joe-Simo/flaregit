@@ -1,3 +1,6 @@
+import {attachmentDisposition,type IssueAttachmentReply} from './issue-attachments';
+import {LfsStorageError} from './lfs-store';
+import {threadSubjectSchema,threadPreferenceUpdate} from './thread-notifications';
 import {taskRetargetRequestSchema} from './task-retarget';
 import {browserEditSchema} from "./browser-edit";
 import {commitSignatureRequest} from './commit-signature-inspection';
@@ -12,7 +15,7 @@ import {RequestBodyError,readRequestJson,readRequestBytes} from "./request-body"
 import {MAX_METADATA_ARCHIVE_BYTES} from "./metadata-archive";
 import {inboxPreferenceUpdate} from "./inbox-preferences";
 import {projectInbox} from './inbox-privacy';
-import {issueFeatureWrite} from './issue-feature-store';
+import {issueFeatureWrite,issueFilterSchema,savedIssueFilterWrite,IssueFilterError} from './issue-feature-store';
 import {planningMutationSchema} from './planning-store';
 import {dispatchPreparedPublication,preparedPublicationRequestSchema,PreparedPublicationDispatchError} from './prepared-publication-dispatch';
 import {normalizeTopics} from '../core/repository-topics';
@@ -923,7 +926,19 @@ export default {
             const repository = projectOf(env, projectId);
             const [role, deleting] = await Promise.all([repository.roleOf(userId), repository.repositoryDeletionPending()]);
             return role !== null && !deleting;
-          }, freshPrincipal);
+          }, freshPrincipal, async row => {
+            const thread=/^thread\.comment\.([a-f0-9-]{36})\.(issue|change|candidate)\.([a-z0-9_-]+)\.([1-9][0-9]*)\.([1-9][0-9]*)$/.exec(row.type);
+            if(thread){
+              const commentId=Number(thread[4]),version=Number(thread[5]);
+              if(!Number.isSafeInteger(commentId)||!Number.isSafeInteger(version))return null;
+              const source=await projectOf(env,row.project_id).memberThreadNotification(userId,thread[1]!,`${thread[2]}:${thread[3]}`,commentId,version);
+              return source?{...row,project_name:source.projectName,title:'New comment in a subscribed thread'}:null;
+            }
+            const match=/^discussion\.reply\.public\.(discussion_[a-f0-9-]{36})\.(discussion_[a-f0-9-]{36})$/.exec(row.type);
+            if(!match)return null;
+            const source=await projectOf(env,row.project_id).publicDiscussionNotification(userId,match[1]!,match[2]!);
+            return source?{...row,project_name:source.projectName,title:'New reply in a subscribed discussion'}:null;
+          });
           if (expiresAt !== undefined && Date.now() >= expiresAt) return repositoryReadText("Inbox authorization expired", 403);
           return repositoryReadJson(projection);
         } catch { return repositoryReadText("Inbox authorization changed; sign in again", 403); }
@@ -1143,11 +1158,21 @@ export default {
           return json({ deleted: projectId });
         }
 
+        if(sub==='/thread-preference'){
+          if(auth.viaToken)return repositoryReadText('Thread preferences require a signed-in human session',403);
+          if(method!=='GET'&&method!=='PUT')return repositoryReadText('Thread preferences accept GET or PUT',405);
+          if([...url.searchParams.keys()].some(key=>key!=='subject')||url.searchParams.getAll('subject').length!==1)return repositoryReadText('Exact thread subject required',400);
+          const subject=threadSubjectSchema.safeParse(url.searchParams.get('subject'));if(!subject.success)return repositoryReadText('Invalid thread subject',400);
+          const input=method==='PUT'?threadPreferenceUpdate.safeParse(await body<unknown>()):undefined;if(input&&!input.success)return repositoryReadText('Choose a thread preference with its saved version',400);
+          const current=await authenticate(request,env);if(current instanceof Response)return current;
+          if(current.viaToken||current.id!==userId||!current.expiresAt||current.expiresAt<=Date.now()||await account.accountLifecycle()!=='active')return repositoryReadText('Thread preference session changed',403);
+          try{const value=await project.threadPreference(userId,subject.data,input?.success?input.data:undefined,current.expiresAt);const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;if(fresh.viaToken||fresh.id!==userId||!fresh.expiresAt||fresh.expiresAt<=Date.now()||await account.accountLifecycle()!=='active'||!await project.roleOf(userId))return repositoryReadText('Thread preference access changed',403);return repositoryReadJson(value);}catch{return repositoryReadText('Thread preference or access changed; reload before retrying',409);}
+        }
         const effectiveAccess=await project.repositoryAccess(userId);
         if(!effectiveAccess)return text('Not found',404);
-        if(method!=='GET'&&!effectiveAccess.direct){
+        if(method!=='GET'&&!effectiveAccess.direct&&sub!=='/issue-filters'){
           if(effectiveAccess.role==='read'&&sub!=='/clone')return text('Repository access is read-only',403);
-          if(sub!=='/clone'&&!sub.startsWith('/wiki/')&&sub!=='/planning'&&sub!=='/issues'&&sub!=='/comments'&&sub!=='/tasks'&&!/^\/tasks\/[a-z0-9-]+\/(token|ready|cancel|browser-edit|fork-permission)$/.test(sub))return text('This operation requires direct repository membership',403);
+          if(sub!=='/clone'&&!sub.startsWith('/wiki/')&&sub!=='/planning'&&sub!=='/issues'&&!/^\/issues\/\d{1,7}\/attachments(?:\/(?:[a-f0-9-]{36})(?:\/(?:content|reconcile))?)?$/.test(sub)&&sub!=='/comments'&&sub!=='/tasks'&&!/^\/tasks\/[a-z0-9-]+\/(token|ready|cancel|browser-edit|fork-permission)$/.test(sub))return text('This operation requires direct repository membership',403);
         }
         const state = await project.getState().catch(() => null);
         if (!state) return text("Not found", 404);
@@ -2477,6 +2502,28 @@ export default {
           return Response.json({ ready: true, status:"available", generationRecovery:await readyRecovery(), url: `${previewOrigin}/preview/${commit}/${exp}/${sig}/`, expiresAt: new Date(exp * 1000).toISOString() }, { headers: { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff" } });
         }
 
+        if(sub==='/issue-filters'||sub==='/issues/query'){
+          const freshFilterActor=async()=>{const current=await authenticate(request,env);if(current instanceof Response||current.id!==userId||current.viaToken!==auth.viaToken||await account.accountLifecycle()!=='active'||!await project.repositoryAccess(userId))throw Error('Issue filter authorization changed');};
+          try{
+            await freshFilterActor();let result:unknown;
+            if(sub==='/issue-filters'){
+              if(url.search)return repositoryReadJson({error:'Saved filters do not accept query parameters'},400);
+              if(method==='GET')result=await project.savedIssueFilters(userId);
+              else if(method==='POST'){const value=savedIssueFilterWrite.safeParse(await body<unknown>());if(!value.success)return repositoryReadJson({error:'Exact saved filter criteria and version required'},400);const outcome=await project.saveIssueFilter(userId,value.data);await freshFilterActor();if(!outcome.ok)return repositoryReadJson({error:outcome.error},outcome.status);result=outcome.value;}
+              else return text('Method not allowed',405);
+            }else{
+              if(method!=='GET')return text('Method not allowed',405);
+              const keys=['state','q','label','assignee','milestone','sort','cursor'];if([...url.searchParams.keys()].some(key=>!keys.includes(key)||url.searchParams.getAll(key).length!==1))return repositoryReadJson({error:'Invalid or duplicated issue filter'},400);
+              const raw=Object.fromEntries(url.searchParams);const {cursor,milestone,...criteria}=raw;
+              if(milestone!==undefined&&milestone!=='none'&&!/^[1-9][0-9]*$/.test(milestone))return repositoryReadJson({error:'Invalid issue milestone'},400);
+              const filter=issueFilterSchema.safeParse({...criteria,...(milestone===undefined?{}:{milestone:milestone==='none'?milestone:Number(milestone)})});
+              if(!filter.success||cursor!==undefined&&(!cursor||cursor.length>256))return repositoryReadJson({error:'Literal query and supported filter fields required'},400);
+              const outcome=await project.filteredIssues(userId,filter.data,cursor);await freshFilterActor();if(!outcome.ok)return repositoryReadJson({error:outcome.error},outcome.status);result=outcome.value;
+            }
+            await freshFilterActor();return repositoryReadJson(result);
+          }catch(error){return repositoryReadJson({error:error instanceof IssueFilterError?error.message:'Issue filter access is unavailable; saved views grant no access'},error instanceof IssueFilterError?error.status:403);}
+        }
+
         if(sub==='/issue-features'){
           if(method==='GET')return repositoryReadJson({...await project.issueFeatures(userId),canManage:isOwner});
           if(method!=='PATCH')return text('Method not allowed',405);
@@ -2528,6 +2575,27 @@ export default {
           if(!await authorizeIssue())return text("Issue result unavailable because access was revoked",403);
           return json(saved,201);
         }
+        const attachmentRoute=/^\/issues\/(\d{1,7})\/attachments(?:\/(references|retention|[a-f0-9-]{36})(?:\/(content|reconcile))?)?$/.exec(sub);
+        if(attachmentRoute){
+          const attachmentValue=<T,>(reply:IssueAttachmentReply<T>):T=>{if(!reply.ok)throw new LfsStorageError(reply.error,reply.status);return reply.value;};
+          if(auth.oauthClientId)return text("Attachment access requires a current session or personal token",403);
+          if(url.search)return text("Invalid attachment query",400);
+          const number=Number(attachmentRoute[1]),id=attachmentRoute[2],action=attachmentRoute[3];
+          const currentAttachmentActor=async()=>{const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||current.viaToken!==auth.viaToken||current.oauthClientId||current.tokenRepo&&current.tokenRepo!==projectId)return text("Attachment access changed",403);const profile=await account.getProfile();return{actor:{userId,displayName:clean(profile.displayName,120)||"Issue member",viaToken:current.viaToken===true},hash:current.viaToken?await gitParentTokenHash(request):undefined,expiry:current.viaToken?undefined:current.expiresAt};};
+          const actor=await currentAttachmentActor();if(actor instanceof Response)return actor;
+          try{
+            if(!id&&method==="GET")return repositoryReadJson(attachmentValue(await project.issueAttachmentList(number,actor.actor,actor.hash,actor.expiry)));
+            if(!id&&method==="POST"){const input=await body<unknown>(4096);const result=attachmentValue(await project.issueAttachmentPrepare(number,input,actor.actor,actor.hash,actor.expiry));const fresh=await currentAttachmentActor();if(fresh instanceof Response)return fresh;return repositoryReadJson(result,201);}
+            if(id==="references"&&method==="GET")return repositoryReadJson(attachmentValue(await project.issueAttachmentReferences(number,actor.actor,actor.hash,actor.expiry)));
+            if(id==="retention"&&method==="POST")return repositoryReadJson(attachmentValue(await project.issueAttachmentRetention(number,actor.actor,actor.hash,actor.expiry)));
+            if(id&&action==="content"&&method==="PUT"){const length=request.headers.get("Content-Length");if(length!==null&&!/^\d+$/.test(length))return text("Invalid attachment content length",400);const size=length===null?undefined:Number(length);if(size!==undefined&&(!Number.isSafeInteger(size)||size>5*1024*1024))return text("Attachment exceeds the 5 MB limit",413);const stream=request.body??new ReadableStream<Uint8Array>({start(controller){controller.close();}});const result=attachmentValue(await project.issueAttachmentUpload(number,id,stream,size,actor.actor,actor.hash,actor.expiry));const fresh=await currentAttachmentActor();if(fresh instanceof Response)return fresh;return repositoryReadJson(result);}
+            if(id&&action==="content"&&method==="GET"){const result=attachmentValue(await project.issueAttachmentDownload(number,id,actor.actor,actor.hash,actor.expiry));const fresh=await currentAttachmentActor();if(fresh instanceof Response){await result.body.cancel();return fresh;}return new Response(result.body,{headers:{"Content-Type":"application/octet-stream","Content-Length":String(result.size),"Content-Disposition":attachmentDisposition(result.name),"Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff","Content-Security-Policy":"default-src 'none'; sandbox"}});}
+            if(id&&action==="reconcile"&&method==="POST")return repositoryReadJson(attachmentValue(await project.issueAttachmentReconcile(number,id,actor.actor,actor.hash,actor.expiry)));
+            if(id&&!action&&method==="DELETE")return repositoryReadJson(attachmentValue(await project.issueAttachmentRemove(number,id,actor.actor,actor.hash,actor.expiry)));
+            return text("Attachment endpoint not found",404);
+          }catch(error){if(error instanceof RequestBodyError)throw error;const status=error instanceof LfsStorageError?error.status:503;return repositoryReadJson({error:error instanceof LfsStorageError?error.message.replace(/LFS/g,"Attachment"):"Attachment outcome was not confirmed. Retry the original file and request identity."},status);}
+        }
+
         const issueRoute = /^\/issues\/(\d{1,7})$/.exec(sub);
         if (issueRoute && method === "GET") {
           const issue = await project.getIssue(Number(issueRoute[1]));

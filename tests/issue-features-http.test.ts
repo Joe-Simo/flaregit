@@ -74,9 +74,27 @@ test('issue planning HTTP enforces member privacy, owner milestone/template auth
     const current=await (await call(member,features)).json() as {triage:Record<string,{labels:string[];assignees:string[];milestone?:number}>;progress:unknown[]};
     expect(current.triage['1']).toMatchObject({labels:['priority'],assignees:['member'],milestone:2});
     expect(current.progress).toEqual([{id:2,open:1,closed:0}]);
+    const savedViews='/api/p/p123456789abc/issue-filters',query='/api/p/p123456789abc/issues/query';
+    const personal=await (await call(member,savedViews)).json() as {scope:string;filters:unknown[]};
+    expect(personal.filters).toEqual([]);expect(personal.scope).toMatch(/^[a-f0-9]{64}$/);
+    const viewId=crypto.randomUUID(),save={action:'save',id:viewId,expectedScope:personal.scope,expectedVersion:0,name:'Private member triage',filter:{state:'open',q:'private description',label:'priority',milestone:2,sort:'number-asc'}};
+    expect((await call(member,savedViews,'POST',save)).status).toBe(200);
+    expect(await (await call(member,savedViews,'POST',save)).json()).toMatchObject({id:viewId,version:1});
+    expect(await (await call(owner,savedViews)).json()).toMatchObject({filters:[]});
+    expect((await call(owner,savedViews,'POST',save)).status).toBe(409);
+    const filtered=await call(member,query+'?state=open&q=private%20description&label=priority&milestone=2&sort=number-asc');
+    expect(filtered.status).toBe(200);const selected=await filtered.json() as {issues:Array<{number:number}>;total:number;complete:boolean};expect(selected.issues.map(issue=>issue.number)).toEqual([1]);expect(selected.total).toBe(1);expect(selected.complete).toBe(true);expect(selected).not.toHaveProperty('sourceFingerprint');
+    expect((await call(member,query+'?q=a&q=b')).status).toBe(400);expect((await call(member,query+'?sort=unsupported')).status).toBe(400);
+    const hidden=await call(outsider,savedViews);expect(hidden.status).toBe(404);expect(await hidden.text()).not.toContain(save.name);
+    const deleted={action:'delete',id:viewId,expectedScope:personal.scope,expectedVersion:1};expect((await call(member,savedViews,'POST',deleted)).status).toBe(200);expect((await call(member,savedViews,'POST',deleted)).status).toBe(200);expect((await call(member,savedViews,'POST',save)).status).toBe(410);
+    expect((await call(member,savedViews,'POST',{...save,id:crypto.randomUUID()})).status).toBe(200);
     expect((await call(owner,life,'POST',{action:'archive'})).status).toBe(200);
     expect((await update({kind:'bulk-label',numbers:[1],label:'blocked'})).status).toBe(409);
     expect((await call(member,features)).status).toBe(200);
+    await worker.fetch('http://fixture/fixture/revoke-member');
+    const revokedViews=await call(member,savedViews);expect([403,404]).toContain(revokedViews.status);expect(await revokedViews.text()).not.toContain(save.name);
+    const revokedWrite=await call(member,savedViews,'POST',save);expect([403,404]).toContain(revokedWrite.status);expect(await revokedWrite.text()).not.toContain(save.name);
+
   } finally {
     await mf.dispose();
     issuer.stop(true);

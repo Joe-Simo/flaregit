@@ -56,6 +56,7 @@ test("repository discussions keep private conversations separate and preserve re
         expect(reply.topicId).toBe(entry.id);
         expect(await(await call('/pending')).json()).toEqual([{event_id:reply.id,actor_id:'intruder',topic_id:entry.id,entry_id:reply.id}]);
         expect(await(await call(`/notification-available?id=${entry.id}&entry=${reply.id}&actor=intruder`)).json()).toBe(true);
+        expect(await(await call(`/notification-available?id=${entry.id}&entry=${entry.id}&actor=intruder`)).json()).toBe(false);
         expect(await(await call('/pending?private=true')).json()).toEqual([]);
         await call(`/acknowledge?event=${reply.id}&actor=intruder`,{});
         await call(`/create?id=${entry.id}`,replyInput);

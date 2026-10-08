@@ -47,6 +47,10 @@ test('organization HTTP grants teams access without direct ownership and revokes
     const cycle=await call(owner,'/api/organizations/'+organization.id+'/teams/contributors/children/engineering','PUT',{present:true,expectedRevision:organization.revision});expect(cycle.status).toBe(409);
 
     await mutation(owner,'/grants','PUT',{repositoryId:'p123456789abc',subject:{kind:'team',id:'engineering'},role:'read'});
+    const issueReply=await call(owner,'/api/p/p123456789abc/issues','POST',{title:'Inherited attachment authority',body:'Synthetic attachment metadata only',idempotencyKey:crypto.randomUUID()});expect(issueReply.status).toBe(201);
+    const issue=await issueReply.json() as {number:number},attachmentPath=`/api/p/p123456789abc/issues/${issue.number}/attachments`,attachment={id:crypto.randomUUID(),name:'team.txt',sha256:'a'.repeat(64),size:1};
+    expect(await(await call(outsider,attachmentPath)).json()).toMatchObject({attachments:[],canUpload:false});
+    expect((await call(outsider,attachmentPath,'POST',attachment)).status).toBe(403);
     const page='/api/p/p123456789abc/wiki/home';
     expect((await call(outsider,'/api/p/p123456789abc/wiki')).status).toBe(200);
     expect((await call(outsider,page,'PUT',{body:'Read cannot write',expectedRevision:null})).status).toBe(403);
@@ -54,6 +58,9 @@ test('organization HTTP grants teams access without direct ownership and revokes
     expect((await call(outsider,'/api/p/p123456789abc/clone','POST',{})).status).toBe(200);
 
     await mutation(owner,'/grants','PUT',{repositoryId:'p123456789abc',subject:{kind:'team',id:'engineering'},role:'write'});
+    expect((await call(outsider,attachmentPath,'POST',attachment)).status).toBe(201);
+    expect(await(await call(outsider,attachmentPath)).json()).toMatchObject({canUpload:true,attachments:[{id:attachment.id,phase:'pending',canRemove:true}]});
+    expect((await call(outsider,`${attachmentPath}/retention`,'POST',{})).status).toBe(403);
     expect((await call(outsider,page,'PUT',{body:'Team contribution',expectedRevision:null})).status).toBe(200);
     expect(await(await call(outsider,page)).json()).toMatchObject({body:'Team contribution',author:'outsider'});
     expect((await worker.fetch('http://fixture/fixture/contribution')).status).toBe(200);
@@ -89,6 +96,8 @@ test('organization HTTP grants teams access without direct ownership and revokes
     expect(uncertain.status).toBe(409);expect(await uncertain.text()).toContain('fanout incomplete');
     // Canonical source changed already, so a stale cached inherited grant never authorizes new reads.
     expect((await call(outsider,page)).status).toBe(404);
+    expect((await call(outsider,attachmentPath)).status).toBe(404);
+    expect((await call(outsider,`${attachmentPath}/${attachment.id}`,'DELETE')).status).toBe(404);
     expect(await(await worker.fetch('http://fixture/fixture/gateway-dispatch?id='+gateway.id)).json()).toEqual({allowed:false});
     expect((await call(outsider,'/api/p/p123456789abc/tasks/team-contribution/token','POST',{})).status).toBe(404);
     organization=await(await call(owner,'/api/organizations/'+organization.id)).json() as typeof organization;
