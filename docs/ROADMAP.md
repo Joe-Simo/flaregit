@@ -6,7 +6,38 @@ checklist while preserving its evidence below. No competing tracker is created.
 
 **Product:** Work in parallel. Integration happens automatically.
 
-## No-spend scope — owner decision, October 8, 2026
+## No-money plan — October 8, 2026 (supersedes the deferred list below)
+
+The owner's requirement: the app must be buildable and testable without money. Checked against Cloudflare's
+pricing pages on October 8, 2026:
+
+- **Free tiers exist for:** Workers (100,000 requests/day, 10 ms CPU per invocation), Durable Objects with SQLite
+  (100,000 requests/day, 5 GB stored), R2 (10 GB-month, 1 M Class A and 10 M Class B operations/month), D1 (5 GB).
+- **Paid only:** Cloudflare Artifacts (Workers Paid plan, $5/month minimum, then per-operation and per-GB charges;
+  billing starts October 14, 2026). Cloudflare Containers (Workers Paid plan, then compute, memory, disk and egress).
+
+Therefore the product should not depend on Artifacts or Containers. Replacements that need no money:
+
+1. **Git storage (replaces Artifacts):** store Git objects, refs and packs in Durable Object SQLite and R2 (free
+   tier), with our own smart-HTTP upload-pack and receive-pack. This is a large engineering item (F02, C03, C05).
+2. **Untrusted execution (replaces Containers):** run customer verification outside the platform on free runners
+   (for example GitHub Actions, free for public repositories). The Worker is the trusted publisher: it accepts only
+   signed attestations bound to the exact commit, tree, policy and runner identity. This is a product decision; see
+   the decisions list below.
+3. **Hosted receipts:** produced by the free Worker and Durable Object tiers and by the free runner. No paid
+   resource is required for any receipt.
+
+**Decisions only the owner can make:**
+- The competition rules require Cloudflare Artifacts. Artifacts requires the Workers Paid plan ($5/month minimum
+  plus usage). Either accept that one cost for the entry, or skip the competition entry and build the no-money
+  product. Nothing here has been changed on your behalf.
+- Approve the replacement design for untrusted execution (free runners with signed attestations), or name a different
+  free design.
+
+**Work that remains, with no money required:** F01 non-project route guards; F02 signature verification and
+replacement Git storage; F03–F20 (not started); C02–C09 replacement designs. Each will be recorded here as it lands.
+
+## Superseded: earlier no-spend scope — owner decision, October 8, 2026
 
 The owner has ruled out spending money. The active scope is therefore limited to work that costs nothing:
 local source, local tests, local Docker images, and reading public documents. Everything that needs paid
