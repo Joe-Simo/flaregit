@@ -2135,6 +2135,13 @@ migration, destructive action, or legal acceptance is authorized by this tracker
 - Introspection is not exposed over HTTP. Team and org membership are not yet read for private package visibility.
 - Not yet done: a restart test in workerd (Miniflare here only supports in-memory persistence; restart behavior is covered by SQLite-backed tests), deployment of the new Durable Object class, and the duplicate-module decision for deployments and org invitations.
 
+## Third batch of local slices, October 8 (source-tested; not wired into routes)
+
+- F06: `project-views.ts`: iterations, views, status automation, bulk status change, deterministic export. Fixed: text fields could not be written.
+- F15: `redirects.ts`: renames with loop refusal and depth limit, 90-day reuse window, tombstones. Importing redirects does not yet carry tombstones.
+- F16: `agent-environment.ts`: fixed tool list, exact-host egress, no secrets, run ledger with timeouts. Commands can reach the network without a declared host; only runtime enforcement closes that.
+- F17: `client-capabilities.ts`: one permission model for web, CLI and API, with per-surface request budgets. Role mapping awaits owner sign-off.
+
 ## Active ticket ledger
 
 | Ticket | Status | Primary owner | Next acceptance action |
