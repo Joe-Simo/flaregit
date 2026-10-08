@@ -3201,8 +3201,15 @@ Workers-compatible) against a key and signature produced by GnuPG 2.5 and checke
 signature that verifies against a trusted key, and reports that key's uppercase fingerprint. Trusted GPG public keys are stored
 on the account (`trusted_gpg_keys` in the account Durable Object) and exposed at `/api/signing-keys/gpg` (GET, POST, DELETE) for
 signed-in human sessions only. Validation (`src/core/trusted-gpg-keys.ts`) refuses private keys, malformed input and extra fields,
-and is idempotent by fingerprint; `tests/gpg-keys-http.test.ts` (1 pass; 13 assertions in child mode) covers it. Remaining F02 work:
-X.509 verification and connecting verification status to the commit view.
+and is idempotent by fingerprint; `tests/gpg-keys-http.test.ts` (1 pass; 13 assertions in child mode) covers it.
+
+**Blocked for F02 (October 8):**
+- X.509 (CMS/PKCS#7) verification: a trust-root policy is required before any X.509 signature can be accepted. The
+  owner must name the certificate authorities to trust, or decide to reject X.509 commits. No code is accepted
+  without that decision.
+- Commit-view wiring: the commit views (`CandidateReview`, `DiffViewer`, `CandidateJournal`) need verification status from
+  the server, and the server reads commit objects through Artifacts. Validating that on a real repository is a hosted
+  Artifacts operation, which needs the owner's confirmation before it runs.
 
 **Still open for F02, not closable without spend:** the R2-backed LFS object store and its HTTP endpoints (billed R2
 storage), stock Git and Git LFS client acceptance against the deployed Worker (hosted), and the artifact-backed
