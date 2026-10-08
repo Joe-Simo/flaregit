@@ -3159,6 +3159,8 @@ topics: owner-only, validated, and refused while archived). Topics validation li
   decision the owner must make before any code changes it.
 - Deletion with recovery: keeping data recoverable extends storage retention, which bills. Needs the owner's
   retention decision.
+- Template creation: creating a repository from a template creates a new hosted Artifacts repository (billed, like
+  forks), so it is blocked until the owner decides on that spend.
 
 Each stays blocked until the owner approves the spend or makes the billing decision.
 
@@ -3183,8 +3185,10 @@ bytes match the declared size and SHA-256 OID). Evidence: `tests/git-lfs.test.ts
 
 Existing local coverage re-run on October 8: exact advertised-ref parsing (`tests/exact-git-ref.test.ts`, 5 pass) and
 tag Git behavior (`tests/tag-git.test.ts`, 7 pass). Gitlink and submodule handling is covered by existing tests
-(for example `tests/git-migration-inventory.test.ts`). Remaining local F02 work: commit signature verification status,
-which needs a real signature parser and key handling (not started).
+(for example `tests/git-migration-inventory.test.ts`). Commit signature parsing is in `src/core/commit-signature.ts` (`tests/commit-signature.test.ts`, 5 pass): it detects
+unsigned, gpg, ssh, x509 and unknown blocks, refuses two signature headers, and rebuilds the exact signed payload byte for
+byte. Every signed commit reports `signed_unverified`. Remaining F02 work: cryptographic verification against trusted keys,
+which needs key registration and the verification code (local, not started).
 
 **Still open for F02, not closable without spend:** the R2-backed LFS object store and its HTTP endpoints (billed R2
 storage), stock Git and Git LFS client acceptance against the deployed Worker (hosted), and the artifact-backed
