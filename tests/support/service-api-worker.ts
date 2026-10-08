@@ -45,6 +45,7 @@ export class ServiceApiFixture extends RepositoryController {
           verifyApiToken: async (token: string) => token === `fgt_abcdef123456_${"x".repeat(32)}` ? { userId:"fixture-user",scope:"full",repo:null } : token === `fgt_abcdef123456_${"y".repeat(32)}` ? {userId:"fixture-member",scope:"full",repo:null} : null,
           repositoryDeletionPending: async () => false, roleOf: async(user:string) => user==="fixture-user"?"owner":"member",
           canGitAccess: async(user:string,task:string|null,write:boolean) => !write || user==="fixture-user" && task==="task-one",
+          repositoryAccess: async(user:string) => ({role:user==="fixture-user"?"admin":"write",direct:user==="fixture-user"?"owner":"member",writableTaskIds:user==="fixture-user"?["task-one"]:[],cancellableTaskIds:user==="fixture-user"?["task-one"]:[],forkPermissions:{}}),
           acceptedDeploymentTarget: async(journal:string)=>journal===acceptedTarget.journalId?{canonicalRepoName:"fixture",target:selection.target,selection}:null,
           acceptedDeploymentTargets: async()=>[selection.target],
           listDeployments:async()=>deployments.list(),

@@ -12,7 +12,7 @@ async function fixture(){
  await Bun.write(join(directory,'first.ts'),'shared\noriginal\n');git('add','.');git('commit','-qm','create');const root=git('rev-parse','HEAD');
  git('mv','first.ts','renamed.ts');git('commit','-qm','rename');const renamed=git('rev-parse','HEAD');
  await Bun.write(join(directory,'renamed.ts'),'shared\nchanged\n');await Bun.write(join(directory,'many.ts'),Array.from({length:70},(_,i)=>`shared ${i}`).join('\n'));git('add','.');git('commit','-qm','edit');
- const metadata=(hash:string)=>{const [actual,treeHash,parents,message]=git('show','-s','--format=%H%n%T%n%P%n%s',hash).split('\n'),author={name:'Pinned author',email:'author@example.test'};return {hash:actual!,treeHash:treeHash!,parents:parents?parents.split(' '):[],message:message!,author,committer:author,committedAt:1700000000000,authoredAt:1700000000000};};
+ const metadata=(hash:string)=>{const [actual,treeHash,parents,message,authoredAt,committedAt]=git('show','-s','--format=%H%n%T%n%P%n%s%n%at%n%ct',hash).split('\n'),author={name:'Pinned author',email:'author@example.test'};return {hash:actual!,treeHash:treeHash!,parents:parents?parents.split(' '):[],message:message!,author,committer:author,committedAt:Number(committedAt),authoredAt:Number(authoredAt)};};
  const repo:RepositoryReader={async log(){throw Error('Pinned inspections do not need mutable-ref log');},async readCommit(hash){return metadata(hash);},async readTree(hash){return git('ls-tree','-z',hash).split('\0').filter(Boolean).map(row=>{const [details,name]=row.split('\t'),[mode,type,hash]=details!.split(' ');return {mode:mode!,type:type==='tree'?'tree' as const:'blob' as const,hash:hash!,name:name!};});},async readBlob(hash){const r=Bun.spawnSync(['git','-C',directory,'cat-file','blob',hash]);if(r.exitCode)throw Error(r.stderr.toString());return new Blob([new Uint8Array(r.stdout)]);}};
  return {directory,repo,head:metadata('HEAD'),root,renamed,git,metadata};
 }
@@ -24,6 +24,7 @@ test('pinned search reads real Git bytes and scopes paging to exact principal/re
  }finally{rmSync(f.directory,{recursive:true,force:true});}},30000);
 test('blame follows a unique exact rename across pinned Git parents and preserves source attribution',async()=>{const f=await fixture();try{
  const result=await blamePinnedFile(f.repo,f.head,'renamed.ts');expect(result.lines.map(line=>[line.text,line.sha])).toEqual([['shared',f.root],['changed',f.head.hash]]);expect(result.renames).toEqual([{commit:f.renamed,from:'first.ts',to:'renamed.ts'}]);expect(result).toMatchObject({complete:true,comparison:'first-parent',scannedCommits:3});
+ expect(result.lines[0]).toMatchObject({author:'Pinned author',timestamp:new Date(Number(f.git('show','-s','--format=%ct',f.root))*1000).toISOString()});
  f.repo.readCommit=async()=>null;await expect(blamePinnedFile(f.repo,f.head,'renamed.ts')).rejects.toThrow('parent is unavailable');
  }finally{rmSync(f.directory,{recursive:true,force:true});}},30000);
 test('search/blame requests require pinned commits and reject duplicate or extra scope fields before provider access',()=>{

@@ -2,12 +2,14 @@ import {FrozenAttribution} from './FrozenAttribution';
 import {frozenInputAttribution} from '../frozen-contribution-attribution';
 import {preservedCandidateSuccessors} from "../candidate-lineage";
 import React from "react";
+import {CommitSignature} from './CommitSignature';
 import { GitMerge, Cpu, ShieldCheck } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import type { CandidateGeneration, PublicationJournalEntry } from "@/core/types";
 
 interface CandidateJournalProps {
+  projectId?:string;
   candidates: Record<string, CandidateGeneration>;
   journal: PublicationJournalEntry[];
   onSelectCandidate?: (candidateId: string) => void;
@@ -15,6 +17,7 @@ interface CandidateJournalProps {
 }
 
 export function CandidateJournal({
+  projectId,
   candidates,
   journal,
   onSelectCandidate,
@@ -125,6 +128,7 @@ export function CandidateJournal({
                   ) : (
                     <div className={cls}>{body}</div>
                   )}
+                  {projectId&&cand.candidateCommit&&<CommitSignature projectId={projectId} commit={cand.candidateCommit} candidate={cand.id}/>}
                 </li>
               );
             })}

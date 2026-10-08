@@ -1,7 +1,7 @@
 import {searchCode,validateCodeSearchQuery,type SearchableFile} from '../core/code-search';
 import {blame,type Commit as BlameCommit,MAX_BLAME_LINES} from '../core/blame';
 import {RepositoryBrowseRequestError,validateRepositoryPath} from './public-repositories';
-import {resolveCommit,type CommitInfo,type RepositoryReader,type TreeEntry} from './browse';
+import {resolveCommit,repositoryEntryAtCommit,findUniqueExactMovedFile,type CommitInfo,type RepositoryReader,type TreeEntry} from './browse';
 
 const MAX_FILES=200,MAX_TREES=200,MAX_INDEX_BYTES=4*1024*1024,MAX_FILE_BYTES=256*1024,MAX_ANCESTORS=64;
 const hex=(bytes:ArrayBuffer)=>Array.from(new Uint8Array(bytes),byte=>byte.toString(16).padStart(2,'0')).join('');
@@ -27,7 +27,7 @@ async function enumerate(repo:RepositoryReader,treeHash:string){
  for(const entry of [...entries].sort((a,b)=>a.name<b.name?-1:a.name>b.name?1:0).reverse()){
   if(!entry.name||entry.name.includes('/')||entry.name==='.'||entry.name==='..'||entry.name.includes('\0'))throw new CodeInspectionError('Repository tree contains an unsafe path',503);
   const path=frame.prefix?`${frame.prefix}/${entry.name}`:entry.name;
-  if(entry.type==='tree')pending.push({hash:entry.hash,prefix:path});else if(entry.type==='blob'&&entry.mode!=='160000')files.push({path,entry:{name:entry.name,hash:entry.hash,mode:entry.mode,type:'blob'}});
+  if(entry.type==='tree')pending.push({hash:entry.hash,prefix:path});else if((entry.type==='blob'||entry.type==='exec')&&entry.mode!=='160000')files.push({path,entry:{name:entry.name,hash:entry.hash,mode:entry.mode,type:'blob'}});
   if(files.length>10000)throw new CodeInspectionError('Repository file inventory exceeds inspection capacity');
  }
  }
@@ -47,28 +47,23 @@ export async function searchPinnedCode(repo:RepositoryReader,head:CommitInfo,inp
  const nextCursor=result.nextCursor===null?null:btoa(JSON.stringify({key:scopeKey,offset:result.nextCursor})).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
  return {...result,commit:head.hash,nextCursor,complete:result.complete&&reasons.size===0,indexComplete:reasons.size===0,reason:reasons.size?[...reasons].join('; '):null,textOnly:true as const,indexedBytes:budget.bytes};
 }
-async function fileAt(repo:RepositoryReader,commit:CommitInfo,path:string):Promise<TreeEntry|null>{
- const segments=path.split('/');let tree=commit.treeHash;
- for(let i=0;i<segments.length;i++){const entries=await repo.readTree(tree);if(!entries)throw new CodeInspectionError('Pinned history tree is unavailable',503);const entry=entries.find(item=>item.name===segments[i]);if(!entry)return null;if(i===segments.length-1)return entry.type==='blob'&&entry.mode!=='160000'?{name:entry.name,hash:entry.hash,mode:entry.mode,type:'blob'}:null;if(entry.type!=='tree')return null;tree=entry.hash;}
- return null;
-}
 export type PinnedBlameResult=Awaited<ReturnType<typeof blamePinnedFile>>;
 /** Complete first-parent ancestry only. Uniquely identical moved blobs can be followed; modified/ambiguous moves are disclosed as unsupported. */
 export async function blamePinnedFile(repo:RepositoryReader,head:CommitInfo,path:string){
  validateRepositoryPath(path);if(!path)throw new RepositoryBrowseRequestError('File path required');
  const history:BlameCommit[]=[],renames:Array<{commit:string;from:string;to:string}>=[],budget={bytes:0};let current:CommitInfo|null=head,currentPath=path;
  while(current){if(history.length>=MAX_ANCESTORS)throw new CodeInspectionError('Blame requires complete ancestry and is limited to 64 first-parent commits; use Git for deeper history');
- const entry=await fileAt(repo,current,currentPath);if(history.length===0&&!entry)throw new CodeInspectionError('File not found',404);
+ const candidate=await repositoryEntryAtCommit(repo,current,currentPath),entry=candidate&&candidate.type!=='tree'&&candidate.mode!=='160000'?candidate:null;if(history.length===0&&!entry)throw new CodeInspectionError('File not found',404);
  const text=entry?await textObject(repo,entry.hash,budget):{text:null,reason:null};if(entry&&text.text===null)throw new CodeInspectionError(text.reason??'Blame supports UTF-8 text files only');
  if(text.text!==null&&text.text.split('\n').length>MAX_BLAME_LINES+1)throw new CodeInspectionError('Blame is limited to 5000 lines');
  const parentHash=current.parents[0]??null;
- history.push({sha:current.hash,parent:parentHash,author:current.author.name,timestamp:new Date(current.committedAt).toISOString(),files:text.text===null?{}:{[path]:text.text}});
+ history.push({sha:current.hash,parent:parentHash,author:current.author.name,timestamp:new Date(current.committedAt*1000).toISOString(),files:text.text===null?{}:{[path]:text.text}});
  if(!parentHash)break;
  const parent=await resolveCommit(repo,parentHash);if(!parent||parent.hash!==parentHash)throw new CodeInspectionError('Pinned history parent is unavailable',503);
- if(entry&&!await fileAt(repo,parent,currentPath)){
- const candidates=(await enumerate(repo,parent.treeHash));if(candidates.reason)throw new CodeInspectionError('Rename inspection exceeded its tree bound');
- const identical=candidates.files.filter(file=>file.entry.hash===entry.hash&&file.entry.mode===entry.mode);
- if(identical.length===1){const source=identical[0]!;if(!await fileAt(repo,current,source.path)){renames.push({commit:current.hash,from:source.path,to:currentPath});currentPath=source.path;}}
+ if(entry&&!await repositoryEntryAtCommit(repo,parent,currentPath)){
+ const moved=await findUniqueExactMovedFile(repo,current,parent,currentPath);
+ if(moved.kind==='unique'){renames.push({commit:current.hash,from:moved.path,to:currentPath});currentPath=moved.path;}
+ else if(moved.kind==='bounded'||moved.kind==='ambiguous')throw new CodeInspectionError(moved.reason);
  }
  current=parent;
  }

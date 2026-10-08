@@ -210,6 +210,8 @@ test("local workerd SQLite executes production publication rollback and recovery
     expect(((await (await request("/agent-state?name=agent-atomic")).json()) as { tasks: { task: { status: string } } }).tasks.task.status).toBe("ready");
     await request("/fail?name=agent-atomic&enabled=false");
     expect((await request("/agent-claim?name=agent-atomic", agentClaim)).status).toBe(200);
+    expect((await request("/agent-native-authority?name=agent-atomic",{runId:"run-one",taskId:"task"})).status).toBe(500);
+    expect((await request("/agent-creator-consent?name=agent-atomic",{taskId:"task"})).status).toBe(200);
     expect((await request("/agent-native-authority?name=agent-atomic",{runId:"run-one",taskId:"task"})).status).toBe(200);
     await request("/agent-proposal?name=agent-atomic", { runId: "run-one", taskId: "task", files: { "src/file.ts": "export const value=1;" } });
     await request("/agent-push?name=agent-atomic", { runId: "run-one", taskId: "task", commit: "b".repeat(40) });
@@ -227,6 +229,7 @@ test("local workerd SQLite executes production publication rollback and recovery
     expect(((await (await request("/agent-state?name=agent-atomic")).json()) as { tasks: { task: { status: string } } }).tasks.task.status).toBe("working");
     await request("/fail?name=agent-atomic&enabled=false");
     await request("/seed?name=agent-resume", { state: agentState, holder: "old-holder" });
+    expect((await request("/agent-creator-consent?name=agent-resume",{taskId:"task"})).status).toBe(200);
     await request("/agent-claim?name=agent-resume", agentClaim);
     expect((await request("/agent-native-authority?name=agent-resume",{runId:"run-one",taskId:"task"})).status).toBe(200);
     await request("/agent-proposal?name=agent-resume", { runId:"run-one",taskId:"task",files:{"src/file.ts":"export const value=1;"} });

@@ -217,7 +217,7 @@ export function IntegrationTab({
       </div>
       <div className={`grid gap-4 ${kind === "demo" ? "lg:grid-cols-2" : ""}`}>
         <div className="min-h-[360px]">
-          <CandidateJournal candidates={state.candidates} journal={state.journal} />
+          <CandidateJournal projectId={projectId} candidates={state.candidates} journal={state.journal} />
         </div>
         {kind === "demo" && state.acceptedState.currentCommit!==null && (
           <div className="min-h-[560px]">

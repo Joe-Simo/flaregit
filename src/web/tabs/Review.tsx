@@ -1,4 +1,5 @@
 import {preparedPublicationRequest} from '../prepared-publication-recovery';
+import {CommitSignature} from '../components/CommitSignature';
 import {GitTransferRecovery} from "../components/GitTransferRecovery";
 import React, { useCallback, useEffect, useState } from "react";
 import { ArrowLeft } from "lucide-react";
@@ -74,6 +75,7 @@ export function ReviewTab({ projectId, task, commit, baseCommit, returnTo, input
           <div className="text-sm">
             <span className="font-semibold">{diff.head.message.split("\n")[0]}</span>
             <span className="text-xs text-muted-foreground ml-2">{diff.head.author.name} · <code>{diff.head.hash.slice(0, 7)}</code></span>
+            <CommitSignature projectId={projectId} commit={diff.head.hash} {...(candidate?{candidate:candidate.id,...(input?{input}:{})}:task?{task}:{})}/>
           </div>
           {candidate?.status === "awaiting_review" && !input && (
             <CandidateReview projectId={projectId} isOwner={isOwner} candidate={candidate} journal={evidence?.journal} evidence={candidate.evidenceId ? evidence?.evidence[candidate.evidenceId] : undefined} showOpen={false} reviewReady={readyDiff?.scope === reviewScope && readyDiff.ready} onDone={() => { reload?.(); navigate(`/p/${projectId}/integration`); }} />

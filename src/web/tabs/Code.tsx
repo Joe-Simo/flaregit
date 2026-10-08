@@ -16,7 +16,7 @@ interface Entry { name: string; type: "blob" | "tree" }
 
 export function UnbornCodeState(){return <Card><CardContent className="p-5 space-y-2"><h3 className="text-sm font-semibold">No accepted commit yet</h3><p className="text-sm text-muted-foreground">The recorded default branch has no accepted history. Create a contribution, push its first commit, and review it before acceptance.</p></CardContent></Card>;}
 
-export function CodeTab({ projectId,isOwner=false,acceptedCommit,params }: { projectId: string;isOwner?:boolean;acceptedCommit?:string|null;params?:URLSearchParams }) { const ref=params?.get("ref"),path=params?.get("path"),line=Number(params?.get("line"));const link=ref&&/^[a-f0-9]{40}$/.test(ref)&&path?{ref,path,line:Number.isSafeInteger(line)&&line>0?line:undefined}:undefined;return <CodeBrowser key={`${projectId}:${link?.ref??""}:${link?.path??""}:${link?.line??""}`} projectId={projectId} acceptedCommit={acceptedCommit} isOwner={isOwner} link={link}/>; }
+export function CodeTab({ projectId,isOwner=false,acceptedCommit,params }: { projectId: string;isOwner?:boolean;acceptedCommit?:string|null;params?:URLSearchParams }) { const ref=params?.get("ref"),path=params?.get("path"),line=Number(params?.get("line"));const link=ref&&/^[a-f0-9]{40}$/.test(ref)?{ref,path:path??'',line:Number.isSafeInteger(line)&&line>0?line:undefined}:undefined;return <CodeBrowser key={`${projectId}:${link?.ref??""}:${link?.path??""}:${link?.line??""}`} projectId={projectId} acceptedCommit={acceptedCommit} isOwner={isOwner} link={link}/>; }
 function CodeBrowser({ projectId,isOwner,acceptedCommit,link }: { projectId: string;isOwner:boolean;acceptedCommit?:string|null;link?:{ref:string;path:string;line?:number} }) {
   const [selection,setSelection]=useState<BranchSelection|null>(null);
   const [path, setPath] = useState("");
@@ -68,7 +68,7 @@ function CodeBrowser({ projectId,isOwner,acceptedCommit,link }: { projectId: str
   };
 
   useEffect(() => {
-    if(selection===null)void open(link?.path??"", Boolean(link),link?.ref??acceptedCommit);
+    if(selection===null)void open(link?.path??"", Boolean(link?.path),link?.ref??acceptedCommit);
     return()=>{requestSequence.current++;requestController.current?.abort();historySequence.current++;historyController.current?.abort();};
   }, [projectId,acceptedCommit===null]);
 
@@ -86,6 +86,18 @@ function CodeBrowser({ projectId,isOwner,acceptedCommit,link }: { projectId: str
     finally{if(sequence===historySequence.current)setHistoryLoading(false);}
   };
 
+  const followToLatest=async()=>{
+    if(!file||!acceptedCommit||acceptedCommit===commit?.hash)return;
+    const sequence=++historySequence.current;historyController.current?.abort();const controller=new AbortController();historyController.current=controller;setHistoryLoading(true);setHistoryError(null);
+    try{
+      const latest=await apiJson<FileHistoryPage>(`/p/${projectId}/commits?path=${encodeURIComponent(file.path)}&ref=${acceptedCommit}&limit=100&offset=0`,{signal:AbortSignal.any([controller.signal,AbortSignal.timeout(20000)])});
+      if(sequence!==historySequence.current)return;
+      if(latest.commit!==acceptedCommit||latest.path!==file.path)throw Error('Latest history did not match the requested accepted revision.');
+      if(!latest.headPath)throw Error(latest.reason??'This path could not be followed to the latest accepted snapshot through unique unchanged renames. Use history or Git to inspect modified moves.');
+      window.location.hash=`/p/${encodeURIComponent(projectId)}/code?${new URLSearchParams({ref:acceptedCommit,path:latest.headPath})}`;
+    }catch(cause){if(sequence===historySequence.current&&!controller.signal.aborted)setHistoryError(cause instanceof Error?cause.message:'Latest path could not be resolved');}
+    finally{if(sequence===historySequence.current)setHistoryLoading(false);}
+  };
   const codeHref=(target:string,line?:number)=>`/p/${encodeURIComponent(projectId)}/code?${new URLSearchParams({ref:commit?.hash??'',path:target,...(line?{line:String(line)}:{})})}`;
   useEffect(()=>{if(link?.line&&file?.path===link.path)document.getElementById(`code-line-${link.line}`)?.scrollIntoView({block:'center'});},[file,link?.line]);
   const crumbs = path.split("/").filter(Boolean);
@@ -129,16 +141,16 @@ function CodeBrowser({ projectId,isOwner,acceptedCommit,link }: { projectId: str
           <CardContent className="p-0">
             <div className="px-4 py-2 border-b border-border text-xs text-muted-foreground flex flex-wrap justify-between gap-2">
               <span className="break-all min-w-0">{file.path} <a className="underline ml-2" href={`/#${codeHref(file.path)}`}>Permalink</a></span>
-              <div className="flex items-center gap-3"><Button size="sm" variant="ghost" disabled={historyLoading||loading!==null} onClick={()=>void loadHistory()}>File history</Button><Button size="sm" variant="ghost" onClick={() => void open(dir, false)}>Back to folder</Button></div>
+              <div className="flex items-center gap-3"><Button size="sm" variant="ghost" disabled={historyLoading||loading!==null} onClick={()=>void loadHistory()}>File history</Button>{acceptedCommit&&acceptedCommit!==commit?.hash&&<Button size="sm" variant="ghost" disabled={historyLoading||loading!==null} onClick={()=>void followToLatest()}>Follow to latest accepted</Button>}<Button size="sm" variant="ghost" onClick={() => void open(dir, false)}>Back to folder</Button></div>
             </div>
             {historyLoading&&<p role="status" className="px-4 py-2 text-xs text-muted-foreground">Loading file history…</p>}
             {historyError&&<p role="alert" className="px-4 py-2 text-sm text-destructive">{historyError}</p>}
             {history&&<section aria-label="File history" className="px-4 py-3 border-b border-border space-y-2">
-              <p className="text-xs text-muted-foreground">Compared to each commit’s first parent. Renames are not followed.</p>
+              <p className="text-xs text-muted-foreground">Compared to each commit’s first parent. Unique unchanged renames are followed; modified moves and copies are not inferred.</p>
               {history.commits.length===0&&<p className="text-sm">No changes to this path in these {history.scanned} commits.</p>}
-              <ul className="space-y-2">{history.commits.map(item=><li key={item.hash} className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="text-sm break-words">{item.message.split("\n")[0]}</p><p className="text-xs text-muted-foreground">{item.author.name} · {timeAgo(item.committedAt)} · {item.hash.slice(0,7)}</p></div><Button size="sm" variant="outline" onClick={()=>void open(item.pathExists?file.path:"",item.pathExists,item.hash)}>{item.pathExists?"Browse revision":"Browse commit"}</Button></li>)}</ul>
+              <ul className="space-y-2">{history.commits.map(item=><li key={item.hash} className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="text-sm break-words">{item.message.split("\n")[0]}</p><p className="text-xs text-muted-foreground break-all">{item.renamedFrom&&<>Renamed {item.renamedFrom} → {item.renamedTo} · </>}{item.author.name} · {timeAgo(item.committedAt)} · {item.hash.slice(0,7)}</p></div><Button size="sm" variant="outline" onClick={()=>{window.location.hash=`/p/${encodeURIComponent(projectId)}/code?${new URLSearchParams({ref:item.hash,...(item.pathExists?{path:item.path}:{})})}`;}}>{item.pathExists?"Browse revision":"Browse commit"}</Button></li>)}</ul>
               {history.nextOffset!==null&&<Button size="sm" variant="outline" disabled={historyLoading} onClick={()=>void loadHistory(history.nextOffset!)}>Older commits</Button>}
-              {history.nextOffset===null&&<p className="text-xs text-muted-foreground">End of history for this path.</p>}
+              {history.reason&&<p role="status" className="text-xs text-muted-foreground">History is incomplete: {history.reason}</p>}{history.complete&&<p className="text-xs text-muted-foreground">End of first-parent history for this tracked path.</p>}
             </section>}
             {file.binary ? (
               <p className="p-4 text-sm text-muted-foreground">Binary file ({file.size} bytes)</p>

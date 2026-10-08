@@ -3,7 +3,7 @@ import {acceptedCommitLabel} from "../accepted-commit-display";
 import {PendingTaskCreations} from "../components/PendingTaskCreations";
 import {readTaskCreationRecovery,restoreTaskCreationRequest,type TaskCreationRecoveryRow,type PendingTaskCreation} from "../task-creation-recovery";
 import {ContributionTargetChoices} from "../components/ContributionTargetChoices";
-import {parseContributionTargets,contributionCreationIntent,type ContributionTarget,type ContributionCreationIntent} from "../contribution-target-selection";
+import {parseContributionTargets,contributionExpectation,contributionCreationIntent,type ContributionTarget,type ContributionCreationIntent} from "../contribution-target-selection";
 import {effectiveTaskAcceptedTarget} from "@/core/accepted-target";
 import {hasOlderAcceptedBase} from "../change-base-state";
 import {GitCredential} from "../components/GitCredential";
@@ -14,6 +14,7 @@ import React, { useCallback,useEffect, useRef, useState } from "react";
 import { useAuth } from "@clerk/clerk-react";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Select,SelectTrigger,SelectValue,SelectContent,SelectItem } from "@/components/ui/select";
 import { changeCreationFollowup, type ChangeCreationResponse } from "../change-creation-followup";
 import { Bot, Check, Copy, GitPullRequestArrow, Layers, Plus, User, X, GitBranch, AlertTriangle, ShieldCheck, Pause, Play, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -87,15 +88,101 @@ function AgentRunControls({ projectId, instanceId, canRetry, retrying, onRetry, 
   </div>;
 }
 
-type ChangesProps = { projectId: string; state: FlareGitProjectState; reload: () => void; taskId?:string|null; canContribute?: boolean; managedActions?: boolean; writableTaskIds?: string[]; cancellableTaskIds?: string[]; forkPermissions?: Record<string,{enabled:boolean;revision:number;canConfigure:boolean}> };
+const originalRetargetRequestSchema=z.object({requestId:z.uuid(),expectedGeneration:z.number().int().nonnegative().safe(),expectedHead:z.string().regex(/^[a-f0-9]{40}$/),target:z.object({ref:z.string(),acceptedCommit:z.string().regex(/^[a-f0-9]{40}$/),acceptedVersion:z.number().int().nonnegative().safe(),policyVersion:z.number().int().positive().safe()})});
+const retargetOperationSchema=z.object({requestId:z.uuid(),phase:z.enum(['prepared','requires_rebase','verified','activated']),target:z.object({ref:z.string(),acceptedCommit:z.string().regex(/^[a-f0-9]{40}$/)}),reason:z.string().optional(),cleanupRequired:z.boolean().optional(),originalRequest:originalRetargetRequestSchema.optional()}).refine(value=>!value.originalRequest||value.originalRequest.requestId===value.requestId);
+function RetargetDialog({projectId,task,targets,allowed,onClose,reload,requestIds}:{projectId:string;task:Task;targets:ContributionTarget[];allowed:boolean;onClose:()=>void;reload:()=>void;requestIds:Map<string,string>}) {
+  const {userId}=useAuth();
+  const identity=apiSessionIdentity();
+  const [ref,setRef]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState<string|null>(null),[operation,setOperation]=useState<z.infer<typeof retargetOperationSchema>|null>(null);
+  const [operations,setOperations]=useState<z.infer<typeof retargetOperationSchema>[]>([]),[discovered,setDiscovered]=useState(false);
+  const requestId=useRef<string|null>(null),lock=useRef(false),alive=useRef(false),sequence=useRef(0);
+  const target=targets.find(item=>item.ref===ref&&item.acceptedCommit!==null);
+  const readOperations=async(signal?:AbortSignal)=>z.object({operations:z.array(retargetOperationSchema).max(200)}).parse(await apiJson<unknown>(`/p/${projectId}/tasks/${task.id}/retargets`,{signal})).operations;
+  const current=(generation:number)=>alive.current&&generation===sequence.current&&identity!==null&&apiSessionIdentity()===identity;
+  useEffect(()=>{
+    alive.current=true;const generation=++sequence.current,controller=new AbortController();
+    setDiscovered(false);setBusy(true);setError(null);setOperation(null);setOperations([]);requestId.current=null;
+    void readOperations(controller.signal).then(records=>{if(current(generation)){setOperations(records);setDiscovered(true);}}).catch(cause=>{if(current(generation))setError(cause instanceof Error?cause.message:'Original retarget requests could not be loaded.');}).finally(()=>{if(current(generation))setBusy(false);});
+    return()=>{alive.current=false;sequence.current++;controller.abort();};
+  },[projectId,task.id,identity,userId]);
+  const findOperation=(records:z.infer<typeof retargetOperationSchema>[],id:string)=>{const found=records.find(item=>item.requestId===id);if(!found)throw new Error('The original retarget request is not confirmed. Check the same request again.');return found;};
+  const submit=async()=>{
+    if(lock.current||busy||!discovered||!allowed||!target||!task.currentCommit||operation||inspectionHeld)return;
+    const generation=++sequence.current;
+    lock.current=true;setBusy(true);setError(null);
+    try{
+      const expectedGeneration=task.targetGeneration?.generation??0,expectedHead=task.currentCommit,expectation=contributionExpectation(target);
+      const signature=JSON.stringify({projectId,userId,identity,taskId:task.id,expectedGeneration,expectedHead,target:expectation});
+      const id=requestIds.get(signature)??crypto.randomUUID();requestIds.set(signature,id);requestId.current=id;
+      await apiJson<unknown>(`/p/${projectId}/tasks/${task.id}/retarget`,{method:'POST',json:{requestId:id,expectedGeneration,expectedHead,target:expectation}});
+      if(!current(generation))return;
+      const records=await readOperations(),found=findOperation(records,id);
+      if(current(generation)){setOperations(records);setOperation(found);}
+    }catch(cause){if(current(generation))setError(cause instanceof Error?cause.message:'Retarget outcome could not be confirmed. Check the original request.');}
+    finally{lock.current=false;if(current(generation)){setBusy(false);reload();}}
+  };
+  const check=async()=>{
+    if(lock.current||busy)return;
+    const generation=++sequence.current,id=requestId.current;
+    lock.current=true;setBusy(true);setError(null);
+    try{const records=await readOperations(),found=id?findOperation(records,id):null;if(current(generation)){setOperations(records);setDiscovered(true);if(found)setOperation(found);}}
+    catch(cause){if(current(generation))setError(cause instanceof Error?cause.message:'Retarget state could not be read.');}
+    finally{lock.current=false;if(current(generation)){setBusy(false);reload();}}
+  };
+  const releaseInspection=async()=>{
+    if(lock.current||busy||!operation?.cleanupRequired)return;
+    const originalId=operation.requestId,generation=++sequence.current;
+    lock.current=true;setBusy(true);setError(null);
+    try{
+      const recovered=retargetOperationSchema.parse(await apiJson<unknown>(`/p/${projectId}/tasks/${task.id}/retargets/${originalId}/recover`,{method:'POST'}));
+      if(recovered.requestId!==originalId||recovered.cleanupRequired!==false)throw new Error('Inspection release is not confirmed. Check the original request again.');
+      if(current(generation)){setOperation(recovered);setOperations(records=>records.map(item=>item.requestId===originalId?recovered:item));}
+    }catch(cause){if(current(generation))setError(cause instanceof Error?cause.message:'Inspection release could not be confirmed.');}
+    finally{lock.current=false;if(current(generation)){setBusy(false);reload();}}
+  };
+  const originalIsStale=(item:z.infer<typeof retargetOperationSchema>)=>{
+    const original=item.originalRequest;
+    if(!original)return true;
+    const recordedTarget=targets.find(candidate=>candidate.ref===original.target.ref);
+    return original.expectedHead!==task.currentCommit||original.expectedGeneration!==(task.targetGeneration?.generation??0)||!recordedTarget||recordedTarget.acceptedCommit!==original.target.acceptedCommit||recordedTarget.acceptedVersion!==original.target.acceptedVersion||recordedTarget.policyVersion!==original.target.policyVersion;
+  };
+  const resumeOriginal=async()=>{
+    if(lock.current||busy||!allowed||!operation?.originalRequest||operation.cleanupRequired||originalIsStale(operation)||!['prepared','verified'].includes(operation.phase))return;
+    const original=operation.originalRequest,generation=++sequence.current;
+    lock.current=true;setBusy(true);setError(null);requestId.current=original.requestId;
+    try{
+      await apiJson<unknown>(`/p/${projectId}/tasks/${task.id}/retarget`,{method:'POST',json:original});
+      if(!current(generation))return;
+      const records=await readOperations(),found=findOperation(records,original.requestId);
+      if(current(generation)){setOperations(records);setOperation(found);}
+    }catch(cause){if(current(generation))setError(cause instanceof Error?cause.message:'The original request could not be resumed. Check its recorded state.');}
+    finally{lock.current=false;if(current(generation)){setBusy(false);reload();}}
+  };
+  const originals=operations;
+  const inspectionHeld=operations.some(item=>item.cleanupRequired)||operation?.cleanupRequired===true;
+  return <Dialog open onOpenChange={open=>{if(!open&&!busy)onClose();}}><DialogHeader><DialogTitle>Retarget change</DialogTitle><DialogDescription>Choose the accepted branch this change should build on. The current fork must contain its accepted base.</DialogDescription></DialogHeader>
+    <div className="space-y-4">
+      {originals.length>0&&<div className="space-y-2"><h3 className="text-sm font-medium">Original requests</h3>{originals.map(item=><Button key={item.requestId} variant="outline" className="w-full h-auto whitespace-normal text-left justify-start" disabled={busy} onClick={()=>{sequence.current++;requestId.current=item.requestId;setOperation(item);setRef('');setError(null);}}>{item.target.ref} · {item.phase}{item.cleanupRequired?' · inspection held':''}<span className="sr-only"> · {item.requestId}</span></Button>)}</div>}
+      {!operation&&<Select value={ref} onValueChange={value=>{sequence.current++;setRef(value);setOperation(null);requestId.current=null;}} disabled={busy||!allowed||!discovered||inspectionHeld}><SelectTrigger aria-label="New accepted base branch"><SelectValue placeholder="Choose accepted branch"/></SelectTrigger><SelectContent>{targets.filter(item=>item.acceptedCommit!==null).map(item=><SelectItem key={item.ref} value={item.ref}>{item.ref}</SelectItem>)}</SelectContent></Select>}
+      {target&&<p className="text-xs text-muted-foreground break-all">Accepted base {target.acceptedCommit} · version {target.acceptedVersion} · policy {target.policyVersion}</p>}
+      {!allowed&&<p role="status" className="text-sm text-muted-foreground">Current fork write authority is unavailable.</p>}
+      {operation&&<div role="status" className="space-y-2 text-sm"><p className="break-all">Original request {operation.requestId} · {operation.target.ref}</p><p>{operation.phase==='activated'?'Base branch changed. Mark this change ready again to verify the new target.':operation.phase==='requires_rebase'?'Rebase your fork onto the selected accepted base and push it. Original history remains unchanged.':operation.phase==='verified'?'Fork ancestry was verified. Activation is not yet confirmed. Check this original request again.':'Retarget request recorded. Native ancestry verification is not yet confirmed.'}</p>{operation.reason&&<p className="text-muted-foreground">{operation.reason}</p>}{['prepared','verified'].includes(operation.phase)&&originalIsStale(operation)&&!operation.cleanupRequired&&<p className="text-muted-foreground">This request's source or accepted target changed. Choose a new target using the current fork head.</p>}{operation.cleanupRequired&&<div className="space-y-2"><p>Release the recorded inspection to restore fork writes.</p><Button variant="outline" disabled={busy} onClick={()=>void releaseInspection()}>Release inspection</Button></div>}</div>}
+      {error&&<p role="alert" className="text-sm text-destructive">{error}</p>}
+      <div className="flex flex-wrap justify-end gap-2">{operation&&!inspectionHeld&&<Button variant="outline" disabled={busy} onClick={()=>{sequence.current++;setOperation(null);setRef('');requestId.current=null;setError(null);}}>New target</Button>}{operation?.originalRequest&&!operation.cleanupRequired&&['prepared','verified'].includes(operation.phase)&&<Button variant="outline" disabled={busy||!allowed||originalIsStale(operation)} onClick={()=>void resumeOriginal()}>Resume original</Button>}<Button variant="outline" disabled={busy} onClick={()=>void check()}>{requestId.current?'Check original request':'Refresh requests'}</Button>{!operation&&<Button disabled={busy||!discovered||inspectionHeld||!allowed||!target||!task.currentCommit} onClick={()=>void submit()}>{busy?'Checking…':'Retarget change'}</Button>}</div>
+    </div>
+  </Dialog>;
+}
+type ChangesProps = { projectId: string; state: FlareGitProjectState; reload: () => void; taskId?:string|null; canContribute?: boolean; managedActions?: boolean; isOwner?: boolean; writableTaskIds?: string[]; cancellableTaskIds?: string[]; forkPermissions?: Record<string,{enabled:boolean;revision:number;canConfigure:boolean}> };
 export function ChangesTab(props: ChangesProps) {
   const { userId } = useAuth();
   return <ChangesPanel key={`${props.projectId}:${userId ?? "signed-out"}`} {...props} />;
 }
-function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,managedActions=true,writableTaskIds,cancellableTaskIds,forkPermissions }: ChangesProps) {
+function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,managedActions=true,isOwner=false,writableTaskIds,cancellableTaskIds,forkPermissions }: ChangesProps) {
   const { userId } = useAuth();
   const canChangeTask = (task: Task) => canContribute && (writableTaskIds !== undefined ? writableTaskIds.includes(task.id) : managedActions || task.contributor.id === userId || task.initiatedBy?.id === userId);
   const canCancelTask = (task: Task) => canContribute && (cancellableTaskIds !== undefined ? cancellableTaskIds.includes(task.id) : managedActions || task.contributor.id === userId || task.initiatedBy?.id === userId);
+  const retargetRequestIds=useRef(new Map<string,string>());
+  const [retargetTaskId,setRetargetTaskId]=useState<string|null>(null);
   const linkedTask=taskId?Object.values(state.tasks).find(task=>task.id===taskId):undefined;
   const linkedTaskElement=useRef<HTMLDivElement|null>(null);
   useEffect(()=>{if(!linkedTask)return;linkedTaskElement.current?.focus({preventScroll:true});linkedTaskElement.current?.scrollIntoView({block:"center",behavior:"instant"});},[projectId,linkedTask?.id]);
@@ -337,7 +424,7 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
             const canSelect = t.status === "ready" || t.status === "blocked";
             return (
               <div key={t.id} ref={t.id===linkedTask?.id?linkedTaskElement:undefined} tabIndex={t.id===linkedTask?.id?-1:undefined} role={t.id===linkedTask?.id?"group":undefined} aria-label={t.id===linkedTask?.id?`Linked change: ${t.goal}`:undefined} className={`px-4 py-4 flex items-start gap-3 flex-wrap sm:flex-nowrap ${t.id===linkedTask?.id?"bg-primary/5 ring-2 ring-inset ring-primary outline-none scroll-mt-24":""}`}>
-                <input type="checkbox" className="mt-1.5" disabled={!canSelect||busy!==null} checked={integrationSelection.includes(t.id)} onChange={() => toggle(t.id)} aria-label={canSelect ? `Select “${t.goal}” for integration` : `“${t.goal}” is not ready to integrate`} />
+                <Checkbox className="mt-1.5" disabled={!canSelect||busy!==null} checked={integrationSelection.includes(t.id)} onCheckedChange={() => toggle(t.id)} aria-label={canSelect ? `Select “${t.goal}” for integration` : `“${t.goal}” is not ready to integrate`} />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
                     <h3 className="text-sm font-medium break-words min-w-0">{t.goal}</h3>
@@ -381,6 +468,7 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
                   )}
                 </div>
                 <div className="flex gap-1.5 shrink-0 flex-wrap justify-end ml-auto">
+                  {isOwner&&canChangeTask(t)&&t.contributor.type==="human"&&t.currentCommit&&!["accepted","cancelled","integrating","verifying"].includes(t.status)&&<Button size="sm" variant="outline" disabled={busy!==null} onClick={()=>setRetargetTaskId(t.id)}>Retarget</Button>}
                   {canChangeTask(t) && t.status !== "accepted" && t.status !== "cancelled" && <Button size="sm" variant="outline" disabled={busy !== null} onClick={()=>void requestGitAccess(t)}>{busy===`token-${t.id}`?"Requesting…":"Git commands"}</Button>}
                   {t.checkpoints.length > 0 && (
                     <Button size="sm" variant="outline" onClick={() => navigate(`/p/${projectId}/review?task=${t.id}`)} aria-label={`View diff of “${t.goal}”`}>Diff</Button>
@@ -414,6 +502,8 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
           {picker === "issue" && !issuesLoading && !issuesError && issues && !issues.some(item => `${item.number} ${item.title}`.toLowerCase().includes(search.toLowerCase())) && <p className="text-sm text-muted-foreground">No matching open issues.</p>}
         </div>
       </Dialog>
+
+      {isOwner&&retargetTaskId&&state.tasks[retargetTaskId]&&<RetargetDialog key={retargetTaskId} projectId={projectId} task={state.tasks[retargetTaskId]!} targets={targets??[]} requestIds={retargetRequestIds.current} allowed={canChangeTask(state.tasks[retargetTaskId]!)} onClose={()=>setRetargetTaskId(null)} reload={reload}/> }
 
       <Dialog open={instructions !== null} onOpenChange={() => setInstructions(null)}>
         <DialogHeader>

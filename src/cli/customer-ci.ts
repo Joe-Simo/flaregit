@@ -34,7 +34,10 @@ export async function runCustomerCi(input:CustomerCiInput){
   if(input.signal?.aborted)ledger.cancel(scope.runId);
   if(!complete&&selected.sequence===-1){const receipt=await report('running',0,`Owner-approved workflow ${digest}; customer-owned Linux runner`);if(receipt.kind==='rejected')throw Error('Provider rejected execution claim');}
   for(const job of complete?[]:jobs){
-   const previous=ledger.jobs(scope.runId),blocked=job.dependencies.some(id=>previous.find(item=>item.id===id)?.status!=='passed');
+   const previous=ledger.jobs(scope.runId),saved=previous.find(item=>item.id===job.id);
+   if(saved&&['passed','failed','cancelled','interrupted'].includes(saved.status))continue;
+   if(saved?.status!=='queued')throw Error('Job state is unavailable; no interrupted claim may be replayed');
+   const blocked=job.dependencies.some(id=>previous.find(item=>item.id===id)?.status!=='passed');
    if(ledger.cancelled(scope.runId))break;
    if(blocked){ledger.finish(scope.runId,job.id,'failed','Skipped because a dependency did not pass',true);continue;}
    if(!ledger.claim(scope.runId,job.id)){if(ledger.cancelled(scope.runId))break;throw Error('Job scheduling claim was not confirmed');}

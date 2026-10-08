@@ -21,7 +21,7 @@ test("real object history includes creation, deletion and restoration with stabl
   const {repo,commits}=fixture();
   const first=await listFileHistory(repo,commits[0]!,"file.ts",2,0);
   expect(first.commits.map(item=>[item.message,item.pathExists])).toEqual([["restore",true],["delete",false]]);
-  expect(first).toMatchObject({commit:sha("a"),scanned:2,nextOffset:2,comparison:"first-parent",followsRenames:false});
+  expect(first).toMatchObject({commit:sha("a"),scanned:2,nextOffset:2,comparison:"first-parent",followsRenames:true});
   const last=await listFileHistory(repo,commits[0]!,"file.ts",2,first.nextOffset!);
   expect(last.commits.map(item=>item.message)).toEqual(["create"]);
   expect(last.nextOffset).toBeNull();
@@ -60,7 +60,8 @@ test("history reads actual local Git commits and trees across an unrelated edit 
     };
     const page=await listFileHistory(reader,metadata("HEAD"),"file.ts",10,0);
     expect(page.commits.map(item=>item.message)).toEqual(["rename","create"]);
-    expect(page.commits.map(item=>item.pathExists)).toEqual([false,true]);
-    expect(page.nextOffset).toBeNull();expect(page.followsRenames).toBe(false);
+    expect(page.commits.map(item=>item.pathExists)).toEqual([true,true]);
+    expect(page.commits.map(item=>item.path)).toEqual(["renamed.ts","file.ts"]);expect(page.headPath).toBe("renamed.ts");
+    expect(page.nextOffset).toBeNull();expect(page.followsRenames).toBe(true);
   }finally{rmSync(directory,{recursive:true,force:true});}
 });

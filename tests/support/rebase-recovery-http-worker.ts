@@ -20,7 +20,14 @@ export class RebaseRecoveryHttpFixture extends RepositoryController {
     fixtureRawRef(bad: boolean) { const ledger = new RetainedInputs(this.ctx.storage), application = ledger.application(id)!; application.input.protectedRef = bad ? "refs/heads/main" : `refs/flaregit/inputs/${application.input.incarnation}/child/${old}`; this.ctx.storage.sql.exec("UPDATE rebase_applications SET doc=?WHERE id=?", JSON.stringify(application), id); }
     async fixtureAgentStart() { const state = await this.getState(), task = state.tasks.child!; new AgentRunLedger(this.ctx.storage).claim({ runId: 'synthetic-active-agent', taskId: 'child', startingCommit: old, startingBranchHead: old, branch: 'child', goal: task.goal, context: { comments: [] }, allowedScope: ['src/'], protectedPaths: [] }); task.agentRunId = 'synthetic-active-agent'; this.ctx.storage.sql.exec("UPDATE project SET doc=?WHERE id=1", JSON.stringify(state)); }
     fixtureAuditCapacity() { this.ctx.storage.sql.exec("WITH RECURSIVE fixture_rows(n) AS(SELECT 1 UNION ALL SELECT n+1 FROM fixture_rows WHERE n<9999) INSERT INTO rebase_recovery_receipts(request_id,payload,doc)SELECT 'fixture-audit-'||n,'{}','{}' FROM fixture_rows"); }
-    fixtureIncarnation() { this.ctx.storage.sql.exec("UPDATE private_recovery_incarnation SET value=?WHERE id=1", crypto.randomUUID()); }
+    fixtureIncarnation() {
+        const incarnation=crypto.randomUUID();
+        this.ctx.storage.sql.exec("UPDATE private_recovery_incarnation SET value=?WHERE id=1",incarnation);
+        // Simulate a coherent current repository projection, while the retained
+        // application and recovery receipt deliberately keep their old scope.
+        this.ctx.storage.sql.exec("UPDATE task_fork_origins SET scope=json_set(scope,'$.incarnation',?)",incarnation);
+        this.ctx.storage.sql.exec("DELETE FROM human_fork_permissions");
+    }
     async fixtureReset() { await this.addMember("owner", "owner"); const state = await this.getState(); state.tasks.child!.currentCommit = old; delete state.tasks.child!.agentRunId; this.ctx.storage.sql.exec("UPDATE project SET doc=?WHERE id=1", JSON.stringify(state)); }
     fixtureResetAccount() { this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS account_lifecycle(id INTEGER PRIMARY KEY,status TEXT NOT NULL)"); this.ctx.storage.sql.exec("DELETE FROM account_lifecycle"); }
     async fixtureSnapshot() { const state = await this.getState(); return { task: state.tasks.child, accepted: state.acceptedState, application: new RetainedInputs(this.ctx.storage).application(id), receipts: this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE name='rebase_recovery_receipts'").toArray().length ? this.ctx.storage.sql.exec('SELECT doc FROM rebase_recovery_receipts').toArray() : [] }; }

@@ -63,6 +63,41 @@ The finite parity gate remains open. A local checkpoint preserves these changes;
 
 ### Latest continuation — integrated local product flows
 
+**Continuation after `a0d5c34`:** immutable file history now follows unique exact-content renames through real
+first-parent Git ancestry. Each revision link carries its actual historical path; old issue paths can resolve to
+the latest accepted path. Ambiguous, modified or bounded rename inspection remains explicit and incomplete.
+Eleven focused history/search/blame tests pass against real Git fixtures.
+
+Commit signature inspection now reads bounded raw commit bytes using a bare native fetch, verifies their Git
+object hash and authorized ancestry, and reports SSH/GPG verification against the viewer's registered keys.
+The account stores an atomic key snapshot with a monotonic trust revision. Key revoke/regrant, PAT revocation
+during the final snapshot and account deletion during GPG parsing refuse completion. Identity claims are not
+inferred from signatures. X.509 trust roots remain unconfigured. Native Git, legacy byte encoding, signed
+Worker HTTP and signing-key API tests pass; desktop/mobile synthetic actual-component interactions pass at
+1280px and 390px with no page/console errors or document overflow. Fixture data does not prove hosted flows.
+Screenshots are retained at `/tmp/flaregit-next-ui-1280.png` and `/tmp/flaregit-next-ui-390.png`; the fixture server
+is stopped and its disposable build was removed. Docker remains off; free disk is approximately 3.8GiB.
+
+Customer CI now resumes queued jobs without replaying completed ones; persisted running claims still refuse
+dispatch pending positive cleanup. Focused real disposable Git execution tests pass; Linux production
+attestation remains an explicit skip. Base-branch retarget now has execution-owned write locks, retained
+cleanup holds, bounded discovery that prioritizes the live holder, and exact server-returned request replay.
+Actual signed Worker/DO/native Git tests cover duplicate requests, failed shutdown, exact recovery and changed
+base activation without rewriting authored history. Original creation bindings and failure diagnostics remain
+preserved; readiness is reset. Targets absent from the fork return `requires_rebase` without mutation.
+Desktop/mobile synthetic Changes UI verifies discover/release/resume/fresh-readiness at 1280px and 390px;
+screenshots are retained under `/tmp/flaregit-retarget-{recovery,activated}-{1280,390}.png`. Those fixture servers
+are stopped and disposable builds removed. The consolidated affected run passed 40 tests across 16 files, with
+one Linux attestation skip. The broader serial suite then exposed twelve stale fixture/expectation cases and a
+real owner-recovery routing regression during deletion. Valid creator provenance and explicit opt-in were restored
+in fixtures; intended late-revocation tests still reach their probes. Production owner storage inspection and
+deletion retries now precede ordinary active-repository projection. Retarget activation additionally requires the
+same execution lease after recovery, so a released old attempt cannot activate after a new Git write.
+The final full suite passes: **2340 pass, 7 explicit skips, 0 fail across 576 files**. The skips cover Linux/container
+and separate Chromium inventories; they are not hosted attestation. Typecheck, lint, build and whitespace
+checks pass. Twenty task-owned failed fixture scratch directories were removed after retaining
+the diagnostic logs. No Docker, provider mutation, push or deployment ran. Full parity and hosted acceptance remain open.
+
 **Current continuation after checkpoint `c383554`:** source work proceeds in parallel while root serializes
 runtime checks. Docker remains off; disk headroom is approximately 3.9GiB. The prior checkpoint's passing gates
 do not certify these newer edits. Browser editing now uses bounded native Git arguments and frozen fork targets;
@@ -3336,13 +3371,13 @@ and is idempotent by fingerprint; `tests/gpg-keys-http.test.ts` (1 pass; 13 asse
 - X.509 (CMS/PKCS#7) verification: a trust-root policy is required before any X.509 signature can be accepted. The
   owner must name the certificate authorities to trust, or decide to reject X.509 commits. No code is accepted
   without that decision.
-- Commit-view wiring: the commit views (`CandidateReview`, `DiffViewer`, `CandidateJournal`) need verification status from
-  the server, and the server reads commit objects through Artifacts. Validating that on a real repository is a hosted
-  Artifacts operation, which needs the owner's confirmation before it runs.
+- Hosted commit-view acceptance: local raw-object inspection, viewer-key verification and review/journal controls
+  are implemented and source-tested. Actual Artifacts-backed execution and rendered hosted acceptance remain
+  outside this no-spend continuation.
 
-**Still open for F02:** local LFS HTTP/storage integration and stock-client acceptance can be developed with local
-storage/workerd/Git fixtures without spending. `lfs-object-store.ts` already supplies a tested hash/size/quota core.
-Hosted Git/LFS acceptance and provider transport changes remain outside this continuation. Branch/tag/signature and
+**Integrated locally for F02:** LFS HTTP/DO/R2 storage and stock-client acceptance pass, including recovery and
+revocation. Commit signature views use exact raw bytes and current viewer trust. Hosted Git/LFS acceptance,
+SSH transport parity, wider signing-key formats and provider transport changes remain outside this continuation. Branch/tag/signature and
 submodule behavior have focused local coverage; the non-project guard HTTP tests from F01 already exist.
 
 Complete normal Git branch/tag behavior, signatures and verification status, clone/fetch/push/pull, submodule references, and an interoperable Git LFS batch/object service on R2 where needed. Check actual object hashes, not pointer files alone. Evaluate an ordinary SSH Git path separately; a custom tunneling client is not transparent SSH parity. Cloudflare's documented Wrangler SSH access is account-authenticated and does not expose public container ports; do not confuse it with a public Git SSH service.
@@ -3359,10 +3394,10 @@ members or outsiders), matches literally and case-insensitively with line number
 at 1,000 matches. Every response says whether it is `complete`; a capped or unfinished search reports a `reason` instead of
 silently truncating. Queries are limited to 200 characters, and empty queries and bad cursors are refused.
 
-**Still open for F03 (local):** complete production browsing/search/history wiring, rename tracking and access-scoped
-cache keys. `blame.ts` already has local blame/history/permalink rules; these do not establish actual commit-object
-reader integration. Local Git fixtures and adapters can advance this work without provider operations. Hosted
-Artifacts reads/writes and browser-edit publication remain outside this continuation.
+**Integrated locally for F03:** pinned browsing/search/blame/history, access-scoped request caches, browser edits,
+revision/line links and unique unchanged rename tracking have production source wiring and real Git or Worker
+fixtures. Modified/ambiguous renames, broader search/indexing coverage and complete parity remain open.
+Hosted Artifacts reads/writes and browser-edit publication remain outside this continuation.
 
 Finish branch/tag-aware browsing, Markdown/raw/binary views, path/history navigation, blame, compare, commit/line permalinks, browser edits/uploads, and permission-filtered code search. Keep query syntax, paging, supported file types and indexing freshness explicit. Reuse the working virtualized diff; do not rebuild it for aesthetics.
 
@@ -3396,7 +3431,12 @@ reason. `src/core/review-requests.ts` (1 pass) refuses self-requests and non-rea
 stacked change merges only after every ancestor; missing parents and cycles are refused. A suggestion replaces exactly one existing
 line and fails when the line is outside the file. Maintainer pushes to a fork need the fork owner's opt-in.
 
-**Still open for F04 (local):** production wiring for base-branch changes; `base-branch-change.ts` already has source-tested rules. Hosted proof remains blocked on owner confirmation. Hosted merge into Artifacts-backed branches needs owner confirmation.
+**Integrated locally for F04:** owner retargeting of an unstacked human contribution uses recorded accepted roots,
+native exact-head ancestry and a separate active generation; original creation bindings remain immutable.
+Write locks survive uncertain cleanup and original requests can be discovered and resumed after browser reload.
+Native Git, signed Worker HTTP, generation/ownership and desktop/mobile fixture checks pass. Broader review,
+queue, suggestion and merge-method parity remains open. Hosted proof and Artifacts-backed publication remain
+outside this no-spend continuation.
 
 Complete drafts, review requests, required approvals, CODEOWNERS, multiline/inline threads, suggested edits, resolution, stale approvals, base changes, fork permissions, stacked changes, merge queues, merge/squash/rebase policies, and explicit revert. Retain original contributor attribution and verifiable repair intent. Platform policy—not an agent—controls gate satisfaction.
 
@@ -3429,7 +3469,8 @@ issues by number and only accessible issues can be added, once. Stale edits are 
 progress counts come from stored items. `planning-store.ts` now persists those rules through `/planning` and
 `/planning/export`; the Planning tab provides board/table/timeline, typed fields, complete saved-view semantics,
 iterations, bulk editing and export. Actual signed Worker HTTP, reopen/CAS and synthetic rendered flows pass.
-Accepted-change-driven automation and complete project parity remain open.
+Accepted-change-driven owner automation now has frozen exact-once receipts and version-bound retries.
+Complete project parity and hosted acceptance remain open.
 
 Implement project boards, tables, timeline/roadmap views, custom fields, saved filters/sorts, iterations, item status automation, bulk editing, and useful progress charts. Projects must reference issues/changes rather than duplicate them into unrelated state.
 

@@ -62,3 +62,17 @@ test('cache restore refuses contributor symlinks before privileged copies',async
   const result=await runCustomerCi({...f.input,workflow:definition,approvedDigest,cacheDirectory});expect(result.jobs[0]!.status).toBe('failed');expect(result.jobs[0]!.log).toContain('ordinary files');
  }finally{f.cleanup();}
 },30000);
+
+test('resume skips an already finished job and executes only its queued dependent',async()=>{
+ const f=fixture();try{
+  const definition={name:'resume',triggers:['push'],jobs:[{name:'finished',steps:[{name:'never-replay',run:'exit 99'}]},{name:'queued',needs:['finished'],steps:[{name:'snapshot',run:'test "$(cat proof.txt)" = frozen && echo queued-job-ran'}]}]},approvedDigest=await workflowDigest(definition);
+  const ledger=new LocalCiLedger(f.input.ledgerPath);try{ledger.initialize({repositoryId:f.input.repositoryId,candidateId:f.input.candidateId,commit:f.input.commit,tree:f.tree,policyVersion:1,runId:'run-one',checkId:f.input.checkId,workflowDigest:approvedDigest},executableJobs(definition).jobs);ledger.finish('run-one','finished.0','passed','Original finished receipt',true);}finally{ledger.close();}
+  const result=await runCustomerCi({...f.input,workflow:definition,approvedDigest});expect(result.jobs.map(job=>job.status)).toEqual(['passed','passed']);expect(result.jobs[0]!.log).toBe('Original finished receipt');expect(result.jobs[1]!.log).toContain('queued-job-ran');expect(result.status).toBe('failed');
+ }finally{f.cleanup();}
+},30000);
+test('resume refuses a persisted running claim and leaves queued work untouched',async()=>{
+ const f=fixture();try{
+  const approvedDigest=await workflowDigest(workflow),ledger=new LocalCiLedger(f.input.ledgerPath);try{ledger.initialize({repositoryId:f.input.repositoryId,candidateId:f.input.candidateId,commit:f.input.commit,tree:f.tree,policyVersion:1,runId:'run-one',checkId:f.input.checkId,workflowDigest:approvedDigest},executableJobs(workflow).jobs);expect(ledger.claim('run-one','test.0')).toBe(true);}finally{ledger.close();}
+  await expect(runCustomerCi({...f.input,approvedDigest})).rejects.toThrow('cleanup inspection');const saved=new LocalCiLedger(f.input.ledgerPath);try{expect(saved.jobs('run-one').map(job=>job.status)).toEqual(['running','queued']);}finally{saved.close();}expect(f.reports).toEqual([]);
+ }finally{f.cleanup();}
+},30000);

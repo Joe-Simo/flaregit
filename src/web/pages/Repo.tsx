@@ -166,7 +166,7 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
       {tab === "code" && <CodeTab projectId={projectId} params={params} acceptedCommit={state.acceptedState.currentCommit} isOwner={ownerActionsAvailable} />}
       {tab === "commits" && <CommitsTab projectId={projectId} />}
       {(tab==="releases"||tab==="tags")&&<Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading tags and releases…</p>}><RepoReleases key={`releases:${projectId}`} projectId={projectId} isOwner={ownerActionsAvailable} tab={tab}/></Suspense>}
-      {tab === "changes" && <ChangesTab projectId={projectId} state={state} reload={reload} taskId={params.get("task")} canContribute={canContribute} managedActions={managedActions} writableTaskIds={state.writableTaskIds} cancellableTaskIds={state.cancellableTaskIds} forkPermissions={state.forkPermissions} />}
+      {tab === "changes" && <ChangesTab projectId={projectId} state={state} reload={reload} taskId={params.get("task")} canContribute={canContribute} managedActions={managedActions} writableTaskIds={state.writableTaskIds} cancellableTaskIds={state.cancellableTaskIds} forkPermissions={state.forkPermissions} isOwner={ownerActionsAvailable} />}
       {tab === "integration" && <IntegrationTab decisionId={params.get("decision")} isOwner={ownerActionsAvailable} projectId={projectId} state={state} reload={reload} kind={meta.kind} />}
       {tab === "activity" && <ActivityTab projectId={projectId} />}
       {tab === "discussions" && <RepositoryDiscussionsTab key={`${projectId}:${params.get("topic") ?? "list"}`} projectId={projectId} owner={ownerActionsAvailable} topic={params.get("topic") ?? undefined} />}

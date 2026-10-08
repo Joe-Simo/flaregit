@@ -1,4 +1,6 @@
+import {taskRetargetRequestSchema} from './task-retarget';
 import {browserEditSchema} from "./browser-edit";
+import {commitSignatureRequest} from './commit-signature-inspection';
 import {handleLfsHttp} from "./lfs-http";
 export {OperationalRecoveryController} from './operational-recovery-controller';
 import {securityImportSchema,securityTriageSchema,SecurityReportError} from '../core/security-report';
@@ -1082,12 +1084,7 @@ export default {
         const project = projectOf(env, projectId);
         const role = await project.roleOf(userId).catch(() => null);
         if (!role) return text("Not found", 404);
-        const effectiveAccess=await project.repositoryAccess(userId);
-        if(!effectiveAccess)return text('Not found',404);
-        if(method!=='GET'&&!effectiveAccess.direct){
-          if(effectiveAccess.role==='read'&&sub!=='/clone')return text('Repository access is read-only',403);
-          if(sub!=='/clone'&&!sub.startsWith('/wiki/')&&sub!=='/planning'&&sub!=='/issues'&&sub!=='/comments'&&sub!=='/tasks'&&!/^\/tasks\/[a-z0-9-]+\/(token|ready|cancel|browser-edit|fork-permission)$/.test(sub))return text('This operation requires direct repository membership',403);
-        }
+
 
         if(sub==="/storage-reconciliation"&&method==="GET"){
           if(auth.viaToken||role!=="owner")return text("A signed-in repository owner must inspect storage",403);
@@ -1121,6 +1118,37 @@ export default {
         }
 
         if (await project.repositoryDeletionPending() && !(sub === "" && method === "DELETE")) return json({ status: "deleting", detail: "Repository storage cleanup is pending; the owner can retry deletion.",canInspectStorage:!auth.viaToken&&role==="owner" }, 409);
+        if (sub === "" && method === "DELETE") {
+          if (role!=="owner" || auth.viaToken&&auth.tokenScope!=="full") return text("Only the owner can delete a repository", 403);
+          const state=await project.getState().catch(()=>null);if(!state)return text("Not found",404);
+          await project.beginRepositoryDeletion();
+          if (!await stopRepositoryWorkflows(env, project)) return json({ deleted: false, status: "deleting", detail: "Repository workflow shutdown is unconfirmed. Retry deletion; metadata is preserved." }, 202);
+          const recoveryCleanup = await cleanupPrivateRecoveryRepositoryOutcome(env, project);
+          if (!recoveryCleanup.deleted) return json({ ...recoveryCleanup, status: "deleting" }, 202);
+          const copiesCleanup=await cleanupRepositoryCopies(env,project);
+          if(!copiesCleanup.cleaned)return json({deleted:false,status:"deleting",...copiesCleanup},202);
+          if (!await reconcileSealedAllocations(env, project)) return json({ deleted: false, status: "deleting", detail: "An in-flight repository allocation remains unconfirmed. Retry deletion." }, 202);
+          const manifest = await globalOf(env).artifactProjectManifest(projectId);
+          const names = [...new Set([...Object.values(state.tasks).map((task) => task.workspace.repoName), state.canonicalRepoName, ...manifest.filter((allocation) => allocation.state !== "deleted").map((allocation) => allocation.name)])];
+          const knownNames = new Set([...Object.values(state.tasks).map((task) => task.workspace.repoName), state.canonicalRepoName]);
+          for (const name of names) {
+            if (await project.repositoryArtifactDeleted(name)) { await globalOf(env).recordArtifactDeletion(name, true); continue; }
+            if (!knownNames.has(name) && !await allocatedArtifactReadable(env, name)) return json({ deleted: false, status: "deleting", detail: "Reserved repository allocation is still unconfirmed. Retry deletion; metadata is preserved." }, 202);
+            if (!await env.ARTIFACTS.delete(name).catch(() => false)) return json({ deleted: false, status: "deleting", detail: "Repository storage cleanup is unconfirmed. Retry deletion; cleanup metadata is preserved." }, 202);
+            await project.recordRepositoryArtifactDeleted(name);
+            await globalOf(env).recordArtifactDeletion(name, true);
+          }
+          await account.removeProject(projectId);
+          await project.destroy();
+          return json({ deleted: projectId });
+        }
+
+        const effectiveAccess=await project.repositoryAccess(userId);
+        if(!effectiveAccess)return text('Not found',404);
+        if(method!=='GET'&&!effectiveAccess.direct){
+          if(effectiveAccess.role==='read'&&sub!=='/clone')return text('Repository access is read-only',403);
+          if(sub!=='/clone'&&!sub.startsWith('/wiki/')&&sub!=='/planning'&&sub!=='/issues'&&sub!=='/comments'&&sub!=='/tasks'&&!/^\/tasks\/[a-z0-9-]+\/(token|ready|cancel|browser-edit|fork-permission)$/.test(sub))return text('This operation requires direct repository membership',403);
+        }
         const state = await project.getState().catch(() => null);
         if (!state) return text("Not found", 404);
         const settings = settingsFor(state.verificationPolicy);
@@ -1691,6 +1719,13 @@ export default {
           }catch(error){if(error instanceof RequestBodyError)throw error;return repositoryReadJson({error:"Branch state or creation was not confirmed. Accepted history and the saved operation remain preserved; refresh before retrying the same operation ID."},409);}
         }
 
+        if(sub==='/commit-signature'){
+          if(method!=='GET')return repositoryReadText('Commit signature inspection is read-only',405);
+          if([...url.searchParams.keys()].some(key=>!['commit','task','candidate','input'].includes(key))||[...url.searchParams.keys()].some(key=>url.searchParams.getAll(key).length!==1))return repositoryReadText('Invalid signature inspection query',400);
+          const parsed=commitSignatureRequest.safeParse(Object.fromEntries(url.searchParams));if(!parsed.success)return repositoryReadText('Exact commit and one review scope required',400);
+          try{const result=await project.inspectRepositoryCommitSignature(parsed.data,{userId,displayName:userId,viaToken:auth.viaToken===true},auth.viaToken?await gitParentTokenHash(request):undefined,auth.expiresAt);return repositoryReadJson(result);}
+          catch{return repositoryReadJson({error:'Signature inspection or cleanup was not confirmed. Refresh the exact commit before retrying.'},409);}
+        }
         // Repository reads validate the entire request before acquiring storage.
         if (method === "GET" && ["/commits", "/tree", "/blob", "/diff", "/blob-by-hash","/code-search","/blame"].includes(sub)) {
           let browseRequest;
@@ -1925,6 +1960,22 @@ export default {
           try{return repositoryReadJson(await project.browserEdit(browserEditRoute[1]!,value.data,{userId,displayName:clean(profile.displayName,120)||"Contributor",viaToken:current.viaToken===true},current.viaToken?await gitParentTokenHash(request):undefined,current.expiresAt));}catch{return repositoryReadJson({error:"Original browser contribution was not confirmed; preserve this request and inspect current access"},409);}
         }
 
+        const retargetRecoveryRoute=/^\/tasks\/([a-z0-9-]+)\/retargets\/([a-f0-9-]{36})\/recover$/.exec(sub);
+        if(retargetRecoveryRoute){
+          if(method!=='POST'||!isOwner)return text('Current direct owner required to release retarget inspection',403);
+          const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||current.viaToken&&(current.tokenScope!=='full'||current.tokenRepo&&current.tokenRepo!==projectId))return text('Retarget owner authority changed',403);
+          const actor={userId,displayName:(await account.getProfile()).displayName||'Repository owner',viaToken:current.viaToken===true};try{return repositoryReadJson(await project.recoverTaskRetarget(retargetRecoveryRoute[1]!,retargetRecoveryRoute[2]!,actor,current.viaToken?await gitParentTokenHash(request):undefined,current.expiresAt));}catch(error){return repositoryReadJson({error:error instanceof Error?error.message:'Original inspection cleanup unconfirmed'},409);}
+        }
+        const retargetRoute=/^\/tasks\/([a-z0-9-]+)\/(retarget|retargets)$/.exec(sub);
+        if(retargetRoute){
+          if(method==='GET'&&retargetRoute[2]==='retargets')return repositoryReadJson(await project.taskRetargets(retargetRoute[1]!,userId));
+          if(method!=='POST'||retargetRoute[2]!=='retarget')return text('Method not allowed',405);
+          if(!isOwner)return text('Direct repository owner required for retarget inspection',403);
+          const parsed=taskRetargetRequestSchema.safeParse(await body<unknown>());if(!parsed.success)return text('Exact recorded target, generation and head required',400);
+          const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||current.viaToken&&(current.tokenScope!=='full'||current.tokenRepo&&current.tokenRepo!==projectId))return text('Retarget owner authentication changed',403);
+          const actor={userId,displayName:(await account.getProfile()).displayName||'Repository owner',viaToken:current.viaToken===true};
+          try{return repositoryReadJson(await project.retargetTaskBase(retargetRoute[1]!,parsed.data,actor,current.viaToken?await gitParentTokenHash(request):undefined,current.expiresAt));}catch(error){return repositoryReadJson({error:error instanceof Error?error.message:'Retarget source unavailable; original history preserved'},409);}
+        }
         const forkPermissionRoute=/^\/tasks\/([a-z0-9-]+)\/fork-permission$/.exec(sub);
         if(forkPermissionRoute){
           if(method==='GET')return repositoryReadJson(await project.taskForkPermission(forkPermissionRoute[1]!,userId));
@@ -2814,29 +2865,7 @@ export default {
           return json({ ok: true });
         }
 
-        if (sub === "" && method === "DELETE") {
-          if (!isOwner) return text("Only the owner can delete a repository", 403);
-          await project.beginRepositoryDeletion();
-          if (!await stopRepositoryWorkflows(env, project)) return json({ deleted: false, status: "deleting", detail: "Repository workflow shutdown is unconfirmed. Retry deletion; metadata is preserved." }, 202);
-          const recoveryCleanup = await cleanupPrivateRecoveryRepositoryOutcome(env, project);
-          if (!recoveryCleanup.deleted) return json({ ...recoveryCleanup, status: "deleting" }, 202);
-          const copiesCleanup=await cleanupRepositoryCopies(env,project);
-          if(!copiesCleanup.cleaned)return json({deleted:false,status:"deleting",...copiesCleanup},202);
-          if (!await reconcileSealedAllocations(env, project)) return json({ deleted: false, status: "deleting", detail: "An in-flight repository allocation remains unconfirmed. Retry deletion." }, 202);
-          const manifest = await globalOf(env).artifactProjectManifest(projectId);
-          const names = [...new Set([...Object.values(state.tasks).map((task) => task.workspace.repoName), state.canonicalRepoName, ...manifest.filter((allocation) => allocation.state !== "deleted").map((allocation) => allocation.name)])];
-          const knownNames = new Set([...Object.values(state.tasks).map((task) => task.workspace.repoName), state.canonicalRepoName]);
-          for (const name of names) {
-            if (await project.repositoryArtifactDeleted(name)) { await globalOf(env).recordArtifactDeletion(name, true); continue; }
-            if (!knownNames.has(name) && !await allocatedArtifactReadable(env, name)) return json({ deleted: false, status: "deleting", detail: "Reserved repository allocation is still unconfirmed. Retry deletion; metadata is preserved." }, 202);
-            if (!await env.ARTIFACTS.delete(name).catch(() => false)) return json({ deleted: false, status: "deleting", detail: "Repository storage cleanup is unconfirmed. Retry deletion; cleanup metadata is preserved." }, 202);
-            await project.recordRepositoryArtifactDeleted(name);
-            await globalOf(env).recordArtifactDeletion(name, true);
-          }
-          await account.removeProject(projectId);
-          await project.destroy();
-          return json({ deleted: projectId });
-        }
+
       }
 
       return text("Not found", 404);
