@@ -2146,6 +2146,12 @@ migration, destructive action, or legal acceptance is authorized by this tracker
 
 - Deleted `src/core/deployments.ts` and `src/core/org-invitations.ts` with their tests. The server's own `src/server/deployments.ts` and `src/server/repository-invitations.ts` remain the source of truth.
 
+## Production deploy, October 8
+
+- Deployed `flaregit` with `bunx wrangler deploy` (version `44d6d54c-16d9-4107-9dee-5fbec6a15ac4`). This added the `AuthorityController` Durable Object and the `/api/oauth/*` and `/api/registry/*` routes.
+- The deploy also rebuilt and pushed the AgentSandbox and IntegratorSandbox Container images. Containers may be billed; check the Cloudflare dashboard.
+- Live checks: `/health` 200, anonymous app registration 401, bad grant type 400, unknown package 404.
+
 ## Active ticket ledger
 
 | Ticket | Status | Primary owner | Next acceptance action |

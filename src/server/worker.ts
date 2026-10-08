@@ -109,6 +109,7 @@ export class PreviewAssetBroker extends WorkerEntrypoint<Env> {
 
 export { FlareGitPrivateRecoveryWorkflow, RepositoryController, FlareGitIntegrationWorkflow, FlareGitScenarioWorkflow, FlareGitAgentWorkflow, FlareGitImportHistoryWorkflow };
 export { IntegratorSandbox, AgentSandbox } from "./integrator.js";
+export { AuthorityController } from "./authority-controller.js";
 
 const TASK_ID = /^[a-z0-9][a-z0-9-]{2,100}$/;
 const json = (data: unknown, status = 200) => Response.json(data, { status });
