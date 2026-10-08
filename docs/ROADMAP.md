@@ -3097,9 +3097,18 @@ project route except the lifecycle route and repository deletion. Evidence: `tes
 topics: owner-only, validated, and refused while archived). Topics validation lives in `src/core/repository-topics.ts`
 (`tests/repository-topics.test.ts`, 3 pass). Lint and typecheck pass.
 
-**Blocked for the no-spend scope:** default branch. Changing it needs canonical Git ref writes through Artifacts (a
-billed hosted operation) and rebinding the accepted-branch scope, which the accepted history depends on. It stays
-blocked until the owner approves that spend or a no-spend design exists.
+**Blocked for the no-spend scope (October 8):**
+- Default branch: changing it needs canonical Git ref writes through Artifacts (billed) and rebinding the
+  accepted-branch scope that accepted history depends on.
+- Rename: changes the canonical repository name that Artifacts and the accepted, preview and storage scopes are
+  keyed on (`canonicalRepoName` identity checks); it is a hosted Git identity change.
+- Forks: creating an independent fork creates a new canonical Artifacts repository (billed).
+- Ownership transfer: moves who controls the project's spend and account responsibility. That is a billing
+  decision the owner must make before any code changes it.
+- Deletion with recovery: keeping data recoverable extends storage retention, which bills. Needs the owner's
+  retention decision.
+
+Each stays blocked until the owner approves the spend or makes the billing decision.
 
 Still open for F01: rename, forks, ownership transfer, and deletion with recovery; and non-project routes are not
 yet guarded.
