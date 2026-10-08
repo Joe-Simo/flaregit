@@ -54,6 +54,7 @@ export interface Env {
   REPOSITORY_CONTROLLER: DurableObjectNamespace;
   INTEGRATOR: DurableObjectNamespace<import("./integrator.js").IntegratorSandbox>;
   AGENT: DurableObjectNamespace<import("./integrator.js").AgentSandbox>;
+  AUTHORITY: DurableObjectNamespace<import("./authority-controller.js").AuthorityController>;
   SCENARIO_WORKFLOW: Workflow;
   AGENT_WORKFLOW: Workflow;
   INTEGRATION_WORKFLOW: Workflow;

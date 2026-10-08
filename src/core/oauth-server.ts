@@ -47,12 +47,31 @@ export interface RefreshTokenRecord {
 }
 
 /** Codes and tokens are keyed by the base64url SHA-256 digest of the secret, so no raw secret rests in the store. */
+/** The only operations the server needs. A Map satisfies it; so does a durable store. Every change must be written back with `set`. */
+export interface KeyValue<V> {
+  get(key: string): V | undefined;
+  set(key: string, value: V): unknown;
+}
+
 export interface OAuthStore {
+  readonly apps: KeyValue<AppRecord>;
+  readonly codes: KeyValue<CodeRecord>;
+  readonly grants: KeyValue<GrantRecord>;
+  readonly accessTokens: KeyValue<AccessTokenRecord>;
+  readonly refreshTokens: KeyValue<RefreshTokenRecord>;
+}
+
+export interface MemoryOAuthStore {
   readonly apps: Map<string, AppRecord>;
   readonly codes: Map<string, CodeRecord>;
   readonly grants: Map<string, GrantRecord>;
   readonly accessTokens: Map<string, AccessTokenRecord>;
   readonly refreshTokens: Map<string, RefreshTokenRecord>;
+}
+
+/** Creates the default in-memory store. Pass a durable store to `createOAuthServer` to keep state across restarts. */
+export function createMemoryOAuthStore(): MemoryOAuthStore {
+  return {apps: new Map(), codes: new Map(), grants: new Map(), accessTokens: new Map(), refreshTokens: new Map()};
 }
 
 export type OAuthResult<T> = ({readonly ok: true} & T) | {readonly ok: false; readonly error: string};
@@ -110,6 +129,7 @@ export interface OAuthServer {
 export interface OAuthServerOptions {
   /** Milliseconds since the epoch. Injected so expiry can be tested. */
   readonly clock?: () => number;
+  readonly store?: OAuthStore;
 }
 
 const fail = (error: string) => ({ok: false, error}) as const;
@@ -152,13 +172,7 @@ function isAllowedRedirectUri(value: string): boolean {
 
 export function createOAuthServer(options: OAuthServerOptions = {}): OAuthServer {
   const clock = options.clock ?? (() => Date.now());
-  const store: OAuthStore = {
-    apps: new Map(),
-    codes: new Map(),
-    grants: new Map(),
-    accessTokens: new Map(),
-    refreshTokens: new Map(),
-  };
+  const store: OAuthStore = options.store ?? createMemoryOAuthStore();
 
   // Raw tokens are returned to the caller once and only their digests are kept.
   async function issueTokens(grant: GrantRecord, now: number): Promise<TokenPair> {
@@ -171,7 +185,10 @@ export function createOAuthServer(options: OAuthServerOptions = {}): OAuthServer
 
   const revokeGrant = (grantId: string): void => {
     const grant = store.grants.get(grantId);
-    if (grant !== undefined) grant.revoked = true;
+    if (grant !== undefined) {
+      grant.revoked = true;
+      store.grants.set(grantId, grant);
+    }
   };
 
   return {
@@ -243,11 +260,13 @@ export function createOAuthServer(options: OAuthServerOptions = {}): OAuthServer
       const grant: GrantRecord = {id: randomToken(16), clientId: record.clientId, userId: record.userId, scopes: record.scopes, revoked: false};
       store.grants.set(grant.id, grant);
       record.grantId = grant.id;
+      store.codes.set(codeKey, record);
       return {ok: true, ...(await issueTokens(grant, now))};
     },
 
     async refresh(request) {
-      const record = store.refreshTokens.get(await storeKey(request.refreshToken));
+      const refreshKey = await storeKey(request.refreshToken);
+      const record = store.refreshTokens.get(refreshKey);
       if (record === undefined) return fail("Unknown refresh token");
       const grant = store.grants.get(record.grantId);
       if (grant === undefined) return fail("Unknown refresh token");
@@ -256,10 +275,12 @@ export function createOAuthServer(options: OAuthServerOptions = {}): OAuthServer
       if (record.consumed) {
         // A rotated refresh token came back, so treat the whole grant family as compromised.
         grant.revoked = true;
+        store.grants.set(grant.id, grant);
         return fail("Refresh token reuse detected; the grant has been revoked");
       }
       // No await between the lookup and this write, so a rotated token cannot be spent twice.
       record.consumed = true;
+      store.refreshTokens.set(refreshKey, record);
       return {ok: true, ...(await issueTokens(grant, clock()))};
     },
 

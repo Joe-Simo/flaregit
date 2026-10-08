@@ -61,6 +61,7 @@ import { FlareGitAgentWorkflow } from "./agent-workflow.js";
 import { FlareGitImportHistoryWorkflow, importHistoryReceiptKey } from "./import-history-workflow.js";
 import { handleQueueBatch } from "./queue.js";
 import { authenticate } from "./access.js";
+import { AUTHORITY_MAX_BODY_BYTES } from "./authority-api.js";
 import { handleGitGateway } from "./git-gateway-handler.js";
 import { admitGitOperation,configuredGitCap } from "./core-git-budget.js";
 import { gitAuthEnv, q } from "./shell.js";
@@ -178,6 +179,23 @@ export default {
 
     if (!url.pathname.startsWith("/api/")) return appAssetResponse(request, env.ASSETS);
 
+    if (url.pathname.startsWith("/api/oauth/") || url.pathname.startsWith("/api/registry/")) {
+      // Only a browser session counts as a person. API tokens and anonymous callers get no userId, so protected routes refuse them.
+      const identity = await authenticate(request, env);
+      const userId = identity instanceof Response || identity.viaToken ? undefined : identity.id;
+      let body: unknown;
+      if (request.method === "POST") {
+        const raw = await request.text();
+        if (new TextEncoder().encode(raw).byteLength > AUTHORITY_MAX_BODY_BYTES) return new Response("Request body is too large", { status: 413 });
+        try {
+          body = raw === "" ? undefined : JSON.parse(raw);
+        } catch {
+          return new Response("Invalid JSON request body", { status: 400 });
+        }
+      }
+      const reply = await env.AUTHORITY.get(env.AUTHORITY.idFromName("authority")).call({ method: request.method, pathname: url.pathname, search: url.search, body, userId });
+      return new Response(reply.body, { status: reply.status, headers: { "Content-Type": reply.contentType, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
+    }
     if (url.pathname.startsWith("/api/profiles/")) {
       const respond = (data: unknown, status = 200) => Response.json(data, { status, headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
       const match = /^\/api\/profiles\/([a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?)$/.exec(url.pathname);

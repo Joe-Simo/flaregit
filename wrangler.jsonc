@@ -45,12 +45,14 @@
     "bindings": [
       { "name": "REPOSITORY_CONTROLLER", "class_name": "RepositoryController" },
       { "name": "INTEGRATOR", "class_name": "IntegratorSandbox" },
-      { "name": "AGENT", "class_name": "AgentSandbox" }
+      { "name": "AGENT", "class_name": "AgentSandbox" },
+      { "name": "AUTHORITY", "class_name": "AuthorityController" }
     ]
   },
   "exports": {
     "RepositoryController": { "type": "durable-object", "storage": "sqlite" },
     "IntegratorSandbox": { "type": "durable-object", "storage": "sqlite" },
+    "AuthorityController": { "type": "durable-object", "storage": "sqlite" },
     "AgentSandbox": { "type": "durable-object", "storage": "sqlite" },
     "IntegratorContainer": { "type": "durable-object", "state": "deleted" },
     "AgentContainer": { "type": "durable-object", "state": "deleted" }

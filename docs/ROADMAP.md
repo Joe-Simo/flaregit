@@ -2129,6 +2129,12 @@ migration, destructive action, or legal acceptance is authorized by this tracker
 - F09: `org-invitations.ts`: email-matched single-use invitations with 7-day expiry, no privilege escalation, teams. Team membership does not yet change permissions.
 - F11: `deployments.ts`: one live deployment per environment, rollback, digest-verified serving. Not yet wired to the server.
 
+## Server wiring added October 8 (tested under workerd; not deployed)
+
+- OAuth and package registry are served at `/api/oauth/*` and `/api/registry/*` from a Durable Object (`AuthorityController`, SQLite-backed, declared in `wrangler.jsonc`). Browser sessions only for writes; API tokens cannot register apps, authorize, publish or deprecate.
+- Introspection is not exposed over HTTP. Team and org membership are not yet read for private package visibility.
+- Not yet done: a restart test in workerd (Miniflare here only supports in-memory persistence; restart behavior is covered by SQLite-backed tests), deployment of the new Durable Object class, and the duplicate-module decision for deployments and org invitations.
+
 ## Active ticket ledger
 
 | Ticket | Status | Primary owner | Next acceptance action |

@@ -1,5 +1,5 @@
 import {expect, test} from "bun:test";
-import {createOAuthServer, OAUTH_ACCESS_TTL_MS, OAUTH_CODE_TTL_MS, type AuthorizeRequest, type OAuthServer, type TokenPair} from "../src/core/oauth-server";
+import {createOAuthServer, OAUTH_ACCESS_TTL_MS, OAUTH_CODE_TTL_MS, type AuthorizeRequest, type MemoryOAuthStore, type OAuthServer, type TokenPair} from "../src/core/oauth-server";
 
 // RFC 7636 appendix B: the challenge is base64url(SHA-256(verifier)).
 const VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
@@ -190,10 +190,11 @@ test("codes, access tokens and refresh tokens are stored only as SHA-256 digests
   }
 
   const digest = async (value: string) => Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))).toString("base64url");
-  expect(server.store.codes.has(await digest(code))).toBe(true);
-  expect(server.store.accessTokens.has(await digest(issued.accessToken))).toBe(true);
-  expect(server.store.accessTokens.has(await digest(rotated.accessToken))).toBe(true);
-  expect(server.store.refreshTokens.has(await digest(issued.refreshToken))).toBe(true);
-  expect(server.store.refreshTokens.has(await digest(rotated.refreshToken))).toBe(true);
-  expect(server.store.accessTokens.size).toBe(2);
+  const memory = server.store as MemoryOAuthStore;
+  expect(memory.codes.has(await digest(code))).toBe(true);
+  expect(memory.accessTokens.has(await digest(issued.accessToken))).toBe(true);
+  expect(memory.accessTokens.has(await digest(rotated.accessToken))).toBe(true);
+  expect(memory.refreshTokens.has(await digest(issued.refreshToken))).toBe(true);
+  expect(memory.refreshTokens.has(await digest(rotated.refreshToken))).toBe(true);
+  expect(memory.accessTokens.size).toBe(2);
 });
