@@ -3121,6 +3121,16 @@ Reference inventory: `https://docs.github.com/en/repositories`.
 
 ### F02 — Git transport, repository size and object integrity (R1; after C03)
 
+**Progress (source-tested only, October 8):** the Git LFS protocol core is in `src/core/git-lfs.ts`: batch validation
+(download/upload, basic transfer only, at most 100 objects, exact SHA-256 OID format, non-negative integer size, a
+size limit checked before any upload) and content-derived verification (an object is accepted only when its actual
+bytes match the declared size and SHA-256 OID). Evidence: `tests/git-lfs.test.ts` (5 pass); lint and typecheck pass.
+
+**Still open for F02, not closable without spend:** the R2-backed LFS object store and its HTTP endpoints (billed R2
+storage), stock Git and Git LFS client acceptance against the deployed Worker (hosted), and the artifact-backed
+transport. Blocked until the owner approves that spend. Local work still open: branch/tag/signature behavior,
+submodule identity checks, and the non-project guard list from F01.
+
 Complete normal Git branch/tag behavior, signatures and verification status, clone/fetch/push/pull, submodule references, and an interoperable Git LFS batch/object service on R2 where needed. Check actual object hashes, not pointer files alone. Evaluate an ordinary SSH Git path separately; a custom tunneling client is not transparent SSH parity. Cloudflare's documented Wrangler SSH access is account-authenticated and does not expose public container ports; do not confuse it with a public Git SSH service.
 
 Acceptance: stock Git and Git LFS clients exercise private/public operations; signed/tagged history survives transfer; blobs, refs and relevant submodule identities survive export/import; unauthorized and non-fast-forward writes follow policy. Test limits before accepting uploads. If Artifacts capacity prevents a promised repository tier, obtain a supported provider change or leave the tier blocked—never secretly split/rewrite Git history.
