@@ -2932,6 +2932,14 @@ Keep payments disabled for the competition. For authentication, either obtain an
 - Status: source-tested and local-image-tested only. No hosted Cloudflare receipt, no synthetic canary run, and no
   cloud allocation was produced. C02's hosted pass criteria remain open and need an approved spend ceiling.
 
+### C10 local reproducibility — October 8, 2026 (source-tested only)
+
+- Clean clone of `17d7550` (reset from `origin/main` into a scratch checkout, no local edits) inside
+  `oven/bun:1.4.2` Linux (`git` 2.47.3, `util-linux`, `procps`), running as the non-root `bun` user.
+- `bun run lint` and `bun run typecheck` exit 0; `bun run build` exit 0.
+- `bun test`: 1887 pass, 7 skip (6 existing platform skips plus the Bun 1.4.2 quarantine), 0 fail, 470 files.
+- Status: local reproducibility only. Hosted C09 batch, C10 evidence package, and C11 owner submission remain open.
+
 ### C03 local source gate — October 8, 2026 (source-tested only)
 
 - All 9 `tests/c03-*.test.ts` files run one at a time on local Bun 1.3.4: 32 pass, 0 fail.
