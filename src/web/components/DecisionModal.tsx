@@ -93,7 +93,7 @@ export function DecisionModal({
       <div className="p-3 rounded-lg bg-background/50 border border-border/50 text-[11px] text-muted-foreground flex items-center gap-2">
         <Shield className="h-3.5 w-3.5 text-primary shrink-0" />
         <span>
-          The accepted repository history stays unchanged. Your choice prepares a new candidate; checks and human acceptance are separate steps.
+          The accepted repository history stays unchanged. Your choice prepares a new combined preview; checks and human acceptance are separate steps.
         </span>
       </div>
 
@@ -107,7 +107,7 @@ export function DecisionModal({
           disabled={isResolving || !selectedId}
           className="font-semibold gap-1.5"
         >
-          <span>{isResolving ? "Saving choice…" : "Save choice & prepare candidate"}</span>
+          <span>{isResolving ? "Saving choice…" : "Save choice & prepare combined preview"}</span>
         </Button>
       </DialogFooter>
     </Dialog>

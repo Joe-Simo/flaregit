@@ -21,7 +21,7 @@ const features = [
   { title: 'Human review', Icon: GitMerge, text: 'Readable diffs, conversations and explicit acceptance of the exact commit.' },
   { title: 'Basic private repositories', Icon: ShieldCheck, text: 'Private by default, with repository membership and scoped access.' },
   { title: 'Your tools and agents', Icon: Terminal, text: 'Use ordinary Git with your preferred editor and coding tools.' },
-  { title: 'Connected checks', Icon: Webhook, text: 'Register external services and report checks for an exact candidate.' },
+  { title: 'Connected checks', Icon: Webhook, text: 'Register external services and report checks for an exact combined preview.' },
   { title: 'People and context', Icon: Users, text: 'Keep contribution purpose, review discussions and original work together.' },
 ];
 export function Pricing({ onSignIn }: { onSignIn: () => void }) {

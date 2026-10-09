@@ -1,0 +1,63 @@
+import { expect, test } from "bun:test";
+import { Glob } from "bun";
+import ts from "typescript";
+
+const forbidden = /\b(candidates?|journals?|epochs?|incarnations?|evidence)\b/i;
+const displayAttributes = new Set(["title", "aria-label", "aria-description", "placeholder", "alt", "label", "description", "summary", "hint", "message", "heading", "emptyText", "children"]);
+
+/** Display copy reads like prose: it contains whitespace or starts with a capitalised word. */
+function prose(value: string): boolean {
+  const trimmed = value.trim();
+  return /\s/.test(trimmed) || /^[A-Z][a-z]/.test(trimmed);
+}
+
+/** Literals that are protocol values rather than copy: imports, keys, comparisons, non-display props. */
+function protocolLiteral(node: ts.Node): boolean {
+  const parent = node.parent;
+  if (ts.isImportDeclaration(parent) || ts.isExportDeclaration(parent) || ts.isLiteralTypeNode(parent) || ts.isExternalModuleReference(parent)) return true;
+  if (ts.isCallExpression(parent) && parent.expression.kind === ts.SyntaxKind.ImportKeyword) return true;
+  if (ts.isPropertyAssignment(parent) && parent.name === node) return true;
+  if (ts.isElementAccessExpression(parent)) return true;
+  if (ts.isBinaryExpression(parent) && [ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken].includes(parent.operatorToken.kind)) return true;
+  if (ts.isCaseClause(parent)) return true;
+  if (ts.isJsxAttribute(parent) && !displayAttributes.has(parent.name.getText())) return true;
+  return false;
+}
+
+export function visibleTerminologyViolations(path: string, source: string): string[] {
+  const kind = path.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, kind);
+  const found: string[] = [];
+  const report = (node: ts.Node, value: string) => {
+    if (!forbidden.test(value)) return;
+    const { line } = file.getLineAndCharacterOfPosition(node.getStart());
+    found.push(`${path}:${line + 1}: ${value.trim().replace(/\s+/g, " ").slice(0, 140)}`);
+  };
+  const visit = (node: ts.Node) => {
+    if (ts.isJsxText(node)) report(node, node.text);
+    else if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && !protocolLiteral(node) && prose(node.text) && !/^[#/]/.test(node.text.trim())) report(node, node.text);
+    else if (ts.isTemplateExpression(node) && !protocolLiteral(node) && !/^[#/]/.test(node.head.text)) {
+      const parts = [node.head.text, ...node.templateSpans.map(span => span.literal.text)];
+      if (parts.some(prose)) report(node, parts.join(" "));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return found;
+}
+
+test("internal Git terminology never reaches the interface", async () => {
+  const violations: string[] = [];
+  for await (const path of new Glob("src/web/**/*.{ts,tsx}").scan(".")) {
+    if (path.endsWith(".worker.ts")) continue;
+    violations.push(...visibleTerminologyViolations(path, await Bun.file(path).text()));
+  }
+  expect(violations).toEqual([]);
+});
+
+test("the scanner flags visible copy and ignores protocol values", () => {
+  const flagged = visibleTerminologyViolations("x.tsx", `const a = <p>Candidate failed</p>; const b = <Badge title="Open journal" />; const c = \`Epoch \${n} ended\`;`);
+  expect(flagged).toHaveLength(3);
+  const allowed = visibleTerminologyViolations("x.tsx", `if (kind === "candidate") call("/p/1/candidates"); const map = { candidate: 1 }; const k = "candidateId"; type T = "evidence"; const e = <X kind="candidate review" />;`);
+  expect(allowed).toEqual([]);
+});

@@ -109,7 +109,7 @@ export function NewRepo() {
   return (
     <div className="max-w-2xl mx-auto px-4 sm:px-6 py-8 min-w-0">
       <h1 className="text-xl font-bold mb-1">New repository</h1>
-      <p className="text-sm text-muted-foreground mb-6">Each contribution has an isolated Git workspace. Candidates wait for your review before acceptance.</p>
+      <p className="text-sm text-muted-foreground mb-6">Each contribution has an isolated Git workspace. Combined previews wait for your review before merging.</p>
       {activeImport && <section className="mb-5 border border-border rounded-md p-4 space-y-3" aria-label="Saved import status">
         <div><h2 className="text-sm font-medium">{activeImport.status === "ready" ? "Import ready" : activeImport.status === "failed" ? "Import refused by provider" : "Import saved · waiting for repository availability"}</h2><p role="status" className="mt-1 text-sm text-muted-foreground">{activeImport.detail || "The provider has not confirmed that repository refs are ready."}</p></div>
         <p className="text-xs text-muted-foreground">{activeImport.status === "failed" ? "The saved source and protected checks remain below. Correcting the source creates a new import; this refused request is retained." : "The source and protected checks below are saved. Checking status inspects this existing import and does not request another provider import."}</p>
@@ -153,7 +153,7 @@ export function NewRepo() {
               <div className="rounded-md border border-border p-3 space-y-3">
                 <div>
                   <h2 className="text-sm font-semibold">Protected checks</h2>
-                  <p className="text-xs text-muted-foreground">Commands FlareGit runs on every candidate. Contributors cannot change them, and tests and dependency files are protected from edits.</p>
+                  <p className="text-xs text-muted-foreground">Commands FlareGit runs on every combined preview. Contributors cannot change them, and tests and dependency files are protected from edits.</p>
                 </div>
                 <label className="block text-sm">
                   <span className="font-medium">Test command (required)</span>

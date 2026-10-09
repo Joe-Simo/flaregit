@@ -1,3 +1,4 @@
+import { NeedsAttention } from "../components/NeedsAttention";
 import {preparedPublicationRequest} from '../prepared-publication-recovery';
 import {CommitSignature} from '../components/CommitSignature';
 import {GitTransferRecovery} from "../components/GitTransferRecovery";
@@ -33,7 +34,7 @@ export function ReviewTab({ projectId, task, commit, baseCommit, returnTo, input
   const [anchor, setAnchor] = useState<{ scope: string; subject: string; path: string; line: number; commit: string } | null>(null);
   const [commentState, setCommentState] = useState<{ scope: string; positions: Set<string> } | null>(null);
   const commented = commentState?.scope === reviewScope ? commentState.positions : new Set<string>();
-  const subject = input ? `change:${input}` : candidate ? `candidate:${candidate.id}` : task ? `change:${task}` : null;
+  const subject = input ? `change:${input}` : candidate ? `combined preview:${candidate.id}` : task ? `change:${task}` : null;
   const onLoaded = useCallback((c: Comment[]) => setCommentState({ scope: reviewScope, positions: new Set(c.filter((x) => x.path && x.line && x.commit === diff?.head.hash).map((x) => `${x.path}:${x.line}`)) }), [reviewScope, diff?.head.hash]);
 
   useEffect(() => {
@@ -42,9 +43,9 @@ export function ReviewTab({ projectId, task, commit, baseCommit, returnTo, input
     const query = candidate ? `candidate=${encodeURIComponent(candidate.id)}${input ? `&input=${encodeURIComponent(input)}` : ""}` : task ? `task=${encodeURIComponent(task)}` : `commit=${encodeURIComponent(commit ?? "")}${baseCommit ? `&base=${encodeURIComponent(baseCommit)}` : ""}`;
     void apiJson<DiffResponse>(`/p/${projectId}/diff?${query}`, { signal: controller.signal }).then((response) => {
       if (!active) return;
-      if (input && !frozenInputDiffMatches(response, { taskId: input, commit: frozenInputCommit, base: frozenInputBase })) throw new Error("The returned diff does not match this candidate's frozen contribution input. Refresh without substituting a newer checkpoint.");
+      if (input && !frozenInputDiffMatches(response, { taskId: input, commit: frozenInputCommit, base: frozenInputBase })) throw new Error("The returned diff does not match this combined preview's frozen contribution input. Refresh without substituting a newer checkpoint.");
       if (baseCommit && !candidate && !task && (response.repo !== "canonical" || response.head.hash !== commit || response.base !== baseCommit)) throw new Error("The returned diff does not match the saved commit and base.");
-      if (candidate && !input && (response.head.hash !== candidate.candidateCommit || response.base !== candidate.expectedAcceptedBase)) throw new Error("The returned diff does not match this candidate commit and base. Refresh the review before accepting.");
+      if (candidate && !input && (response.head.hash !== candidate.candidateCommit || response.base !== candidate.expectedAcceptedBase)) throw new Error("The returned diff does not match this combined preview commit and base. Refresh the review before merging.");
       if (taskSnapshot && !input && (response.head.hash !== taskSnapshot.currentCommit || response.base !== taskSnapshot.baseCommit)) throw new Error("The change checkpoint advanced while the diff was loading. Refresh the change before reviewing.");
       setLoadedDiff({ scope: reviewScope, response });
     }).catch((cause: unknown) => { if (active) setFailure({ scope: reviewScope, message: cause instanceof Error ? cause.message : "Could not load the review diff" }); });
@@ -66,7 +67,7 @@ export function ReviewTab({ projectId, task, commit, baseCommit, returnTo, input
       {candidate && <CandidatePurpose projectId={projectId} candidate={candidate} tasks={evidence?.tasks} />}
       {taskSnapshot && !candidate && <section aria-label="Contribution purpose" className="space-y-1 text-sm"><h2 className="font-semibold break-words">{taskSnapshot.goal}</h2><p className="text-xs text-muted-foreground">{taskSnapshot.contributor.name} · {taskSnapshot.contributor.type}{taskSnapshot.dependsOn ? ` · Builds on ${taskSnapshot.dependsOn}` : ""}{taskSnapshot.issue ? ` · Issue #${taskSnapshot.issue}` : ""}</p></section>}
       {task && !candidate && <GitTransferRecovery key={`${projectId}:${task}`} projectId={projectId} taskId={task} isOwner={isOwner}/>}
-      {task && evidence?.tasks[task]?.agentRunId && <AgentRecoveryPanel key={`${projectId}:${task}:${evidence.tasks[task]!.agentRunId}`} projectId={projectId} taskId={task} runId={evidence.tasks[task]!.agentRunId!} canResume={["working", "checkpointed", "blocked", "needs_decision"].includes(evidence.tasks[task]!.status)} onStarted={reload} />}
+      {task && evidence?.tasks[task]?.agentRunId && <NeedsAttention label="Agent run needs attention"><AgentRecoveryPanel key={`${projectId}:${task}:${evidence.tasks[task]!.agentRunId}`} projectId={projectId} taskId={task} runId={evidence.tasks[task]!.agentRunId!} canResume={["working", "checkpointed", "blocked", "needs_decision"].includes(evidence.tasks[task]!.status)} onStarted={reload} /></NeedsAttention>}
       {savedPublication && candidate && <CandidateReview projectId={projectId} isOwner={isOwner} candidate={candidate} journal={evidence?.journal} evidence={candidate.evidenceId ? evidence?.evidence[candidate.evidenceId] : undefined} showOpen={false} reviewReady={true} onDone={() => { reload?.(); navigate(`/p/${projectId}/integration`); }} />}
       {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}<Button size="sm" variant="outline" className="ml-3" onClick={() => setRevision((value) => value + 1)}>Retry diff</Button></div>}
       {!diff && !error && <p className="text-sm text-muted-foreground">Loading changes…</p>}
