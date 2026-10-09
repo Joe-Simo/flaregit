@@ -31,6 +31,8 @@ import {prepareIntegrationIntent,readIntegrationIntents,saveIntegrationIntent,ac
 import { apiFetch, apiJson, apiSessionIdentity } from "../api";
 import { navigate, timeAgo } from "../router";
 import type { FlareGitProjectState, Task, TaskStatus } from "@/core/types";
+import { QUEUE_STATUS, useCoordination } from "../coordination";
+import { ChangeUpdateStatus } from "../components/MergeQueue";
 
 const STATUS: Record<TaskStatus, { label: string; variant: "secondary" | "info" | "warning" | "success" | "purple" | "destructive" | "outline" }> = {
   working: { label: "Working", variant: "secondary" },
@@ -184,6 +186,9 @@ export function ChangesTab(props: ChangesProps) {
 }
 function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,managedActions=true,isOwner=false,writableTaskIds,cancellableTaskIds,forkPermissions }: ChangesProps) {
   const { userId } = useAuth();
+  const coordination = useCoordination(projectId);
+  const queueByTask = new Map((coordination.view?.queue ?? []).filter(entry => entry.status !== "removed").map(entry => [entry.taskId, entry]));
+  const updateByTask = new Map((coordination.view?.updates ?? []).map(update => [update.taskId, update]));
   const canChangeTask = (task: Task) => canContribute && (writableTaskIds !== undefined ? writableTaskIds.includes(task.id) : managedActions || task.contributor.id === userId || task.initiatedBy?.id === userId);
   const canCancelTask = (task: Task) => canContribute && (cancellableTaskIds !== undefined ? cancellableTaskIds.includes(task.id) : managedActions || task.contributor.id === userId || task.initiatedBy?.id === userId);
   const retargetRequestIds=useRef(new Map<string,string>());
@@ -484,6 +489,8 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
                   {t.status === "blocked" && (
                     <p className="mt-1.5 text-xs text-destructive">Blocked: {t.blockedReason ?? "no reason was recorded"}</p>
                   )}
+                  {queueByTask.get(t.id) && t.status !== "accepted" && <p className="mt-1.5 text-xs text-muted-foreground break-words">Merge queue: <Badge variant={QUEUE_STATUS[queueByTask.get(t.id)!.status].variant}>{QUEUE_STATUS[queueByTask.get(t.id)!.status].label}</Badge> {queueByTask.get(t.id)!.reason ?? ""}</p>}
+                  {t.status !== "accepted" && <ChangeUpdateStatus update={updateByTask.get(t.id)} />}
                 </div>
                 <div className="flex gap-1.5 shrink-0 flex-wrap justify-end ml-auto">
                   {isOwner&&canChangeTask(t)&&t.contributor.type==="human"&&t.currentCommit&&!["accepted","cancelled","integrating","verifying"].includes(t.status)&&<Button size="sm" variant="outline" disabled={busy!==null} onClick={()=>setRetargetTaskId(t.id)}>Retarget</Button>}

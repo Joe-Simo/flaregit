@@ -98,6 +98,10 @@ import {inspectGitGatewayRecovery} from "./git-gateway-recovery";
 import {GitGatewayLedger,type GitGatewayScope} from "./git-gateway-ledger";
 import {TaskTargetGenerations,type TaskTargetGenerationIntent,type TaskTargetGenerationSettlement} from "./task-target-generations";
 import {freezeProductDecisionScope,planProductDecisionResolution} from "./product-decision-scope";
+import {CoordinationController} from "./coordination-controller";
+import type {ContradictionProof} from "../core/decision/contradiction-proof";
+import type {LandingOutcome} from "./merge-queue-runner";
+import type {RebaseExecution} from "./post-land-rebase";
 import { WebhookBlockedDeferrals, MAX_WEBHOOK_BLOCKED_DEFERRALS } from "./webhook-blocked-deferrals.js";
 import type {ImportReadScope} from "./import-read-lifecycle.js";
 import type {ImportNativeSnapshot} from "./import-native-readiness.js";
@@ -1064,6 +1068,18 @@ export interface Ledger {
   observeTaskReadyGitHead(taskId:string,userId:string,context:RepositoryReadContext,credentialHash?:string,sessionExpiresAt?:number,expectedHead?:string):Promise<string|null>;
   ingestMemberCheckpoint(ev:{eventId:string;taskId:string;commit:string;ready:boolean;filesChanged?:string[]},userId:string,context:RepositoryReadContext,credentialHash?:string,sessionExpiresAt?:number):Promise<{applied:boolean}>;
   ingestCheckpoint(ev: { eventId: string; taskId: string; commit: string; ready: boolean; filesChanged?: string[] }): Promise<{ applied: boolean }>;
+  requirementDecisionSources(decisionId:string):Promise<Awaited<ReturnType<CoordinationController["decisionSources"]>>>;
+  recordRequirementProof(proof:ContradictionProof):Promise<ContradictionProof>;
+  prepareRequirementRevisions(decisionId:string):Promise<Awaited<ReturnType<CoordinationController["prepareRevisions"]>>>;
+  markRequirementRevision(decisionId:string,taskId:string,outcome:{dispatched:true}|{dispatched:false;reason:string}):Promise<Awaited<ReturnType<CoordinationController["markRevision"]>>>;
+  coordinationView(userId:string):Promise<Awaited<ReturnType<CoordinationController["view"]>>>;
+  mergeQueueEnqueue(input:unknown,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<Awaited<ReturnType<CoordinationController["enqueue"]>>>;
+  mergeQueueRemove(taskId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<Awaited<ReturnType<CoordinationController["remove"]>>>;
+  mergeQueueAdvance():Promise<Awaited<ReturnType<CoordinationController["advance"]>>>;
+  mergeQueueSettle(eventId:string,outcome:LandingOutcome,reason?:string):Promise<Awaited<ReturnType<CoordinationController["settle"]>>>;
+  postLandRebasePlan(landedCommit:string,workflowId:string):Promise<Awaited<ReturnType<CoordinationController["planRebase"]>>>;
+  recordPostLandRebase(input:{taskId:string;landedCommit:string;fromCommit:string;execution:RebaseExecution}):Promise<Awaited<ReturnType<CoordinationController["recordRebase"]>>>;
+  markPostLandRevision(taskId:string,landedCommit:string,workflowId:string,outcome:{ok:true}|{ok:false;reason:string}):Promise<Awaited<ReturnType<CoordinationController["markRebaseRevision"]>>>;
 }
 
 const LEASE_MS = 20 * 60_000;
@@ -6526,6 +6542,21 @@ export class RepositoryController extends DurableObject<Env> {
     for (const deliveryId of deliveries) await this.enqueueWebhookDelivery(deliveryId);
     await this.logActivity("FlareGit", outcome === "stale" ? "integration.stale" : "integration.blocked", outcome === "stale" ? "Base moved; will recompose" : `Blocked: ${reason}`.slice(0, 280));
   }
+
+  // Coordination (requirement decisions, merge queue, post-land updates); logic lives in ./coordination-controller.
+  private coordination(){return new CoordinationController({storage:this.ctx.storage,load:()=>this.load(),save:()=>this.save(),reset:()=>{this.state=null;},activity:(type,summary)=>this.logActivity("FlareGit",type,summary),comment:async(subject,body)=>{await this.addComment({subject,author:"FlareGit",body});}});}
+  async requirementDecisionSources(decisionId:string){return this.coordination().decisionSources(decisionId);}
+  async recordRequirementProof(proof:ContradictionProof){return this.coordination().recordProof(proof);}
+  async prepareRequirementRevisions(decisionId:string){return this.coordination().prepareRevisions(decisionId);}
+  async markRequirementRevision(decisionId:string,taskId:string,outcome:{dispatched:true}|{dispatched:false;reason:string}){return this.coordination().markRevision(decisionId,taskId,outcome);}
+  async coordinationView(userId:string){if(!await this.roleOf(userId))throw new Error("Repository access required");return this.coordination().view();}
+  async mergeQueueEnqueue(input:unknown,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const assertCurrent=await this.integrationRequestAuthority(actor,credentialHash,sessionExpiresAt);assertCurrent();return this.coordination().enqueue(input,actor.userId);}
+  async mergeQueueRemove(taskId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const assertCurrent=await this.integrationRequestAuthority(actor,credentialHash,sessionExpiresAt);assertCurrent();return this.coordination().remove(taskId,actor.userId,await this.roleOf(actor.userId)==="owner");}
+  async mergeQueueAdvance(){return this.coordination().advance();}
+  async mergeQueueSettle(eventId:string,outcome:LandingOutcome,reason?:string){return this.coordination().settle(eventId,outcome,reason);}
+  async postLandRebasePlan(landedCommit:string,workflowId:string){return this.coordination().planRebase(landedCommit,workflowId);}
+  async recordPostLandRebase(input:{taskId:string;landedCommit:string;fromCommit:string;execution:RebaseExecution}){return this.coordination().recordRebase(input);}
+  async markPostLandRevision(taskId:string,landedCommit:string,workflowId:string,outcome:{ok:true}|{ok:false;reason:string}){return this.coordination().markRebaseRevision(taskId,landedCommit,workflowId,outcome);}
 
   async resolveDecision(decisionId: string, selectedOptionId: string, actor: HumanDecisionActor, credentialHash?: string, sessionExpiresAt?:number): Promise<{ taskIds: string[];legacyRerunId?:string;continuationWorkflowId?:string }> {
     let assertCurrent = await this.authorizeHumanDecision(actor, credentialHash, true);

@@ -39,6 +39,7 @@ import { settingsFor,isGitIntegrityPolicy } from "../core/command-policy.js";
 import { inAgentScope, isProtectedPath, redactSecrets } from "../agents/prompt.js";
 import { globalOf, reserveManagedAgent, assertManagedInitiator } from "./projects.js";
 import type { WorkflowOutcome } from "./durable-object.js";
+import {coordinationFollowup,runPostLandRebaseWorkflow,type PostLandRebaseParams} from "./coordination-dispatch.js";
 
 /** Pure selection: explicit bindings never consult a mutable default branch. */
 export function integrationTargetBranch(candidate:Pick<CandidateGeneration,"acceptedTarget"|"expectedAcceptedBase"|"frozenPolicyVersion"|"frozenVerificationPolicy">,state:Pick<FlareGitProjectState,"projectId"|"canonicalRepoName"|"defaultBranch">):string|undefined{
@@ -79,7 +80,7 @@ export interface IntegrationParams {
 }
 
 export interface PreparedPublicationParams {mode:'prepared-publication';projectId:string;candidateId:string;journalId:string}
-export type IntegrationWorkflowParams=IntegrationParams|PreparedPublicationParams;
+export type IntegrationWorkflowParams=IntegrationParams|PreparedPublicationParams|PostLandRebaseParams;
 const preparedPublicationSchema=z.object({mode:z.literal('prepared-publication'),projectId:z.string().regex(/^[a-z0-9]{12,16}$/),candidateId:z.string().regex(/^[a-z0-9_-]{1,128}$/),journalId:z.string().regex(/^jrnl_[a-f0-9-]{36}$/)}).strict();
 
 const WORK = "/workspace/integration";
@@ -89,6 +90,17 @@ type Stub = Ledger;
 export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, IntegrationWorkflowParams> {
   override async run(event: WorkflowEvent<IntegrationWorkflowParams>, step: WorkflowStep) {
     const params=event.payload;if(params.mode==='prepared-publication')return this.publishPrepared({...event,payload:params},step);
+    if(params.mode==='post-land-rebase')return runPostLandRebaseWorkflow(this.env,{...event,payload:params},step);
+    const requested={...event,payload:params};
+    // Merge queue, contradiction proof and post-land updates follow every requested integration.
+    let outcome:Awaited<ReturnType<FlareGitIntegrationWorkflow['integrateRequested']>>;
+    try{outcome=await this.integrateRequested(requested,step);}catch(error){await coordinationFollowup(this.env,requested,step,{status:'failed',error:'Integration stopped unexpectedly'});throw error;}
+    await coordinationFollowup(this.env,requested,step,outcome);
+    return outcome;
+  }
+
+  private async integrateRequested(event: Readonly<WorkflowEvent<IntegrationParams>>, step: WorkflowStep) {
+    const params=event.payload;
     const repository = ledgerOf(this.env, event.payload.projectId) as Stub;
     const admitted = await step.do("repository-dispatch-identity", () => repository.admitIntegrationDispatch(event.instanceId,params.taskIds));
     if (admitted.terminal) return { status: "skipped" as const, duplicate: true };

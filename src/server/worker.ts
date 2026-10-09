@@ -73,6 +73,8 @@ import { allocateArtifact } from "./storage-allocation.js";
 import { gitRemote, gitParentTokenHash } from "./git-gateway-handler.js";
 import { scenarioAgentRunIds } from "./scenario-workflow.js";
 import { reserveManagedAgents } from "./projects.js";
+import { coordinationHttp } from "./coordination-http.js";
+import { afterRequirementDecision } from "./coordination-dispatch.js";
 import { searchAccountMetadata } from "./metadata-search.js";
 import { communityQuerySchema } from "./platform-community.js";
 import { RepositoryController, WEBHOOK_EVENTS } from "./durable-object.js";
@@ -1209,6 +1211,7 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
           if(!currentRole||currentLifecycle!=='active'||!fresh.viaToken&&(!Number.isFinite(fresh.expiresAt)||Date.now()>=fresh.expiresAt!))return null;
           return {identity:fresh,isOwner:currentRole==='owner'&&(!fresh.viaToken||fresh.tokenScope==='full')};
         };
+        const coordination=await coordinationHttp({sub,method,request,env,ctx,project,projectId,userId,displayName:async()=>clean((await account.getProfile()).displayName,120),freshActor:freshMetadataActor});if(coordination)return coordination;
         if(sub==='/operations/backups'||sub.startsWith('/operations/backups/')){
           if(auth.viaToken||!isOwner||!(env.OPERATOR_ACCOUNTS??'').split(',').map(value=>value.trim()).includes(accountKey))return text('Not found',404);
           const current=await freshMetadataActor(method!=='GET');if(!current?.isOwner||current.identity.viaToken)return text('Current signed-in operator owner required',403);
@@ -2412,13 +2415,9 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
           let result;
           try { result = await project.resolveDecision(b.decisionId, b.selectedOptionId, actor, credentialHash,currentAuth.expiresAt); }
           catch (cause) { return text(cause instanceof Error ? cause.message : "Decision was not saved", 409); }
-          const { taskIds } = result;
-          if (taskIds.length > 0) {
-            const eventId = result.continuationWorkflowId??`decision-${projectId}-${b.decisionId}`;
-            await project.registerWorkflow(eventId, "integration", undefined, userId,1);
-            await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds, eventId } satisfies QueueMessage);
-          }
-          return json({ resolved: true });
+          // The losing agent revises its change against the winner; resolved changes then land through the merge queue.
+          // A failed follow-up surfaces as before; choosing the same option again resends it.
+          return json({ resolved: true, ...(await afterRequirementDecision(env, project, { projectId, decisionId: b.decisionId, result, actor, credentialHash, sessionExpiresAt: currentAuth.expiresAt })) });
         }
 
         if(sub==="/scenarios"&&method==="GET"){

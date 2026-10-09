@@ -79,6 +79,7 @@ export const ACT2: [TaskSpec, TaskSpec] = [
 ];
 
 const FOUR_REFUNDABLE = { ticketCount: 4, basePrice: 40, isRefundable: true };
+const QUOTE_PROBE = { module: "src/pricing.ts", export: "calculateQuote" };
 
 export const ACT3: [TaskSpec, TaskSpec] = [
   {
@@ -99,6 +100,7 @@ export const ACT3: [TaskSpec, TaskSpec] = [
             description: "Four $40 refundable tickets cost $153.00 ($180 × 0.85)",
             input: FOUR_REFUNDABLE,
             expectedOutput: { total: 153 },
+            probe: QUOTE_PROBE,
           },
         ],
       }),
@@ -122,6 +124,7 @@ export const ACT3: [TaskSpec, TaskSpec] = [
             description: "Four $40 refundable tickets cost $156.00 ($160 × 0.85 + $20)",
             input: FOUR_REFUNDABLE,
             expectedOutput: { total: 156 },
+            probe: QUOTE_PROBE,
           },
         ],
       }),

@@ -36,7 +36,9 @@ export function redactSecrets(text: string): string {
 }
 
 export function buildAgentPrompt(task: Task, agentName: string, files: Record<string, string>, checkCommand?: string, shared?: string): string {
-  const requirements = task.requirements.map((r) => `- ${r.title}: ${r.description}`).join("\n");
+  const requirements = task.requirements.filter((r) => r.status === "approved").map((r) => `- ${r.title}: ${r.description}`).join("\n");
+  // A maintainer chose another requirement over these; the change must stop implementing them.
+  const superseded = task.requirements.filter((r) => r.status === "superseded").map((r) => `- ${r.title}: ${r.description}`).join("\n");
   const context = Object.entries(files)
     .map(([f, c]) => `<current path="${f}">\n${redactSecrets(c)}\n</current>`)
     .join("\n");
@@ -44,6 +46,7 @@ export function buildAgentPrompt(task: Task, agentName: string, files: Record<st
     `You are ${agentName}, a coding agent working in an isolated git workspace.`,
     `Task: ${task.goal}`,
     requirements ? `Requirements:\n${requirements}` : "",
+    superseded ? `No longer required (a maintainer chose a conflicting requirement instead; remove this behavior if your change implements it):\n${superseded}` : "",
     shared ? `Shared context from the people on this change (issue, review comments, earlier progress):\n${redactSecrets(shared)}` : "",
     `You may only change: ${task.allowedScope.map((x) => (x === "*" ? "any source file" : x)).join(", ")}.`,
     checkCommand ? `Your change is only accepted if the project's protected check passes: ${checkCommand}` : "",
