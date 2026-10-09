@@ -139,8 +139,8 @@ const repositoryReadJson = (data: unknown, status = 200) => Response.json(data, 
 const repositoryReadText = (message: string, status: number) => new Response(message, { status, headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
 const clean = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
 
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+
+async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if(!runtimeReleaseRequestMatches(request,env))return repositoryReadText("Runtime release differs from the pinned request; no operation was admitted",409);
     if (/^\/api\/join-return\/(prepare|confirm|resume|clear)$/.test(url.pathname)) return invitationReturnHttp(request, { master: env.PREVIEW_SIGNING_KEY, allowedOrigins: env.CLERK_AUTHORIZED_PARTIES ?? "", limit: async ip => (await env.API_LIMITER.limit({ key: `invitation-return:${ip}` })).success, authenticate: () => authenticate(request, env), role: (projectId, actorId) => projectOf(env, projectId).roleOf(actorId) });
@@ -3053,6 +3053,31 @@ export default {
       console.error("api error", method, path, message);
       return text(message, 500);
     }
+}
+
+/** Requests refused before their body is read leave the connection unreusable;
+ * drain small bodies (and cancel large ones) so HTTP/1.1 keep-alive clients see
+ * the refusal instead of a reset on their next request. */
+async function releaseUnreadBody(request: Request): Promise<void> {
+  const body = request.body;
+  if (!body || body.locked) return;
+  const reader = body.getReader();
+  let received = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) return;
+      received += next.value.byteLength;
+      if (received > 1_048_576) { await reader.cancel(); return; }
+    }
+  } catch { /* The client already went away; nothing remains to release. */ }
+}
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const response = await routeRequest(request, env, ctx);
+    await releaseUnreadBody(request);
+    return response;
   },
 
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {

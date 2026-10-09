@@ -2741,7 +2741,11 @@ policy does not approve competition terms, identity replacement, or payments.
 - Quarantine: the blocking `verify` job skips this one test on Bun 1.4.2 only (`knownFlakeQuarantined`).
   The `known-flake-quarantine` job runs it with `FLAREGIT_KNOWN_FLAKE_RUN=1` and is `continue-on-error`, so the
   result stays visible without blocking merges or deploys. Every assertion is unchanged.
-- Reinstatement: remove the quarantine gate and the quarantine job once a Bun or Miniflare release passes
+- Resolved October 9, 2026: the Worker refused these requests without reading their bodies, so the
+  connection could not be reused and Bun 1.4.2 reset the next request. `src/server/worker.ts` now drains
+  unread bodies (cancelling past 1 MiB) before responding; the test passed 10/10 on Bun 1.4.2 (0/10 before).
+  The quarantine gate and job are removed.
+- Original reinstatement plan: remove the quarantine gate and the quarantine job once a Bun or Miniflare release passes
   the job reliably. Draft upstream report: `scratchpad/bun-issue-draft.md` (not yet filed).
 
 ### Production deploy — `f67dfb1` (October 7–8, 2026)
