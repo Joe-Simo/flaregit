@@ -1,3 +1,4 @@
+import { computeStatus, type ServiceStatus } from "../core/service-status.js";
 import { HEALTH_EMBEDDING_MODEL } from "./health-probe-budget.js";
 import type { ComponentStatus, WorkflowCount } from "./durable-object.js";
 import type { Env } from "./env.js";
@@ -93,15 +94,20 @@ export async function runProbes(env: Env): Promise<void> {
   if (!sent.ok) await g.recordProbe("queue", false, sent.ms, `send failed: ${sent.detail}`);
 }
 
-export async function currentStatus(env: Env): Promise<Array<ComponentStatus & { label: string; scope: string }>> {
-  const rows = await globalOf(env).statusSummary();
+export type PublicComponentStatus = ComponentStatus & { label: string; scope: string; status: ServiceStatus };
+
+/** Normalize persisted probes once against an injected clock; future timestamps are unverified. */
+export function summarizeComponentStatus(rows: readonly ComponentStatus[], now: number): PublicComponentStatus[] {
   const by = new Map(rows.map((row) => [row.component, row]));
   return Object.keys(LABELS).map((component) => {
     const r = by.get(component) ?? { component, degradedNow: true, lastCheckAt: null, checks24h: 0, failed24h: 0, lastFailureAt: null, lastFailureDetail: null, degradedMinutes24h: 0 };
-    // A component that has not reported for 15 minutes is treated as degraded (a silent consumer is a failure).
-    const stale = r.lastCheckAt !== null && Date.now() - r.lastCheckAt > 15 * 60_000;
-    return { ...r, degradedNow: r.degradedNow || stale || r.lastCheckAt === null, label: LABELS[r.component] ?? r.component, scope: SCOPES[r.component] ?? "Availability only" };
+    const status = computeStatus(r.lastCheckAt === null ? [] : [{name: component, ok: !r.degradedNow, checkedAt: r.lastCheckAt}], now, 15 * 60_000);
+    return { ...r, status, degradedNow: status !== "operational", label: LABELS[component] ?? component, scope: SCOPES[component] ?? "Availability only" };
   });
+}
+
+export async function currentStatus(env: Env): Promise<PublicComponentStatus[]> {
+  return summarizeComponentStatus(await globalOf(env).statusSummary(), Date.now());
 }
 
 export type ProbeRow = { component: string; at: number; ok: number; latency_ms: number | null; detail: string | null };
@@ -194,7 +200,7 @@ export function statusPage(rows: Awaited<ReturnType<typeof currentStatus>>, inci
     .join("");
   const body = rows
     .map(
-      (r) => `<tr><td>${esc(r.label)}<br><small>${esc(r.scope)}</small></td><td class="${r.degradedNow ? "bad" : "ok"}">${r.lastCheckAt === null ? "Unverified" : r.degradedNow ? "Degraded" : "Probe passed"}</td>
+      (r) => `<tr><td>${esc(r.label)}<br><small>${esc(r.scope)}</small></td><td class="${r.degradedNow ? "bad" : "ok"}">${r.status === "unknown" ? "Unverified" : r.degradedNow ? "Degraded" : "Probe passed"}</td>
 <td>${r.failed24h} of ${r.checks24h}</td><td>${r.degradedMinutes24h} min</td><td>${r.lastFailureAt ? `${ago(r.lastFailureAt)}${r.lastFailureDetail ? ` — ${esc(r.lastFailureDetail)}` : ""}` : "none in 24 h"}</td></tr>`
     )
     .join("");

@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { apiJson } from "../api";
 import { deploymentStatusRead } from "../deployment-status-read";
-import type { AcceptedDeploymentTarget, DeploymentRecord } from "@/server/deployments";
+import type { AcceptedDeploymentTarget, DeploymentRecord, DeploymentEnvironment } from "@/server/deployments";
 
 interface Service { id: string; name: string; active: boolean; capabilities: string[] }
 interface Delivery { id: string; event: string; status: string; attempts: number }
@@ -17,6 +17,10 @@ export function DeploymentTargetSummary({target}:{target:AcceptedDeploymentTarge
 }
 
 export function DeploymentCard({ projectId }: { projectId: string }) {
+  const [environments,setEnvironments]=useState<DeploymentEnvironment[]>([]);
+  const [assets,setAssets]=useState<Array<{releaseId:string;id:string;name:string;sha256:string;commit:string}>>([]);
+  const [assetId,setAssetId]=useState("");
+  const [approvalId,setApprovalId]=useState("");
   const [records, setRecords] = useState<DeploymentRecord[] | null>(null);
   const [targets, setTargets] = useState<AcceptedDeploymentTarget[]>([]);
   const [services, setServices] = useState<Service[]>([]);
@@ -32,9 +36,14 @@ export function DeploymentCard({ projectId }: { projectId: string }) {
   const [notice, setNotice] = useState<string | null>(null);
   const generation = useRef(0);
   const readSequence = useRef(0);
+  const rollbackRequests=useRef(new Map<string,{key:string;approvalId?:string}>());
   const request = useRef<{ payload: string; key: string } | null>(null);
   const load = useCallback(async (current = generation.current) => {
     const sequence = ++readSequence.current;
+    const extra=await Promise.allSettled([apiJson<{environments:DeploymentEnvironment[]}>(`/p/${projectId}/deployment-environments`),apiJson<{releases:Array<{scope:{id:string;source:{commit:string}};phase:string;assets:Array<{id:string;name:string;sha256:string;phase:string}>}>}>(`/p/${projectId}/releases`)]);
+    if(current!==generation.current||sequence!==readSequence.current)return;
+    setEnvironments(extra[0].status==="fulfilled"?extra[0].value.environments:[]);
+    setAssets(extra[1].status==="fulfilled"?extra[1].value.releases.filter(row=>row.phase==="published").flatMap(row=>row.assets.filter(asset=>asset.phase==="verified").map(asset=>({...asset,releaseId:row.scope.id,commit:row.scope.source.commit}))):[]);
     const result = await Promise.allSettled([
       deploymentStatusRead(signal => apiJson<{ deployments: DeploymentRecord[] }>(`/p/${projectId}/deployments`, { signal })),
       deploymentStatusRead(signal => apiJson<{ targets: AcceptedDeploymentTarget[] }>(`/p/${projectId}/deployment-targets`, { signal })),
@@ -57,6 +66,9 @@ export function DeploymentCard({ projectId }: { projectId: string }) {
     void load(current).catch(() => { if (current === generation.current) setError("Deployment settings could not load. Refresh to retry."); });
     return () => { generation.current++; };
   }, [load]);
+  const selectedAsset=assets.find(row=>row.id===assetId);
+  const selectedEnvironment=environments.find(row=>row.name===environment.trim());
+  const artifact=selectedAsset&&selectedEnvironment?{releaseId:selectedAsset.releaseId,assetId:selectedAsset.id,environmentId:selectedEnvironment.id,approvalId}:undefined;
   const target = targets.find(item => item.journalId === journalId);
   return <Card>
     <CardHeader className="pb-2"><CardTitle className="text-sm">Deploy accepted history</CardTitle></CardHeader>
@@ -65,17 +77,18 @@ export function DeploymentCard({ projectId }: { projectId: string }) {
       {sourceErrors.map(message => <p key={message} role="alert" className="text-xs text-destructive">{message}</p>)}
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       {notice && <p role="status" className="text-sm">{notice}</p>}
+      <Button type="button" size="sm" variant="outline" disabled={busy||!environment.trim()||!!selectedEnvironment} onClick={async()=>{setBusy(true);setError(null);try{await apiJson(`/p/${projectId}/deployment-environments`,{method:"POST",json:{id:crypto.randomUUID(),name:environment.trim(),requireApproval:true,revision:0}});await load();}catch(cause){setError(cause instanceof Error?cause.message:"Environment could not save");}finally{setBusy(false);}}}>Require artifact approval for this environment</Button>
       <Button size="sm" variant="outline" disabled={busy} onClick={async () => { const current = generation.current; setBusy(true); setError(null); try { await load(current); } catch { if (current === generation.current) setError("Could not refresh. Previously loaded records may be outdated."); } finally { if (current === generation.current) setBusy(false); } }}>Refresh deployment status</Button>
       {!records && !error && sourceErrors.length === 0 && <p role="status" className="text-sm text-muted-foreground">Loading deployments…</p>}
       {records && <>
         <form className="space-y-3" onSubmit={async event => {
           event.preventDefault(); if (!configurationKnown) return; const current = generation.current;
-          const payload = JSON.stringify({ journalId, serviceId, environment: environment.trim() });
+          const payload = JSON.stringify({ journalId, serviceId, environment: environment.trim(),artifact });
           if (request.current?.payload !== payload) request.current = { payload, key: crypto.randomUUID() };
           const idempotencyKey = request.current.key;
           setBusy(true); setError(null); setNotice(null);
           try {
-            const result = await apiJson<{ kind: "created" | "duplicate"; deployment: DeploymentRecord }>(`/p/${projectId}/deployments`, { method: "POST", json: { journalId, serviceId, environment: environment.trim(), idempotencyKey } });
+            const result = await apiJson<{ kind: "created" | "duplicate"; deployment: DeploymentRecord }>(`/p/${projectId}/deployments`, { method: "POST", json: { journalId, serviceId, environment: environment.trim(), idempotencyKey,artifact } });
             if (current !== generation.current) return;
             setRecords(rows => [...(rows ?? []).filter(row => row.id !== result.deployment.id), result.deployment]);
             setNotice(result.kind === "duplicate" ? "Existing request recovered. Deployment status is shown below." : "Request saved for webhook delivery. The deployment has not yet been confirmed by the service.");
@@ -83,14 +96,15 @@ export function DeploymentCard({ projectId }: { projectId: string }) {
           } catch (cause) { if (current === generation.current) setError(cause instanceof Error ? cause.message : "Request outcome is unknown. Retry unchanged fields to reuse the same request key."); }
           finally { if (current === generation.current) setBusy(false); }
         }}>
-          <label className="block text-sm">Accepted revision<select className={field} value={journalId} disabled={busy} onChange={event => setJournalId(event.target.value)}><option value="">Choose accepted history</option>{targets.map(item => <option key={item.journalId} value={item.journalId}>{deploymentTargetOptionLabel(item)}</option>)}</select></label>
+          <label className="block text-sm">Accepted revision<select className={field} value={journalId} disabled={busy} onChange={event => {setJournalId(event.target.value);setApprovalId("");}}><option value="">Choose accepted history</option>{targets.map(item => <option key={item.journalId} value={item.journalId}>{deploymentTargetOptionLabel(item)}</option>)}</select></label>
           {target && <DeploymentTargetSummary target={target}/>}
           <label className="block text-sm">Deployment service<select className={field} value={serviceId} disabled={busy} onChange={event => setServiceId(event.target.value)}><option value="">Choose connected service</option>{services.map(service => <option key={service.id} value={service.id}>{service.name}</option>)}</select></label>
-          <label className="block text-sm">Environment<Input value={environment} maxLength={100} disabled={busy} onChange={event => setEnvironment(event.target.value)} /></label>
+          <label className="block text-sm">Environment<Input value={environment} maxLength={100} disabled={busy} onChange={event => {setEnvironment(event.target.value);setApprovalId("");}} /></label>
           {configurationKnown && (!targets.length || !services.length) && <p className="text-xs text-muted-foreground">Accept a reviewed change and connect a service with deployment reporting enabled. Configure its webhook for deployment.requested below.</p>}
-          <Button variant="outline" disabled={busy || !configurationKnown || !target || !services.some(service => service.id === serviceId) || !environment.trim()}>{busy ? "Saving…" : "Request deployment"}</Button>
+          {selectedEnvironment && <><label className="block text-sm">Release artifact<select className={field} value={assetId} onChange={event=>{setAssetId(event.target.value);setApprovalId("");}}><option value="">Choose immutable artifact</option>{assets.filter(row=>row.commit===target?.commit).map(row=><option key={row.id} value={row.id}>{row.name} · {row.sha256.slice(0,12)}</option>)}</select></label><Button type="button" variant="outline" disabled={busy||!selectedAsset||!target} onClick={async()=>{setBusy(true);setError(null);try{const result=await apiJson<{approvalId:string}>(`/p/${projectId}/deployment-approvals`,{method:"POST",json:{journalId,artifact:{releaseId:selectedAsset!.releaseId,assetId:selectedAsset!.id,environmentId:selectedEnvironment.id}}});setApprovalId(result.approvalId);}catch(cause){setError(cause instanceof Error?cause.message:"Approval failed");}finally{setBusy(false);}}}>{approvalId?"Artifact approved":"Approve exact artifact"}</Button></>}
+          <Button variant="outline" disabled={busy || (selectedEnvironment&&!approvalId) || !configurationKnown || !target || !services.some(service => service.id === serviceId) || !environment.trim()}>{busy ? "Saving…" : "Request deployment"}</Button>
         </form>
-        <ul className="divide-y divide-border">{records.length === 0 && <li className="text-sm text-muted-foreground">No deployment requests.</li>}{records.slice().reverse().map(record => <li key={record.id} className="space-y-1 py-3"><div className="flex flex-wrap items-center justify-between gap-2"><span className="text-sm font-medium">{record.environment}</span><Badge variant="outline">{record.status === "requested" ? "Awaiting service report" : record.status}</Badge></div><p className="text-xs break-all font-mono text-muted-foreground">{deploymentTargetRefLabel(record.target)}</p><code className="block text-xs break-all">{record.target.commit}</code>{record.summary && <p className="text-sm break-words">{record.summary}</p>}{record.detailsUrl && <a href={record.detailsUrl} target="_blank" rel="noopener noreferrer" className="text-xs underline">Deployment details</a>}<p className="text-xs text-muted-foreground break-all">Request event: {record.requestEventId}</p></li>)}</ul>
+        <ul className="divide-y divide-border">{records.length === 0 && <li className="text-sm text-muted-foreground">No deployment requests.</li>}{records.slice().reverse().map(record => <li key={record.id} className="space-y-1 py-3"><div className="flex flex-wrap items-center justify-between gap-2"><span className="text-sm font-medium">{record.environment}</span><Badge variant="outline">{record.status === "requested" ? "Awaiting service report" : record.status}</Badge></div><p className="text-xs break-all font-mono text-muted-foreground">{deploymentTargetRefLabel(record.target)}</p><code className="block text-xs break-all">{record.target.commit}</code>{record.artifact && record.status==="succeeded" && <Button size="sm" variant="outline" disabled={busy||!assets.some(row=>row.id===record.artifact?.artifactId)} onClick={async()=>{const asset=assets.find(row=>row.id===record.artifact!.artifactId)!;const binding={releaseId:asset.releaseId,assetId:asset.id,environmentId:record.artifact!.environmentId,rollbackOf:record.id};let attempt=rollbackRequests.current.get(record.id);if(!attempt){attempt={key:crypto.randomUUID()};rollbackRequests.current.set(record.id,attempt);}setBusy(true);setError(null);try{if(!attempt.approvalId){const approved=await apiJson<{approvalId:string}>(`/p/${projectId}/deployment-approvals`,{method:"POST",json:{journalId:record.target.journalId,artifact:binding}});attempt.approvalId=approved.approvalId;}await apiJson(`/p/${projectId}/deployments`,{method:"POST",json:{journalId:record.target.journalId,serviceId:record.serviceId,environment:record.environment,idempotencyKey:attempt.key,artifact:{...binding,approvalId:attempt.approvalId}}});setNotice("Rollback requested for the exact observed artifact.");await load();}catch(cause){setError(cause instanceof Error?cause.message:"Rollback outcome unknown; retry to recover the same request.");}finally{setBusy(false);}}}>Restore this artifact</Button>}{record.artifact && <code className="block break-all text-xs">SHA-256 {record.artifact.digest}</code>}{record.summary && <p className="text-sm break-words">{record.summary}</p>}{record.detailsUrl && <a href={record.detailsUrl} target="_blank" rel="noopener noreferrer" className="text-xs underline">Deployment details</a>}<p className="text-xs text-muted-foreground break-all">Request event: {record.requestEventId}</p></li>)}</ul>
         {deliveryKnown && deliveries.length > 0 && <p className="text-xs text-muted-foreground">Webhook delivery: {deliveries.filter(row => row.status === "success").length} delivered · {deliveries.filter(row => row.status === "pending").length} pending · {deliveries.filter(row => row.status === "failed").length} failed. <a href="#deployment-deliveries" className="underline">Inspect and replay failed delivery below</a>.</p>}
       </>}
     </CardContent>

@@ -1,3 +1,4 @@
+import { CommunityModeration } from "./community-moderation.js";
 import { z } from "zod";
 import { actorName, safeContent, type PublicCommunityActor } from "./public-community.js";
 export const COMMUNITY_CATEGORIES = ["getting-started", "concurrency", "review", "agents", "integrations", "migration", "feedback"] as const;
@@ -21,17 +22,19 @@ export interface CommunityEntry {
     updatedAt: string;
     removed: boolean;
     moderationReason?: string;
+    moderationState?: "visible" | "hidden" | "removed";
 }
 export interface CommunityTopic extends CommunityEntry {
     replyCount: number;
 }
 export class PlatformCommunity {
     constructor(private storage: DurableObjectStorage) { storage.sql.exec("CREATE TABLE IF NOT EXISTS platform_community_entries(id TEXT PRIMARY KEY,topic_id TEXT NOT NULL,author_id TEXT NOT NULL,doc TEXT NOT NULL); CREATE TABLE IF NOT EXISTS platform_community_receipts(actor_id TEXT NOT NULL,event_key TEXT NOT NULL,payload TEXT NOT NULL,entry_id TEXT NOT NULL,PRIMARY KEY(actor_id,event_key)); CREATE INDEX IF NOT EXISTS platform_community_topic ON platform_community_entries(topic_id);"); }
+    moderation() { return new CommunityModeration(this.storage,"forum",id=>{const row=this.row(id);if(!row)return null;const item=JSON.parse(row.doc) as CommunityEntry;return {authorId:row.author_id,available:!item.removed};},(id,state)=>{const row=this.row(id);if(!row)throw Error("Content unavailable");const item=JSON.parse(row.doc) as CommunityEntry;this.storage.sql.exec("UPDATE platform_community_entries SET doc=? WHERE id=?",JSON.stringify({...item,moderationState:state,version:item.version+1,updatedAt:new Date().toISOString()}),id);}); }
     private row(id: string) { return this.storage.sql.exec<{
         author_id: string;
         doc: string;
     }>("SELECT author_id,doc FROM platform_community_entries WHERE id=?", id).toArray()[0]; }
-    private projection(doc: string): CommunityEntry { const value = JSON.parse(doc) as CommunityEntry; return value.removed ? { ...value, title: "Removed", body: "", author: "Contributor" } : value; }
+    private projection(doc: string): CommunityEntry { const value = JSON.parse(doc) as CommunityEntry; return value.removed || (value.moderationState && value.moderationState !== "visible") ? { ...value, removed:true, title: "Removed", body: "", author: "Contributor" } : value; }
     list(input: {
         category?: string;
         q?: string;
@@ -39,7 +42,7 @@ export class PlatformCommunity {
     } = {}) { const query = communityQuerySchema.parse(input); const rows = this.storage.sql.exec<{
         doc: string;
         reply_count: number;
-    }>("SELECT t.doc,(SELECT COUNT(*) FROM platform_community_entries r WHERE r.topic_id=t.id AND r.id!=r.topic_id AND json_extract(r.doc,'$.removed')=0) AS reply_count FROM platform_community_entries t WHERE t.id=t.topic_id AND json_extract(t.doc,'$.removed')=0 ORDER BY json_extract(t.doc,'$.createdAt') DESC,t.id DESC LIMIT 1000").toArray(); const topics = rows.map(r => ({ ...this.projection(r.doc), replyCount: r.reply_count })).filter(t => (!query.category || t.category === query.category) && (!query.q || `${t.title} ${t.body}`.toLowerCase().includes(query.q.toLowerCase()))); if (query.sort === "top")
+    }>("SELECT t.doc,(SELECT COUNT(*) FROM platform_community_entries r WHERE r.topic_id=t.id AND r.id!=r.topic_id AND json_extract(r.doc,'$.removed')=0 AND coalesce(json_extract(r.doc,'$.moderationState'),'visible')='visible') AS reply_count FROM platform_community_entries t WHERE t.id=t.topic_id AND json_extract(t.doc,'$.removed')=0 AND coalesce(json_extract(t.doc,'$.moderationState'),'visible')='visible' ORDER BY json_extract(t.doc,'$.createdAt') DESC,t.id DESC LIMIT 1000").toArray(); const topics = rows.map(r => ({ ...this.projection(r.doc), replyCount: r.reply_count })).filter(t => (!query.category || t.category === query.category) && (!query.q || `${t.title} ${t.body}`.toLowerCase().includes(query.q.toLowerCase()))); if (query.sort === "top")
         topics.sort((a, b) => b.replyCount - a.replyCount || b.createdAt.localeCompare(a.createdAt)); return { categories: COMMUNITY_CATEGORIES, topics: topics.slice(0, 100), scope: "Latest 100 matching topics from up to 1000 retained topics" }; }
     topic(id: string) { const row = this.row(id); if (!row)
         return null; const topic = this.projection(row.doc); if (topic.topicId !== id)

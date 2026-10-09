@@ -5,7 +5,7 @@ import type { ProjectRow } from "../src/server/durable-object.js";
 const id = "p123456abcdef";
 const reference: ProjectRow = { id, name: "Find me", role: "owner", kind: "empty", created_at: "" };
 const state = { projectId: id, projectName: "Find me", tasks: {} } as FlareGitProjectState;
-function repository(role: () => Promise<unknown>, read = async () => state) { return { roleOf: role, getState: read, listIssues: async () => [] }; }
+function repository(role: () => Promise<unknown>, read = async () => state) { return { roleOf: role, getState: read, getIssue:async()=>null, listIssues: async () => [] }; }
 test("account metadata searches literal names with bounded internal links", async () => {
   const result = await searchAccountMetadata({ query: "Find", userId: "user", references: [reference], repository: () => repository(async () => "owner"), lifecycle: async () => "active" });
   expect(result.results).toEqual([{ id, kind: "repository", title: "Find me", description: "Repository", href: `/#/p/${id}/code` }]);

@@ -1,0 +1,16 @@
+import {expect,test} from 'bun:test';
+import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
+import {workerdChild} from './support/workerd-child';
+test('issue activity and inbox source checks hide deleted titles and file paths, including late deletion',async()=>{
+ if(await workerdChild('tests/issue-event-privacy-http.test.ts'))return;
+ const built=await Bun.build({entrypoints:['tests/support/issue-event-privacy-worker.ts'],target:'browser',external:['cloudflare:workers','node:*']});if(!built.success)throw Error(built.logs.join('\n'));
+ const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:'issue-event-privacy',modules:true,script:await built.outputs[0]!.text(),compatibilityDate:'2026-10-02',compatibilityFlags:['nodejs_compat'],durableObjects:{REPOSITORY_CONTROLLER:{className:'IssueEventPrivacyFixture',useSQLite:true}},r2Buckets:{EVIDENCE_BUCKET:'event-fixture'}}]}));
+ try{const worker=await mf.getWorker('issue-event-privacy');await worker.fetch('http://fixture/fixture/seed');const {secret}=await(await worker.fetch('http://fixture/fixture/token')).json() as {secret:string};const call=(path:string,method='GET',body?:unknown)=>worker.fetch('http://fixture'+path,{method,headers:{Authorization:'Bearer '+secret,'CF-Connecting-IP':'192.0.2.56','content-type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
+ const base='/api/p/p123456789abc',create=async(title:string)=>{const response=await call(base+'/issues','POST',{title,body:'Private issue body',idempotencyKey:crypto.randomUUID()});expect(response.status).toBe(201);return await response.json() as {number:number};};
+ const issue=await create('Private deleted title');expect((await call(base+'/comments','POST',{subject:'issue:'+issue.number,body:'Private annotation',path:'private-hidden-path.ts',line:1,commit:'a'.repeat(40),idempotencyKey:crypto.randomUUID()})).status).toBe(201);
+ const shown=await(await call(base+'/issues/'+issue.number)).json() as {stateRevision:number};expect((await call(base+'/issues/'+issue.number,'DELETE',{expectedRevision:shown.stateRevision,requestId:crypto.randomUUID(),confirmed:true})).status).toBe(200);
+ for(const path of [base+'/activity','/api/inbox?filter=activity']){const text=await(await call(path)).text();for(const secretText of ['Private deleted title','private-hidden-path.ts','Legacy private deleted title','Legacy private deleted path.ts','legacy-sensitive-author'])expect(text).not.toContain(secretText);}
+ const raw=await(await worker.fetch('http://fixture/fixture/raw-audit')).text();expect(raw).toContain('Private deleted title');expect(raw).toContain('Legacy private deleted title');
+ for(const kind of ['activity','inbox'] as const){const late=await create('Late deletion '+kind+' title');await worker.fetch(`http://fixture/fixture/arm-event?kind=${kind}&number=${late.number}`);const text=await(await call(kind==='activity'?base+'/activity':'/api/inbox?filter=activity')).text();expect(text).not.toContain('Late deletion '+kind+' title');if(kind==='inbox'){const projection=JSON.parse(text) as {items:Array<{issueSource?:{number:number}}>};expect(projection.items.some(row=>row.issueSource?.number===late.number)).toBe(false);}}
+ }finally{await mf.dispose();}
+},60000);

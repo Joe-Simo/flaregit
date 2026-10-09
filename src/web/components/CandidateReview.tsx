@@ -1,4 +1,5 @@
 import {PreparedPublicationControl} from './PreparedPublicationControl';
+import {CommitSignature} from './CommitSignature';
 import {preparedPublicationRequest} from '../prepared-publication-recovery';
 import {FrozenAttribution} from './FrozenAttribution';
 import {frozenInputAttribution} from '../frozen-contribution-attribution';
@@ -203,6 +204,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks,journal,
         <code className="text-xs text-muted-foreground">{candidate.candidateCommit?.slice(0, 7)}{candidate.acceptedTarget===undefined&&<> on {candidate.expectedAcceptedBase?.slice(0, 7)??"empty accepted history"}</>}</code>
       </div>
       {targetSummary}
+      {showOpen&&candidate.candidateCommit&&<CommitSignature projectId={projectId} commit={candidate.candidateCommit} candidate={candidate.id}/>}
       <p className="text-sm text-muted-foreground">
         Combines {candidate.participatingTaskIds.join(" and ")}{candidate.compositionMethod ? ` (${candidate.compositionMethod.replace(/_/g, " ")})` : ""}
         {candidate.repairAttempts.length > 0 ? `, with ${candidate.repairAttempts.length} repair record${candidate.repairAttempts.length === 1 ? "" : "s"} to review` : ""}.{" "}

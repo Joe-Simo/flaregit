@@ -1,0 +1,8 @@
+import React,{useId} from 'react';
+import type {Project} from '../../core/project-planning';
+import {planningDistribution} from '../../core/planning-distribution';
+/** A read-only data graphic; text carries every value without relying on color. */
+export function PlanningProgress({project}:{project:Pick<Project,'statuses'|'items'>}){
+ const identity=useId(),distribution=planningDistribution(project),format=new Intl.NumberFormat(undefined,{maximumFractionDigits:1});
+ return <figure aria-labelledby={`${identity}-caption`} className="space-y-3"><figcaption id={`${identity}-caption`} className="text-sm font-medium">All planned issues by status</figcaption>{distribution.total===0?<p className="text-sm text-muted-foreground">No active planning items.</p>:<div className="grid gap-x-8 gap-y-3 sm:grid-cols-2">{distribution.statuses.map((row,index)=>{const label=`${row.status}: ${row.count} of ${distribution.total} planned issues (${format.format(row.percentage)}%)`;return <div key={row.status} className="space-y-1.5 min-w-0"><div className="flex justify-between gap-3 text-sm"><span className="break-words text-muted-foreground">{row.status}</span><span className="shrink-0 tabular-nums"><strong>{row.count}</strong><span className="text-muted-foreground"> · {format.format(row.percentage)}%</span></span></div><svg className="block w-full h-1.5 overflow-hidden rounded-full" viewBox="0 0 100 6" preserveAspectRatio="none" role="img" aria-labelledby={`${identity}-${index}`}><title id={`${identity}-${index}`}>{label}</title><rect width="100" height="6" fill="hsl(var(--muted))"/><rect width={row.percentage} height="6" fill="hsl(var(--primary))"/></svg></div>;})}</div>}</figure>;
+}

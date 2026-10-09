@@ -1,6 +1,6 @@
 import {z} from "zod";
 const id=z.string().min(1).max(200).regex(/^[A-Za-z0-9_-]+$/);
-export const agentNativeAttemptSchema=z.object({attemptId:z.uuid(),nativeId:z.uuid(),projectId:id,incarnation:z.uuid(),workflowId:id,runId:id,taskId:id,actorId:z.string().min(1).max(256),accountKey:id,phase:z.enum(["proposal","apply"]),generation:z.number().int().nonnegative(),snapshotDigest:z.string().regex(/^[a-f0-9]{64}$/)}).strict();
+export const agentNativeAttemptSchema=z.object({attemptId:z.uuid(),nativeId:z.uuid(),projectId:id,incarnation:z.uuid(),workflowId:id,runId:id,taskId:id,actorId:z.string().min(1).max(256),accountKey:id,phase:z.enum(["proposal","apply"]),generation:z.number().int().nonnegative(),maintainerWriteSource:z.object({creatorId:z.string().min(1).max(256),revision:z.number().int().positive().safe()}).strict().optional(),snapshotDigest:z.string().regex(/^[a-f0-9]{64}$/)}).strict();
 export type AgentNativeAttemptIdentity=z.infer<typeof agentNativeAttemptSchema>;
 export interface AgentNativeAttempt extends AgentNativeAttemptIdentity{state:"possible"|"stopped";createdAt:number;stoppedAt?:number}
 /** Internal exact allocation ownership only. Authority/funding must be checked separately by the DO. */

@@ -24,17 +24,23 @@ import { SettingsTab } from "../tabs/Settings";
 import type { FlareGitProjectState } from "@/core/types";
 
 const AcceptancePolicyPanel=lazy(async()=>({default:(await import("../components/AcceptancePolicyPanel")).AcceptancePolicyPanel}));
+const PlanningTab=lazy(async()=>({default:(await import("../tabs/Planning")).PlanningTab}));
+const SecurityTab=lazy(async()=>({default:(await import("../tabs/Security")).SecurityTab}));
+const WikiTab=lazy(async()=>({default:(await import("../tabs/Wiki")).WikiTab}));
 const RepoReleases=lazy(async()=>({default:(await import("../components/RepoReleases")).RepoReleases}));
 const PreviewOnboardingPanel=lazy(async()=>({default:(await import("../components/PreviewOnboardingPanel")).PreviewOnboardingPanel}));
 
-interface Meta { id: string; role: "owner" | "member"; kind: string; name: string; source: string | null; verification: Record<string, unknown>; protectedPaths: string[]; visibility?: "private" | "public" }
-type State = FlareGitProjectState & { role: string };
+interface Meta { id: string; role: "owner" | "member"; permission?: "read" | "write" | "admin"; inheritedAccess?: boolean; kind: string; name: string; source: string | null; verification: Record<string, unknown>; protectedPaths: string[]; visibility?: "private" | "public" }
+type State = FlareGitProjectState & { role: string; permission?: "read" | "write" | "admin"; inheritedAccess?: boolean; writableTaskIds?: string[]; cancellableTaskIds?: string[]; forkPermissions?: Record<string,{enabled:boolean;revision:number;canConfigure:boolean}> };
 
 
 const TABS = [
   ["code", "Code", "Files at the accepted version."],
   ["commits", "Commits", "History of accepted versions."],
   ["releases", "Releases", "Saved version notes and exact Git tag identities."],
+  ["planning", "Planning", "Issue-linked work, custom fields, and iterations."],
+  ["security", "Security", "Private scanner findings and triage history."],
+  ["wiki", "Wiki", "Shared repository documentation with revision history."],
   ["discussions", "Discussions", "Repository-member questions and decisions; separate from public conversations."],
   ["issues", "Issues", "Problems and requests; a change can resolve one."],
   ["changes", "Changes", "Work in progress by people and agents, each in its own isolated copy. Mark one ready, then integrate."],
@@ -117,6 +123,8 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
   };
   const current = TABS.find(([key]) => key === (tab==="tags"?"releases":tab));
   const ownerActionsAvailable = !stateError && state.role === "owner";
+  const canContribute = !stateError && state.lifecycle?.state !== "archived" && (state.permission ?? meta.permission) !== "read";
+  const managedActions = canContribute && !(state.inheritedAccess ?? meta.inheritedAccess ?? false);
   const currentMeta = { ...meta, role: ownerActionsAvailable ? "owner" as const : "member" as const };
 
   return (
@@ -155,13 +163,16 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
       {current && <p className="text-xs text-muted-foreground mb-5">{current[2]}</p>}
 
       <div id="repo-tabpanel" aria-labelledby={current ? `tab-${current[0]}` : undefined} className="min-w-0">
-      {tab === "code" && <CodeTab projectId={projectId} acceptedCommit={state.acceptedState.currentCommit} isOwner={ownerActionsAvailable} />}
+      {tab === "code" && <CodeTab projectId={projectId} params={params} acceptedCommit={state.acceptedState.currentCommit} isOwner={ownerActionsAvailable} />}
       {tab === "commits" && <CommitsTab projectId={projectId} />}
       {(tab==="releases"||tab==="tags")&&<Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading tags and releases…</p>}><RepoReleases key={`releases:${projectId}`} projectId={projectId} isOwner={ownerActionsAvailable} tab={tab}/></Suspense>}
-      {tab === "changes" && <ChangesTab projectId={projectId} state={state} reload={reload} taskId={params.get("task")} />}
+      {tab === "changes" && <ChangesTab projectId={projectId} state={state} reload={reload} taskId={params.get("task")} canContribute={canContribute} managedActions={managedActions} writableTaskIds={state.writableTaskIds} cancellableTaskIds={state.cancellableTaskIds} forkPermissions={state.forkPermissions} isOwner={ownerActionsAvailable} />}
       {tab === "integration" && <IntegrationTab decisionId={params.get("decision")} isOwner={ownerActionsAvailable} projectId={projectId} state={state} reload={reload} kind={meta.kind} />}
       {tab === "activity" && <ActivityTab projectId={projectId} />}
       {tab === "discussions" && <RepositoryDiscussionsTab key={`${projectId}:${params.get("topic") ?? "list"}`} projectId={projectId} owner={ownerActionsAvailable} topic={params.get("topic") ?? undefined} />}
+      {tab === "planning" && <Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading planning…</p>}><PlanningTab key={projectId} projectId={projectId} owner={ownerActionsAvailable} readOnly={!canContribute}/></Suspense>}
+      {tab === "security" && <Suspense fallback={<p role="status" className="text-sm">Loading security…</p>}><SecurityTab key={projectId} projectId={projectId} commit={state.acceptedState.currentCommit} tree={state.acceptedBaseline?.commit===state.acceptedState.currentCommit?state.acceptedBaseline.tree:Object.values(state.evidence).find(evidence=>evidence.status==='passed'&&evidence.candidateCommit===state.acceptedState.currentCommit)?.candidateTree} readOnly={!!stateError || state.lifecycle?.state === "archived"}/></Suspense>}
+      {tab === "wiki" && <Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading wiki…</p>}><WikiTab key={`${projectId}:${params.get("page") ?? "list"}`} projectId={projectId} slug={params.get("page") ?? undefined} readOnly={!canContribute} /></Suspense>}
       {tab === "issues" && <IssuesTab projectId={projectId} issue={params.get("n") ? Number(params.get("n")) : undefined} />}
       {tab === "people" && <PeopleTab projectId={projectId} />}
       {tab === "review" && <ReviewTab isOwner={ownerActionsAvailable} projectId={projectId} task={params.get("task") ?? undefined} commit={params.get("commit") ?? undefined} baseCommit={params.get("base") ?? undefined} returnTo={params.get("from") === "recovery" ? "integration" : undefined} input={params.get("input") ?? undefined} candidate={params.get("candidate") ? state.candidates[params.get("candidate")!] : undefined} evidence={state} reload={reload} />}

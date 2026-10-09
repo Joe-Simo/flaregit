@@ -4,21 +4,28 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { apiJson, ApiError } from "../api";
 import { timeAgo } from "../router";
+import {BrowserEdit} from '../components/BrowserEdit';
+import {CodeInspection} from '../components/CodeInspection';
 
+import type {FileHistoryPage} from "../../server/browse";
 import type {BranchSelection} from "../branch-browser";
 const BranchControls=lazy(async()=>({default:(await import("../components/BranchControls")).BranchControls}));
 
-interface Commit { hash: string; message: string; author: { name: string }; committedAt: number }
+interface Commit { hash: string; treeHash:string; message: string; author: { name: string }; committedAt: number }
 interface Entry { name: string; type: "blob" | "tree" }
 
 export function UnbornCodeState(){return <Card><CardContent className="p-5 space-y-2"><h3 className="text-sm font-semibold">No accepted commit yet</h3><p className="text-sm text-muted-foreground">The recorded default branch has no accepted history. Create a contribution, push its first commit, and review it before acceptance.</p></CardContent></Card>;}
 
-export function CodeTab({ projectId,isOwner=false,acceptedCommit }: { projectId: string;isOwner?:boolean;acceptedCommit?:string|null }) { return <CodeBrowser key={projectId} projectId={projectId} acceptedCommit={acceptedCommit} isOwner={isOwner}/>; }
-function CodeBrowser({ projectId,isOwner,acceptedCommit }: { projectId: string;isOwner:boolean;acceptedCommit?:string|null }) {
+export function CodeTab({ projectId,isOwner=false,acceptedCommit,params }: { projectId: string;isOwner?:boolean;acceptedCommit?:string|null;params?:URLSearchParams }) { const ref=params?.get("ref"),path=params?.get("path"),line=Number(params?.get("line"));const link=ref&&/^[a-f0-9]{40}$/.test(ref)?{ref,path:path??'',line:Number.isSafeInteger(line)&&line>0?line:undefined}:undefined;return <CodeBrowser key={`${projectId}:${link?.ref??""}:${link?.path??""}:${link?.line??""}`} projectId={projectId} acceptedCommit={acceptedCommit} isOwner={isOwner} link={link}/>; }
+function CodeBrowser({ projectId,isOwner,acceptedCommit,link }: { projectId: string;isOwner:boolean;acceptedCommit?:string|null;link?:{ref:string;path:string;line?:number} }) {
   const [selection,setSelection]=useState<BranchSelection|null>(null);
   const [path, setPath] = useState("");
   const [entries, setEntries] = useState<Entry[] | null>(null);
   const [file, setFile] = useState<{ path: string; content: string; binary: boolean; truncated: boolean; size: number } | null>(null);
+  const [history, setHistory] = useState<FileHistoryPage | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const historySequence=useRef(0), historyController=useRef<AbortController | null>(null);
   const [commit, setCommit] = useState<Commit | null>(null);
   const [error, setError] = useState<{ message: string; target: string; isFile: boolean; ref?: string; status?: number; retryAt?: number } | null>(null);
   const [loading, setLoading] = useState<string | null>(null);
@@ -28,6 +35,7 @@ function CodeBrowser({ projectId,isOwner,acceptedCommit }: { projectId: string;i
   useEffect(()=>{if(!error?.retryAt)return;const timer=setTimeout(()=>refreshRetry(value=>value+1),Math.min(2147483647,Math.max(0,error.retryAt-Date.now())));return()=>clearTimeout(timer);},[error]);
   const open = async (target: string, isFile: boolean, ref: string | null | undefined=loadedRevision.current) => {
     if(acceptedCommit===null&&!ref){setEntries(null);setFile(null);setCommit(null);setPath("");setError(null);setLoading(null);return true;}
+    historySequence.current++;historyController.current?.abort();setHistory(null);setHistoryError(null);setHistoryLoading(false);
     const sequence=++requestSequence.current;requestController.current?.abort();const controller=new AbortController();requestController.current=controller;
     const suffix=ref ? `&ref=${encodeURIComponent(ref)}` : "";
     setError(null);
@@ -60,10 +68,38 @@ function CodeBrowser({ projectId,isOwner,acceptedCommit }: { projectId: string;i
   };
 
   useEffect(() => {
-    if(selection===null)void open("", false,acceptedCommit);
-    return()=>{requestSequence.current++;requestController.current?.abort();};
+    if(selection===null)void open(link?.path??"", Boolean(link?.path),link?.ref??acceptedCommit);
+    return()=>{requestSequence.current++;requestController.current?.abort();historySequence.current++;historyController.current?.abort();};
   }, [projectId,acceptedCommit===null]);
 
+  const loadHistory = async (offset=0) => {
+    if (!file || !commit) return;
+    const sequence=++historySequence.current;
+    historyController.current?.abort();const controller=new AbortController();historyController.current=controller;
+    setHistoryLoading(true);setHistoryError(null);
+    try {
+      const result=await apiJson<FileHistoryPage>(`/p/${projectId}/commits?path=${encodeURIComponent(file.path)}&ref=${commit.hash}&limit=10&offset=${offset}`,{signal:AbortSignal.any([controller.signal,AbortSignal.timeout(15000)])});
+      if(sequence!==historySequence.current)return;
+      if(result.commit!==commit.hash||result.path!==file.path)throw new Error("History did not match the viewed file revision.");
+      setHistory(result);
+    }catch(error){if(sequence===historySequence.current&&!controller.signal.aborted)setHistoryError(error instanceof Error?error.message:"History could not be loaded");}
+    finally{if(sequence===historySequence.current)setHistoryLoading(false);}
+  };
+
+  const followToLatest=async()=>{
+    if(!file||!acceptedCommit||acceptedCommit===commit?.hash)return;
+    const sequence=++historySequence.current;historyController.current?.abort();const controller=new AbortController();historyController.current=controller;setHistoryLoading(true);setHistoryError(null);
+    try{
+      const latest=await apiJson<FileHistoryPage>(`/p/${projectId}/commits?path=${encodeURIComponent(file.path)}&ref=${acceptedCommit}&limit=100&offset=0`,{signal:AbortSignal.any([controller.signal,AbortSignal.timeout(20000)])});
+      if(sequence!==historySequence.current)return;
+      if(latest.commit!==acceptedCommit||latest.path!==file.path)throw Error('Latest history did not match the requested accepted revision.');
+      if(!latest.headPath)throw Error(latest.reason??'This path could not be followed to the latest accepted snapshot through unique unchanged renames. Use history or Git to inspect modified moves.');
+      window.location.hash=`/p/${encodeURIComponent(projectId)}/code?${new URLSearchParams({ref:acceptedCommit,path:latest.headPath})}`;
+    }catch(cause){if(sequence===historySequence.current&&!controller.signal.aborted)setHistoryError(cause instanceof Error?cause.message:'Latest path could not be resolved');}
+    finally{if(sequence===historySequence.current)setHistoryLoading(false);}
+  };
+  const codeHref=(target:string,line?:number)=>`/p/${encodeURIComponent(projectId)}/code?${new URLSearchParams({ref:commit?.hash??'',path:target,...(line?{line:String(line)}:{})})}`;
+  useEffect(()=>{if(link?.line&&file?.path===link.path)document.getElementById(`code-line-${link.line}`)?.scrollIntoView({block:'center'});},[file,link?.line]);
   const crumbs = path.split("/").filter(Boolean);
   const dir = file ? file.path.split("/").slice(0, -1).join("/") : path;
 
@@ -91,6 +127,8 @@ function CodeBrowser({ projectId,isOwner,acceptedCommit }: { projectId: string;i
         </div>
       )}
       <Button size="sm" variant="ghost" disabled={loading !== null} onClick={()=>void open(file?.path ?? path, file !== null, selection&&!selection.accepted?selection.commit:null)}>Refresh {selection&&!selection.accepted?"pinned branch snapshot":"latest accepted revision"}</Button>
+      {commit&&loading===null&&/^[a-f0-9]{40}$/.test(commit.treeHash)&&(!file||!file.binary&&!file.truncated)&&<BrowserEdit key={`edit:${commit.hash}:${file?.path??''}`} projectId={projectId} head={commit.hash} tree={commit.treeHash} branchName={selection?.name} path={file?.path} content={file?.content}/>}
+      {commit&&<CodeInspection key={`${commit.hash}:${file?.path??''}`} projectId={projectId} commit={commit.hash} path={file&&!file.binary&&!file.truncated?file.path:undefined} onOpen={(target,line)=>{window.location.hash=codeHref(target,line);}}/>}
       {loading && entries !== null && <p role="status" className="text-xs text-muted-foreground break-all">Loading {loading}…</p>}
       {error && (
         <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex flex-wrap items-center justify-between gap-2">
@@ -102,9 +140,18 @@ function CodeBrowser({ projectId,isOwner,acceptedCommit }: { projectId: string;i
         <Card>
           <CardContent className="p-0">
             <div className="px-4 py-2 border-b border-border text-xs text-muted-foreground flex flex-wrap justify-between gap-2">
-              <span className="break-all min-w-0">{file.path}</span>
-              <button className="hover:underline shrink-0" onClick={() => void open(dir, false)}>Back to folder</button>
+              <span className="break-all min-w-0">{file.path} <a className="underline ml-2" href={`/#${codeHref(file.path)}`}>Permalink</a></span>
+              <div className="flex items-center gap-3"><Button size="sm" variant="ghost" disabled={historyLoading||loading!==null} onClick={()=>void loadHistory()}>File history</Button>{acceptedCommit&&acceptedCommit!==commit?.hash&&<Button size="sm" variant="ghost" disabled={historyLoading||loading!==null} onClick={()=>void followToLatest()}>Follow to latest accepted</Button>}<Button size="sm" variant="ghost" onClick={() => void open(dir, false)}>Back to folder</Button></div>
             </div>
+            {historyLoading&&<p role="status" className="px-4 py-2 text-xs text-muted-foreground">Loading file history…</p>}
+            {historyError&&<p role="alert" className="px-4 py-2 text-sm text-destructive">{historyError}</p>}
+            {history&&<section aria-label="File history" className="px-4 py-3 border-b border-border space-y-2">
+              <p className="text-xs text-muted-foreground">Compared to each commit’s first parent. Unique unchanged renames are followed; modified moves and copies are not inferred.</p>
+              {history.commits.length===0&&<p className="text-sm">No changes to this path in these {history.scanned} commits.</p>}
+              <ul className="space-y-2">{history.commits.map(item=><li key={item.hash} className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="text-sm break-words">{item.message.split("\n")[0]}</p><p className="text-xs text-muted-foreground break-all">{item.renamedFrom&&<>Renamed {item.renamedFrom} → {item.renamedTo} · </>}{item.author.name} · {timeAgo(item.committedAt)} · {item.hash.slice(0,7)}</p></div><Button size="sm" variant="outline" onClick={()=>{window.location.hash=`/p/${encodeURIComponent(projectId)}/code?${new URLSearchParams({ref:item.hash,...(item.pathExists?{path:item.path}:{})})}`;}}>{item.pathExists?"Browse revision":"Browse commit"}</Button></li>)}</ul>
+              {history.nextOffset!==null&&<Button size="sm" variant="outline" disabled={historyLoading} onClick={()=>void loadHistory(history.nextOffset!)}>Older commits</Button>}
+              {history.reason&&<p role="status" className="text-xs text-muted-foreground">History is incomplete: {history.reason}</p>}{history.complete&&<p className="text-xs text-muted-foreground">End of first-parent history for this tracked path.</p>}
+            </section>}
             {file.binary ? (
               <p className="p-4 text-sm text-muted-foreground">Binary file ({file.size} bytes)</p>
             ) : file.truncated ? (
@@ -112,7 +159,7 @@ function CodeBrowser({ projectId,isOwner,acceptedCommit }: { projectId: string;i
             ) : file.content.length === 0 ? (
               <p className="p-4 text-sm text-muted-foreground">Empty file</p>
             ) : (
-              <pre className="p-4 text-xs overflow-auto max-h-[60vh] leading-relaxed" tabIndex={0} aria-label={`Contents of ${file.path}`}><code>{file.content}</code></pre>
+              <pre className="p-4 text-xs overflow-auto max-h-[60vh] leading-relaxed" tabIndex={0} aria-label={`Contents of ${file.path}`}><code>{file.content.split('\n').map((text,index)=><span id={`code-line-${index+1}`} key={index} className={`block ${link?.line===index+1?'bg-primary/15':''}`}><a className="inline-block w-10 mr-3 text-right text-muted-foreground hover:text-foreground select-none" aria-label={`Permalink to line ${index+1}`} aria-current={link?.line===index+1?'location':undefined} href={`/#${codeHref(file.path,index+1)}`}>{index+1}</a>{text||' '}</span>)}</code></pre>
             )}
           </CardContent>
         </Card>

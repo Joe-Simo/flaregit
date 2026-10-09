@@ -1,5 +1,5 @@
 import {z} from 'zod';
-const scopeSchema=z.object({projectId:z.string().min(1).max(128),incarnation:z.uuid(),taskId:z.string().min(1).max(101),repoName:z.string().min(1).max(200),actorId:z.string().min(1).max(256),generationStamp:z.string().min(1).max(1000),parentTokenHash:z.string().regex(/^[a-f0-9]{64}$/).nullable()}).strict();
+const scopeSchema=z.object({projectId:z.string().min(1).max(128),incarnation:z.uuid(),taskId:z.string().min(1).max(101),repoName:z.string().min(1).max(200),actorId:z.string().min(1).max(256),generationStamp:z.string().min(1).max(1000),maintainerWriteSource:z.object({creatorId:z.string().min(1).max(256),revision:z.number().int().positive().safe()}).strict().optional(),organizationSource:z.object({id:z.string().min(1).max(256),revision:z.number().int().positive().safe()}).strict().optional(),parentTokenHash:z.string().regex(/^[a-f0-9]{64}$/).nullable()}).strict();
 const coverageSchema=scopeSchema.pick({projectId:true,incarnation:true,taskId:true,repoName:true});
 export type GitGatewayScope=z.infer<typeof scopeSchema>;
 export interface GitGatewayAttempt {id:string;scope:GitGatewayScope;credential:'issuance_unknown'|'pending'|'revoked';token?:string;dispatch:'never'|'possible';transport:'open'|'completed'|'unknown'}

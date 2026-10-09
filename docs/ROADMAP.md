@@ -6,6 +6,194 @@ checklist while preserving its evidence below. No competing tracker is created.
 
 **Product:** Work in parallel. Integration happens automatically.
 
+## Current scope — October 8, 2026
+
+Continue the existing finite roadmap without spending money. Local implementation, local Git/workerd/SQLite
+fixtures, lint, typecheck, tests and builds are authorized. Paid execution, provider mutations, billing,
+identity migration, destructive actions and legal acceptance remain outside this continuation.
+The earlier pricing and scope discussions are retained in git history; they do not establish new authorization.
+
+**Status: incomplete.** F01–F20 all have partial source work; “F03–F20 not started” was stale. Tested helpers,
+production API/storage wiring, rendered UI, stock-client interoperability and hosted acceptance are separate
+states. Hosted restrictions do not prevent implementing and verifying local storage adapters and HTTP flows.
+No source helper alone closes a ticket or establishes release parity.
+
+### Resource constraint — owner warning, October 8
+
+Disk exhaustion interrupted current verification. Docker Desktop was stopped, together with task-owned duplicate
+FlareGit typechecks/lint processes and temporary fixture servers. The Docker VM was configured for24GiB RAM;
+its existing32GiB image/data was preserved. Only disposable synthetic UI builds were removed; source changes,
+screenshots and logs remain. Free disk recovered from below600MiB to approximately3.7GiB after stopping the load.
+
+Keep Docker off. Root owns at most one heavy test/build/typecheck at a time; agents may perform source-only work.
+Check available disk before each heavy command and defer it below2GiB. Limit Node heap to1536MiB for checks.
+Do not resume broad suites, downloads, container builds or parallel checks merely to collect more green results.
+Current interrupted verification must remain distinct from the earlier passing baseline until rerun safely.
+A single1536MiB-capped typecheck passed after source repairs; interrupted runtime/browser checks remain pending.
+
+### Resource-safe continuation — October 8
+
+Verified the interrupted integrations one command at a time with a1536MiB Node heap cap and2GiB disk preflight.
+Docker remains off. Latest source passes typecheck, lint, build and diff-whitespace checks. The earlier full-suite
+baseline remains separate; a new full-suite or new browser pass was not run under the resource constraint.
+
+- Core integration run:34 pass, two explicit skips across13 files. This includes actual stock npm publish/install and
+  credential revocation, organizations, OAuth issue/check use, SARIF, forum appeals, release assets, native Git inspection,
+  encrypted backup modules and customer CI. Linux production attestation remains skipped; the test harness never reports it passed.
+- Daemonless stock OCI run:5 pass/64 assertions, including binary push/pull, revocation, immutable manifests and restart.
+- Additional HTTP/archive run:9 pass across6 files, including signed release asset/R2 and security-report requests,
+  canonical discussion polls/subscriptions/conversion, signed backup recovery primitives and actual pinned-answer export.
+- New operational backup HTTP run:operator-owner authorization, encrypted-only export, persistent hold and unsafe deletion
+  refusal pass. Unconfigured isolated recovery refuses to run. No provider resources or Docker images were allocated.
+
+Canonical discussion replies now retain a namespace-isolated retry outbox and account deduplication receipts; delivery
+rechecks current subscription/topic/member access. Issue details link preserved discussion provenance. Code search/blame
+now has UI and immutable revision/path/line opening. A strict archive schema gap for pinned/answered topics was fixed
+and tested against actual canonical discussion records; subscription/outbox authority stays excluded from customer imports.
+
+Operator backup source is now wired:server-only signing/encryption, bounded base64 envelopes,8MB snapshots,
+4-entry/32MB vault admission, one capture/recovery in flight, no recursive operational-table snapshots, persisted
+holds and audit, and an isolated controller with no live publication RPC. Isolated Git/recovery bindings remain optional
+and unconfigured by default; a hosted recovery claim is not made.
+
+**Still incomplete:** Linux passing CI and crash cleanup; broader organization/native-task inheritance and nesting;
+public outsider subscription delivery, browser edits and Git wiki interoperability; registry protocol expansion;
+actual deployment adapters/static sites/domains; scanner/advisory/SBOM coverage; complete client/operational acceptance.
+The finite parity gate remains open. A local checkpoint preserves these changes; no push or deployment is authorized here.
+
+### Latest continuation — integrated local product flows
+
+**Continuation after `a0d5c34`:** immutable file history now follows unique exact-content renames through real
+first-parent Git ancestry. Each revision link carries its actual historical path; old issue paths can resolve to
+the latest accepted path. Ambiguous, modified or bounded rename inspection remains explicit and incomplete.
+Eleven focused history/search/blame tests pass against real Git fixtures.
+
+Commit signature inspection now reads bounded raw commit bytes using a bare native fetch, verifies their Git
+object hash and authorized ancestry, and reports SSH/GPG verification against the viewer's registered keys.
+The account stores an atomic key snapshot with a monotonic trust revision. Key revoke/regrant, PAT revocation
+during the final snapshot and account deletion during GPG parsing refuse completion. Identity claims are not
+inferred from signatures. X.509 trust roots remain unconfigured. Native Git, legacy byte encoding, signed
+Worker HTTP and signing-key API tests pass; desktop/mobile synthetic actual-component interactions pass at
+1280px and 390px with no page/console errors or document overflow. Fixture data does not prove hosted flows.
+Screenshots are retained at `/tmp/flaregit-next-ui-1280.png` and `/tmp/flaregit-next-ui-390.png`; the fixture server
+is stopped and its disposable build was removed. Docker remains off; free disk is approximately 3.8GiB.
+
+Customer CI now resumes queued jobs without replaying completed ones; persisted running claims still refuse
+dispatch pending positive cleanup. Focused real disposable Git execution tests pass; Linux production
+attestation remains an explicit skip. Base-branch retarget now has execution-owned write locks, retained
+cleanup holds, bounded discovery that prioritizes the live holder, and exact server-returned request replay.
+Actual signed Worker/DO/native Git tests cover duplicate requests, failed shutdown, exact recovery and changed
+base activation without rewriting authored history. Original creation bindings and failure diagnostics remain
+preserved; readiness is reset. Targets absent from the fork return `requires_rebase` without mutation.
+Desktop/mobile synthetic Changes UI verifies discover/release/resume/fresh-readiness at 1280px and 390px;
+screenshots are retained under `/tmp/flaregit-retarget-{recovery,activated}-{1280,390}.png`. Those fixture servers
+are stopped and disposable builds removed. The consolidated affected run passed 40 tests across 16 files, with
+one Linux attestation skip. The broader serial suite then exposed twelve stale fixture/expectation cases and a
+real owner-recovery routing regression during deletion. Valid creator provenance and explicit opt-in were restored
+in fixtures; intended late-revocation tests still reach their probes. Production owner storage inspection and
+deletion retries now precede ordinary active-repository projection. Retarget activation additionally requires the
+same execution lease after recovery, so a released old attempt cannot activate after a new Git write.
+The final full suite passes: **2340 pass, 7 explicit skips, 0 fail across 576 files**. The skips cover Linux/container
+and separate Chromium inventories; they are not hosted attestation. Typecheck, lint, build and whitespace
+checks pass. Twenty task-owned failed fixture scratch directories were removed after retaining
+the diagnostic logs. No Docker, provider mutation, push or deployment ran. Full parity and hosted acceptance remain open.
+
+**Current continuation after checkpoint `c383554`:** source work proceeds in parallel while root serializes
+runtime checks. Docker remains off; disk headroom is approximately 3.9GiB. The prior checkpoint's passing gates
+do not certify these newer edits. Browser editing now uses bounded native Git arguments and frozen fork targets;
+maintainer consent binds write operations to a revocable epoch, including agent handoff and streaming LFS uploads.
+Nested organization teams grant scoped human contribution access. Accepted changes apply frozen owner planning
+automation with durable retry receipts. These remain partial roadmap slices, with hosted acceptance still open.
+
+Git LFS passed sixteen focused tests, including the official stock client against workerd's direct HTTP listener,
+binary upload/download/checkout, revocation epochs, malformed-upload recovery, uncertain-write receipts and
+public ancestor visibility. A failing cross-runtime test bridge was removed; both protocol checks now use actual
+wire HTTP. Native browser edits, planning automation and organization resolution passed nine tests (77 assertions).
+npm publication ordering, independent tags, immutable versions and durable restart passed seventeen tests.
+OCI passed seven focused tests, including stock ORAS push/pull,
+catalog admission boundaries and blob/manifest coexistence across restart. Browser editing and permission
+integration passed ten tests across six files. No full-suite, new rendered UI, push or deployment
+claim is made for this continuation.
+Final typecheck, lint, build and whitespace checks pass. These are local results; the complete roadmap remains open.
+
+- F03: signed file-history API and Code tab traverse real pinned Git objects. Changes compare each commit to its first
+  parent, with bounded pagination; rename following is explicitly unsupported. Code search and blame integration remain open.
+- F05: durable triage, labels/assignees, atomic bulk changes, milestones/due dates/reassignment, relationships and templates
+  now have member-authorized HTTP and issue UI flows. Required template fields are enforced by `/issues/from-template`;
+  retries preserve the original rendered body and issue identity even after template edits. Owner configuration requires
+  owner/full administration authority. Attachments, saved filters, full moderation and transfer/deletion flows remain open.
+- F06: repository Planning now references actual issues across board/table/timeline views, typed fields, saved filters/sorts,
+  iterations, status-driven field automation, bulk edits, progress and deterministic export. Full saved-view semantics are
+  honored. Whole-plan/item versions refuse stale updates. Accepted-change-driven automation and full project parity remain open.
+- F08: inbox projections and unread counts revalidate current repository membership and deletion state; titles from revoked
+  repositories are withheld. Durable repository delivery preferences offer All activity, Needs you only and Muted from Inbox
+  and Settings. Existing history is preserved; stale asynchronous responses and failed refreshes cannot retain old titles.
+  True thread subscriptions, mentions and email delivery remain open.
+- F09: member removal now uses fresh actor/session/token authority with an atomic durable membership/registration fence.
+  Owner removal and stale authority are refused. Organization/team inheritance remains open.
+- F12/F14: nonboolean package visibility is refused before publication. OAuth registration, authorization, code exchange,
+  refresh and introspection check current account lifecycle; replay and expiry checks survive asynchronous authority checks.
+  Production scoped OAuth consumption, app installation UX and stock registry protocol compatibility remain open.
+- F15: metadata archives have actual member export/history APIs, owner-confirmed empty-destination restore, matching accepted
+  Git head, SHA-256 verification, bounded transport, transactional rollback and stable request receipts. Settings provides
+  export/inspection/restore with preserved lost-acknowledgement retries. Issues, their comments, wiki histories and validated
+  planning activate; discussions, release records, issue-feature documents and omitted-review comments remain historical.
+  Source identities are unverified external claims, never local author/permission authority. Wiki shows this provenance.
+  Git objects/refs require a separate native transfer. Credentials, memberships, accepted-review authority and provider state
+  are not imported. This is partial migration coverage, not complete exit parity.
+
+**Current verification:** final lint, typecheck, build and `git diff --check` pass. `bun test --timeout 30000` finished
+with 2,249 passes, six existing skips and zero failures across 546 files (21,353 assertions). The combined integration
+suite passed 80 tests across 20 files; later authorization/archive-contract checks also pass, including seven tests
+across five files after the last fixture/type repairs. New tests created after broad-run enumeration are covered by
+those focused checks. Actual components with real CSS passed synthetic desktop/mobile flows for planning, file
+history, issue triage/templates/bulk labels, inbox preferences and reverse-response handling, archive lost-ack retry,
+and restored wiki provenance. All temporary fixture servers and browsers were stopped. These local tests do not
+establish hosted authentication, cross-account customer acceptance, stock registry compatibility or full release parity.
+No provider mutation, deployment, paid execution or paid API call occurred in this continuation.
+
+### Earlier continuation — local evidence
+
+- F02: strict complete SSHSIG envelope validation, including canonical base64 and binary trailing-data refusal.
+- F07: wiki revision storage and authorized HTTP reads, edits, history, diffs and optimistic-concurrency revert.
+  The repository Wiki tab supports creation, editing, revision history and confirmed restores.
+  Storage is capped at 5 MB of body bytes and 10,000 revisions; history returns metadata.
+  Reads are member-only, including public repositories. Git-backed wiki access remains open.
+- F10: bounded per-job timeout and cancellation signals; an unresolved runner reports termination unconfirmed.
+  A signal is not process-cleanup evidence. Executable workflow steps and a trusted runtime adapter remain open.
+- F14: absolute 30-day OAuth refresh-grant expiry survives rotation and SQLite reopen; access lifetime is clamped
+  to remaining grant lifetime. Legacy unbounded grants require fresh authorization. Malformed registry URL encoding
+  returns a controlled error. No new Jev call was made: this work uses deterministic rules and no configured
+  TypeSafe credential was found in the checkout.
+- F15: complete redirect snapshots preserve tombstones and validate before replacing state. Full migration wiring remains open.
+- F18: reporter conflict checks and overturned-appeal visibility restoration preserve independent restrictions and audit history.
+  These are core rules; production moderation integration remains open. Billing stays outside scope.
+- F19: actual public status readers refuse to treat stale, missing, malformed or future-dated successful probes as operational.
+  Recorded failures remain degraded even when their timestamps are stale; missing fresh success is never uptime proof.
+- F20: certification requires a nonempty valid catalog and passing UI/API/interoperability/permissions receipt metadata,
+  bound to each ticket and the expected source revision. Receipt authentication remains a caller responsibility;
+  no parity certification is claimed.
+
+**Verification:** lint, typecheck and build pass. The combined changed-feature suite passes 117 tests/436 assertions
+across 12 files, including signed workerd HTTP and SQLite reopen coverage. Actual WikiTab with real CSS passed
+synthetic desktop (1280×800) and mobile (390×844) edit/save/history/restore-view checks under React StrictMode;
+zero runtime errors or horizontal overflow. Temporary browser/server were stopped. The page content is plain text,
+not rendered Markdown. No hosted authentication, Durable Object eviction, Git wiki interoperability or release
+acceptance is claimed.
+
+**Broad-suite result:** `bun test` completed 2,224 passes, six skips and two failures across 534 files. The failures
+were unchanged deadline-sensitive cases in `isolated-build-job.test.ts` and `accepted-followups.test.ts`; both
+passed on isolated reruns with a 30-second test timeout. The former still uses its own short injected job deadline,
+so its successful rerun also exercised the stop/seal assertions. This is not a clean single-run full-suite claim.
+The changed-feature aggregate above covers newly added tests that were not necessarily enumerated when the broad
+run started. Final lint, typecheck, build and `git diff --check` pass. Changes remain local and uncommitted; no push,
+deployment, provider mutation or paid API call occurred during this continuation.
+
+**Next acceptance work:** connect existing F03–F09 rules to authorized durable APIs and product flows; provide
+executable CI steps and a trusted runner adapter with confirmed cleanup (F10); complete stock registry protocol
+and client compatibility (F12); exercise complete local export/restore (F15); then validate the declared client,
+permission and operational journeys. These remain open work, not certification exceptions.
+
 ## Current handoff — October 7, 2026
 
 - The owner authorization/device blocker is resolved. The bounded native run
@@ -2049,6 +2237,56 @@ No tickets are DONE. Source-tested, deployed, and hosted-verified are separate.
 No deployment, public release, billing activation, spending increase, identity
 migration, destructive action, or legal acceptance is authorized by this tracker.
 
+## Local slices added October 8 (source-tested; no hosted proof)
+
+- F02: `lfs-object-store.ts` (hash/size verified, per-repository quota, no partial storage).
+- F04: `base-branch-change.ts` (retarget marks reviews stale, feeds the merge gate).
+- F05: `issue-milestones.ts`, `issue-bulk.ts` (capped at 100), `issue-relations.ts` (cycles refused), `issue-templates.ts`.
+- F07/F08: `polls.ts`, `snippets.ts`, `follows.ts`, `contribution-visibility.ts`.
+- F10/F13/F14: `workflow-parser.ts`, `dependency-advisories.ts`, `webhook-signature.ts` (5-minute replay window), `oauth-scopes.ts` (exact redirect, PKCE S256).
+
+## Engines added October 8 (source-tested; no hosted proof)
+
+- F10: `ci-engine.ts`: runs a parsed workflow by topological waves; failed jobs skip dependents; `cancel` stops scheduling but does not interrupt running jobs (no timeout yet).
+- F07: `wiki.ts`: revisions are append-only, saves require the expected revision, line diffs (LCS), revert appends a copy.
+- F03: `blame.ts`: line-level blame and file history over an in-memory commit list, plus permalinks.
+- F15: `import-bundle.ts`: verifies every digest before any write; conflicts reported as kind:id; store failures report partial writes.
+
+## Modules added October 8, second batch (source-tested; no hosted proof)
+
+- F14: `oauth-server.ts`: app registration, PKCE S256 codes, single-use codes, refresh rotation with family revocation, hashed secrets. Refresh tokens have no expiry yet.
+- F12: `package-registry.ts`: publish with immutable versions, digest verification on fetch, private visibility, deprecation, exact/caret/x-range resolution.
+- F09: `org-invitations.ts`: email-matched single-use invitations with 7-day expiry, no privilege escalation, teams. Team membership does not yet change permissions.
+- F11: `deployments.ts`: one live deployment per environment, rollback, digest-verified serving. Not yet wired to the server.
+
+## Server wiring added October 8 (tested under workerd; not deployed)
+
+- OAuth and package registry are served at `/api/oauth/*` and `/api/registry/*` from a Durable Object (`AuthorityController`, SQLite-backed, declared in `wrangler.jsonc`). Browser sessions only for writes; API tokens cannot register apps, authorize, publish or deprecate.
+- Introspection is not exposed over HTTP. Team and org membership are not yet read for private package visibility.
+- Not yet done: a restart test in workerd (Miniflare here only supports in-memory persistence; restart behavior is covered by SQLite-backed tests), deployment of the new Durable Object class, and the duplicate-module decision for deployments and org invitations.
+
+## Third batch of local slices, October 8 (source-tested; not wired into routes)
+
+- F06: `project-views.ts`: iterations, views, status automation, bulk status change, deterministic export. Fixed: text fields could not be written.
+- F15: `redirects.ts`: renames with loop refusal and depth limit, 90-day reuse window, tombstones. Importing redirects does not yet carry tombstones.
+- F16: `agent-environment.ts`: fixed tool list, exact-host egress, no secrets, run ledger with timeouts. Commands can reach the network without a declared host; only runtime enforcement closes that.
+- F17: `client-capabilities.ts`: one permission model for web, CLI and API, with per-surface request budgets. Role mapping awaits owner sign-off.
+
+## Duplicate modules removed, October 8
+
+- Deleted `src/core/deployments.ts` and `src/core/org-invitations.ts` with their tests. The server's own `src/server/deployments.ts` and `src/server/repository-invitations.ts` remain the source of truth.
+
+## Production deploy, October 8
+
+- Deployed `flaregit` with `bunx wrangler deploy` (version `44d6d54c-16d9-4107-9dee-5fbec6a15ac4`). This added the `AuthorityController` Durable Object and the `/api/oauth/*` and `/api/registry/*` routes.
+- The deploy also rebuilt and pushed the AgentSandbox and IntegratorSandbox Container images. Containers may be billed; check the Cloudflare dashboard.
+- Live checks: `/health` 200, anonymous app registration 401, bad grant type 400, unknown package 404.
+
+## Fourth batch of local slices, October 8 (source-tested; not wired)
+
+- F18: `moderation.ts`: report queue (no self-reports, no duplicates), moderator actions with an append-only audit log, one appeal within 14 days decided by a different moderator, and a pure limit check. Plan limits are not set: the repo defines only the 10-repository free limit, so limits must come from configuration. Gaps: an overturned appeal does not reverse the action (no unhide exists), and a reporter may resolve their own report.
+- F19: `retention.ts` and `service-status.ts`: retention periods, legal holds, status from fresh checks (stale never counts as ok), uptime with no-sample null, and single-resolution incidents.
+
 ## Active ticket ledger
 
 | Ticket | Status | Primary owner | Next acceptance action |
@@ -2434,26 +2672,26 @@ checkboxes, or submission actions were performed. Demo remains deferred by owner
 
 | Ticket | Status | Owner | Scheduling |
 | --- | --- | --- | --- |
-| F01 — repository lifecycle (R1; after C05) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F02 — Git transport, repository size and object integrity (R1; after C03) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F03 — code experience and search (R1; after C06) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F04 — pull-request and branch-policy parity (R1; after C04/C06) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F05 — issues and triage (R1; after C06) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F06 — project planning (R1; after F05) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F07 — discussions, documentation and snippets (R1; after F05) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F08 — people, discovery and notifications (R1; after F05/F07) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F09 — organizations and access (R1; after C01/C05) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F10 — CI engine and runner compatibility (R2; after C02/C08/F09) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F11 — releases, static sites and deployments (R2; after C07/F10) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F12 — packages and registries (R2; after F09/F10) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F13 — code and supply-chain security features (R2; after F09/F10/F12) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F14 — APIs, apps and ecosystem interoperability (R1 core; R2 expansion; after C08/F09) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F15 — complete migration and exit (R1; after F01–F09/C08; extend for R2 objects) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F16 — developer environments and agent interoperability (R2; after C02/F10/F14) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F17 — clients and accessibility (R3; after F03–F09/F14) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F18 — commercial and community operations (R3; after usage/authorization foundations) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F19 — operations, enterprise and service trust (R3; start relevant safeguards in C) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
-| F20 — finite parity certification and stop (R3; after all included tickets) | NOT_STARTED | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F01 — repository lifecycle (R1; after C05) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F02 — Git transport, repository size and object integrity (R1; after C03) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F03 — code experience and search (R1; after C06) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F04 — pull-request and branch-policy parity (R1; after C04/C06) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F05 — issues and triage (R1; after C06) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F06 — project planning (R1; after F05) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F07 — discussions, documentation and snippets (R1; after F05) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F08 — people, discovery and notifications (R1; after F05/F07) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F09 — organizations and access (R1; after C01/C05) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F10 — CI engine and runner compatibility (R2; after C02/C08/F09) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F11 — releases, static sites and deployments (R2; after C07/F10) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F12 — packages and registries (R2; after F09/F10) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F13 — code and supply-chain security features (R2; after F09/F10/F12) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F14 — APIs, apps and ecosystem interoperability (R1 core; R2 expansion; after C08/F09) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F15 — complete migration and exit (R1; after F01–F09/C08; extend for R2 objects) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F16 — developer environments and agent interoperability (R2; after C02/F10/F14) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F17 — clients and accessibility (R3; after F03–F09/F14) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F18 — commercial and community operations (R3; after usage/authorization foundations) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F19 — operations, enterprise and service trust (R3; start relevant safeguards in C) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
+| F20 — finite parity certification and stop (R3; after all included tickets) | PARTIAL (local source slices only; no hosted proof) | unassigned | After its defined dependencies; existing partial foundations retained. |
 
 ## C00 evidence reconciliation
 
@@ -2503,7 +2741,11 @@ policy does not approve competition terms, identity replacement, or payments.
 - Quarantine: the blocking `verify` job skips this one test on Bun 1.4.2 only (`knownFlakeQuarantined`).
   The `known-flake-quarantine` job runs it with `FLAREGIT_KNOWN_FLAKE_RUN=1` and is `continue-on-error`, so the
   result stays visible without blocking merges or deploys. Every assertion is unchanged.
-- Reinstatement: remove the quarantine gate and the quarantine job once a Bun or Miniflare release passes
+- Resolved October 9, 2026: the Worker refused these requests without reading their bodies, so the
+  connection could not be reused and Bun 1.4.2 reset the next request. `src/server/worker.ts` now drains
+  unread bodies (cancelling past 1 MiB) before responding; the test passed 10/10 on Bun 1.4.2 (0/10 before).
+  The quarantine gate and job are removed.
+- Original reinstatement plan: remove the quarantine gate and the quarantine job once a Bun or Miniflare release passes
   the job reliably. Draft upstream report: `scratchpad/bun-issue-draft.md` (not yet filed).
 
 ### Production deploy — `f67dfb1` (October 7–8, 2026)
@@ -2923,6 +3165,45 @@ Keep payments disabled for the competition. For authentication, either obtain an
 
 **Pass:** the deployed architecture and its public description match approved reality; fresh login, logout, session expiry, member removal, and denied access pass. A billing provider failure cannot prevent repository reads or reviews. Unresolved approval is BLOCKED, not a fake Cloudflare-only claim.
 
+### C02 local source gate — October 8, 2026 (source-tested only)
+
+- HEAD `c1390b9`: `bun run lint` and `bun run typecheck` exit 0.
+- All 24 `tests/c02-*.test.ts` and `tests/untrusted-execution*.test.ts` files run one at a time: 84 pass, 0 fail,
+  with `FLAREGIT_UNTRUSTED_LOCAL_PROOF_IMAGE=flaregit-untrusted-c02-local` (the local `linux/amd64` image built from
+  `Dockerfile.untrusted` on this commit, 104,598,007 bytes).
+- Status: source-tested and local-image-tested only. No hosted Cloudflare receipt, no synthetic canary run, and no
+  cloud allocation was produced. C02's hosted pass criteria remain open and need an approved spend ceiling.
+
+### C11 official rules recheck — October 8, 2026 (no entry, no terms accepted)
+
+- Official Rules PDF (local copy, read directly): contest period Oct 1, 2026 9:00 AM EDT to Oct 14, 2026 11:59 PM PDT.
+- Eligibility: legal resident of the US or Canada, 18+, not on sanctions lists and not a Sponsor employee or family member.
+- Entry: a 5–10 minute demo video, the source repository, run instructions, and acceptance of the Official Rules.
+- Submission criteria: must use Cloudflare's developer platform including Workers and Artifacts, with multiple agents
+  working on changes concurrently; source licensed under MIT, Apache 2.0, or BSD 2/3-clause, with a LICENSE file.
+- Finalists (three) present live at Cloudflare Connect (San Francisco, Oct 21, 2026); winners must attend in person.
+  Travel and hotel for finalists may be sponsor-provided, but finalists pay some expenses. This is a spending
+  consideration; do not commit to it without the owner's decision.
+- The rules grant Cloudflare broad rights to the demo video and presentation materials, and require access to the
+  complete source code to administer judging. The owner must review this before accepting.
+- Entry form (per Cloudflare's submit page): team and attendee details, project name, vision, Cloudflare use,
+  demo video (MP4/WebM/MOV, up to 2 GiB), open-source repository URL, run instructions, and two confirmation boxes.
+- Owner-only: the entry form and the terms acceptance. No entry was submitted and no terms were accepted.
+
+### C10 local reproducibility — October 8, 2026 (source-tested only)
+
+- Clean clone of `17d7550` (reset from `origin/main` into a scratch checkout, no local edits) inside
+  `oven/bun:1.4.2` Linux (`git` 2.47.3, `util-linux`, `procps`), running as the non-root `bun` user.
+- `bun run lint` and `bun run typecheck` exit 0; `bun run build` exit 0.
+- `bun test`: 1887 pass, 7 skip (6 existing platform skips plus the Bun 1.4.2 quarantine), 0 fail, 470 files.
+- Status: local reproducibility only. Hosted C09 batch, C10 evidence package, and C11 owner submission remain open.
+
+### C03 local source gate — October 8, 2026 (source-tested only)
+
+- All 9 `tests/c03-*.test.ts` files run one at a time on local Bun 1.3.4: 32 pass, 0 fail.
+- Status: source-tested only. The hosted publication matrix (stale base, interrupts, competing publishers, cancel)
+  remains open and needs an approved spend ceiling.
+
 ### C02 — replace assumed sandbox trust with demonstrated boundaries
 
 **Dependencies:** C00. **Budget:** two days; highest technical priority. **Starting files:** `integrator.ts`, `src/core/verification/execution.ts`, `workflow.ts`, build/verification modules, Dockerfile, Wrangler configuration.
@@ -3027,6 +3308,40 @@ Each ticket below is a finite workstream. Split it into approximately one-day ve
 
 ### F01 — repository lifecycle (R1; after C05)
 
+**Progress (source-tested only, October 8):** archive and unarchive are implemented end to end: pure rules in
+`src/core/repository-lifecycle.ts`; optional `lifecycle` field in the project document; Durable Object methods
+`repositoryLifecycle` and `repositoryLifecycleTransition`; route `/api/p/:id/lifecycle` (GET for members, POST
+archive/unarchive for owners only); and a central read-only guard on archived repositories for every non-GET
+project route except the lifecycle route and repository deletion. Evidence: `tests/repository-lifecycle.test.ts`
+(5 pass) and `tests/repository-lifecycle-http.test.ts` (1 pass; 48 assertions in child mode covering visibility and
+topics: owner-only, validated, and refused while archived). Topics validation lives in `src/core/repository-topics.ts`
+(`tests/repository-topics.test.ts`, 3 pass). Lint and typecheck pass.
+
+**Blocked for the no-spend scope (October 8):**
+- Default branch: changing it needs canonical Git ref writes through Artifacts (billed) and rebinding the
+  accepted-branch scope that accepted history depends on.
+- Rename: changes the canonical repository name that Artifacts and the accepted, preview and storage scopes are
+  keyed on (`canonicalRepoName` identity checks); it is a hosted Git identity change.
+- Forks: creating an independent fork creates a new canonical Artifacts repository (billed).
+- Ownership transfer: moves who controls the project's spend and account responsibility. That is a billing
+  decision the owner must make before any code changes it.
+- Deletion with recovery: keeping data recoverable extends storage retention, which bills. Needs the owner's
+  retention decision.
+- Template creation: creating a repository from a template creates a new hosted Artifacts repository (billed, like
+  forks), so it is blocked until the owner decides on that spend.
+
+Each stays blocked until the owner approves the spend or makes the billing decision.
+
+Non-project writes are now guarded by `archivedWriteRefusal` (`src/server/archive-guard.ts`, 3 unit tests pass): connection
+event callbacks, public participation, public discussion changes, and invitation joins return 409 while archived. Route-level
+HTTP tests for those four families now exist: `tests/archived-nonproject-http.test.ts` (1 pass; 10 assertions in child
+mode; authenticated member requests get 409 with the read-only message, and a public read is not refused). Still open for F01: rename, forks, ownership transfer, and deletion
+with recovery, which are blocked as listed above.
+Archive/unarchive now additionally has an owner Settings control and required lifecycle version checks. Fresh
+session/full-PAT and durable owner authorization replace the earlier cached administrator boolean. Unconfirmed
+UI mutations require current-state inspection before another action. Six pure lifecycle checks pass, including
+stale-version rejection; current signed HTTP and rendered acceptance of this correction remain pending.
+
 Cover repository visibility, README/license/gitignore initialization, template creation, independent forks, fork relationships, default branch changes, topics, archive/unarchive, rename, ownership transfer, deletion and recovery. Preserve source identity and permission boundaries during every transition. Imported data stays attributed and source repos are never mutated by an import.
 
 Acceptance: migrate an owned test repository through rename, transfer, archive, restore, and fork contribution; verify links/refs/data and old credential denial. A fork is not merely a hidden task workspace with no user lifecycle. Owner deletion must not orphan unbounded billable resources.
@@ -3034,6 +3349,48 @@ Acceptance: migrate an owned test repository through rename, transfer, archive, 
 Reference inventory: `https://docs.github.com/en/repositories`.
 
 ### F02 — Git transport, repository size and object integrity (R1; after C03)
+
+**Progress (source-tested only, October 8):** the Git LFS protocol core is in `src/core/git-lfs.ts`: batch validation
+(download/upload, basic transfer only, at most 100 objects, exact SHA-256 OID format, non-negative integer size, a
+size limit checked before any upload) and content-derived verification (an object is accepted only when its actual
+bytes match the declared size and SHA-256 OID). Evidence: `tests/git-lfs.test.ts` (5 pass); lint and typecheck pass.
+
+Existing local coverage re-run on October 8: exact advertised-ref parsing (`tests/exact-git-ref.test.ts`, 5 pass) and
+tag Git behavior (`tests/tag-git.test.ts`, 7 pass). Gitlink and submodule handling is covered by existing tests
+(for example `tests/git-migration-inventory.test.ts`). Commit signature parsing is in `src/core/commit-signature.ts` (`tests/commit-signature.test.ts`, 5 pass): it detects
+unsigned, gpg, ssh, x509 and unknown blocks, refuses two signature headers, and rebuilds the exact signed payload byte for
+byte. Cryptographic verification for SSH signatures is in `src/core/ssh-signature.ts` (`tests/ssh-signature.test.ts`, 6 pass):
+it verifies ssh-ed25519 SSHSIG signatures made by `ssh-keygen -Y sign -n git` against a trusted authorized key, and refuses
+other namespaces, untrusted keys, other key types, tampered bytes and non-SSH input. Test fixtures were generated locally with
+`ssh-keygen` and checked with `ssh-keygen -Y check-novalidate`. The trusted-key registry is in `src/core/trusted-keys.ts`
+(`tests/trusted-keys.test.ts`, 5 pass): it accepts only ssh-ed25519 authorized-key lines, validates the blob, de-duplicates,
+caps each user at 20 keys, refuses removal of unknown keys, and feeds the SSH verifier. The registry is stored on the
+account in the Durable Object (`trusted_signing_keys`) and exposed at `/api/signing-keys` (GET, POST, DELETE) for a
+signed-in human session only; `tests/signing-keys-http.test.ts` (1 pass; 15 assertions in child mode) covers listing, idempotent
+add, refusal of other key types and extra fields, unknown removal, wrong methods and anonymous access. GPG verification is in
+`src/core/gpg-signature.ts` (`tests/gpg-signature.test.ts`, 4 pass), using the `openpgp` library (6.3.2, pure JavaScript,
+Workers-compatible) against a key and signature produced by GnuPG 2.5 and checked with `gpg --verify`. It accepts only a
+signature that verifies against a trusted key, and reports that key's uppercase fingerprint. Trusted GPG public keys are stored
+on the account (`trusted_gpg_keys` in the account Durable Object) and exposed at `/api/signing-keys/gpg` (GET, POST, DELETE) for
+signed-in human sessions only. Validation (`src/core/trusted-gpg-keys.ts`) refuses private keys, malformed input and extra fields,
+and is idempotent by fingerprint; `tests/gpg-keys-http.test.ts` (1 pass; 13 assertions in child mode) covers it.
+
+**Blocked for F02 (October 8):**
+- X.509 (CMS/PKCS#7) verification: a trust-root policy is required before any X.509 signature can be accepted. The
+  owner must name the certificate authorities to trust, or decide to reject X.509 commits. No code is accepted
+  without that decision.
+- Hosted commit-view acceptance: local raw-object inspection, viewer-key verification and review/journal controls
+  are implemented and source-tested. Actual Artifacts-backed execution and rendered hosted acceptance remain
+  outside this no-spend continuation.
+
+**Integrated locally for F02:** LFS HTTP/DO/R2 storage and stock-client acceptance pass, including recovery and
+revocation. Commit signature views use exact raw bytes and current viewer trust. Hosted Git/LFS acceptance,
+SSH transport parity, wider signing-key formats and provider transport changes remain outside this continuation. Branch/tag/signature and
+submodule behavior have focused local coverage; the non-project guard HTTP tests from F01 already exist.
+An additional LFS recovery correction is prepared in source: incomplete uploads rejected by consent fences,
+source failures or timeouts can release their pending marker only after both producer and storage SDK settle.
+Full-body uncertain outcomes retain their hold. Same-object retry coverage is added for session and PAT consent
+changes; this correction still requires runtime verification under the resource guard.
 
 Complete normal Git branch/tag behavior, signatures and verification status, clone/fetch/push/pull, submodule references, and an interoperable Git LFS batch/object service on R2 where needed. Check actual object hashes, not pointer files alone. Evaluate an ordinary SSH Git path separately; a custom tunneling client is not transparent SSH parity. Cloudflare's documented Wrangler SSH access is account-authenticated and does not expose public container ports; do not confuse it with a public Git SSH service.
 
@@ -3043,6 +3400,17 @@ References: `https://docs.github.com/en/repositories`, `https://developers.cloud
 
 ### F03 — code experience and search (R1; after C06)
 
+**Progress (source-tested only, October 8):** permission-filtered code search is in `src/core/code-search.ts`
+(`tests/code-search.test.ts`, 5 pass). It searches only files the actor may read (owner-only files are never searched for
+members or outsiders), matches literally and case-insensitively with line numbers, pages with a cursor (50 per page), and caps
+at 1,000 matches. Every response says whether it is `complete`; a capped or unfinished search reports a `reason` instead of
+silently truncating. Queries are limited to 200 characters, and empty queries and bad cursors are refused.
+
+**Integrated locally for F03:** pinned browsing/search/blame/history, access-scoped request caches, browser edits,
+revision/line links and unique unchanged rename tracking have production source wiring and real Git or Worker
+fixtures. Modified/ambiguous renames, broader search/indexing coverage and complete parity remain open.
+Hosted Artifacts reads/writes and browser-edit publication remain outside this continuation.
+
 Finish branch/tag-aware browsing, Markdown/raw/binary views, path/history navigation, blame, compare, commit/line permalinks, browser edits/uploads, and permission-filtered code search. Keep query syntax, paging, supported file types and indexing freshness explicit. Reuse the working virtualized diff; do not rebuild it for aesthetics.
 
 Acceptance: a user follows an issue to a line at an old commit, sees accurate blame/history, searches a symbol, proposes an edit, and returns after a rename. Deleted/private material is removed from unauthorized search projections. Searches must not silently truncate and report complete results. Cache keys include relevant version and access scope.
@@ -3050,6 +3418,37 @@ Acceptance: a user follows an issue to a line at an old commit, sees accurate bl
 References: `https://github.com/features` and `https://docs.github.com/en/search-github`.
 
 ### F04 — pull-request and branch-policy parity (R1; after C04/C06)
+
+**Progress (source-tested only, October 8):** the platform merge gate is in `src/core/merge-gate.ts`
+(`tests/merge-gate.test.ts`, 5 pass). Only the latest review per reviewer counts, and only on the current head commit, so stale
+approvals stop counting when the head changes. Self-approval and duplicate approvals from one reviewer do not count. Any
+outstanding "request changes" blocks the merge. Required approval counts are enforced, and CODEOWNERS rules use the most
+specific path prefix; an owner's approval is needed for each changed path under that rule, and an author cannot satisfy their own
+code-owner rule. The gate reports every blocker. Lint and typecheck pass.
+
+**Merge-method policy (source-tested, October 8):** `src/core/merge-method-policy.ts` (`tests/merge-method-policy.test.ts`,
+4 pass) resolves merge, squash or rebase against the repository policy. An omitted method uses the default; a disabled method
+is refused even when requested explicitly; a policy with no enabled method, or a disabled default, is refused.
+
+**Review drafts and threads (source-tested, October 8):** `src/core/review-threads.ts` (`tests/review-threads.test.ts`, 4 pass).
+Drafts stay private to their author until published, and publishing affects only that author's drafts. Threads are anchored to a
+repository-relative path and a line of at least 1 (no traversal or absolute paths). Comments are limited to 65,536 characters.
+Only a participant who has published can resolve a thread, and a resolved thread cannot be resolved again.
+
+**Queue, revert and requests (source-tested, October 8):** `src/core/merge-queue.ts` (`tests/merge-queue.test.ts`, 2 pass) merges the
+queue head only on the current base with passing checks and otherwise requeues it; a revert is a new change naming its target and
+reason. `src/core/review-requests.ts` (1 pass) refuses self-requests and non-readers and deduplicates.
+
+**Stacks, suggestions and forks (source-tested, October 8):** `src/core/change-stacks.ts` (`tests/change-stacks.test.ts`, 3 pass). A
+stacked change merges only after every ancestor; missing parents and cycles are refused. A suggestion replaces exactly one existing
+line and fails when the line is outside the file. Maintainer pushes to a fork need the fork owner's opt-in.
+
+**Integrated locally for F04:** owner retargeting of an unstacked human contribution uses recorded accepted roots,
+native exact-head ancestry and a separate active generation; original creation bindings remain immutable.
+Write locks survive uncertain cleanup and original requests can be discovered and resumed after browser reload.
+Native Git, signed Worker HTTP, generation/ownership and desktop/mobile fixture checks pass. Broader review,
+queue, suggestion and merge-method parity remains open. Hosted proof and Artifacts-backed publication remain
+outside this no-spend continuation.
 
 Complete drafts, review requests, required approvals, CODEOWNERS, multiline/inline threads, suggested edits, resolution, stale approvals, base changes, fork permissions, stacked changes, merge queues, merge/squash/rebase policies, and explicit revert. Retain original contributor attribution and verifiable repair intent. Platform policy—not an agent—controls gate satisfaction.
 
@@ -3059,6 +3458,81 @@ References: `https://docs.github.com/en/pull-requests` and `https://docs.github.
 
 ### F05 — issues and triage (R1; after C06)
 
+**Progress (source-tested only, October 8):** `src/core/issue-triage.ts` (`tests/issue-triage.test.ts`, 4 pass). Labels are
+trimmed, deduplicated and limited to 50 characters. Only repository members can be assigned. An accepted change closes an issue
+once; a second closure keeps the original record, and reopening clears the closing change without fabricating history. A
+transferred issue keeps a tombstone with its destination and refuses further changes. Lint and typecheck pass.
+
+**Integrated locally for F05:** `issue-feature-store.ts`, member-authorized `/issue-features` and `/issues/from-template`
+routes, plus issue planning/template/bulk UI. SQLite reopen, actual signed Worker HTTP, required-field/retry and
+rendered desktop/mobile flows pass. Personal saved filters now retain canonical state/text/label/assignee/milestone/sort
+criteria with per-principal and repository-incarnation isolation, versioned writes, replay-safe delete tombstones,
+and complete bounded query paging; native SQLite and actual signed Worker HTTP pass. Issue attachments now have
+immutable issue/incarnation-bound request receipts, bounded SHA-256-verified R2 streaming, protected download/removal,
+and explicit per-issue reference manifests that do not pretend to restore bytes. Actual local Worker/R2 binary,
+retry, quota, token revocation and inherited team-access checks pass. Removal during reconciliation, overlapping
+retention ownership, same-hash admission holds and late deletion of an old physical generation are also verified.
+Desktop/mobile actual-component fixtures pass.
+Still open: complete duplicate/sub-issue workflows, broader moderation and hosted transfer acceptance; this does not close the full ticket.
+Issue-state PATCH now checks the current actor, credential/session, lifecycle and direct/inherited writer authority
+at the canonical transaction. Durable revisions observe internal and raw SQL updates; original UUID/CAS receipts
+reconcile lost responses without repeating a status change. Signed HTTP withdrawal/conflict/replay and actual CLI
+retry checks pass. Issue detail reads withhold titles/comments after membership, credential or account withdrawal.
+Relationships now show current title/status navigation, unavailable peers, bounded complete pages and version-bound
+removal through the canonical link store. SQLite, signed HTTP and desktop/mobile interaction checks pass.
+Confirmed owner/admin issue removal now creates a durable tombstone with revision/UUID receipts; canonical rows
+remain audit history. Active reads, comments, state changes, new task references, attachments, search and planning
+exclude removed issues, and late reads return minimal tombstones without old content. CLI and desktop/mobile
+confirmation, lost-response retry, denial and stale-revision flows pass. Same-hash attachment adoption requires
+verified caller bytes for that exact attachment UUID; hash-only reconciliation cannot resurrect retained files.
+Activity and inbox events now carry structured issue references; current availability checks hide retired titles
+and paths, including late deletion. Unbound legacy issue events expose generic descriptions rather than guessed
+source authority. Raw audit records remain separate from these reader projections.
+Cross-repository transfer now freezes a bounded issue/conversation/attachment manifest under administrator
+authority in both repositories. Confirmation binds the reviewed content, destination incarnation and current
+direct/inherited reader audience. Destination reservations remain hidden until real R2 bytes, content and
+source-origin attribution are verified. New attachment UUIDs and durable once-only copy attempts reconcile
+uncertain responses without allocating another destination or dispatching another copy. Source tombstones
+expose destination navigation only with fresh destination read access. Unmapped planning/triage context remains
+explicit source history; memberships, subscriptions, task authority and accepted Git state are not transplanted.
+Signed local HTTP/R2, CLI recovery, SQLite and rendered 1280/390 interaction checks pass. Destination finalization
+recovery retains the original retry until positive destination proof, and revoke/regrant rejects the old admission
+epoch. At `06cad90`, the aggregate suite passed 2,392 tests with nine explicit skips.
+Confirmed cancellation now binds a distinct immutable cancellation UUID to the original transfer proof. A durable
+destination fence wins against delayed reservations, uploads and activation before the source becomes editable.
+Stale requests that never froze receive a permanent source UUID fence without inventing a manifest or destination.
+An already active destination cannot be cancelled; its original operator can finish under current authority even
+after audience changes, without allocating or copying again. A replacement administrator can discover and cancel
+an unactivated transfer only with current administrator authority in both repositories. Source bytes and incoming
+provenance remain intact. Bounded cleanup preserves unknown storage holds and shared files, and reports pending
+physical cleanup separately from logical cancellation. Read-only positive receipts reconcile another administrator's
+cancellation without replaying that actor's mutation or releasing a newer transfer lock. Signed local SQLite/R2,
+CLI and rendered 1280/390 recovery flows pass. Aggregate verification was stopped at the storage guard when
+free disk fell to 1.4 GiB and system swap reached approximately 8.3 GiB. The run recorded one existing native
+Git first-root test reaching Bun's default five-second timeout; that case and the uncompleted files require
+verification once resource headroom returns. This checkpoint does not claim an aggregate green run.
+Replacement-administrator finalization now has its own immutable recovery UUID and audit identity. It requires
+current administrator authority in both repositories and an exact already-active destination; it cannot allocate,
+copy or activate content. GET-only SHA/size readback precedes source completion, with both authority generations
+fenced across awaits. Lost acknowledgements reconcile immutable completion receipts without reverting later edits.
+The original creator, actual source tombstone creator and first destination finisher remain separate. Minimal
+source tombstones expose this administrative recovery only after fresh authority in both repositories. Nine native
+HTTP cases, 23 CLI/ledger/intent checks, lint/typecheck and rendered 1280/390 recovery pass; aggregate verification
+remains open after the storage interruption.
+The isolated verifier now supports low-memory child processes, exact inventories, resource preflight and resumable
+hashed log receipts. Resume binds source/configuration/runtime inputs and refuses changed code rather than carrying
+old green results forward. No test deadlines, assertions or existing skips are removed.
+Destination catalog mapping is now prepared in source: a destination administrator explicitly selects labels,
+current eligible members and milestones while retaining immutable source context. Confirmed requests bind the
+origin, feature revision and principal generation; receipt replay preserves later edits. Member catalogs are paged
+and mapping storage is bounded. Six local SQLite domain checks pass, including remapping, historical receipts and
+quota rejection. Five intent/CLI preparation checks also pass, including later member pages, stale proof rejection
+and frozen replay. The actual CLI later-page selection and lost-acknowledgement retry test also passes (nine
+assertions). Current signed HTTP and rendered-flow verification remains pending under the disk resource guard;
+this source checkpoint does not establish release readiness.
+Still open: unresolved physical storage outcomes, complete destination mapping verification and hosted
+multi-repository acceptance.
+
 Complete labels, assignees, milestones, templates/forms, attachment handling, linking/closing through accepted work, duplicate/transfer workflows, relationships/subissues, saved filtering, bulk actions, and moderation. Preserve discussion context when tasks are assigned to agents.
 
 Acceptance: a maintainer triages a set of issues, converts one into a task, merges its fix, and sees the correct issue close once; reopen/revert does not fabricate history. Deleted and transferred resources retain appropriate redirects or tombstones. All actions respect role and privacy boundaries.
@@ -3066,6 +3540,17 @@ Acceptance: a maintainer triages a set of issues, converts one into a task, merg
 Reference: `https://docs.github.com/en/issues`.
 
 ### F06 — project planning (R1; after F05)
+
+**Progress (source-tested only, October 8):** `src/core/project-planning.ts` (`tests/project-planning.test.ts`, 3 pass). Items reference
+issues by number and only accessible issues can be added, once. Stale edits are rejected by item version, fields are typed, and
+progress counts come from stored items. `planning-store.ts` now persists those rules through `/planning` and
+`/planning/export`; the Planning tab provides board/table/timeline, typed fields, complete saved-view semantics,
+iterations, bulk editing and export. Actual signed Worker HTTP, reopen/CAS and synthetic rendered flows pass.
+Accepted-change-driven owner automation now has frozen exact-once receipts and version-bound retries.
+The Planning view additionally shows an accessible status-distribution chart from active stored items, preserving
+owner-defined status names without inferring completion. Two focused derivation/rendered-markup checks pass
+(ten assertions); actual browser chart verification remains pending under the resource guard.
+Complete project parity and hosted acceptance remain open.
 
 Implement project boards, tables, timeline/roadmap views, custom fields, saved filters/sorts, iterations, item status automation, bulk editing, and useful progress charts. Projects must reference issues/changes rather than duplicate them into unrelated state.
 
@@ -3075,6 +3560,20 @@ Reference: `https://docs.github.com/en/issues`.
 
 ### F07 — discussions, documentation and snippets (R1; after F05)
 
+**Progress (source-tested only, October 8):** `src/core/discussions.ts` (`tests/discussions.test.ts`, 3 pass). Moderation (lock,
+pin) is maintainer-only and audited; locked discussions refuse replies; only the asker or a maintainer marks an answer, only in
+questions. Polls, snippets and wiki rules exist as tested core modules. This continuation wires wiki revisions into
+member-authorized SQLite/API/UI flows. Git-backed wiki interoperability, subscriptions, issue conversion and
+production integration of the other core modules remain open.
+Repository discussion moderation is additionally wired in source for separate public/private ledgers, reporting,
+independent review, author appeals and reversal. Suppressed threads exclude replies, polls, search, subscriptions
+and notifications; portable archives retain restrictions without exporting private reports. Local originals remain
+available to the authorized appeal workflow. Focused native/SQLite cases are added but not yet executed under the
+resource guard. Previously converted issues remain independently governed; hidden discussions cannot be converted.
+Archive suppression now also binds both discussion namespaces across asynchronous hashing and redacts restricted
+native author IDs. Three real SQLite archive checks pass, including moderation during hashing. Parent-aware
+projections block known reply edit/report paths under a suppressed thread; native HTTP checks remain pending.
+
 Implement discussion categories, question/answer marking, polls, threading, subscriptions, pin/lock/moderation, and issue conversion; versioned wikis with Git access; shareable revisioned snippets with explicit visibility. Do not call issue comments a full discussion system.
 
 Acceptance: a question becomes an issue without losing attribution/links; wiki edits and history survive ordinary Git operations; private snippets cannot leak through discovery, feeds or raw URLs; moderation is audited and appeal/support routes are real.
@@ -3082,6 +3581,24 @@ Acceptance: a question becomes an issue without losing attribution/links; wiki e
 References: `https://docs.github.com/en/discussions` and `https://github.com/features`.
 
 ### F08 — people, discovery and notifications (R1; after F05/F07)
+
+**Progress (source-tested only, October 8):** `src/core/notification-privacy.ts` (`tests/notification-privacy.test.ts`, 3 pass).
+Recipients without read access never get a title; muted threads and unsubscribed users get no ordinary events; mentions reach
+unsubscribed readers but not muted ones. Follow/contribution-visibility rules and existing profile/community/inbox
+modules are present. Complete discovery, subscription/preferences, delivery diagnostics and end-to-end privacy
+verification remain open. Durable repository delivery preferences and current-access inbox projection are now
+integrated and locally verified, including revoked membership, stale writes, reversed responses and failed refreshes.
+Canonical issue/change/candidate comment subscriptions now persist subscribed/unsubscribed/muted preferences.
+Source comment and recipient outbox commit atomically; alarm retries use account delivery receipts, and delivered
+inbox entries revalidate their exact source, repository incarnation and preference revision. Public discussion
+subscribers can receive reply events without membership; their exact public source never releases private activity
+from the same repository. Native storage and actual Worker HTTP cover lost acknowledgements, withdrawal, removal,
+and publication revocation. Authenticated new member comments now resolve literal mentions to proven direct or
+inherited readers, freeze recipient identities and union mentions/subscriptions into one direct delivery.
+Profile changes cannot reroute mentions; subscribe/unsubscribe preserves them, while a durable mute epoch prevents
+old events resurfacing after unmute. Per-user membership epochs prevent same-timestamp remove/regrant resurrection.
+Parser, SQLite and signed Worker HTTP checks pass. Public outsider/historical/system mentions, state-event
+subscriptions, email delivery, discovery completeness and full hosted acceptance remain open.
 
 Complete profiles, contribution visibility controls, follows, stars/watch subscriptions, repository discovery/topics, notifications, mentions, mute/unsubscribe, read/unread state, email preferences, and delivery diagnostics. Use existing profile/community/inbox modules where they work. Prevent name/namespace impersonation through a defined reporting and review process.
 
@@ -3091,6 +3608,9 @@ References: `https://docs.github.com/en/account-and-profile` and `https://docs.g
 
 ### F09 — organizations and access (R1; after C01/C05)
 
+**Progress (source-tested only, October 8):** `src/core/org-access.ts` (`tests/org-access.test.ts`, 3 pass). Effective role is the
+highest of direct and team grants; org owners are admin; the last owner cannot be removed. Open: invitations, teams UI, audit log, SSO.
+
 Build true organization ownership, teams/nesting, inherited roles, outside collaborators, multiple owners, invitations, access reviews, scoped application/token controls, and audit trails. Reserve enterprise SSO/managed-user expansion for F19; implement those paths only through maintained standards-based implementations and approved providers. R1 must already provide secure session/account recovery and key/token revocation.
 
 Acceptance: transfer a repo into an organization, grant/revoke team access, remove an employee, and verify every read, clone, preview, notification, search and app token respects the change. Invitations cannot downgrade an owner or be consumed twice. Business account continuity must survive one owner leaving.
@@ -3098,6 +3618,15 @@ Acceptance: transfer a repo into an organization, grant/revoke team access, remo
 References: `https://docs.github.com/en/organizations` and `https://docs.github.com/en/authentication`.
 
 ### F10 — CI engine and runner compatibility (R2; after C02/C08/F09)
+
+**Progress (source-tested only, October 8):** `src/core/ci-gate.ts` (`tests/ci-gate.test.ts`, 2 pass). A required check passes only with
+a successful latest run on the exact commit; missing checks block. `workflow-parser.ts` and `ci-engine.ts` provide
+a local dependency scheduler with timeouts, abort requests and unconfirmed-termination reporting. Executable
+steps and persistent claims now also have source implementations in `customer-ci.ts`, `ci-ledger.ts` and
+`ci-workflow.ts`: bounded environment matrices, exact-tree/workflow caches and customer-owned Linux execution.
+The declared dialect grants no workflow secrets and refuses replay of interrupted running claims. Actual Linux
+isolation and cleanup acceptance, Cloudflare-hosted execution, workload identity and broader dialect compatibility
+remain open; these source mechanisms do not establish hosted runner parity.
 
 Implement triggers, job dependencies, matrices, conditions, reusable workflows, logs, artifacts/caches, timeouts, cancellation/retry, secret scopes, environment approval, workload identity, resource quotas and billable usage. Publish a precise workflow dialect/compatibility matrix. Test imported workflows through actual execution; an Actions YAML parser alone is not compatibility.
 
@@ -3109,6 +3638,15 @@ References: `https://docs.github.com/en/actions`, `https://github.com/features`,
 
 ### F11 — releases, static sites and deployments (R2; after C07/F10)
 
+**Progress (source-tested only, October 8):** `src/core/release-rules.ts` (2 tests): semantic tags, one release per tag, unique assets, SHA-256 digests. Open: static sites, deployments.
+Deployment approval revocation is additionally prepared in source: approvals and queued intents bind their original
+owner membership epochs; removal and regrant cannot revive the old approval or requester intent. Dispatch checks current account lifecycles, policy revision,
+repository identity, delivery generation and service authority immediately before webhook delivery. Legacy approvals
+without epoch fences fail closed. One real SQLite epoch check passes (22 assertions), covering distinct approver
+and requester revocation/regrant, fresh approval/intent and unchanged historical receipt. Signed HTTP/webhook cases remain pending
+under the resource guard. A receiver
+still needs execution authorization before irreversible deployment work; delivery is not deployment acceptance.
+
 Extend release support to assets, draft/prerelease state, changelog/provenance, immutable downloads, and permission-safe publication. Provide static-site publishing, custom domain validation, deployment environments, approval, statuses and rollback. Distinguish source accepted, artifact built, deployment requested, and deployment observed.
 
 Acceptance: publish an actual asset, validate its digest, install/download it through the documented client flow, deploy the exact approved artifact, fail/retry a delivery, and roll back deliberately. No acceptance or re-delivery silently repeats a production migration. Environment secrets never reach untrusted previews.
@@ -3116,6 +3654,9 @@ Acceptance: publish an actual asset, validate its digest, install/download it th
 References: `https://docs.github.com/en/pages` and `https://docs.github.com/en/repositories`.
 
 ### F12 — packages and registries (R2; after F09/F10)
+
+**Progress (source-tested only, October 8):** `src/core/package-visibility.ts` (2 tests): private packages hidden from outsiders; published versions immutable. `package-registry.ts` and AuthorityController
+provide a SQLite-backed custom text-file API. This is not npm/OCI stock-client protocol compatibility; that remains open.
 
 Provide actual package protocol implementations for the registries included in the frozen catalog, not generic file-upload pages: OCI/container images and the required language-package formats. Implement public/private access, version immutability, digest/provenance, retention, deletion/restoration policy, repository linkage and namespace protection. Pin supported protocol versions.
 
@@ -3125,6 +3666,8 @@ Reference: `https://docs.github.com/en/packages`.
 
 ### F13 — code and supply-chain security features (R2; after F09/F10/F12)
 
+**Progress (source-tested only, October 8):** `src/core/security-alerts.ts` (2 tests): secret-pattern scan reports kind and line only, never the value. Open: dependency graph, advisories, code scanning.
+
 Integrate maintained scanners and suitable advisory data for secret, source-code and dependency findings; support SARIF ingestion, vulnerability reporting/advisories, alert triage, dependency update proposals, license policy and SBOM/provenance. Check licenses and hosted-use terms before integrating tools. Do not simply label any scanner “CodeQL equivalent.”
 
 Acceptance: known benign synthetic fixtures trigger the expected findings, corrected revisions resolve them without erasing history, new vulnerable dependencies are blocked where policy requires, and private reports remain private. No automatic exploit execution against third parties. Coverage limits and false-positive handling are visible.
@@ -3132,6 +3675,11 @@ Acceptance: known benign synthetic fixtures trigger the expected findings, corre
 Reference: `https://docs.github.com/en/code-security`.
 
 ### F14 — APIs, apps and ecosystem interoperability (R1 core; R2 expansion; after C08/F09)
+
+**Progress (source-tested only, October 8):** `src/core/token-scopes.ts` (`tests/token-scopes.test.ts`, 2 pass). Least-privilege scopes;
+write implies read of the same resource only; unknown scopes are refused. OAuth app/code/token routes and hashed
+SQLite storage are implemented; this continuation adds bounded expiry. Complete installation/consent UX, token
+consumption across product APIs, webhook expansion and external-client journeys remain open.
 
 Publish stable versioned contracts, pagination, rate limits, resource IDs, webhook events and replay rules. Complete app installation/consent, scoped authentication, revocation, check/report APIs, and a trustworthy integration discovery surface. Expose REST and GraphQL equivalents where included; disclose exact incompatibilities rather than claiming drop-in GitHub API support.
 
@@ -3141,6 +3689,16 @@ References: `https://docs.github.com/en/rest`, `https://docs.github.com/en/graph
 
 ### F15 — complete migration and exit (R1; after F01–F09/C08; extend for R2 objects)
 
+**Progress (source-tested only, October 8):** `src/core/export-bundle.ts` (`tests/export-bundle.test.ts`, 2 pass). SHA-256 manifest per
+object; private objects excluded without access; tampered or missing content reported. Import digest checks and
+complete redirect/tombstone snapshots have source tests. Full Git/LFS/conversation inventory, resumable production
+wiring and export/restore acceptance remain open.
+Metadata archive v2 now preserves portable issue deletion history while restoring a fresh inactive destination
+identity, never source permissions or mutation receipts. Full owner audit exports retain historical content;
+ordinary/read-only exports redact retired issue content, imported-origin documents and identity provenance.
+Native archive round-trip, browser schema and signed HTTP credential checks pass. Attachment bytes remain an
+explicit separate inventory/copy requirement; this does not establish full migration acceptance.
+
 Inventory and transfer all in-scope heads/tags/reachable objects and LFS bytes; map issues, PRs, inline reviews, discussions, reactions, attachments, releases, wiki and project metadata. Support authorized private sources, resumable jobs, deletions, idempotent restart, and provenance. Imported authors retain attribution without impersonating local accounts. Produce a coverage and discrepancy report.
 
 Acceptance: migrate a purpose-built repository containing every supported object, compare counts/identities/content hashes, intentionally interrupt and resume, and export/restore into a clean destination. A source-only archive does not establish conversational migration. Provider restrictions and missing objects must remain explicit blockers or approved exceptions.
@@ -3148,6 +3706,9 @@ Acceptance: migrate a purpose-built repository containing every supported object
 Reference: `https://docs.github.com/en/migrations`.
 
 ### F16 — developer environments and agent interoperability (R2; after C02/F10/F14)
+
+**Progress (source-tested only, October 8):** `src/core/agent-permissions.ts` (1 test): an agent calls only granted tools inside its own repository. `agent-environment.ts` adds local environment rules,
+but actual command egress enforcement, reconnect/cleanup and protocol interoperability remain open.
 
 Extend existing managed agents and Git workspaces to resumable development environments, editor attachment, scoped terminals, dependency/bootstrap policies, snapshot/cleanup, and safe AI assistance. Keep provider/agent identity verifiable and distinguish local customer-owned agents from built-in runtime agents. Preserve prompts, requirements, patches and evidence without exposing private transcripts publicly.
 
@@ -3157,6 +3718,11 @@ References: `https://docs.github.com/en/codespaces`, `https://docs.github.com/en
 
 ### F17 — clients and accessibility (R3; after F03–F09/F14)
 
+**Progress (source-tested only, October 8):** `src/core/accessible-names.ts` (1 test): interactive elements without a name are reported. Open: clients, full audit.
+Mobile workspace navigation now moves keyboard focus from the closing sidebar to the existing main content
+region. This source correction preserves the current layout and needs rendered keyboard verification once the
+resource guard allows it; it does not close full screen-reader or client acceptance.
+
 Finish the CLI's supported workflows and credentials on macOS/Windows/Linux. Provide the agreed desktop and mobile/tablet client experiences, including review, notifications and authentication. Record whether these are native clients or responsive web; do not call a mobile webpage native app parity. Preserve normal editor/Git compatibility.
 
 Acceptance: complete create/clone/contribute/review/accept/inspect on each declared client, with keyboard, screen-reader and reduced-motion checks. No client stores account-wide infrastructure secrets. Offline/draft behavior and conflict recovery are explicit.
@@ -3164,6 +3730,8 @@ Acceptance: complete create/clone/contribute/review/accept/inspect on each decla
 Reference inventory: `https://docs.github.com/en`.
 
 ### F18 — commercial and community operations (R3; after usage/authorization foundations)
+
+**Progress (source-tested only, October 8):** `src/core/usage-limits.ts` (2 tests): usage accumulates, overage is flagged, invalid amounts refused. Open: billing, sponsorship (owner decisions).
 
 Complete measured pricing, entitlements, usage accuracy, checkout/webhook recovery, refunds/cancellation, receipts and support before enabling payments. Preserve free basic private repositories with truthful quotas; do not promise unlimited loss-making hosted agent work. Sponsorship, education/nonprofit programs, and community support have operational, legal and payment obligations; code alone cannot manufacture these services.
 
@@ -3173,6 +3741,10 @@ References: `https://docs.github.com/en/billing`, `https://docs.github.com/en/sp
 
 ### F19 — operations, enterprise and service trust (R3; start relevant safeguards in C)
 
+**Progress (source-tested only, October 8):** `src/core/audit-log.ts` (1 test): hash-chained audit log locates the first edited or removed entry. Retention rules and real public status readers
+exist; this continuation tightens status evidence freshness. Actual backup/restore, operational incidents,
+retention enforcement and enterprise identity/governance remain open.
+
 Provide scoped backups and tested restores, monitoring of actual user journeys, declared service objectives, incident communications, abuse and security-response queues, retention/deletion controls, audit export, capacity management and a recovery runbook. Enterprise identity/governance/self-hosting or data-residency commitments require tested support, not badges. Never claim independent compliance certification without the real assessment.
 
 Acceptance: exercise the agreed recovery objective, restore in an isolated environment, confirm no accepted state disappears during optional-service failure, revoke leaked test credentials, and resolve an abuse report with an audit trail. Monitor clone/review/accept/delivery separately; a health endpoint that always returns 200 is not platform uptime evidence.
@@ -3180,6 +3752,8 @@ Acceptance: exercise the agreed recovery objective, restore in an isolated envir
 References: `https://docs.github.com/en/organizations` and `https://docs.github.com/en/enterprise-cloud@latest`.
 
 ### F20 — finite parity certification and stop (R3; after all included tickets)
+
+**Progress (source-tested only, October 8):** `src/core/parity-certification.ts` (1 test): a ticket counts only with evidence; the rest are listed gaps. The certification itself is not claimed.
 
 Review the frozen feature register, not all future GitHub ideas. Each included row must link passing UI/API/native interoperability and permissions evidence. Every external dependency/exception must be approved, and every unresolved operational requirement stays open. Remove overbroad claims, not useful features, when a capability is genuinely unsupported.
 

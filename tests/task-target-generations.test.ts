@@ -1,4 +1,4 @@
-import type {CommittedAcceptedTarget} from "../src/core/accepted-target";
+import {effectiveTaskAcceptedTarget,type CommittedAcceptedTarget} from "../src/core/accepted-target";
 import {Database} from "bun:sqlite";
 import {test,expect} from "bun:test";
 import {TaskTargetGenerations,type TaskTargetGenerationIntent,type TaskTargetGenerationSettlement} from "../src/server/task-target-generations";
@@ -40,4 +40,18 @@ test("native child based on P aligns only after P becomes the reviewed first acc
  const value:TaskTargetGenerationIntent={...seed,source:{...seed.source,dependsOn:"parent-task",baseCommit:parentCommit,currentCommit:childCommit,originalAcceptedTarget:original},target:{...seed.target,acceptedCommit:parentCommit},change:{kind:"accepted-parent-alignment",parentTaskId:"parent-task"}};ledger.prepare(value,()=>{});
  const activated=ledger.activate(value.eventId,()=>{const accepted=db.query("SELECT * FROM native_parent_acceptance WHERE journal_id=?").get("native-journal") as {candidate_id:string;commit_id:string};expect(gitOrThrow(canonical,["rev-parse",original.ref],{gitDir:true})).toBe(accepted.commit_id);gitOrThrow(work,["merge-base","--is-ancestor",parentCommit,childCommit]);return{...settled(value),git:{kind:"aligned-parent",parentTaskId:"parent-task",parentCandidateId:accepted.candidate_id,journalId:"native-journal",parentTarget:{projectId:value.projectId,incarnation:value.incarnation,canonicalRepoName:value.canonicalRepoName,ref:original.ref,acceptedCommit:accepted.commit_id,acceptedVersion:value.target.acceptedVersion},parentCheckpoint:parentCommit,acceptedCommit:accepted.commit_id,baseCommit:parentCommit,currentCommit:childCommit,ancestryVerified:true}};},()=>{});expect(activated.activation?.git).toBe("aligned-parent");expect(gitOrThrow(work,["rev-parse","HEAD"])).toBe(childCommit);expect(activated.activation?.baseCommit).toBe(parentCommit);expect(activated.source.originalAcceptedTarget.acceptedCommit).toBeNull();
  }finally{db.close();await rm(directory,{recursive:true,force:true});}
+});
+test('retarget generation changes accepted branch only with exact unchanged-head ancestry proof and preserves original source',()=>{
+ const {db,ledger}=fixture(),value=intent(),receiptId=value.eventId;
+ const retarget:TaskTargetGenerationIntent={...value,target:{...value.target,ref:'refs/heads/new-base',branch:'new-base',acceptedCommit:'d'.repeat(40),acceptedVersion:0},change:{kind:'retarget',receiptId}};
+ try{
+  ledger.prepare(retarget,()=>{});expect(()=>ledger.activate(retarget.eventId,()=>settled(retarget),()=>{})).toThrow('retarget ancestry');
+  const proof:TaskTargetGenerationSettlement={...settled(retarget),git:{kind:'retargeted',receiptId,oldBase:retarget.source.baseCommit,oldCommit:retarget.source.currentCommit,newBase:retarget.target.acceptedCommit!,currentCommit:retarget.source.currentCommit,ancestryVerified:true}};
+  const activated=ledger.activate(retarget.eventId,()=>proof,()=>{});expect(activated.activation).toMatchObject({git:'retargeted',baseCommit:'d'.repeat(40),currentCommit:retarget.source.currentCommit});
+  expect(activated.source.originalAcceptedTarget.ref).toBe('refs/heads/release');expect(activated.source.baseCommit).toBe(value.source.baseCommit);
+  const projected={acceptedTarget:retarget.source.originalAcceptedTarget,baseCommit:activated.activation!.baseCommit,currentCommit:activated.activation!.currentCommit,targetGeneration:{eventId:activated.eventId,generation:activated.generation,acceptedTarget:activated.target,baseCommit:activated.activation!.baseCommit,currentCommit:activated.activation!.currentCommit}};
+  expect(()=>effectiveTaskAcceptedTarget(projected)).toThrow('scope');expect(effectiveTaskAcceptedTarget({...projected,targetGeneration:{...projected.targetGeneration,retargetedFrom:{ref:'refs/heads/release',branch:'release'}}})?.ref).toBe('refs/heads/new-base');
+
+  const refresh:TaskTargetGenerationIntent={...retarget,eventId:crypto.randomUUID(),expectedGeneration:1,source:{...retarget.source,baseCommit:'d'.repeat(40)},target:{...retarget.target,policyVersion:3},change:{kind:'policy-refresh'}};ledger.prepare(refresh,()=>{});ledger.activate(refresh.eventId,()=>settled(refresh),()=>{});expect(ledger.current('task')?.target.ref).toBe('refs/heads/new-base');
+ }finally{db.close();}
 });

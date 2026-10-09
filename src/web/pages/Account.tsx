@@ -1,3 +1,4 @@
+import {SigningKeys} from '../components/SigningKeys';
 import {GitCredential} from '../components/GitCredential';
 import { ProfileDiscoverySettings } from "./CommunityPeople";
 import { StorageReconciliation } from "../components/StorageReconciliation";
@@ -241,6 +242,7 @@ export function Account() {
         </CardContent>
       </Card>
       </fieldset>
+      <SigningKeys disabled={deletionStarted||busy!==null}/>
       <StorageReconciliation />
       <Card>
         <CardHeader><CardTitle className="text-base text-destructive">Delete account</CardTitle></CardHeader>

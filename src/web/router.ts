@@ -4,9 +4,11 @@ export type RepositoryVersionTab="tags"|"releases";
 export function repositoryVersionPath(projectId:string,tab:RepositoryVersionTab):string{return `/p/${encodeURIComponent(projectId)}/${tab}`;}
 
 export type Route =
+  | { name: "snippets";accountKey?:string;id?:string }
   | { name: "home" }
   | { name: "new" }
   | { name: "account" }
+  | { name: "organizations" }
   | { name: "inbox" }
   | { name: "report"; params: URLSearchParams }
   | { name: "operator" }
@@ -22,6 +24,7 @@ export type Route =
 export function parseHash(hash: string): Route {
   const [pathPart, query = ""] = hash.replace(/^#/, "").split("?");
   const parts = (pathPart ?? "").split("/").filter(Boolean);
+  if(parts[0]==="snippets")return {name:"snippets",...(parts[1]&&/^[a-f0-9]{12}$/.test(parts[1])?{accountKey:parts[1]}:{}),...(parts[2]&&/^[a-f0-9-]{36}$/.test(parts[2])?{id:parts[2]}:{})};
   if (parts[0] === "community") return { name: "community", params: new URLSearchParams(query) };
   if (parts[0] === "community-post") return { name: "community-post", params: new URLSearchParams(query) };
   if (parts[0] === "profile" && parts[1] && /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(parts[1])) return { name: "profile", handle: parts[1] };
@@ -29,6 +32,7 @@ export function parseHash(hash: string): Route {
   if (parts[0] === "public" && parts[1] && /^[a-z0-9]{12,16}$/.test(parts[1])) return { name: "public", projectId: parts[1], params: new URLSearchParams(query) };
   if (parts[0] === "new") return { name: "new" };
   if (parts[0] === "account") return { name: "account" };
+  if (parts[0] === "organizations") return { name: "organizations" };
   if (parts[0] === "inbox") return { name: "inbox" };
   if (parts[0] === "report") return { name: "report", params: new URLSearchParams(query) };
   if (parts[0] === "operator") return { name: "operator" };

@@ -268,7 +268,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     };
     for (const parentId of accepted) await discover(parentId,landed);
     if (!queue.length) return {rebased:[],blocked:[]};
-    const sb = await this.sandbox(`rebase-${candidate.id}`), rebased:string[] = [], blocked:string[] = [];
+    let sb:Awaited<ReturnType<FlareGitIntegrationWorkflow["sandbox"]>>|undefined;const rebased:string[] = [], blocked:string[] = [];
     try {
       while (queue.length) {
         const item = queue.shift()!; if (visited.has(item.id)) continue; visited.add(item.id);
@@ -279,14 +279,18 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
         // Fresh credential identity for each attempt; old issuance intents are never reused.
         const input = await stub.prepareRetainedInput(item.id,workflowId,candidate.id,crypto.randomUUID());
         if (input.dependsOn !== item.parentId || (application && (input.commit !== application.input.commit || input.base !== application.input.base || input.workspaceRepoName !== application.input.workspaceRepoName))) throw new Error("Dependent checkpoint changed; its pushed branch is preserved");
+        try{await stub.assertRetainedWorkspaceWrite(input);}catch{
+          blocked.push(item.id);await stub.logActivity('FlareGit','stack.rebase_deferred',`Change ${item.id} retains its original checkpoint and base; creator consent for maintainer edits is unavailable.`).catch(()=>undefined);continue;
+        }
+        sb??=await this.sandbox(`rebase-${candidate.id}`);
         const canonical = await this.canonicalRemote(stub,input);
         let workspace: Awaited<ReturnType<FlareGitIntegrationWorkflow["retainedRemote"]>> | undefined;
         try {
           workspace = await this.retainedRemote(stub,input,"workspace","write");
           const run = async (command:string,env?:Record<string,string>) => {
-            await this.fundedRetainedCommand(input,stub);
-            const result = await sb.exec(command,env);
-            await this.retainedAuthority(input,stub); return result;
+            await stub.assertRetainedWorkspaceWrite(input);await this.fundedRetainedCommand(input,stub);await stub.assertRetainedWorkspaceWrite(input);
+            const result = await sb!.exec(command,env);
+            await stub.assertRetainedWorkspaceWrite(input);await this.retainedAuthority(input,stub); return result;
           };
           const inspectBranch = async () => {
             const result = await run(`git ls-remote --refs ${q(workspace!.remote)} ${q(`refs/heads/${input.branch}`)}`,gitAuthEnv(workspace!.token));
@@ -321,7 +325,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
                 blocked.push(item.id); continue;
               }
               const newCommit=(await run(`git -C ${WORK} rev-parse HEAD`)).stdout.trim();
-              const beforeCommand=async(phase:"before"|"after")=>{if(phase==="before")await this.fundedRetainedCommand(input,stub);else await this.retainedAuthority(input,stub);};
+              const beforeCommand=async(phase:"before"|"after")=>{await stub.assertRetainedWorkspaceWrite(input);if(phase==="before")await this.fundedRetainedCommand(input,stub);else await this.retainedAuthority(input,stub);await stub.assertRetainedWorkspaceWrite(input);};
               // Preserve the result and target BEFORE persisting an intent or modifying the fork.
               await retainGitInput({exec:run,directory:WORK,remote:canonical.remote,token:canonical.token,incarnation:input.incarnation,taskId:item.id,commit:newCommit,beforeCommand});
               await retainGitInput({exec:run,directory:WORK,remote:canonical.remote,token:canonical.token,incarnation:input.incarnation,taskId:item.id,commit:item.target,beforeCommand});
@@ -336,8 +340,8 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
           rebased.push(item.id); await discover(item.id,application.commit);
         } finally { await workspace?.close(); await canonical.close(); }
       }
-      return {rebased,blocked};
-    } finally { await sb.destroy(); }
+      return {rebased,blocked,...(!sb&&blocked.length?{status:"deferred" as const,reason:"creator_consent_required"}:{})};
+    } finally { await sb?.destroy(); }
   }
 
   private projectId = "";
@@ -385,6 +389,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
   /** Issuance is recorded before use; failed revocation stays in the durable cleanup queue. */
   private async retainedRemote(stub: Stub, input: RetainedInput, purpose: "canonical" | "workspace", scope: "read" | "write") {
     const repoName = purpose === "canonical" ? input.canonicalRepoName : input.workspaceRepoName;
+    if(purpose==="workspace"&&scope==="write")await stub.assertRetainedWorkspaceWrite(input);
     await this.fundedRetainedCommand(input, stub);
     using repo = await this.env.ARTIFACTS.get(repoName);
     await this.retainedAuthority(input, stub);
@@ -395,6 +400,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     const plannedExpiry = Date.now() + 900_000;
     if (!await stub.beginRetainedCredential(input, purpose, plannedExpiry, scope)) throw new Error("A prior credential issuance remains recorded; no duplicate credential was created");
     await this.fundedRetainedCommand(input, stub);
+    if(purpose==="workspace"&&scope==="write")await stub.assertRetainedWorkspaceWrite(input);
     const issued = await repo.createToken(scope, 900);
     const expiresAt = Date.parse(issued.expiresAt);
     try {
@@ -419,7 +425,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
     if (issued.scope !== scope || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now() || expiresAt > Date.now() + 905_000) {
       await close(); throw new Error("Provider credential scope or expiry was not confirmed");
     }
-    try { await this.retainedAuthority(input, stub); }
+    try { await this.retainedAuthority(input, stub);if(purpose==="workspace"&&scope==="write")await stub.assertRetainedWorkspaceWrite(input); }
     catch { await close(); throw new Error("Contribution authority changed before credential use"); }
     return { remote, token: issued.plaintext, close };
   }

@@ -22,10 +22,13 @@ export class PublicationFixture extends RepositoryController {
       for(const taskId of candidate.participatingTaskIds){const task=state.tasks[taskId],commit=candidate.participatingCommits[taskId];if(!task||!commit||!/^[a-f0-9]{40}$/.test(commit))continue;const base=candidate.frozenContributorProofs.find(proof=>proof.id===taskId)?.baseCommit??task.baseCommit??candidate.expectedAcceptedBase??"a".repeat(40);if(!/^[a-f0-9]{40}$/.test(base))continue;if(!task.workspace)throw Error("Synthetic preserved input needs workspace identity");const owner=candidate.review?.actor?.userId??"test-reviewer";new RetainedInputs(this.ctx.storage).record({id:crypto.randomUUID(),version:1,projectId:state.projectId,incarnation,taskId,commit,base,canonicalRepoName:state.canonicalRepoName,workspaceRepoName:task.workspace.repoName,branch:task.workspace.branch,protectedRef:`refs/flaregit/inputs/${incarnation}/${taskId}/${commit}`,protectedBaseRef:`refs/flaregit/inputs/${incarnation}/${taskId}/${base}`,workflowId:candidate.workflowInstanceId,candidateId:candidate.id,actorId:task.contributor.id,ownerId:owner,accountKey:await accountKeyFor(owner)},{commit,base});}
     }
     this.ctx.storage.sql.exec("INSERT INTO project (id, doc) VALUES (1, ?)", JSON.stringify(state));
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS git_task_writers(task_id TEXT PRIMARY KEY,user_id TEXT NOT NULL)");
+    for(const task of Object.values(state.tasks))if(task.contributor.type==="human")this.ctx.storage.sql.exec("INSERT INTO git_task_writers VALUES(?,?)",task.id,task.contributor.id);
     for (const candidate of Object.values(state.candidates)) if (candidate.review?.actor) this.ctx.storage.sql.exec("INSERT OR IGNORE INTO members(user_id,role,added_at,label) VALUES (?,'owner','synthetic-review-time',?)",candidate.review.actor.userId,candidate.review.actor.displayName);
     this.ctx.storage.sql.exec("INSERT INTO lease (id, holder, expires_at) VALUES (1, ?, ?)", holder, Date.now() + 60_000);
     this.ctx.storage.sql.exec("INSERT INTO webhooks (id,url,secret,events,active,created_at) VALUES ('hook','https://example.com/hook','test-secret','change.accepted,change.ready,change.blocked,decision.needed',1,'now')");
   }
+  async fixtureAgentCreatorConsent(taskId:string){const task=(await this.getState()).tasks[taskId];if(!task||task.contributor.type!=="human")throw Error("Known original human creator required");await this.addMember(task.contributor.id,"member");return this.taskForkPermissionUpdate(taskId,task.contributor.id,{enabled:true,expectedRevision:0},{viaToken:false,sessionExpiresAt:Date.now()+60000});}
   async fixtureAgentNativeAuthority(runId:string,taskId:string){
     await this.registerWorkflow(runId,"agent",taskId,"test-reviewer");
     return this.beginAgentNativeAttempt({workflowId:runId,runId,taskId,phase:"apply",attemptId:crypto.randomUUID(),nativeId:crypto.randomUUID()});
@@ -120,6 +123,7 @@ export default {
       if (url.pathname === "/agent-resume") { const input = await request.json() as { runId:string;taskId:string;previousRunId:string }; return Response.json(await stub.resumeAgentRun(input.runId,input.taskId,input.previousRunId)); }
       if (url.pathname === "/verification-policy") await stub.setVerificationPolicy(await request.json() as Record<string,unknown>);
       if (url.pathname === "/agent-claim") return Response.json(await stub.claimAgentRun(await request.json() as AgentRunInput));
+      if(url.pathname==="/agent-creator-consent")return Response.json(await stub.fixtureAgentCreatorConsent((await request.json() as {taskId:string}).taskId));
       if (url.pathname === "/agent-native-authority") {const input=await request.json() as {runId:string;taskId:string};return Response.json(await stub.fixtureAgentNativeAuthority(input.runId,input.taskId));}
       if (url.pathname === "/agent-proposal") { const input = await request.json() as { runId: string; taskId: string; files: Record<string,string> }; return Response.json(await stub.saveAgentProposal(input.runId,input.taskId,input.files)); }
       if (url.pathname === "/agent-push") { const input = await request.json() as { runId: string; taskId: string; commit: string }; return Response.json(await stub.markAgentPushed(input.runId,input.taskId,input.commit)); }

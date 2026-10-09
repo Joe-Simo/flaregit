@@ -1,3 +1,43 @@
+import {MetadataArchiveReleases,metadataReleaseDigest,type ArchiveReleaseProof} from "./metadata-archive-release";
+import type {RepositoryDiscoverySnapshot,RepositoryDiscoveryCredential} from './account-repository-discovery';
+import {inheritedRepositoryDiscovery} from './inherited-repository-discovery';
+import {ensureIssueEventSources,bindIssueActivity,sensitiveLegacyIssueEvent,genericLegacyIssueEvent,issueEventSourceSchema,type IssueEventSource} from './issue-event-sources';
+import {IssueLifecycleStore,IssueLifecycleError,issueDeletionSchema,ensureIssueLifecycleSchema,activeIssueSql,isIssueActive,type IssueDeletionResult} from './issue-lifecycle';
+import {IssueTransferLedger,IssueTransferError,assertIssueWritable,issueTransferManifestSchema,issueTransferCancellationSchema,normalizeIssueTransferCancellation,issueTransferFinalizationSchema,type IssueTransferFinalization,IssueTransferActiveDestinationError,type IssueTransferCancellation,type IssueTransferCancellationRecord,type IssueTransferManifest,type IssueTransferRecord,type IssueTransferCopyAttempt} from './issue-transfer';
+import {copyIssueTransferAttachment,type VerifiedTransferAttachment} from './issue-transfer-bytes';
+import {issueTransferRequestSchema,issueTransferView,canonicalTransferJson,type IssueTransferPreview,type IssueTransferCancellationResult,type IssueTransferPendingRecovery} from './issue-transfer-api';
+import {MembershipEpochs} from './membership-epochs';
+import {IssueStateLedger,IssueStateError,issueStateMutationSchema,type IssueStateScope,type IssueStateCredential,type IssueStateReply,type IssueStateResult} from './issue-state';
+import {plainTextMentions,type MentionRecipient} from './plain-text-mentions';
+import {IssueAttachments,type IssueAttachment,type IssueAttachmentScope,type IssueAttachmentView,type IssueAttachmentInput,type IssueAttachmentReply} from './issue-attachments';
+import {ThreadNotifications,threadSubjectSchema,type ThreadPreference} from './thread-notifications';
+import {TaskRetargets,taskRetargetRequestSchema,type TaskRetargetRequest,type TaskRetargetRecord} from './task-retarget';
+import {inspectTaskRetarget} from './task-retarget-git';
+import {retargetBaseBranch} from '../core/base-branch-change';
+import {ForkPermissions,type ForkPermissionScope,type ForkPermissionSource} from './fork-permissions';
+import {maintainerMayPush} from '../core/change-stacks';
+import {BrowserEdits,browserEditSchema,browserEditBytes,publishBrowserEdit,type BrowserEditInput} from "./browser-edit";
+import type {PublicLfsProof} from "./lfs-public";
+import {DurableLfsStore,LfsStorageError,type LfsScope} from "./lfs-store";
+import type {LfsCredential} from "./lfs-http";
+import type {LfsObjectRef} from "../core/git-lfs";
+import {captureOperationalBackup,encryptOperationalBackup,decryptOperationalBackup,operationalHash,OperationalBackupRetention,type BackupScope,type EncryptedOperationalBackup} from './operational-backup';
+import {SecurityStore} from './security-store';
+import {SecurityReportError,type SecurityImport,type SecurityTriage} from '../core/security-report';
+import {OrganizationAccessLedger,organizationDocumentSchema,organizationTeamsFor,type OrganizationAccessSnapshot,type OrganizationRepositoryRole} from './organization-access';
+import {organizationMutationSchema,type OrganizationMutation} from './organization-requests';
+import {DurableSnippets,type SnippetWrite} from './snippet-store';
+import {InboxPreferences,type InboxPreference} from "./inbox-preferences";
+import {MetadataArchives,MetadataArchiveError,type MetadataArchive} from "./metadata-archive";
+import {IssueFeatureStore,IssueFilterError,issueFilterSchema,issueTransferMappingSchema,type IssueFilterCriteria,type SavedIssueFilterWrite,type IssueFeatureWrite} from './issue-feature-store';
+import {PlanningStore,PlanningError,type PlanningMutation} from './planning-store';
+import {DurableWikiStore} from './wiki-store';
+import type {SaveRequest,HistoryOptions} from '../core/wiki';
+import {applyLifecycleAction, initialLifecycle, type LifecycleAction, type LifecycleResult, type RepositoryLifecycle} from "../core/repository-lifecycle";
+import {normalizeTopics} from "../core/repository-topics";
+import {addTrustedKey, removeTrustedKey, type TrustedKey, type TrustedKeyResult} from "../core/trusted-keys";
+import {addTrustedGpgKey, parseTrustedGpgKey, removeTrustedGpgKey, type TrustedGpgKey, type TrustedGpgResult} from "../core/trusted-gpg-keys";
+import {commitSignatureRequest,inspectCommitSignature,readCommitSignatureObject,type SigningTrustSnapshot} from './commit-signature-inspection';
 import {BranchHttpAttempts} from "./branch-http-attempts";
 import {inspectHttpBranches} from "./branch-http-inventory";
 import {freezeContributionAttribution,ContributionAttributionLedger,assertJournalAttribution} from "./contribution-attribution";
@@ -39,6 +79,7 @@ import {AutoIntegrationDispatch,type AutoIntegrationFacts} from "./auto-integrat
 import {admitRun} from "./projects";
 import {planLimits} from "./polar";
 import {createNativeTag,inspectNativeTags,type TagCreationIdentity,type TagNativeOwnership} from "./tag-git";
+import {ReleaseAssets,type ReleaseAssetInput} from "./release-assets";
 import {ReleaseRecords,type ReleaseContent} from "./release-records";
 import {RepositoryInvitations,type InvitationGrant} from "./repository-invitations";
 import {MirrorExecutions,mapPolicyMirrorAuthority,type MirrorExecutionRecord,type MirrorExecutionScope} from "./mirror-execution";
@@ -128,7 +169,7 @@ import type { Env } from "./env.js";
 import { accountKeyFor,newProjectId,canonicalNameFor,managedBudget, accountOf, projectOf, globalOf } from "./projects.js";
 import { isCommandPolicy,isGitIntegrityPolicy,GIT_INTEGRITY_POLICY, settingsFor } from "../core/command-policy.js";
 import { VERIFIER_IDENTITIES } from "../core/verification-identities.js";
-import { RepositoryDeployments,type AcceptedDeploymentTarget,type DeploymentRecord } from "./deployments.js";
+import { RepositoryDeployments,type AcceptedDeploymentTarget,type DeploymentRecord,type DeploymentArtifactParameters } from "./deployments.js";
 import { RepositoryConnections, type ConnectionMetadata, type CallbackReceipt } from "./connections.js";
 import type { IntegrationCallback, IntegrationCapability } from "./integration-auth.js";
 import { externalCheckGate, type ExternalCheckPolicy, type ExternalCheckState } from "../core/external-checks.js";
@@ -138,7 +179,7 @@ import type { ImportJob } from "./import-job.js";
 import type { PublicRepositoryGrant } from "./public-repositories.js";
 import { AgentRunLedger, type AgentRunInput, type AgentRunRecord, type AgentRunClaim } from "./agent-run-ledger.js";
 import { actorName, RepositoryPublicCommunity, type PublicCommunityActor, type PublicCommunityPolicy, type PublicPost, type ContributionRequest } from "./public-community.js";
-export interface RepositoryReadContext { projectId:string; incarnation:string|null; canonicalRepoName:string; repoName:string; ownerId:string; accountKey:string; publicationVersion?:number; acceptedCommit?:string; taskBase?:string|null; taskCommit?:string|null; taskBranch?:string;taskContributorId?:string;taskInitiatorId?:string; candidateId?:string; candidateCommit?:string; candidateBase?:string|null; candidateInputCommit?:string; candidateInputBase?:string|null;retainedInputReceiptId?:string }
+export interface RepositoryReadContext { projectId:string; incarnation:string|null; canonicalRepoName:string; repoName:string; ownerId:string; accountKey:string; publicationVersion?:number; acceptedCommit?:string; taskBase?:string|null; taskCommit?:string|null; taskBranch?:string;taskContributorId?:string;taskInitiatorId?:string; candidateId?:string; candidateCommit?:string; candidateBase?:string|null; candidateInputCommit?:string; candidateInputBase?:string|null;retainedInputReceiptId?:string;organizationSource?:{id:string;revision:number};maintainerWriteSource?:ForkPermissionSource }
 export type OwnerRebaseRecoveryResult={ok:true;receipt:RebaseRecoveryReceipt}|{ok:false;status:409|503|429;error:string;report?:RebaseRecoveryReport};
 export type OwnerRebaseResumeResult={ok:true;attempt:RebaseResumeAttempt}|{ok:false;status:409|503|429;error:string;report?:RebaseRecoveryReport};
 export type OwnerRebaseApplication=RebaseRecoveryReport & {resumeAvailable:boolean;resume?:{id:string;generation:number;dispatch:RebaseResumeAttempt["dispatch"];nativeState:RebaseResumeAttempt["nativeState"];terminal?:RebaseResumeAttempt["terminal"];pauseReason?:string}};
@@ -220,6 +261,7 @@ export interface TokenScope {
 
 export interface IssueRow {
   importedOrigin?:ImportedConversationOrigin|null;
+  discussionOrigin?:ReturnType<RepositoryDiscussions['conversionOrigin']>;
   number: number;
   title: string;
   body: string;
@@ -229,6 +271,11 @@ export interface IssueRow {
   updated_at: string;
   closed_by: string | null;
   comments: number;
+  stateRevision?:number;
+  transferPending?:boolean;
+  transferContext?:ReturnType<IssueFeatureStore['transferContext']>;
+  transferMappingAvailable?:boolean;
+  transferOrigin?:{source:{projectId:string;number:number};attribution:IssueTransferManifest['attribution'];inlineAnchors:'source-origin-only';authorityTransferred:false};
 }
 
 /** One conversation model for issues, changes and candidates: subject is "issue:<n>", "change:<id>" or "candidate:<id>". */
@@ -286,6 +333,7 @@ export interface InboxRow {
   title: string;
   created_at: string;
   state: "unread" | "archived" | "snoozed";
+  issueSource?:IssueEventSource;
 }
 
 export interface ApiTokenRow {
@@ -402,7 +450,7 @@ export interface Ledger {
   nativeComputeFailure(key: string): Promise<boolean>;
   setNativeComputeFailure(key: string, failed: boolean): Promise<void>;
   nativeComputeStatus(key: string): Promise<{ active: boolean; sandboxName: string; token: string; deadline: number } | null>;
-  existingDeploymentRequest(target: AcceptedDeploymentTarget, serviceId: string, environment: string, key: string, actorId: string): Promise<DeploymentRecord | null>;
+  existingDeploymentRequest(target: AcceptedDeploymentTarget, serviceId: string, environment: string, key: string, actorId: string,artifactInput?:DeploymentArtifactParameters): Promise<DeploymentRecord | null>;
   claimNativeCompute(key: string): Promise<string | null>;
   finishNativeCompute(key: string, token: string): Promise<void>;
   reserveRepositoryReadOperation(operationId:string,accountKey:string):Promise<CoreGitAdmission>;
@@ -467,13 +515,20 @@ export interface Ledger {
   acceptedDeploymentTargets():Promise<AcceptedDeploymentTarget[]>;
   privateRecoveryTargets():Promise<PrivateRecoveryTarget[]>;
   listDeployments():Promise<DeploymentRecord[]>;
-  requestDeployment(target:AcceptedDeploymentTarget,serviceId:string,environment:string,key:string,actorId:string,pin?:CommittedDeploymentPin):Promise<{kind:"created"|"duplicate";deployment:DeploymentRecord}>;
+  deploymentEnvironments():ReturnType<RepositoryController["deploymentEnvironments"]>;
+  configureDeploymentEnvironment(input:{id:string;name:string;requireApproval:boolean},revision:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["configureDeploymentEnvironment"]>;
+  approveDeploymentArtifact(journalId:string,input:DeploymentArtifactParameters,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["approveDeploymentArtifact"]>;
+  requestDeployment(target:AcceptedDeploymentTarget,serviceId:string,environment:string,key:string,actorId:string,pin?:CommittedDeploymentPin,artifactInput?:DeploymentArtifactParameters):Promise<{kind:"created"|"duplicate";deployment:DeploymentRecord}>;
   discussionList(publicOnly:boolean,actor?:PublicCommunityActor):Promise<ReturnType<RepositoryDiscussions["list"]>>;
   publicDiscussionActivity(query:string,ids?:string[]):Promise<DiscussionTopic[]>;
   publicDiscussionActivitySnapshot(ids:string[]):Promise<{directory:DirectoryState;grant:PublicGrantMetadata|null;topics:DiscussionTopic[]}>;
   discussionTopic(id:string,publicOnly:boolean,actor?:PublicCommunityActor):Promise<ReturnType<RepositoryDiscussions["topic"]>>;
   discussionSettings(actor:PublicCommunityActor,input?:unknown):Promise<{enabled:boolean}>;
+  discussionModeration(actor:PublicCommunityActor,publicOnly:boolean,operation:string,id:string,input:unknown):Promise<unknown>;
   discussionPermissions(actor:PublicCommunityActor,id:string,publicOnly:boolean,canAdminister?:boolean):Promise<ReturnType<RepositoryDiscussions["permissions"]>>;
+  discussionFeature(actor:PublicCommunityActor,operation:'poll'|'subscription'|'convert',id:string,input:unknown,publicOnly:boolean,canAdminister?:boolean):Promise<ReturnType<RepositoryDiscussions['pollMutate']>|ReturnType<RepositoryDiscussions['subscribe']>|ReturnType<RepositoryDiscussions['convert']>>;
+  discussionSubscriptions(actor:PublicCommunityActor,publicOnly:boolean):Promise<ReturnType<RepositoryDiscussions['subscriptions']>>;
+  publicDiscussionNotification(actorId:string,topicId:string,entryId:string):Promise<{projectName:string}|null>;
   discussionMutate(actor:PublicCommunityActor,operation:"create"|"reply"|"edit"|"remove"|"control",input:unknown,id:string|undefined,publicOnly:boolean,canAdminister?:boolean):Promise<ReturnType<RepositoryDiscussions["create"]>>;
   publicCommunity(publicOnly?: boolean): Promise<{ policy: PublicCommunityPolicy; posts: PublicPost[] }>;
   configurePublicCommunity(policy: PublicCommunityPolicy, confirmed: boolean, actor: PublicCommunityActor): Promise<PublicCommunityPolicy>;
@@ -486,6 +541,9 @@ export interface Ledger {
   decidePublicContribution(actor: PublicCommunityActor, requestId: string, decision: "approved" | "rejected", confirmedPrivateAccess: boolean): Promise<ContributionRequest>;
   reconcileContributorRegistrations(): Promise<void>;
   cancelContributorRegistration(userId: string): Promise<void>;
+  snippetsList:RepositoryController["snippetsList"];
+  snippetRead:RepositoryController["snippetRead"];
+  snippetSave:RepositoryController["snippetSave"];
   accountLifecycle(): Promise<"active" | "deleting" | "deleted">;
   previewAvailable(): Promise<boolean>;
   beginAccountDeletion(): Promise<void>;
@@ -572,12 +630,41 @@ export interface Ledger {
   externalChecks(candidateId: string): Promise<ExternalCheckState | null>;
   registerExternalRun(candidateId: string, checkId: string, runId: string): Promise<ExternalCheckState>;
   acceptIntegrationCallback(callback: IntegrationCallback): Promise<CallbackReceipt>;
+  organizations: RepositoryController['organizations'];
+  inheritedRepositoryDiscovery:RepositoryController['inheritedRepositoryDiscovery'];
+  repositoryDiscoverySnapshot:RepositoryController['repositoryDiscoverySnapshot'];
+  assertRepositoryDiscovery:RepositoryController['assertRepositoryDiscovery'];
+  organizationCreate: RepositoryController['organizationCreate'];
+  organizationRead: RepositoryController['organizationRead'];
+  organizationMutate: RepositoryController['organizationMutate'];
+  organizationSource: RepositoryController['organizationSource'];
+  synchronizeOrganization: RepositoryController['synchronizeOrganization'];
+  repositoryAccess: RepositoryController['repositoryAccess'];
+  taskForkPermission: RepositoryController['taskForkPermission'];
+  retargetTaskBase: RepositoryController['retargetTaskBase'];
+  recoverTaskRetarget: RepositoryController['recoverTaskRetarget'];
+  taskRetargets: RepositoryController['taskRetargets'];
+  taskForkPermissionUpdate: RepositoryController['taskForkPermissionUpdate'];
+  assertRetainedWorkspaceWrite: RepositoryController['assertRetainedWorkspaceWrite'];
   listProjects(): Promise<ProjectRow[]>;
   addProject(p: { id: string; name: string; role: "owner" | "member"; kind: string }): Promise<void>;
   removeProject(id: string): Promise<void>;
+  securityRead: RepositoryController['securityRead'];
+  securityImport: RepositoryController['securityImport'];
+  securityTriage: RepositoryController['securityTriage'];
+  planningRead: RepositoryController['planningRead'];
+  planningExport: RepositoryController['planningExport'];
+  planningMutate: RepositoryController['planningMutate'];
+  wikiList: RepositoryController['wikiList'];
+  wikiRead: RepositoryController['wikiRead'];
+  wikiHistory: RepositoryController['wikiHistory'];
+  wikiDiff: RepositoryController['wikiDiff'];
+  wikiSave: RepositoryController['wikiSave'];
+  wikiRevert: RepositoryController['wikiRevert'];
   roleOf(userId: string): Promise<"owner" | "member" | null>;
   addMember(userId: string, role: "owner" | "member", label?: string): Promise<void>;
   removeMember(userId: string): Promise<void>;
+  removeRepositoryMember(userId: string, actor: HumanDecisionActor, credentialHash?: string, sessionExpiresAt?: number): Promise<void>;
   listMembers(): Promise<Array<{ user_id: string; role: string; label: string | null; added_at: string }>>;
   peopleAttributionSnapshot(userId:string):Promise<{stamp:string;members:Array<{user_id:string;role:string;label:string|null;added_at:string}>;tasks:PeopleContribution[];writers:PeopleWriter[];acceptedContributions:Array<{candidateId:string;acceptedCommit:string;acceptedAt:string;attribution:import("../core/types").FrozenContributionAttribution[]|null}>}>;
   assertPeopleAttributionSnapshot(userId:string,stamp:string):Promise<boolean>;
@@ -588,13 +675,27 @@ export interface Ledger {
   joinRepositoryInvitation(token:string,eventId:string,userId:string,label:string|undefined,credential:TaskCreationCredential):ReturnType<RepositoryController["joinRepositoryInvitation"]>;
   createInvite(createdBy: string): Promise<string>;
   acceptInvite(token: string, userId: string, label?: string): Promise<boolean>;
-  logActivity(actor: string, type: string, summary: string, opts?: { exceptUser?: string }): Promise<void>;
-  addInbox(item: { projectId: string; projectName: string; kind: "direct" | "activity"; type: string; title: string }): Promise<void>;
+  logActivity(actor: string, type: string, summary: string, opts?: { exceptUser?: string;issueNumber?:number }): Promise<void>;
+  threadPreference(userId:string,subject:string,input?:unknown,sessionExpiresAt?:number):Promise<ThreadPreference>;
+  memberThreadNotification(userId:string,incarnation:string,subject:string,commentId:number,preferenceVersion:number,kind?:'subscription'|'mention'):Promise<{projectName:string}|null>;
+  mentionProfileSnapshot():Promise<{handle:string;version:number;active:boolean}>;
+  addInbox(item: { projectId: string; projectName: string; kind: "direct" | "activity"; type: string; title: string; eventKey?:string;issueSource?:IssueEventSource }): Promise<void>;
+  inboxPreference(projectId:string):Promise<InboxPreference>;
+  updateInboxPreference(projectId:string,input:unknown):Promise<InboxPreference>;
+  inboxSnapshot(): Promise<InboxRow[]>;
   listInbox(filter: "direct" | "activity" | "snoozed" | "archived"): Promise<InboxRow[]>;
   setInboxState(id: number, state: "unread" | "archived" | "snoozed"): Promise<void>;
   inboxUnread(): Promise<{ direct: number; activity: number }>;
   domainsFor(projectId: string): Promise<DomainRow[]>;
   getProfile(): Promise<Profile>;
+  trustedSigningKeys(): Promise<TrustedKey[]>;
+  signingTrustSnapshot(credential?:{hash:string;userId:string;projectId:string}):Promise<SigningTrustSnapshot>;
+  inspectRepositoryCommitSignature: RepositoryController['inspectRepositoryCommitSignature'];
+  addTrustedSigningKey(line: unknown): Promise<TrustedKeyResult>;
+  removeTrustedSigningKey(blob: unknown): Promise<TrustedKeyResult>;
+  trustedGpgKeys(): Promise<TrustedGpgKey[]>;
+  addTrustedGpgKey(armored: unknown): Promise<TrustedGpgResult>;
+  removeTrustedGpgKey(fingerprint: unknown): Promise<TrustedGpgResult>;
   publicProfileState(): Promise<PublicProfileState>;
   peopleSnapshot():Promise<PeopleSnapshot>;
   configureDiscovery(input:unknown,userId:string):Promise<ReturnType<CommunityPeople["state"]>>;
@@ -609,14 +710,66 @@ export interface Ledger {
   publicAcceptedActivity(userId:string):Promise<{directory:DirectoryState;grant:PublicGrantMetadata|null;contributions:Array<{commit:string;acceptedAt:string}>}>;
   publicActivityProjects():Promise<Array<{id:string}>>;
   setPublicProfileVisibility(visibility: "public" | "private", confirmed: boolean, ownerId: string, expectedVersion?: number): Promise<void>;
+  savedIssueFilters(userId:string):ReturnType<RepositoryController['savedIssueFilters']>;
+  saveIssueFilter(userId:string,input:SavedIssueFilterWrite):ReturnType<RepositoryController['saveIssueFilter']>;
+  filteredIssues(userId:string,input:IssueFilterCriteria,cursor?:string):ReturnType<RepositoryController['filteredIssues']>;
+  issueRelationships(userId:string,number:number,cursor?:string):ReturnType<RepositoryController['issueRelationships']>;
+  issueFeatures(userId:string):Promise<ReturnType<IssueFeatureStore['view']>&{canManage:boolean;members:Array<{user_id:string;label:string}>}>;
+  issueFeatureUpdate(userId:string,input:IssueFeatureWrite):Promise<ReturnType<IssueFeatureStore['update']>>;
+  issueTemplatePreview(userId:string,name:string,values:Record<string,unknown>):Promise<ReturnType<IssueFeatureStore['preview']>>;
+  createTemplateIssue(userId:string,input:{title:string;name:string;values:Record<string,string|boolean>;idempotencyKey:string;expectedRevision:number;author:string}):Promise<IssueRow>;
+
+  issueAttachmentList(number:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<IssueAttachmentReply<{attachments:IssueAttachmentView[];canUpload:boolean}>>;
+  issueAttachmentPrepare(number:number,value:unknown,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<IssueAttachmentReply<IssueAttachmentView>>;
+  issueAttachmentUpload(number:number,id:string,body:ReadableStream<Uint8Array>,declaredSize:number|undefined,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<IssueAttachmentReply<IssueAttachmentView>>;
+  issueAttachmentDownload(number:number,id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<IssueAttachmentReply<{name:string;size:number;body:ReadableStream<Uint8Array>}>>;
+  issueAttachmentReconcile(number:number,id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<IssueAttachmentReply<IssueAttachmentView&{reconciled:boolean}>>;
+  issueAttachmentRemove(number:number,id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<IssueAttachmentReply<IssueAttachmentView>>;
+  issueAttachmentReferences(number:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<IssueAttachmentReply<ReturnType<IssueAttachments['references']>>>;
+  issueAttachmentRetention(number:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<IssueAttachmentReply<{retired:number;bytesDeletionConfirmed:boolean}>>;
   listIssues(state: "open" | "closed"): Promise<IssueRow[]>;
   getIssue(n: number): Promise<IssueRow | null>;
   createIssue(i: { title: string; body: string; author: string }): Promise<IssueRow>;
   createMemberIssue(userId:string,input:MemberIssueInput):Promise<IssueRow>;
+  issueAvailability(n:number,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<{number:number;status:'active'|'deleted'|'missing';transferred?:boolean;transfer?:{projectId:string;number:number}}>>;
+  deleteIssueMutation(n:number,value:unknown,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<IssueDeletionResult>>;
+  issueTransferPendingRecovery:RepositoryController['issueTransferPendingRecovery'];
+  issueTransferRollbackContext:RepositoryController['issueTransferRollbackContext'];
+  issueTransferCancellationRead:RepositoryController['issueTransferCancellationRead'];
+  issueTransferCancelDestination:RepositoryController['issueTransferCancelDestination'];
+  issueTransferCancellationReadback:RepositoryController['issueTransferCancellationReadback'];
+  issueTransferCancelledCleanupInspection:RepositoryController['issueTransferCancelledCleanupInspection'];
+  issueTransferFinalizationSourceFence:RepositoryController['issueTransferFinalizationSourceFence'];
+  issueTransferRecoveryDestinationFence:RepositoryController['issueTransferRecoveryDestinationFence'];
+  issueTransferRecoveryReadback:RepositoryController['issueTransferRecoveryReadback'];
+  issueTransferRecoveryFinishDestination:RepositoryController['issueTransferRecoveryFinishDestination'];
+  issueTransferFinalize:RepositoryController['issueTransferFinalize'];
+  issueTransferMappingPreview:RepositoryController['issueTransferMappingPreview'];
+  issueTransferMappingMutation:RepositoryController['issueTransferMappingMutation'];
+  issueTransferMappingRelease:RepositoryController['issueTransferMappingRelease'];
+
+  issueTransferCancel:RepositoryController['issueTransferCancel'];
+  issueTransferReadableDestination:RepositoryController['issueTransferReadableDestination'];
+  issueTransferContext:RepositoryController['issueTransferContext'];
+  issueTransferPreview:RepositoryController['issueTransferPreview'];
+  issueTransferRead:RepositoryController['issueTransferRead'];
+  issueTransferReserve:RepositoryController['issueTransferReserve'];
+  issueTransferCopyAttempt:RepositoryController['issueTransferCopyAttempt'];
+  issueTransferCopyFence:RepositoryController['issueTransferCopyFence'];
+  issueTransferUpload:RepositoryController['issueTransferUpload'];
+  issueTransferConfirmAttachment:RepositoryController['issueTransferConfirmAttachment'];
+  issueTransferActivate:RepositoryController['issueTransferActivate'];
+  issueTransferFinalReadback:RepositoryController['issueTransferFinalReadback'];
+  issueTransferFinishDestination:RepositoryController['issueTransferFinishDestination'];
+  issueTransferStatus:RepositoryController['issueTransferStatus'];
+  issueTransferRun:RepositoryController['issueTransferRun'];
+
+  issueStateMutation(n:number,value:unknown,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<IssueStateResult>>;
   setIssueState(n: number, state: "open" | "closed", by: string): Promise<IssueRow | null>;
   listComments(subject: string): Promise<CommentRow[]>;
   listMemberCommentsPage(userId: string, subject: string, cursor?: string): Promise<CommentPage>;
-  addMemberComment(userId: string, input: MemberCommentInput): Promise<CommentRow>;
+  addMemberComment(userId: string, input: MemberCommentInput,credential?:{viaToken:boolean;hash?:string;expiresAt?:number}): Promise<CommentRow>;
+  addMemberCommentMutation:RepositoryController['addMemberCommentMutation'];
   addComment(c: { subject: string; author: string; body: string; path?: string; line?: number; commit?: string }): Promise<CommentRow>;
   setProfile(p: Profile, expectedVersion?: number): Promise<void>;
   claimHandle(handle: string, accountKey: string): Promise<boolean>;
@@ -679,7 +832,9 @@ export interface Ledger {
   tagOperation(id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["tagOperation"]>;
   release(id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["release"]>;
   tagOperations(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["tagOperations"]>;
-  createRelease(input:{id:string;tagOperationId:string;title:string;notes:string},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["createRelease"]>;
+  createRelease(input:{id:string;tagOperationId:string;title:string;notes:string;prerelease?:boolean},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["createRelease"]>;
+  uploadReleaseAsset(id:string,input:ReleaseAssetInput,bytes:ArrayBuffer,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["uploadReleaseAsset"]>;
+  downloadReleaseAsset(id:string,assetId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["downloadReleaseAsset"]>;
   publishRelease(id:string,expectedRevision:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["publishRelease"]>;
   editRelease(id:string,editId:string,expectedRevision:number,content:ReleaseContent,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["editRelease"]>;
   releases(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["releases"]>;
@@ -687,6 +842,7 @@ export interface Ledger {
   setMirror(p: { target?: string; token?: string; enabled?: boolean }): Promise<void>;
   deleteMirror(): Promise<void>;
   recordMirrorRun(commit: string, status: string, detail: string): Promise<void>;
+  forumModeration(actorId:string,moderator:boolean,operation:string,id:string,input:unknown):Promise<unknown>;
   forumList(input:{category?:string;q?:string;sort?:string}):Promise<ReturnType<PlatformCommunity["list"]>>;
   forumTopic(id:string):Promise<ReturnType<PlatformCommunity["topic"]>>;
   forumCreate(actor:PublicCommunityActor,input:unknown,topicId?:string):Promise<ReturnType<PlatformCommunity["create"]>>;
@@ -704,7 +860,8 @@ export interface Ledger {
   listWebhooks(): Promise<WebhookRow[]>;
   removeWebhook(id: string): Promise<void>;
   listDeliveries(limit: number): Promise<DeliveryRow[]>;
-  getDelivery(id: string): Promise<{ delivery: DeliveryRow & { payload: string; generation: number }; webhook: { url: string; secret: string; active: number } } | null>;
+  deploymentDispatchAllowed(deliveryId:string,expectedGeneration:number,expectedWebhook:{url:string;secret:string;active:number;events:string}):Promise<boolean>;
+  getDelivery(id: string): Promise<{ delivery: DeliveryRow & { payload: string; generation: number }; webhook: { url: string; secret: string; active: number;events:string } } | null>;
   markDelivery(id: string, result: { generation: number; ok: boolean; status?: number; error?: string; latencyMs?: number; final?: boolean }): Promise<number | null>;
   redeliver(id: string): Promise<boolean>;
   redeliverOriginal(id:string,input:WebhookReplayRequest,actor:HumanDecisionActor,credentialHash?:string):Promise<boolean>;
@@ -764,7 +921,8 @@ export interface Ledger {
   prepareRetainedInput(taskId:string,workflowId:string,candidateId:string,id:string,followup?:boolean):Promise<RetainedInput>;
   recordRetainedInput(input:RetainedInput,proof:{commit:string;base:string|null;rootCommit?:string;rootAncestryVerified?:true}):Promise<RetainedInputReceipt>;
   applyRebase(taskId: string, r: { commit?: string; base?: string; parentAccepted?: boolean; failed?: string; expected?:RetainedInput; receiptId?:string;applicationId?:string }): Promise<void>;
-  listActivity(limit: number): Promise<ActivityRow[]>;
+  listActivity(limit: number,userId?:string,credentialHash?:string,sessionExpiresAt?:number): Promise<ActivityRow[]>;
+  issueEventAvailable(userId:string,source:IssueEventSource):Promise<{projectName:string}|null>;
   setVerificationPolicy(policy: Record<string, unknown>): Promise<void>;
   destroy(): Promise<void>;
   repositoryDeletionPending(): Promise<boolean>;
@@ -772,10 +930,19 @@ export interface Ledger {
   repositoryArtifactDeleted(name: string): Promise<boolean>;
   recordRepositoryArtifactDeleted(name: string): Promise<void>;
   initialize(init: { projectId: string; projectName: string; canonicalRepoName: string; head: string; tree?: string; verificationPolicy: Record<string, unknown>; kind?: "demo" | "import" | "empty" | "repository"; defaultBranch?: string; ownerId?: string; source?: string }): Promise<FlareGitProjectState>;
+  browserEdit(taskId:string,input:BrowserEditInput,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):ReturnType<RepositoryController["browserEdit"]>;
   createTask(task: Task, actorId?: string,creationInput?:TaskCreationInput,internalTarget?:InternalTaskTargetOptions,credential?:TaskCreationCredential): Promise<Task & {creationReplayed?:boolean}>;
   taskCreationReplay(taskId:string,actorId:string,input:TaskCreationInput,internalTarget?:InternalTaskTargetOptions,credential?:TaskCreationCredential):Promise<Task|null>;
   mintGitCapability(userId: string, taskId: string | null, write: boolean, parentTokenHash?: string): Promise<{token: string; expiresInSeconds: number}>;
   verifyGitCapability(secret: string, taskId: string | null, write: boolean): Promise<{userId:string;parentTokenHash:string|null}|null>;
+  lfsPublicExpectedSizes(oids:string[],proof:Omit<PublicLfsProof,"objects">):Promise<LfsObjectRef[]>;
+  lfsPublicBatch(objects:LfsObjectRef[],proof:PublicLfsProof):Promise<{oid:string;size:number;error?:{code:number;message:string}}[]>;
+  lfsPublicDownload(oid:string,proof:PublicLfsProof):Promise<{size:number;body:ReadableStream<Uint8Array>}>;
+  lfsBatch(operation:"upload"|"download",objects:LfsObjectRef[],actor:LfsCredential):Promise<{oid:string;size:number;exists:boolean;error?:{code:number;message:string}}[]>;
+  lfsUpload(object:{oid:string;size?:number},body:ReadableStream<Uint8Array>,actor:LfsCredential):Promise<{stored:boolean}>;
+  lfsDownload(oid:string,actor:LfsCredential):Promise<{size:number;body:ReadableStream<Uint8Array>}>;
+  lfsReconcile(oid:string,actor:LfsCredential):Promise<{reconciled:boolean}>;
+  lfsVerify(object:LfsObjectRef,actor:LfsCredential):Promise<void>;
   canGitAccess(userId: string, taskId: string | null, write: boolean): Promise<boolean>;
   apiTokenHashActive(hash: string): Promise<boolean>;
   apiTokenHashCanRead(hash:string,userId:string,projectId:string,write?:boolean):Promise<boolean>;
@@ -796,7 +963,22 @@ export interface Ledger {
 
   revokeGitCapabilities(userId: string): Promise<void>;
   resolveDecision(decisionId: string, selectedOptionId: string, actor: HumanDecisionActor, credentialHash?: string, sessionExpiresAt?:number): Promise<{ taskIds: string[];legacyRerunId?:string;continuationWorkflowId?:string }>;
+  operationalBackupAudit(userId:string,expiresAt:number):Promise<Array<{id:string;actor:string;action:string;at:number}>>;
+  operationalBackupExport(userId:string,expiresAt:number,id:string):Promise<EncryptedOperationalBackup>;
+  operationalBackupDeleteExpired(userId:string,expiresAt:number,id:string):Promise<void>;
+  operationalBackupCreate(userId:string,expiresAt:number):Promise<{id:string;sha256:string;scope:BackupScope}>;
+  operationalBackupRead(userId:string,expiresAt:number):Promise<ReturnType<OperationalBackupRetention['exportAudit']>>;
+  operationalBackupHold(userId:string,expiresAt:number,id:string,held:boolean):Promise<void>;
+  operationalBackupRecover(userId:string,expiresAt:number,id:string):Promise<unknown>;
+  metadataArchiveExport(userId:string,credential:{viaToken:boolean;credentialHash?:string;sessionExpiresAt?:number;includeHistory:boolean}):Promise<{archive:MetadataArchive;sha256:string;releaseProof:ArchiveReleaseProof}>;
+  metadataArchiveRelease(userId:string,credential:{viaToken:boolean;credentialHash?:string;sessionExpiresAt?:number;includeHistory:boolean},proof:ArchiveReleaseProof):Promise<true>;
+  metadataArchiveRestore(userId:string,value:unknown,requestId:string,sha256:string,sessionExpiresAt:number):Promise<Awaited<ReturnType<MetadataArchives["restore"]>>>;
+  metadataArchiveHistory(userId:string,credential:{viaToken:boolean;credentialHash?:string;sessionExpiresAt?:number;includeHistory:boolean}):Promise<{records:ReturnType<MetadataArchives["history"]>;releaseProof:ArchiveReleaseProof}>;
   getState(): Promise<FlareGitProjectState>;
+  repositoryLifecycle(): Promise<RepositoryLifecycle>;
+  repositoryLifecycleTransition: RepositoryController['repositoryLifecycleTransition'];
+  repositoryTopics(): Promise<string[]>;
+  setRepositoryTopics(topics: string[]): Promise<string[]>;
   repositoryInitializationStatusByRequest(requestId:string,actorId:string,credential:TaskCreationCredential):Promise<RepositoryInitializationStatus|null>;
   repositoryInitializationDiagnosticByRequest(requestId:string,actorId:string,credential:TaskCreationCredential):Promise<{requestId:string;eventId:string;allocationId:string;projectId:string;projectName:string;canonicalRepoName:string;nativeName:string|null;phase:RepositoryInitializationIntent["phase"];metadataRecorded:boolean;commitRecorded:boolean;published:boolean}|null>;
   repositoryInitializationStatuses(actorId:string,credential:TaskCreationCredential,options?:{limit?:number;cursor?:string}):Promise<{initializations:RepositoryInitializationStatus[];nextCursor:string|null}>;
@@ -864,6 +1046,7 @@ export interface Ledger {
   completePublish(journalId: string,readbackScope?:string): Promise<void>;
   abortPublish(candidateId: string, journalId: string | undefined, reason: string, outcome: "failed" | "stale"): Promise<void>;
   cancelTask(taskId: string): Promise<void>;
+  cancelMemberTask: RepositoryController['cancelMemberTask'];
   failAgentTask(taskId: string, runId?: string): Promise<void>;
   beginAgentTask(taskId: string, runId?: string): Promise<boolean>;
   getBilling(): Promise<{ plan: "free" | "pro"; status: string; subscriptionId?: string; updatedAt: string }>;
@@ -1420,23 +1603,29 @@ export class RepositoryController extends DurableObject<Env> {
     else { const legacy = this.legacyRecoveryTarget(); if (legacy) targets.unshift(legacy); }
     return targets;
   }
-  async listDeployments():Promise<DeploymentRecord[]>{return new RepositoryDeployments(this.ctx.storage,this.load().projectId).list();}
+  async deploymentEnvironments(){return new RepositoryDeployments(this.ctx.storage,this.load().projectId,actorId=>this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId).toArray()[0]?.role==="owner",actorId=>this.membershipEpochs().read(actorId)).environments();}
+  async configureDeploymentEnvironment(input:{id:string;name:string;requireApproval:boolean},revision:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const epoch=this.membershipEpochs().read(actor.userId),authority=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authority();if(this.membershipEpochs().read(actor.userId)!==epoch)throw Error("Deployment owner membership changed");return new RepositoryDeployments(this.ctx.storage,this.load().projectId,actorId=>this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId).toArray()[0]?.role==="owner",actorId=>this.membershipEpochs().read(actorId)).configureEnvironment(input,revision);}
+  private deploymentArtifact(target:AcceptedDeploymentTarget,input:DeploymentArtifactParameters){const scope=this.releaseScope(input.releaseId),record=new ReleaseRecords(this.ctx.storage).get(input.releaseId);if(record?.phase!=="published"||scope.source.commit!==target.commit||scope.source.tree!==target.tree||scope.source.acceptedJournalId!==target.journalId||(target.acceptedRef!==undefined&&scope.source.acceptedRef!==target.acceptedRef)||(target.acceptedRootVersion!==undefined&&scope.source.acceptedRootVersion!==target.acceptedRootVersion))throw Error("Published release must bind exact accepted deployment source");const asset=new ReleaseAssets(this.ctx.storage).list(scope).find(row=>row.id===input.assetId&&row.phase==="verified");if(!asset)throw Error("Verified immutable release asset required");return{artifactId:asset.id,digest:asset.sha256,environmentId:input.environmentId,...(input.rollbackOf?{rollbackOf:input.rollbackOf}:{})};}
+  async approveDeploymentArtifact(journalId:string,input:DeploymentArtifactParameters,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const epoch=this.membershipEpochs().read(actor.userId),authority=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authority();if(this.membershipEpochs().read(actor.userId)!==epoch)throw Error("Deployment owner membership changed");const selected=this.selectRecordedDeployment(journalId);if(!selected)throw Error("Accepted source unavailable");const artifact=this.deploymentArtifact(selected.target,input);return{approvalId:new RepositoryDeployments(this.ctx.storage,this.load().projectId,actorId=>this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId).toArray()[0]?.role==="owner",actorId=>this.membershipEpochs().read(actorId)).approve(selected.target,artifact,actor.userId)};}
+  async listDeployments():Promise<DeploymentRecord[]>{return new RepositoryDeployments(this.ctx.storage,this.load().projectId,actorId=>this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId).toArray()[0]?.role==="owner",actorId=>this.membershipEpochs().read(actorId)).list();}
   async acceptedDeploymentTargets():Promise<AcceptedDeploymentTarget[]>{
     const targets=await Promise.all(this.load().journal.filter(entry=>entry.state==="ACCEPTED").slice(-100).map(entry=>this.acceptedDeploymentTarget(entry.id)));
     return targets.filter((entry):entry is NonNullable<typeof entry>=>entry!==null).map(entry=>entry.target);
   }
-  async requestDeployment(target:AcceptedDeploymentTarget,serviceId:string,environment:string,key:string,actorId:string,pin?:CommittedDeploymentPin){
+  async requestDeployment(target:AcceptedDeploymentTarget,serviceId:string,environment:string,key:string,actorId:string,pin?:CommittedDeploymentPin,artifactInput?:DeploymentArtifactParameters){
+    const requesterEpoch=this.membershipEpochs().read(actorId);
     const context=await this.repositoryReadContext(actorId);if(await this.roleOf(actorId)!=="owner")throw Error("Only the owner can request a deployment");
     const selection=this.selectRecordedDeployment(target.journalId);if(!selection||JSON.stringify(selection.target)!==JSON.stringify(target))throw Error("Deployment target must match an exact accepted publication journal");
-    const ledger=new RepositoryDeployments(this.ctx.storage,this.load().projectId),duplicate=ledger.existingRequest(target,serviceId,environment,key,actorId,this.legacyPrimaryDeploymentCompatibility(selection));if(duplicate)return{kind:"duplicate" as const,deployment:duplicate};
+    const ledger=new RepositoryDeployments(this.ctx.storage,this.load().projectId,actorId=>this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId).toArray()[0]?.role==="owner",actorId=>this.membershipEpochs().read(actorId)),duplicate=await this.existingDeploymentRequest(target,serviceId,environment,key,actorId,artifactInput);if(duplicate)return{kind:"duplicate" as const,deployment:duplicate};
     if(!pin)throw Error("Trusted exact deployment pin required before creating an event");confirmAcceptedDeploymentSelection(selection,pin);
     const service=this.connections().signingConfig(serviceId);if(!service?.capabilities.includes("report-deployment"))throw Error("Deployment reporting service unavailable");
     if(!(await this.listWebhooks()).some(hook=>hook.active&&hook.events.split(",").includes("deployment.requested")))throw Error("Configure an active deployment.requested webhook before requesting delivery");
     await this.ensureRecoveryAlarm();if(!await this.assertRepositoryReadContext(context,actorId)||await this.roleOf(actorId)!=="owner")throw Error("Deployment owner authority changed");
     let deliveryIds:string[]=[];const result=this.ctx.storage.transactionSync(()=>{
-      if(this.repositoryDeleting()||this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId).toArray()[0]?.role!=="owner")throw Error("Deployment owner authority changed");const current=this.selectRecordedDeployment(target.journalId);if(!current||JSON.stringify(current)!==JSON.stringify(selection))throw Error("Accepted deployment receipt changed");confirmAcceptedDeploymentSelection(current,pin);
+      if(this.repositoryDeleting()||this.membershipEpochs().read(actorId)!==requesterEpoch||this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId).toArray()[0]?.role!=="owner")throw Error("Deployment owner authority changed");const current=this.selectRecordedDeployment(target.journalId);if(!current||JSON.stringify(current)!==JSON.stringify(selection))throw Error("Accepted deployment receipt changed");confirmAcceptedDeploymentSelection(current,pin);
       const freshService=this.connections().signingConfig(serviceId);if(!freshService?.capabilities.includes("report-deployment")||!this.ctx.storage.sql.exec<{events:string}>("SELECT events FROM webhooks WHERE active=1").toArray().some(hook=>hook.events.split(",").includes("deployment.requested")))throw Error("Deployment service or delivery authorization changed");
-      return ledger.request(current.target,serviceId,environment,key,actorId,event=>{deliveryIds=this.stageEvent(event.type,event.data,{id:event.id,createdAt:event.createdAt});},this.legacyPrimaryDeploymentCompatibility(current));
+      const artifact=artifactInput?{...this.deploymentArtifact(current.target,artifactInput),...(artifactInput.approvalId?{approvalId:artifactInput.approvalId}:{})}:undefined;
+      return ledger.request(current.target,serviceId,environment,key,actorId,event=>{deliveryIds=this.stageEvent(event.type,event.data,{id:event.id,createdAt:event.createdAt});},this.legacyPrimaryDeploymentCompatibility(current),artifact,artifactInput);
     });await Promise.all(deliveryIds.map(deliveryId=>this.enqueueWebhookDelivery(deliveryId)));return result;
   }
 
@@ -1470,12 +1659,68 @@ export class RepositoryController extends DurableObject<Env> {
     return {directory,grant,topics};
   }
   async discussionTopic(id:string,publicOnly:boolean,actor?:PublicCommunityActor){await this.assertDiscussionAccess(publicOnly,actor);return this.discussions(publicOnly).topic(id);}
-  async discussionPermissions(actor:PublicCommunityActor,id:string,publicOnly:boolean,canAdminister=false){const owner=canAdminister&&await this.roleOf(actor.userId)==="owner";await this.assertDiscussionAccess(publicOnly,actor);return this.discussions(publicOnly).permissions(actor,id,owner);}
-  async discussionMutate(actor:PublicCommunityActor,operation:"create"|"reply"|"edit"|"remove"|"control",input:unknown,id:string|undefined,publicOnly:boolean,canAdminister=false){
+  async discussionModeration(actor:PublicCommunityActor,publicOnly:boolean,operation:string,id:string,input:unknown){
+    await this.assertDiscussionAccess(publicOnly,actor);
+    const canonicalAccountKey=await accountKeyFor(actor.userId);
+    if(actor.accountKey!==canonicalAccountKey)throw Error("Canonical account required");
+    const access=publicOnly?await this.repositoryAccessFence(actor.userId).catch(()=>null):await this.repositoryAccessFence(actor.userId);
+    return this.ctx.storage.transactionSync(()=>{
+      access?.assert();
+      const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actor.userId).toArray()[0]?.role;
+      if(!actor.userId||this.repositoryDeleting()||!this.discussionEnabled(publicOnly)||!publicOnly&&!access)throw Error("Discussion access changed");
+      if(!["inbox","audit"].includes(operation)&&this.load().lifecycle?.state==="archived")throw Error("Archived discussions cannot be changed");
+      const operator=(this.env.OPERATOR_ACCOUNTS??"").split(",").map(value=>value.trim()).includes(canonicalAccountKey);
+      const moderator=role==="owner"||operator||access?.role==="admin";
+      const ledger=this.discussions(publicOnly).moderation();
+      switch(operation){case "inbox":return {reports:ledger.inbox(actor.userId,moderator),moderator,...(moderator?{audit:ledger.history(actor.userId,true)}:{})};case "report":return ledger.report(id,actor.userId,input);case "resolve":return ledger.resolve(id,actor.userId,moderator,input);case "appeal":return ledger.appeal(id,actor.userId,input);case "decide":return ledger.decide(id,actor.userId,moderator,input);default:throw Error("Unknown moderation operation");}
+    });
+  }
+  async discussionPermissions(actor:PublicCommunityActor,id:string,publicOnly:boolean,canAdminister=false){const owner=canAdminister&&await this.roleOf(actor.userId)==="owner";await this.assertDiscussionAccess(publicOnly,actor);return {...this.discussions(publicOnly).permissions(actor,id,owner),canConvert:!!this.ctx.storage.sql.exec('SELECT 1 FROM members WHERE user_id=?',actor.userId).toArray().length};}
+  async discussionSubscriptions(actor:PublicCommunityActor,publicOnly:boolean){await this.assertDiscussionAccess(publicOnly,actor);return this.discussions(publicOnly).subscriptions(actor);}
+  async publicDiscussionNotification(actorId:string,topicId:string,entryId:string){
+    try{
+      if(!/^discussion_[a-f0-9-]{36}$/.test(topicId)||!/^discussion_[a-f0-9-]{36}$/.test(entryId)||!actorId)return null;
+      if(!this.discussionEnabled(true)||!this.discussions(true).notificationAvailable(topicId,entryId,actorId))return null;
+      return {projectName:this.load().projectName};
+    }catch{return null;}
+  }
+  async discussionFeature(actor:PublicCommunityActor,operation:'poll'|'subscription'|'convert',id:string,input:unknown,publicOnly:boolean,canAdminister=false){
     await this.assertDiscussionAccess(publicOnly,actor);
     return this.ctx.storage.transactionSync(()=>{
+      const role=this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',actor.userId).toArray()[0]?.role,owner=canAdminister&&role==='owner';
+      if(!publicOnly&&!role||this.repositoryDeleting()||this.load().lifecycle?.state==='archived'||!this.discussionEnabled(publicOnly))throw Error('Discussion writing access changed');
+      const ledger=this.discussions(publicOnly);
+      if(operation==='poll')return ledger.pollMutate(actor,id,input,owner);
+      if(operation==='subscription')return ledger.subscribe(actor,id,input);
+      if(!role)throw Error('Only members can convert discussions into private repository issues');
+      return ledger.convert(actor,id,input);
+    });
+  }
+  private async deliverDiscussionNotifications(){
+    if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'repository_%_discussion_notifications' LIMIT 1").toArray().length)return;
+    for(const publicOnly of [true,false]){
+      const ledger=this.discussions(publicOnly);
+      for(const pending of ledger.pendingNotifications()){
+        try{
+          const role=publicOnly?true:await this.roleOf(pending.actor_id)!==null;
+          const available=()=>{if(this.repositoryDeleting()||!role)return false;try{return this.discussionEnabled(publicOnly)&&ledger.notificationAvailable(pending.topic_id,pending.entry_id,pending.actor_id);}catch{return false;}};
+          if(!available()){ledger.acknowledgeNotification(pending.event_id,pending.actor_id);continue;}
+          const account=accountOf(this.env,await accountKeyFor(pending.actor_id));
+          if(!publicOnly&&!await this.roleOf(pending.actor_id)||!available()){ledger.acknowledgeNotification(pending.event_id,pending.actor_id);continue;}
+          const state=this.load();
+          await account.addInbox({projectId:state.projectId,projectName:state.projectName,kind:'activity',type:`discussion.reply.${publicOnly?'public':'members'}.${pending.topic_id}${publicOnly?`.${pending.entry_id}`:''}`,title:'New reply in a subscribed discussion',eventKey:`discussion:${publicOnly?'public':'members'}:${pending.event_id}`});
+          ledger.acknowledgeNotification(pending.event_id,pending.actor_id);
+        }catch{/* A lost acknowledgement retains the original event for deduplicated delivery. */}
+      }
+      if(ledger.pendingNotifications().length)await this.ensureRecoveryAlarm(60000);
+    }
+  }
+  async discussionMutate(actor:PublicCommunityActor,operation:"create"|"reply"|"edit"|"remove"|"control",input:unknown,id:string|undefined,publicOnly:boolean,canAdminister=false){
+    await this.assertDiscussionAccess(publicOnly,actor);
+    if(operation==="reply")await this.ensureRecoveryAlarm(60000);
+    const result=this.ctx.storage.transactionSync(()=>{
       const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actor.userId).toArray()[0]?.role;const owner=canAdminister&&role==="owner";if(!publicOnly&&!role)throw new Error("Repository membership changed");
-      if(!this.discussionEnabled(publicOnly))throw new Error("Discussion access changed");const ledger=this.discussions(publicOnly);
+      if(this.load().lifecycle?.state==='archived'||!this.discussionEnabled(publicOnly))throw new Error("Discussion access changed");const ledger=this.discussions(publicOnly);
       if(operation==="create"){if(typeof input==="object"&&input!==null&&"category" in input&&input.category==="announcements"&&!owner)throw new Error("Announcements require maintainer");return ledger.create(actor,input);}
       if(!id)throw new Error("Discussion id required");
       if(operation==="reply")return ledger.create(actor,input,id);
@@ -1483,6 +1728,8 @@ export class RepositoryController extends DurableObject<Env> {
       if(operation==="remove")return ledger.remove(actor,id,input,owner);
       return ledger.control(actor,id,input,owner);
     });
+    if(operation==="reply")this.ctx.waitUntil(this.deliverDiscussionNotifications());
+    return result;
   }
   private community() { return new RepositoryPublicCommunity(this.ctx.storage, this.load().projectId); }
   private requirePublicRepository(): void {
@@ -1630,27 +1877,72 @@ export class RepositoryController extends DurableObject<Env> {
   async prepareBranchCreation(input:{operationId:string;name:string;sourceCommit:string},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const initial=await this.authorizeHumanDecision(actor,credentialHash,true);initial();const state=this.load();this.synchronizePrimaryAcceptedRegistry(state);const incarnation=new PrivateRecoveryOperations(this.ctx.storage).incarnation(),authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt),accountKey=await accountKeyFor(actor.userId),operations=new BranchCreationOperations(this.ctx.storage),existing=operations.get(input.operationId);if(!isSafeRef(input.name)||input.name==="HEAD"||input.name.startsWith("refs/")||input.name===(state.defaultBranch??"main")||!isSafeSha(input.sourceCommit)||/^0{40}$/.test(input.sourceCommit)||state.acceptedState.kind==="unborn"||!isSafeSha(state.acceptedState.currentCommit)||/^0{40}$/.test(state.acceptedState.currentCommit))throw Error("A new branch name and committed accepted source are required");const identity:BranchCreationIdentity={operationId:input.operationId,projectId:state.projectId,incarnation,canonicalRepoName:state.canonicalRepoName,actorId:actor.userId,accountKey,branch:input.name,sourceCommit:input.sourceCommit,acceptedCommit:existing?.acceptedCommit??state.acceptedState.currentCommit};return operations.prepare(identity,()=>{authorize();this.assertBranchCreationLocal(identity);});}
   async branchOperations(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authorize();new BranchCreationOperations(this.ctx.storage);new BranchNativeAttempts(this.ctx.storage);new BranchCredentialIncidents(this.ctx.storage);const projectId=this.load().projectId,incarnation=this.readRepositoryIncarnation()??"",pending="(json_extract(o.doc,'$.phase') IN ('prepared','unknown') OR EXISTS(SELECT id FROM branch_native_attempts a WHERE a.operation_id=o.id AND json_extract(a.doc,'$.state')!='stopped') OR EXISTS(SELECT id FROM branch_credential_incidents c WHERE json_extract(c.payload,'$.operationId')=o.id AND c.status!='revoked'))";const rows=this.ctx.storage.sql.exec<{doc:string}>(`SELECT o.doc FROM branch_creation_operations o WHERE json_extract(o.doc,'$.projectId')=? AND json_extract(o.doc,'$.incarnation')=? ORDER BY ${pending} DESC,o.rowid DESC LIMIT 21`,projectId,incarnation).toArray();const pendingCount=this.ctx.storage.sql.exec<{n:number}>(`SELECT COUNT(*) AS n FROM branch_creation_operations o WHERE json_extract(o.doc,'$.projectId')=? AND json_extract(o.doc,'$.incarnation')=? AND ${pending}`,projectId,incarnation).one().n;return{operations:rows.slice(0,20).map(row=>this.branchOperationView(JSON.parse(row.doc) as BranchCreationOperation)),truncated:rows.length>20,pendingTruncated:pendingCount>20,historyHasMore:rows.length>20};}
   async branchOperation(id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authorize();const operation=new BranchCreationOperations(this.ctx.storage).get(id);if(!operation)throw Error("Saved branch creation unavailable");this.assertBranchCreationLocal(operation);return this.branchOperationView(operation);}
+  async browserEdit(taskId:string,input:BrowserEditInput,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){
+    const parsed=browserEditSchema.parse(input),bytes=await browserEditBytes(parsed);
+    const creationCredential={viaToken:actor.viaToken,...(actor.viaToken?{credentialHash}:{sessionExpiresAt})};
+    const initial=await this.taskCreationCredentialFence(actor.userId,creationCredential);initial();
+    if(!await this.canGitAccess(actor.userId,taskId,true))throw Error("Only the contribution author or owner can edit");
+    const ledger=new BrowserEdits(this.ctx.storage),old=ledger.get(parsed.requestId);
+    const state=this.load(),task=state.tasks[taskId],incarnation=this.readRepositoryIncarnation();
+    if(!task||!task.allowedScope.some(scope=>scope==='*'||(scope.endsWith('/**/*')?parsed.path.startsWith(scope.slice(0,-4)):scope.endsWith('/')?parsed.path.startsWith(scope):parsed.path===scope))||task.contributor.type!=='human'||task.workspace.repoName===state.canonicalRepoName||task.workspace.branch!==`task/${taskId}`||!incarnation)throw Error("An existing private human contribution is required");
+    const creation=new TaskCreationIntents(this.ctx.storage).forTask(taskId);if(!creation?.providerRepoId||creation.phase!=='committed'||creation.workspaceRepoName!==task.workspace.repoName||creation.projectId!==state.projectId||creation.incarnation!==incarnation)throw Error('Original contribution fork allocation must be confirmed');
+    const maintainerWriteSource=old?old.identity.maintainerWriteSource:this.forkWriteSource(taskId,actor.userId);
+    const identity={projectId:state.projectId,incarnation,canonicalRepoName:state.canonicalRepoName,taskId,workspaceRepoName:task.workspace.repoName,providerRepoId:creation.providerRepoId,remote:task.workspace.remote,branch:task.workspace.branch,actorId:actor.userId,...(maintainerWriteSource?{maintainerWriteSource}:{}),authorName:old?.identity.authorName??actor.displayName,authorEmail:old?.identity.authorEmail??`${await accountKeyFor(actor.userId)}@users.flaregit.invalid`,createdAt:old?.identity.createdAt??new Date().toISOString(),input:parsed};
+    const assert=()=>{initial();this.assertForkWriteSource(taskId,actor.userId,maintainerWriteSource);const current=this.load().tasks[taskId];if(this.readRepositoryIncarnation()!==incarnation||this.load().canonicalRepoName!==state.canonicalRepoName||!current||current.workspace.repoName!==identity.workspaceRepoName||current.workspace.remote!==identity.remote||current.workspace.branch!==identity.branch||!['working','checkpointed'].includes(current.status)||current.currentCommit!==parsed.expectedHead&&current.currentCommit!==ledger.get(parsed.requestId)?.commit)throw Error("Contribution identity or expected head changed");};
+    const record=ledger.prepare(identity,bytes.blob,assert);
+    const authorize=async()=>{assert();await this.taskCreationCredentialFence(actor.userId,creationCredential);assert();if(!await this.canGitAccess(actor.userId,taskId,true))throw Error("Contribution writer access changed");assert();};
+    if(record.phase==='refused')return {requestId:parsed.requestId,taskId,phase:record.phase,commit:record.commit??null};
+    if(record.phase==='confirmed'){await authorize();await this.applyCheckpoint({eventId:`browser-edit:${parsed.requestId}`,taskId,commit:record.commit!,ready:false,filesChanged:[parsed.path]},assert);return {requestId:parsed.requestId,taskId,phase:record.phase,commit:record.commit!};}
+    try{
+      const result=await this.withBranchNative(parsed.requestId,record.phase==='push_unknown'?'inventory':'create',actor,authorize,JSON.stringify(identity),(executor,_remote,token)=>publishBrowserEdit(executor,record,token,async(commit,tree)=>{await authorize();ledger.update(identity,current=>{if(current.phase!=='prepared'||current.commit&&current.commit!==commit)throw Error("Original commit proposal changed");current.commit=commit;current.tree=tree;},assert);},async()=>{await authorize();ledger.update(identity,current=>{if(current.phase!=='prepared'||!current.commit)throw Error("Original commit proposal unavailable");current.phase='push_unknown';},assert);}),undefined,{repoName:identity.workspaceRepoName,remote:identity.remote,providerRepoId:identity.providerRepoId});
+      await authorize();if(result.confirmed&&result.commit){ledger.update(identity,current=>{if(current.commit!==result.commit||current.phase!=='push_unknown')throw Error("Original push readback differs");current.phase='confirmed';},assert);await this.applyCheckpoint({eventId:`browser-edit:${parsed.requestId}`,taskId,commit:result.commit,ready:false,filesChanged:[parsed.path]},assert);}
+    }catch{/* Saved preparation/proposal/push state is returned for retry, never replaced. */}
+    const current=ledger.get(parsed.requestId)!;return {requestId:parsed.requestId,taskId,phase:current.phase,commit:current.commit??null};
+  }
   protected branchNativeSandbox(nativeId:string){return this.env.INTEGRATOR.getByName(`native-${nativeId}`);}
   protected branchRepositoryProvider(){return this.env.ARTIFACTS;}
   protected branchInventoryFetcher():NonNullable<Parameters<typeof inspectHttpBranches>[0]["fetcher"]>{return fetch;}
   private async authorizeBranchRead(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<()=>void>{const state=this.load(),incarnation=new PrivateRecoveryOperations(this.ctx.storage).incarnation(),account=accountOf(this.env,await accountKeyFor(actor.userId));const assert=()=>{const current=this.load();if(this.repositoryDeleting()||!this.ctx.storage.sql.exec("SELECT user_id FROM members WHERE user_id=?",actor.userId).toArray().length||this.readRepositoryIncarnation()!==incarnation||current.projectId!==state.projectId||current.canonicalRepoName!==state.canonicalRepoName||(!actor.viaToken&&(!Number.isFinite(sessionExpiresAt)||Date.now()>=sessionExpiresAt!)))throw Error("Branch read authority changed");};assert();if(await account.accountLifecycle()!=="active"||(actor.viaToken&&(!credentialHash||!await account.apiTokenHashActive(credentialHash))))throw Error("Branch read authentication unavailable");assert();return assert;}
   private async revokeBranchCredential(attemptId:string,fundingAccountKey?:string):Promise<boolean>{const ledger=new BranchCredentialIncidents(this.ctx.storage);if(ledger.summary(attemptId)?.status==="revoked")return true;const credential=ledger.credentialForRevocation(attemptId);if(!credential)return false;const global=globalOf(this.env),accountKey=fundingAccountKey??credential.accountKey,http=new BranchHttpAttempts(this.ctx.storage).get(attemptId);const funding=await (http?global.reserveRepositoryReadOperation(`branch-read-cleanup-${crypto.randomUUID()}`,accountKey):global.reserveCoreGitOperation(`branch-cleanup-${crypto.randomUUID()}`,accountKey,this.currentGitBudget())).catch(()=>null);if(!funding?.allowed||!ledger.markAttempt(attemptId))return false;try{using repository=await this.branchRepositoryProvider().get(credential.repoName);if(!await repository.revokeToken(credential.token))return false;await ledger.markRevoked(attemptId,credential.token);return true;}catch{return false;}}
   private async retryBranchCredentials(){const ledger=new BranchCredentialIncidents(this.ctx.storage);for(const credential of ledger.pendingBatch())if(ledger.markAutomaticSweep(credential.attemptId))await this.revokeBranchCredential(credential.attemptId);const wake=ledger.nextWake();if(wake!==null)await this.ensureRecoveryAlarm(Math.max(1,wake-Date.now()));}
-  private async withBranchNative<T>(operationId:string,kind:"inventory"|"create",actor:HumanDecisionActor,authorize:()=>Promise<void>,snapshot:string,run:(executor:import("./branch-git.js").BranchGitExecutor,remote:string,token:string)=>Promise<T>,hooks?:{prepared(identity:BranchNativeAttemptIdentity):void;stopped(identity:BranchNativeAttemptIdentity):void}):Promise<T>{
+  private async withBranchNative<T>(operationId:string,kind:"inventory"|"create",actor:HumanDecisionActor,authorize:()=>Promise<void>,snapshot:string,run:(executor:import("./branch-git.js").BranchGitExecutor,remote:string,token:string)=>Promise<T>,hooks?:{prepared?(identity:BranchNativeAttemptIdentity):void;stopped?(identity:BranchNativeAttemptIdentity):void;finished?(identity:BranchNativeAttemptIdentity,proof:{nativeStopped:boolean;credentialState:"not_issued"|"revoked"|"unconfirmed"}):void},target?:{repoName:string;remote:string;providerRepoId:string}):Promise<T>{
     const state=this.load(),incarnation=this.readRepositoryIncarnation();if(!incarnation)throw Error("Repository incarnation unavailable");const runtime=new BranchNativeAttempts(this.ctx.storage),credentials=new BranchCredentialIncidents(this.ctx.storage);if(this.ctx.storage.sql.exec("SELECT id FROM branch_credential_incidents WHERE json_extract(payload,'$.operationId')=? AND status!='revoked' LIMIT 1",operationId).toArray().length)throw Error("Earlier branch credential cleanup remains unconfirmed");
-    const accountKey=await accountKeyFor(actor.userId),snapshotDigest=await this.sha256(snapshot);await authorize();const nativeId=crypto.randomUUID();let attempt:BranchNativeAttemptIdentity|undefined,completed=false;
+    const accountKey=await accountKeyFor(actor.userId),snapshotDigest=await this.sha256(snapshot);await authorize();const nativeId=crypto.randomUUID();let attempt:BranchNativeAttemptIdentity|undefined,completed=false,issuancePrepared=false;
     try{
-      await authorize();const preparedAttempt:BranchNativeAttemptIdentity={attemptId:crypto.randomUUID(),nativeId,operationId,kind,projectId:state.projectId,incarnation,canonicalRepoName:state.canonicalRepoName,actorId:actor.userId,accountKey,snapshotDigest};const identity=preparedAttempt;runtime.begin(identity,()=>{if(this.readRepositoryIncarnation()!==incarnation||this.load().canonicalRepoName!==state.canonicalRepoName)throw Error("Branch native scope changed");});attempt=preparedAttempt;hooks?.prepared(preparedAttempt);const assertPossible=()=>{const current=runtime.get(identity.attemptId);if(!current||current.state!=="possible"||current.nativeId!==identity.nativeId||current.operationId!==identity.operationId||current.snapshotDigest!==identity.snapshotDigest)throw Error("Branch native attempt was stopped or replaced");};const scopedAuthorize=async()=>{assertPossible();await authorize();assertPossible();};await this.ensureRecoveryAlarm();assertPossible();await admitNativeCompute(this.env,accountKey,`native-${nativeId}`,"native-essential");assertPossible();await scopedAuthorize();const sandbox=this.branchNativeSandbox(nativeId),deadline=Date.now()+60000;
-      const fund=async()=>{await scopedAuthorize();const admission=await globalOf(this.env).reserveCoreGitOperation(`branch-command-${crypto.randomUUID()}`,accountKey,this.currentGitBudget());await scopedAuthorize();if(!admission.allowed)throw Error("Branch operation read allowance unavailable");};await fund();using repository=await this.branchRepositoryProvider().get(state.canonicalRepoName);await scopedAuthorize();const remote=(await repository.info()).remote;assertPossible();validateRecoveryRemote(remote);await scopedAuthorize();const scope=kind==="inventory"?"read":"write";await fund();credentials.begin(identity,Date.now()+60000,()=>{assertPossible();if(this.readRepositoryIncarnation()!==incarnation)throw Error("Branch credential scope changed");});assertPossible();const issued=await repository.createToken(scope,60);await credentials.record(identity.attemptId,state.canonicalRepoName,issued.plaintext,Date.parse(issued.expiresAt),issued.scope);await scopedAuthorize();const credential=credentials.credentialForUse(identity);if(!credential)throw Error("Branch credential scope or expiry is unconfirmed");
+      await authorize();const preparedAttempt:BranchNativeAttemptIdentity={attemptId:crypto.randomUUID(),nativeId,operationId,kind,...(target?{credentialRepoName:target.repoName}:{}),projectId:state.projectId,incarnation,canonicalRepoName:state.canonicalRepoName,actorId:actor.userId,accountKey,snapshotDigest};const identity=preparedAttempt;runtime.begin(identity,()=>{if(this.readRepositoryIncarnation()!==incarnation||this.load().canonicalRepoName!==state.canonicalRepoName)throw Error("Branch native scope changed");});attempt=preparedAttempt;hooks?.prepared?.(preparedAttempt);const assertPossible=()=>{const current=runtime.get(identity.attemptId);if(!current||current.state!=="possible"||current.nativeId!==identity.nativeId||current.operationId!==identity.operationId||current.snapshotDigest!==identity.snapshotDigest)throw Error("Branch native attempt was stopped or replaced");};const scopedAuthorize=async()=>{assertPossible();await authorize();assertPossible();};await this.ensureRecoveryAlarm();assertPossible();await admitNativeCompute(this.env,accountKey,`native-${nativeId}`,"native-essential");assertPossible();await scopedAuthorize();const sandbox=this.branchNativeSandbox(nativeId),deadline=Date.now()+60000;
+      const fund=async()=>{await scopedAuthorize();const admission=await globalOf(this.env).reserveCoreGitOperation(`branch-command-${crypto.randomUUID()}`,accountKey,this.currentGitBudget());await scopedAuthorize();if(!admission.allowed)throw Error("Branch operation read allowance unavailable");};await fund();using repository=await this.branchRepositoryProvider().get(target?.repoName??state.canonicalRepoName);await scopedAuthorize();const metadata=await repository.info(),remote=metadata.remote;if(target&&(remote!==target.remote||metadata.id!==target.providerRepoId))throw Error("Contribution provider remote changed");assertPossible();validateRecoveryRemote(remote);await scopedAuthorize();const scope=kind==="inventory"?"read":"write";await fund();credentials.begin(identity,Date.now()+60000,()=>{assertPossible();if(this.readRepositoryIncarnation()!==incarnation)throw Error("Branch credential scope changed");});issuancePrepared=true;assertPossible();const issued=await repository.createToken(scope,60);await credentials.record(identity.attemptId,target?.repoName??state.canonicalRepoName,issued.plaintext,Date.parse(issued.expiresAt),issued.scope);await scopedAuthorize();const credential=credentials.credentialForUse(identity);if(!credential)throw Error("Branch credential scope or expiry is unconfirmed");
       const executor:import("./branch-git.js").BranchGitExecutor={beforeCommand:async phase=>{await scopedAuthorize();if(phase==="before"){if(!credentials.credentialForUse(identity))throw Error("Branch credential expired before command");await fund();}},exec:async(command,env)=>{assertPossible();if(!credentials.credentialForUse(identity))throw Error("Branch credential unavailable at native dispatch");const remaining=deadline-Date.now();if(remaining<=0)throw Error("Branch native deadline reached");return sandbox.exec(["sh","-c",command],{env:{...env,GIT_CONFIG_GLOBAL:"/dev/null",GIT_CONFIG_NOSYSTEM:"1",GIT_CONFIG_COUNT:"3",GIT_CONFIG_KEY_1:"core.hooksPath",GIT_CONFIG_VALUE_1:"/dev/null",GIT_CONFIG_KEY_2:"http.followRedirects",GIT_CONFIG_VALUE_2:"false"},timeoutMs:remaining});}};
       const proof=await run(executor,remote,credential.token);completed=true;return proof;
     }finally{
       if(attempt){
         runtime.markExecutionEnded(attempt,()=>{if(runtime.get(attempt!.attemptId)?.nativeId!==attempt!.nativeId)throw Error("Branch execution scope changed");});
-        const credentialRevoked=await this.revokeBranchCredential(attempt.attemptId);let nativeStopped=false;try{const sandbox=this.branchNativeSandbox(attempt.nativeId);await sandbox.seal();await sandbox.destroy();const lifetime=await sandbox.lifetimeStatus();if(lifetime?.state==="stopped"&&lifetime.sealed===true){runtime.confirmStopped(attempt,{nativeId:attempt.nativeId,state:"stopped"});hooks?.stopped(attempt);nativeStopped=true;}}catch{/* Exact native and credential holds remain for explicit recovery. */}
+        const credentialRevoked=await this.revokeBranchCredential(attempt.attemptId);let nativeStopped=false;try{const sandbox=this.branchNativeSandbox(attempt.nativeId);await sandbox.seal();await sandbox.destroy();const lifetime=await sandbox.lifetimeStatus();if(lifetime?.state==="stopped"&&lifetime.sealed===true){runtime.confirmStopped(attempt,{nativeId:attempt.nativeId,state:"stopped"});hooks?.stopped?.(attempt);nativeStopped=true;}}catch{/* Exact native and credential holds remain for explicit recovery. */}
+        hooks?.finished?.(attempt,{nativeStopped,credentialState:!issuancePrepared?"not_issued":credentialRevoked?"revoked":"unconfirmed"});
         if(completed&&(!credentialRevoked||!nativeStopped))throw Error("Branch inspection cleanup remains unconfirmed; saved refs and operation context were preserved");
       }
     }
+  }
+  async inspectRepositoryCommitSignature(input:unknown,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){
+    const request=commitSignatureRequest.parse(input),taskId=request.input??request.task??null,candidateId=request.candidate??null;
+    const state=this.load(),context=await this.repositoryReadContext(actor.userId,taskId,candidateId);
+    const anchor=request.input?context.candidateInputCommit:request.task?context.taskCommit:request.candidate?context.candidateCommit:state.acceptedState.currentCommit;
+    if(!anchor||!isSafeSha(anchor)||!context.incarnation)throw Error('Pinned signature read scope is unavailable');
+    const account=accountOf(this.env,await accountKeyFor(actor.userId));
+    const trustIdentity=(value:SigningTrustSnapshot)=>JSON.stringify([value.revision,value.ssh,value.gpg]);
+    const tokenContext=actor.viaToken&&credentialHash?{hash:credentialHash,userId:actor.userId,projectId:context.projectId}:undefined;
+    const keys=await account.signingTrustSnapshot(tokenContext),keySnapshot=trustIdentity(keys),snapshot=JSON.stringify({context,anchor,commit:request.commit,keySnapshot});
+    const authenticated=()=>actor.viaToken?Boolean(credentialHash):Number.isFinite(sessionExpiresAt)&&Date.now()<sessionExpiresAt!;
+    const authorize=async()=>{if(!authenticated()||!await this.assertRepositoryReadContext(context,actor.userId,taskId,credentialHash,candidateId)||!authenticated()||(!taskId&&!candidateId&&this.load().acceptedState.currentCommit!==anchor))throw Error('Pinned signature read authority changed');};
+    await authorize();
+    using repository=await openRepositoryRead({ARTIFACTS:this.branchRepositoryProvider()},{repoName:context.repoName,authorize,reserveGroup:operationId=>globalOf(this.env).reserveRepositoryReadOperation(operationId,context.accountKey)});
+    const metadata=await repository.info();await authorize();if(!metadata.id||metadata.name!==context.repoName)throw Error('Pinned signature provider identity changed');
+    const operationId=crypto.randomUUID(),bytes=await this.withBranchNative(operationId,'inventory',actor,authorize,snapshot,(executor,remote,token)=>readCommitSignatureObject(executor,{remote,token,anchor,commit:request.commit,operationId}),undefined,{repoName:context.repoName,remote:metadata.remote,providerRepoId:metadata.id});
+    await authorize();const result=await inspectCommitSignature(request.commit,bytes,keys);await authorize();
+    const freshKeys=await account.signingTrustSnapshot(tokenContext);
+    if(trustIdentity(freshKeys)!==keySnapshot)throw Error('Registered signing keys changed during verification');
+    if(!authenticated()||(!taskId&&!candidateId&&this.load().acceptedState.currentCommit!==anchor))throw Error('Pinned signature read authority changed');
+    this.assertReadLocal(context,actor.userId,taskId);
+    return {...result,checkedAt:freshKeys.observedAt,trustRevision:freshKeys.revision};
   }
   async branchInventory(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){
     const current=await this.authorizeBranchRead(actor,credentialHash,sessionExpiresAt),state=this.load(),context=await this.repositoryReadContext(actor.userId,null),snapshot=JSON.stringify({projectId:state.projectId,canonicalRepoName:state.canonicalRepoName,incarnation:this.readRepositoryIncarnation(),acceptedCommit:state.acceptedState.currentCommit,defaultBranch:state.defaultBranch??"main"});
@@ -1822,6 +2114,54 @@ export class RepositoryController extends DurableObject<Env> {
     const scope:CandidateReviewScope=candidateReviewScopeSchema.parse({candidateId,commit:candidate.candidateCommit,tree:evidence.candidateTree,base:candidate.expectedAcceptedBase,...(candidate.acceptedTarget?.kind==="unborn"?{unbornTarget:acceptedTargetSchema.parse(candidate.acceptedTarget)}:{}),verificationPolicyVersion:candidate.frozenPolicyVersion,reviewPolicyVersion:policy.version,authorIds:policy.authorIds});const frozen=ledger.frozen(candidateId);if(frozen){if(JSON.stringify(frozen.scope)!==JSON.stringify(scope))throw Error("Candidate review scope changed");}else ledger.freeze(scope,()=>{if(this.load().candidates[candidateId]?.candidateCommit!==scope.commit)throw Error("Candidate review scope changed");});return scope;
   }
   private async delegatedReviewGate(candidateId:string){const scope=this.delegatedReviewScope(candidateId),ledger=this.delegatedReviews(),users=this.ctx.storage.sql.exec<{reviewer_id:string}>("SELECT DISTINCT reviewer_id FROM candidate_approval_events WHERE candidate_id=? LIMIT 101",candidateId).toArray();if(users.length>100)throw Error("Review authority set exceeds bounded validation");const active=new Set<string>();for(const user of users){if(await this.roleOf(user.reviewer_id)&&await accountOf(this.env,await accountKeyFor(user.reviewer_id)).accountLifecycle()==="active")active.add(user.reviewer_id);}const current=this.delegatedReviewScope(candidateId);if(JSON.stringify(scope)!==JSON.stringify(current))throw Error("Candidate changed during reviewer authorization");return ledger.gate(current,user=>active.has(user)&&this.ctx.storage.sql.exec("SELECT user_id FROM members WHERE user_id=?",user).toArray().length>0);}
+  private async planningAccess(actorId:string,write=false){
+    const authority=await this.repositoryAccessFence(actorId,write);authority.assert();
+    if(write&&this.load().lifecycle?.state==='archived')throw Error('Repository is archived and read-only');
+    return {store:new PlanningStore(this.ctx.storage),owner:authority.role==='admin',assert:authority.assert};
+  }
+  async planningRead(actorId:string){const {store,assert}=await this.planningAccess(actorId);assert();return store.snapshot();}
+  async planningExport(actorId:string){const {store,assert}=await this.planningAccess(actorId);assert();return store.export();}
+  async planningMutate(actorId:string,input:PlanningMutation){const {store,owner,assert}=await this.planningAccess(actorId,true);assert();try{return {ok:true as const,value:store.mutate(input,owner)};}catch(error){if(error instanceof PlanningError)return {ok:false as const,error:error.message,status:error.status};throw error;}}
+
+  private async securityAccess(actorId:string,write=false){
+    const authority=await this.repositoryAccessFence(actorId,write);authority.assert();
+    if(write&&this.load().lifecycle?.state==='archived')throw new SecurityReportError('Repository is archived and read-only',409);
+    return new SecurityStore(this.ctx.storage);
+  }
+  async securityRead(actorId:string){return (await this.securityAccess(actorId)).read();}
+  async securityImport(actorId:string,input:SecurityImport){
+    const store=await this.securityAccess(actorId,true),state=this.load();
+    if(state.acceptedState.currentCommit!==input.commit)throw new SecurityReportError('Import reports for the current accepted commit; older revisions cannot resolve current alerts',409);
+    const tree=state.acceptedBaseline?.commit===input.commit?state.acceptedBaseline.tree:Object.values(state.evidence).find(evidence=>evidence.status==='passed'&&evidence.candidateCommit===input.commit)?.candidateTree;
+    if(!tree||tree!==input.tree)throw new SecurityReportError('The report must identify the recorded accepted commit and tree',409);
+    return store.import(input,actorId);
+  }
+  async securityTriage(actorId:string,id:string,input:SecurityTriage){return (await this.securityAccess(actorId,true)).triage(id,input,actorId);}
+
+  private async wikiAccess(actorId:string,write=false){
+    const authority=await this.repositoryAccessFence(actorId,write);authority.assert();
+    if(write&&this.load().lifecycle?.state==='archived')throw Error('Repository is archived and read-only');
+    return {store:new DurableWikiStore(this.ctx.storage),assert:authority.assert};
+  }
+  async wikiList(actorId:string){const {store,assert}=await this.wikiAccess(actorId);assert();return store.list();}
+  async wikiRead(actorId:string,slug:string,revision?:number){const {store,assert}=await this.wikiAccess(actorId);assert();const result=store.read(slug,revision);return result.ok?{...result,value:{...result.value,archiveOrigin:new MetadataArchives(this.ctx.storage).origin("wiki_revisions",`${result.value.slug}:${result.value.id}`)}}:result;}
+  async wikiHistory(actorId:string,slug:string,options:HistoryOptions){const {store,assert}=await this.wikiAccess(actorId);assert();return store.history(slug,options);}
+  async wikiDiff(actorId:string,slug:string,from:number,to:number){const {store,assert}=await this.wikiAccess(actorId);assert();return store.diff(slug,from,to);}
+  async wikiSave(actorId:string,slug:string,input:Omit<SaveRequest,'author'>){const {store,assert}=await this.wikiAccess(actorId,true);assert();return store.save(slug,{...input,author:actorId});}
+  async wikiRevert(actorId:string,slug:string,to:number,expectedRevision:number){const {store,assert}=await this.wikiAccess(actorId,true);assert();return store.revert(slug,to,actorId,expectedRevision);}
+
+  /** F01: current archive state. Absent stored state reads as active. */
+  async repositoryLifecycle():Promise<RepositoryLifecycle>{return structuredClone(this.load().lifecycle??initialLifecycle());}
+  /** F01: archive or unarchive. Only the owner-level caller may change state; writes are saved with the project document. */
+  async repositoryLifecycleTransition(action:LifecycleAction,expectedVersion:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<LifecycleResult>{
+    z.enum(['archive','unarchive']).parse(action);z.number().int().positive().safe().parse(expectedVersion);
+    const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authorize();
+    try{return this.ctx.storage.transactionSync(()=>{authorize();const state=this.load(),current=state.lifecycle??initialLifecycle(),result=applyLifecycleAction(current,action,{canAdmin:true},new Date().toISOString(),expectedVersion);if(result.ok){state.lifecycle=result.next;this.save();}return result;});}catch(error){this.state=null;throw error;}
+  }
+  /** F01: repository topics; empty when none are stored. */
+  async repositoryTopics():Promise<string[]>{return [...(this.load().topics??[])];}
+  /** F01: replaces topics after validation; invalid input never reaches storage. */
+  async setRepositoryTopics(topics:string[]):Promise<string[]>{const checked=normalizeTopics(topics);if(!checked.ok)throw Error(checked.error);const state=this.load();state.topics=checked.topics;this.save();return [...checked.topics];}
   async repositoryReviewSettings(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authorize();const ledger=this.delegatedReviews(),rows=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM repository_review_grants ORDER BY user_id LIMIT 101").toArray();return{policy:ledger.policy(),grants:rows.slice(0,100).map(row=>ledger.grant(row.user_id)!),truncated:rows.length>100};}
   async configureRepositoryReviewPolicy(input:{eventId:string;expectedVersion:number;policy:RepositoryReviewPolicy},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);return this.delegatedReviews().configurePolicy({...input,ownerId:actor.userId},authorize);}
   async setRepositoryReviewGrant(input:{eventId:string;userId:string;expectedVersion:number;enabled:boolean},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);if(input.enabled&&!await this.roleOf(input.userId))throw Error("Reviewer must be a current repository member");authorize();return this.delegatedReviews().setGrant({...input,ownerId:actor.userId},()=>{authorize();if(input.enabled&&!this.ctx.storage.sql.exec("SELECT user_id FROM members WHERE user_id=?",input.userId).toArray().length)throw Error("Reviewer membership changed");});}
@@ -1831,6 +2171,7 @@ export class RepositoryController extends DurableObject<Env> {
   }
   private agentNativeSnapshot(task:Task):string{task=this.projectedTask(task);return JSON.stringify({id:task.id,goal:task.goal,base:task.baseCommit,commit:task.currentCommit,workspace:task.workspace,scope:task.allowedScope,...(effectiveTaskAcceptedTarget(task)?{acceptedTarget:effectiveTaskAcceptedTarget(task)}:{}),...(task.targetGeneration?{targetGeneration:task.targetGeneration}:{})});}
   private assertAgentNativeLocal(attempt:AgentNativeAttemptIdentity):void {
+    this.assertTaskWriteUnlocked(attempt.taskId);this.assertForkWriteSource(attempt.taskId,attempt.actorId,attempt.maintainerWriteSource);
     const state=this.load(),rawTask=state.tasks[attempt.taskId],task=rawTask?{...this.projectedTask(rawTask),acceptedTarget:effectiveTaskAcceptedTarget(this.projectedTask(rawTask))}:undefined,registered=this.ctx.storage.sql.exec<{actor_id:string|null;kind:string}>("SELECT actor_id,kind FROM project_workflows WHERE instance_id=?",attempt.workflowId).toArray()[0];
     if(task?.acceptedTarget&&task.acceptedTarget.policyVersion!==state.policyVersion)throw Error("Frozen task policy changed");this.gitTables();const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",attempt.actorId).toArray()[0]?.role;const writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",attempt.taskId).toArray()[0]?.user_id;const selected=task?.agentRunId?this.agentRuns().get(task.agentRunId):null;
     const activeStamp=task?.targetGeneration?{eventId:task.targetGeneration.eventId,generation:task.targetGeneration.generation}:undefined;if(JSON.stringify(this.agentRuns().get(attempt.runId)?.targetGeneration)!==JSON.stringify(activeStamp))throw Error("Agent target generation changed");
@@ -1842,6 +2183,7 @@ export class RepositoryController extends DurableObject<Env> {
   private agentRelayBasis(props:AgentEgressWorkerProps){
     this.agentRelayTables();const runtime=new AgentRuntimeLedger(this.ctx.storage).get(props.attemptId),state=this.load();
     if(!runtime||runtime.state!=="possible"||runtime.nativeId!==props.nativeId||state.projectId!==runtime.projectId||this.readRepositoryIncarnation()!==runtime.incarnation||this.repositoryDeleting()||this.ctx.storage.sql.exec("SELECT attempt_id FROM agent_relay_closed WHERE attempt_id=?",props.attemptId).toArray().length)throw Error("Original active restricted runtime required");
+    this.assertTaskWriteUnlocked(runtime.taskId);this.assertForkWriteSource(runtime.taskId,runtime.actorId,runtime.maintainerWriteSource);
     const {state:_state,createdAt:_created,stoppedAt:_stopped,...attempt}=runtime,raw=state.tasks[attempt.taskId];if(!raw)throw Error("Assigned agent task unavailable");const task=this.projectedTask(raw),scope=props.scope,registered=this.ctx.storage.sql.exec<{actor_id:string|null;kind:string}>("SELECT actor_id,kind FROM project_workflows WHERE instance_id=?",attempt.workflowId).toArray()[0];this.gitTables();
     const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",attempt.actorId).toArray()[0]?.role,writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",attempt.taskId).toArray()[0]?.user_id;
     const run=this.agentRuns().get(attempt.runId),head=this.ctx.storage.sql.exec<{run_id:string;generation:number}>("SELECT run_id,generation FROM agent_run_heads WHERE task_id=?",attempt.taskId).toArray()[0];
@@ -1908,7 +2250,8 @@ export class RepositoryController extends DurableObject<Env> {
     if(!run?.actorId||!task||!incarnation||(run.kind!=="agent"&&run.kind!=="scenario")||(run.kind==="agent"&&(task.agentWorkflowInstanceId!==input.workflowId||input.runId!==input.workflowId)))throw Error("Registered agent initiator required");
     const snapshot=this.agentNativeSnapshot(task),accountKey=await accountKeyFor(run.actorId),digest=await this.sha256(snapshot);
     if(await accountOf(this.env,accountKey).accountLifecycle()!=="active"||!await this.canGitAccess(run.actorId,input.taskId,true))throw Error("Agent account or task writer unavailable");
-    const attempt:AgentNativeAttemptIdentity={...input,projectId:state.projectId,incarnation,actorId:run.actorId,accountKey,generation:this.agentRuns().get(input.runId)?.generation??0,snapshotDigest:digest};
+    const maintainerWriteSource=this.forkWriteSource(input.taskId,run.actorId);
+    const attempt:AgentNativeAttemptIdentity={...input,...(maintainerWriteSource?{maintainerWriteSource}:{}),projectId:state.projectId,incarnation,actorId:run.actorId,accountKey,generation:this.agentRuns().get(input.runId)?.generation??0,snapshotDigest:digest};
     return new AgentRuntimeLedger(this.ctx.storage).begin(attempt,()=>{this.assertAgentNativeLocal(attempt);new AgentCredentialIncidents(this.ctx.storage);if(this.ctx.storage.sql.exec("SELECT id FROM agent_credential_incidents WHERE json_extract(payload,'$.taskId')=? AND status!='revoked' LIMIT 1",input.taskId).toArray().length)throw Error("Earlier agent credential cleanup remains unconfirmed");if(this.agentNativeSnapshot(this.load().tasks[input.taskId]!)!==snapshot)throw Error("Agent task changed during allocation");});
   }
   async beginAgentCredential(attemptId:string,id:string,scope:"read"|"write",expiresAt:number):Promise<AgentCredentialScope|null>{
@@ -1996,7 +2339,7 @@ export class RepositoryController extends DurableObject<Env> {
     if(!row)throw Error("Agent execution authority has no recorded native scope");
     const attempt=JSON.parse(row.doc) as AgentNativeAttemptIdentity,run=this.agentRuns().get(runId),incarnation=this.readRepositoryIncarnation();
     if(!run||run.taskId!==taskId)throw Error("Agent run unavailable");
-    const validate=()=>{const state=this.load(),rawTask=state.tasks[taskId],task=rawTask?{...this.projectedTask(rawTask),acceptedTarget:effectiveTaskAcceptedTarget(this.projectedTask(rawTask))}:undefined,current=this.agentRuns().get(runId);if(JSON.stringify(current?.targetGeneration)!==JSON.stringify(task?.targetGeneration?{eventId:task.targetGeneration.eventId,generation:task.targetGeneration.generation}:undefined))throw Error("Agent mutation target generation changed");if(Boolean(task?.acceptedTarget)!==Boolean(current?.acceptedTarget))throw Error("Agent mutation accepted target changed");if(task?.acceptedTarget&&current?.acceptedTarget){assertCompatibleAcceptedTargetBatch([task.acceptedTarget,current.acceptedTarget]);if(task.acceptedTarget.policyVersion!==state.policyVersion)throw Error("Agent mutation frozen policy changed");}const registered=this.ctx.storage.sql.exec<{actor_id:string|null}>("SELECT actor_id FROM project_workflows WHERE instance_id=?",attempt.workflowId).toArray()[0];this.gitTables();const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",attempt.actorId).toArray()[0]?.role,writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",taskId).toArray()[0]?.user_id;if(!task||task.agentRunId!==runId||!current||current.generation!==run.generation||this.readRepositoryIncarnation()!==incarnation||incarnation!==attempt.incarnation||registered?.actor_id!==attempt.actorId||(role!=="owner"&&writer!==attempt.actorId)||!role)throw Error("Agent mutation authority changed");};
+    const validate=()=>{this.assertForkWriteSource(taskId,attempt.actorId,attempt.maintainerWriteSource);const state=this.load(),rawTask=state.tasks[taskId],task=rawTask?{...this.projectedTask(rawTask),acceptedTarget:effectiveTaskAcceptedTarget(this.projectedTask(rawTask))}:undefined,current=this.agentRuns().get(runId);if(JSON.stringify(current?.targetGeneration)!==JSON.stringify(task?.targetGeneration?{eventId:task.targetGeneration.eventId,generation:task.targetGeneration.generation}:undefined))throw Error("Agent mutation target generation changed");if(Boolean(task?.acceptedTarget)!==Boolean(current?.acceptedTarget))throw Error("Agent mutation accepted target changed");if(task?.acceptedTarget&&current?.acceptedTarget){assertCompatibleAcceptedTargetBatch([task.acceptedTarget,current.acceptedTarget]);if(task.acceptedTarget.policyVersion!==state.policyVersion)throw Error("Agent mutation frozen policy changed");}const registered=this.ctx.storage.sql.exec<{actor_id:string|null}>("SELECT actor_id FROM project_workflows WHERE instance_id=?",attempt.workflowId).toArray()[0];this.gitTables();const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",attempt.actorId).toArray()[0]?.role,writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",taskId).toArray()[0]?.user_id;if(!task||task.agentRunId!==runId||!current||current.generation!==run.generation||this.readRepositoryIncarnation()!==incarnation||incarnation!==attempt.incarnation||registered?.actor_id!==attempt.actorId||(role!=="owner"&&writer!==attempt.actorId)||!role)throw Error("Agent mutation authority changed");};
     validate();const selectedTask=this.load().tasks[taskId],selectedTarget=selectedTask?effectiveTaskAcceptedTarget(this.projectedTask(selectedTask)):undefined;if(Boolean(selectedTarget)!==Boolean(run.acceptedTarget))throw Error("Agent run accepted target binding changed");if(selectedTarget&&run.acceptedTarget)assertCompatibleAcceptedTargetBatch([selectedTarget,run.acceptedTarget]);if(await accountOf(this.env,attempt.accountKey).accountLifecycle()!=="active"||!await this.canGitAccess(attempt.actorId,taskId,true))throw Error("Agent mutation writer unavailable");validate();return validate;
   }
   async saveAgentProposal(runId: string, taskId: string, files: Record<string, string>): Promise<boolean> { const validate=await this.authorizeAgentMutation(runId,taskId);return this.ctx.storage.transactionSync(()=>{validate();return this.agentRuns().propose(runId, taskId, files);}); }
@@ -2273,12 +2616,16 @@ export class RepositoryController extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    ensureIssueLifecycleSchema(ctx.storage);
     ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS project (id INTEGER PRIMARY KEY CHECK (id = 1), doc TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS billing (id INTEGER PRIMARY KEY CHECK (id = 1), doc TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, kind TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS members (user_id TEXT PRIMARY KEY, role TEXT NOT NULL, label TEXT, added_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS repository_organization_sources(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,doc TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS human_fork_permissions(task_id TEXT PRIMARY KEY,scope TEXT NOT NULL,revision INTEGER NOT NULL,enabled INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS human_fork_permission_history(task_id TEXT NOT NULL,revision INTEGER NOT NULL,scope TEXT NOT NULL,enabled INTEGER NOT NULL,actor_id TEXT NOT NULL,at INTEGER NOT NULL,PRIMARY KEY(task_id,revision));
       CREATE TABLE IF NOT EXISTS invites (token TEXT PRIMARY KEY, created_by TEXT NOT NULL, expires_at INTEGER NOT NULL, used_by TEXT);
       CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, type TEXT NOT NULL, summary TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS webhooks (id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL, events TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
@@ -2366,7 +2713,7 @@ export class RepositoryController extends DurableObject<Env> {
     const state=this.load();if(record.phase!=="activated"||!record.activation||!task.acceptedTarget||record.projectId!==state.projectId||record.incarnation!==this.readRepositoryIncarnation()||record.canonicalRepoName!==state.canonicalRepoName||record.source.workspaceRepoName!==task.workspace.repoName||record.source.branch!==task.workspace.branch||record.source.contributorId!==task.contributor.id||record.activation.baseCommit!==task.baseCommit)throw Error("Current target generation scope changed");
     assertCompatibleAcceptedTargetBatch([record.source.originalAcceptedTarget,task.acceptedTarget]);if(task.currentCommit!==record.activation.currentCommit&&!task.checkpoints.some(checkpoint=>checkpoint.commitHash===task.currentCommit))throw Error("Target generation checkpoint has no recorded contribution history");
     if(task.currentCommit===null)throw Error("Activated target generation has no recorded checkpoint");
-    return{...task,targetGeneration:{eventId:record.eventId,generation:record.generation,acceptedTarget:structuredClone(record.target),baseCommit:task.baseCommit,currentCommit:task.currentCommit}};
+    return{...task,targetGeneration:{eventId:record.eventId,generation:record.generation,acceptedTarget:structuredClone(record.target),baseCommit:task.baseCommit,currentCommit:task.currentCommit,...(record.target.ref!==task.acceptedTarget.ref?{retargetedFrom:{ref:task.acceptedTarget.ref,branch:task.acceptedTarget.branch}}:{})}};
   }
   async agentTaskView(taskId:string){const task=this.load().tasks[taskId];if(!task)throw Error("Unknown task");const projected=this.projectedTask(task),record=new TaskTargetGenerations(this.ctx.storage).current(taskId);return{task:structuredClone(projected),...(record?{targetGeneration:{eventId:record.eventId,generation:record.generation,sourceSnapshotDigest:record.source.snapshotDigest}}:{})};}
   private async accountInitializationFence(actorId:string,credential:TaskCreationCredential,projectId?:string,writeRequired=true):Promise<()=>void>{
@@ -2415,6 +2762,77 @@ export class RepositoryController extends DurableObject<Env> {
   async admitPreviewRead():Promise<PreviewReadAdmission>{
     if(this.repositoryDeleting())throw Error("Preview repository unavailable");const state=this.load(),ownerId=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id;if(!ownerId)throw Error("Preview owner scope unavailable");const scope={projectId:state.projectId,canonicalRepoName:state.canonicalRepoName,incarnation:this.readRepositoryIncarnation(),ownerId},accountKey=await accountKeyFor(ownerId);const authorize=async()=>{if(await accountOf(this.env,accountKey).accountLifecycle()!=="active")throw Error("Preview owner account unavailable");const current=this.load();if(this.repositoryDeleting()||current.projectId!==scope.projectId||current.canonicalRepoName!==scope.canonicalRepoName||this.readRepositoryIncarnation()!==scope.incarnation||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==ownerId)throw Error("Preview ownership changed");};await authorize();const result=await globalOf(this.env).admitOwnerPreviewRead(accountKey);await authorize();return result;
   }
+  private operationalBackupAuthority(userId:string,expiresAt:number){
+    if(!this.env.OPERATIONAL_BACKUP_KEY||new TextEncoder().encode(this.env.OPERATIONAL_BACKUP_KEY).length<32)throw Error('Operator backup key is unavailable');
+    if(!Number.isFinite(expiresAt)||Date.now()>=expiresAt||this.repositoryDeleting()||this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',userId).toArray()[0]?.role!=='owner')throw Error('Current owner session required');
+  }
+  private async operationalBackupAdmission(userId:string,expiresAt:number){
+    this.operationalBackupAuthority(userId,expiresAt);const accountKey=await accountKeyFor(userId);
+    if(!(this.env.OPERATOR_ACCOUNTS??'').split(',').map(value=>value.trim()).includes(accountKey)||await accountOf(this.env,accountKey).accountLifecycle()!=='active')throw Error('Active operator owner required');
+    this.operationalBackupAuthority(userId,expiresAt);
+  }
+  private operationalBackupAuditEvent(actor:string,action:string){this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS operational_backup_audit(id TEXT PRIMARY KEY,actor TEXT NOT NULL,action TEXT NOT NULL,at INTEGER NOT NULL)');if(this.ctx.storage.sql.exec<{count:number}>('SELECT COUNT(*) AS count FROM operational_backup_audit').toArray()[0]!.count>=10000)throw Error('Operational audit capacity reached');this.ctx.storage.sql.exec('INSERT INTO operational_backup_audit VALUES(?,?,?,?)',crypto.randomUUID(),actor,action,Date.now());}
+  async operationalBackupAudit(userId:string,expiresAt:number){await this.operationalBackupAdmission(userId,expiresAt);const exists=this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='operational_backup_audit'").toArray().length;return exists?this.ctx.storage.sql.exec<{id:string;actor:string;action:string;at:number}>('SELECT id,actor,action,at FROM operational_backup_audit ORDER BY at,id LIMIT 10000').toArray():[];}
+  private operationalBackupTables(){this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS operational_backups(id TEXT PRIMARY KEY,envelope TEXT NOT NULL,sha256 TEXT NOT NULL,scope TEXT NOT NULL)');return new OperationalBackupRetention(this.ctx.storage);}
+  private operationalBackupCapacity(additionalBytes=0){const capacity=this.ctx.storage.sql.exec<{count:number;bytes:number}>('SELECT COUNT(*) AS count,COALESCE(SUM(LENGTH(CAST(envelope AS BLOB))),0) AS bytes FROM operational_backups').toArray()[0]!;if(capacity.count>=4||capacity.bytes+additionalBytes>32_000_000)throw Error('Operational backup capacity reached; release eligible backups before capture');}
+  private operationalBackupInFlight=false;
+  async operationalBackupCreate(userId:string,expiresAt:number){if(this.operationalBackupInFlight)throw Error('An operational backup operation is already running');this.operationalBackupInFlight=true;try{return await this.operationalBackupCapture(userId,expiresAt);}finally{this.operationalBackupInFlight=false;}}
+  private async operationalBackupCapture(userId:string,expiresAt:number){
+    await this.operationalBackupAdmission(userId,expiresAt);const authorize=()=>this.operationalBackupAuthority(userId,expiresAt);authorize();const retention=this.operationalBackupTables();this.operationalBackupCapacity(11_000_000);const state=this.load(),acceptedSnapshot=JSON.stringify(state.acceptedState);
+    const scope:BackupScope={repositoryId:state.projectId,canonicalRepository:state.canonicalRepoName,head:state.acceptedState.currentCommit,acceptedStateHash:await operationalHash(state.acceptedState)};
+    const backup=await captureOperationalBackup(this.ctx.storage,scope,this.env.OPERATIONAL_BACKUP_KEY!,authorize),envelope=await encryptOperationalBackup(backup,this.env.OPERATIONAL_BACKUP_KEY!),id=crypto.randomUUID(),envelopeText=JSON.stringify(envelope);
+    await this.operationalBackupAdmission(userId,expiresAt);this.ctx.storage.transactionSync(()=>{authorize();this.operationalBackupCapacity(new TextEncoder().encode(envelopeText).length);if(JSON.stringify(this.load().acceptedState)!==acceptedSnapshot)throw Error('Accepted state changed while backing up');this.ctx.storage.sql.exec('INSERT INTO operational_backups VALUES(?,?,?,?)',id,envelopeText,backup.sha256,JSON.stringify(scope));retention.register(id,Date.now(),authorize);this.operationalBackupAuditEvent(userId,`capture:${id}:${backup.sha256}`);});return {id,sha256:backup.sha256,scope};
+  }
+  async operationalBackupRead(userId:string,expiresAt:number){await this.operationalBackupAdmission(userId,expiresAt);const authorize=()=>this.operationalBackupAuthority(userId,expiresAt);authorize();return this.operationalBackupTables().exportAudit(authorize);}
+  async operationalBackupHold(userId:string,expiresAt:number,id:string,held:boolean){await this.operationalBackupAdmission(userId,expiresAt);const authorize=()=>this.operationalBackupAuthority(userId,expiresAt);authorize();this.ctx.storage.transactionSync(()=>{this.operationalBackupTables().hold(id,held,authorize);this.operationalBackupAuditEvent(userId,`${held?'hold':'release-hold'}:${id}`);});}
+  async operationalBackupExport(userId:string,expiresAt:number,id:string){await this.operationalBackupAdmission(userId,expiresAt);const row=this.ctx.storage.sql.exec<{envelope:string}>('SELECT envelope FROM operational_backups WHERE id=?',id).toArray()[0];if(!row)throw Error('Operational backup not found');return JSON.parse(row.envelope) as EncryptedOperationalBackup;}
+  async operationalBackupDeleteExpired(userId:string,expiresAt:number,id:string){await this.operationalBackupAdmission(userId,expiresAt);const authorize=()=>this.operationalBackupAuthority(userId,expiresAt);this.ctx.storage.transactionSync(()=>{this.operationalBackupTables().deleteExpired(id,Date.now(),()=>{this.ctx.storage.sql.exec('DELETE FROM operational_backups WHERE id=?',id);},authorize);this.operationalBackupAuditEvent(userId,`expire:${id}`);});}
+  async operationalBackupRecover(userId:string,expiresAt:number,id:string){if(this.operationalBackupInFlight)throw Error('An operational backup operation is already running');this.operationalBackupInFlight=true;try{return await this.operationalBackupRestore(userId,expiresAt,id);}finally{this.operationalBackupInFlight=false;}}
+  private async operationalBackupRestore(userId:string,expiresAt:number,id:string){
+    await this.operationalBackupAdmission(userId,expiresAt);const authorize=()=>this.operationalBackupAuthority(userId,expiresAt);authorize();if(!this.env.OPERATIONAL_RECOVERY||!this.env.OPERATIONAL_RECOVERY_GIT)throw Error('Isolated recovery service is unavailable');
+    const row=this.ctx.storage.sql.exec<{envelope:string;scope:string}>('SELECT envelope,scope FROM operational_backups WHERE id=?',id).toArray()[0];if(!row)throw Error('Operational backup not found');
+    const backup=await decryptOperationalBackup(JSON.parse(row.envelope),this.env.OPERATIONAL_BACKUP_KEY!),scope=JSON.parse(row.scope) as BackupScope;authorize();
+    const recoveryId=crypto.randomUUID(),destination=this.env.OPERATIONAL_RECOVERY.get(this.env.OPERATIONAL_RECOVERY.idFromName(`recovery:${scope.repositoryId}:${recoveryId}`));
+    const receipt=await destination.restore(backup,scope);await this.operationalBackupAdmission(userId,expiresAt);authorize();this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS operational_recovery_audit(id TEXT PRIMARY KEY,backup_id TEXT NOT NULL,actor TEXT NOT NULL,at INTEGER NOT NULL,receipt TEXT NOT NULL)');this.ctx.storage.sql.exec('INSERT INTO operational_recovery_audit VALUES(?,?,?,?,?)',recoveryId,id,userId,Date.now(),JSON.stringify(receipt));this.operationalBackupAuditEvent(userId,`restore-isolated:${id}:${recoveryId}`);return {recoveryId,...receipt};
+  }
+  private metadataArchiveContext(userId:string,owner=false){
+    const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",userId).toArray()[0]?.role;
+    if(!role||(owner&&role!=="owner"))throw new MetadataArchiveError(owner?"Only the owner can restore metadata":"Repository membership required",403);
+    const state=this.load();if(owner&&state.lifecycle?.state==='archived')throw new MetadataArchiveError("Repository is archived and read-only");if(!state.acceptedState.currentCommit)throw new MetadataArchiveError("Metadata archives require an accepted Git head");
+    new DurableWikiStore(this.ctx.storage);new PlanningStore(this.ctx.storage);new IssueFeatureStore(this.ctx.storage);new RepositoryDiscussions(this.ctx.storage,true);new RepositoryDiscussions(this.ctx.storage,false);new ReleaseRecords(this.ctx.storage);new MigrationConversationPublication(this.ctx.storage);
+    return {projectId:state.projectId,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation(),head:state.acceptedState.currentCommit};
+  }
+  private async metadataArchiveReadAuthority(userId:string,credential:{viaToken:boolean;credentialHash?:string;sessionExpiresAt?:number;includeHistory:boolean}){
+    if(!credential||typeof credential.viaToken!=="boolean"||typeof credential.includeHistory!=="boolean")throw new MetadataArchiveError("Current archive credential is required",403);
+    const initial=await this.repositoryAccessFence(userId);initial.assert();const scope=this.metadataArchiveContext(userId),permission=await this.repositoryAccessFence(userId);permission.assert();const account=accountOf(this.env,await accountKeyFor(userId));
+    const assert=()=>{permission.assert();if(JSON.stringify(this.metadataArchiveContext(userId))!==JSON.stringify(scope)||!credential.viaToken&&(!Number.isFinite(credential.sessionExpiresAt)||credential.sessionExpiresAt!<=Date.now()))throw new MetadataArchiveError("Archive credential or source changed",403);};
+    const authorize=async()=>{assert();if(await account.accountLifecycle()!=="active"||credential.viaToken&&(!credential.credentialHash||!await account.apiTokenHashCanRead(credential.credentialHash,userId,scope.projectId)))throw new MetadataArchiveError("Archive authentication changed",403);assert();};await authorize();
+    const directOwner=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",userId).toArray()[0]?.role==="owner",includeHistory=credential.includeHistory&&directOwner&&(!credential.viaToken||!!credential.credentialHash&&await account.apiTokenHashCanAdminister(credential.credentialHash,userId,scope.projectId));assert();
+    const assertMode=async()=>{await authorize();if(includeHistory){if(this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",userId).toArray()[0]?.role!=="owner"||credential.viaToken&&(!credential.credentialHash||!await account.apiTokenHashCanAdminister(credential.credentialHash,userId,scope.projectId)))throw new MetadataArchiveError("Archive history authority changed",403);assert();}};
+    return{scope,includeHistory,authorize:assertMode,assert};
+  }
+  async metadataArchiveExport(userId:string,credential:{viaToken:boolean;credentialHash?:string;sessionExpiresAt?:number;includeHistory:boolean}){
+    const authority=await this.metadataArchiveReadAuthority(userId,credential),archives=new MetadataArchives(this.ctx.storage),visibility=archives.releaseSnapshot(),result=await archives.export(authority.scope,authority.includeHistory);
+    await authority.authorize();authority.assert();if(archives.releaseSnapshot()!==visibility)throw new MetadataArchiveError("Archive visibility changed after export authorization",409);
+    const releaseProof=new MetadataArchiveReleases(this.ctx.storage).prepare(userId,result.sha256,authority.scope,authority.includeHistory,visibility);return {...result,releaseProof};
+  }
+  async metadataArchiveRelease(userId:string,credential:{viaToken:boolean;credentialHash?:string;sessionExpiresAt?:number;includeHistory:boolean},proof:ArchiveReleaseProof){
+    const authority=await this.metadataArchiveReadAuthority(userId,credential);await authority.authorize();
+    // No awaited operations follow the last credential check: role, source,
+    // visibility and receipt consumption share this synchronous release fence.
+    return this.ctx.storage.transactionSync(()=>{authority.assert();return new MetadataArchiveReleases(this.ctx.storage).release(userId,proof,authority.scope,authority.includeHistory,new MetadataArchives(this.ctx.storage).releaseSnapshot());});
+  }
+  async metadataArchiveRestore(userId:string,value:unknown,requestId:string,sha256:string,sessionExpiresAt:number){
+    const scope=this.metadataArchiveContext(userId,true),state=this.load();
+    if(Object.keys(state.tasks).length||Object.keys(state.candidates).length||state.journal.length||state.acceptedState.history.length)throw new MetadataArchiveError("Destination must contain no task or review history");
+    return new MetadataArchives(this.ctx.storage).restore(value,scope,requestId,sha256,()=>{const current=this.load();if(Object.keys(current.tasks).length||Object.keys(current.candidates).length||current.journal.length||current.acceptedState.history.length)throw new MetadataArchiveError("Destination acquired task or review history");if(JSON.stringify(this.metadataArchiveContext(userId,true))!==JSON.stringify(scope))throw new MetadataArchiveError("Destination identity changed");},()=>this.authorizeRebaseRecovery({userId,displayName:"Repository owner",viaToken:false},undefined,sessionExpiresAt),userId);
+  }
+  async metadataArchiveHistory(userId:string,credential:{viaToken:boolean;credentialHash?:string;sessionExpiresAt?:number;includeHistory:boolean}){
+    const authority=await this.metadataArchiveReadAuthority(userId,credential),archives=new MetadataArchives(this.ctx.storage),visibility=archives.releaseSnapshot(),records=archives.history(authority.includeHistory);
+    await authority.authorize();authority.assert();if(archives.releaseSnapshot()!==visibility)throw new MetadataArchiveError("Archive history visibility changed after authorization",409);
+    const releaseProof=new MetadataArchiveReleases(this.ctx.storage).prepare(userId,metadataReleaseDigest(records),authority.scope,authority.includeHistory,visibility);return {records,releaseProof};
+  }
+
   async getState(): Promise<FlareGitProjectState> {
     const state=this.load(true);if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='task_target_generation_heads'").toArray().length)return state;
     if(!this.ctx.storage.sql.exec("SELECT task_id FROM task_target_generation_heads WHERE event_id IS NOT NULL LIMIT 1").toArray().length)return state;
@@ -2424,18 +2842,77 @@ export class RepositoryController extends DurableObject<Env> {
     const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authorize();const state=this.load(),task=state.tasks[taskId],incarnation=this.readRepositoryIncarnation();if(!task)throw Error("Repository task recovery scope unavailable");if(!incarnation){authorize();return{coverage:"unknown" as const,pendingCount:null,quiescent:false,attempts:[],nextCursor:null,complete:false,source:"recorded-ledger" as const,providerVerified:false as const};}const scope={projectId:state.projectId,incarnation,taskId,repoName:task.workspace.repoName};const validate=()=>{authorize();const current=this.load(),saved=current.tasks[taskId];if(current.projectId!==scope.projectId||this.readRepositoryIncarnation()!==scope.incarnation||saved?.workspace.repoName!==scope.repoName)throw Error("Git recovery task scope changed");};return inspectGitGatewayRecovery(this.ctx.storage,scope,validate,options);
   }
 
+  private taskForkOrigin(taskId:string):{human:boolean;creatorId:string|null} {
+    const task=this.load().tasks[taskId];if(!task)throw Error('Contribution unavailable');this.gitTables();
+    const creatorId=this.ctx.storage.sql.exec<{user_id:string}>('SELECT user_id FROM git_task_writers WHERE task_id=?',taskId).toArray()[0]?.user_id??null;
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS task_fork_origins(task_id TEXT PRIMARY KEY,scope TEXT NOT NULL,human INTEGER NOT NULL,creator_id TEXT)');
+    const scope=JSON.stringify({projectId:this.load().projectId,incarnation:this.readRepositoryIncarnation(),repoName:task.workspace.repoName,branch:task.workspace.branch}),old=this.ctx.storage.sql.exec<{scope:string;human:number;creator_id:string|null}>('SELECT scope,human,creator_id FROM task_fork_origins WHERE task_id=?',taskId).toArray()[0];
+    if(old){if(old.scope!==scope||old.creator_id!==creatorId)throw Error('Original fork creator identity changed');return {human:old.human===1,creatorId:old.creator_id};}
+    const creation=new TaskCreationIntents(this.ctx.storage).forTask(taskId),human=creation?.phase==='committed'||task.contributor.type==='human'||task.initiatedBy?.type==='human';
+    if(creation?.phase==='committed'&&creatorId!==creation.actor.userId)throw Error('Original human fork creator receipt differs');
+    if(!this.readRepositoryIncarnation())return {human,creatorId};
+    this.ctx.storage.sql.exec('INSERT INTO task_fork_origins VALUES(?,?,?,?)',taskId,scope,human?1:0,creatorId);
+    return {human,creatorId};
+  }
+  private humanForkScope(taskId:string):ForkPermissionScope|null {
+    const task=this.load().tasks[taskId];if(!task)return null;const origin=this.taskForkOrigin(taskId),incarnation=this.readRepositoryIncarnation();
+    if(!origin.human||!origin.creatorId||!incarnation)return null;
+    return {projectId:this.load().projectId,incarnation,taskId,repoName:task.workspace.repoName,branch:task.workspace.branch,creatorId:origin.creatorId};
+  }
+  private forkWriteSource(taskId:string,actorId:string):ForkPermissionSource|undefined {
+    const task=this.load().tasks[taskId];if(!task)throw Error('Contribution unavailable');
+    this.gitTables();const creatorId=this.ctx.storage.sql.exec<{user_id:string}>('SELECT user_id FROM git_task_writers WHERE task_id=?',taskId).toArray()[0]?.user_id;
+    if(creatorId===actorId)return undefined;
+    const directOwner=this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',actorId).toArray()[0]?.role==='owner';
+    if(!directOwner)throw Error('Only the creator or direct repository maintainer may write this fork');
+    if(!this.taskForkOrigin(taskId).human)return undefined;
+    const scope=this.humanForkScope(taskId);if(!scope)throw Error('Original human fork creator unavailable');
+    const source=new ForkPermissions(this.ctx.storage).source(scope);
+    if(!maintainerMayPush(!!source,directOwner)||!source)throw Error('The human fork creator has not allowed maintainer edits');return source;
+  }
+  private assertForkWriteSource(taskId:string,actorId:string,expected?:ForkPermissionSource) {
+    const source=this.forkWriteSource(taskId,actorId);
+    if(JSON.stringify(source)!==JSON.stringify(expected))throw Error('Original human fork consent revision changed');
+  }
+  async taskForkPermission(taskId:string,userId:string){
+    const authority=await this.repositoryAccessFence(userId);authority.assert();const task=this.load().tasks[taskId];if(!task)throw Error('Contribution unavailable');const scope=this.humanForkScope(taskId);
+    const current=scope?new ForkPermissions(this.ctx.storage).read(scope):{enabled:false,revision:0};
+    return {...current,creatorId:scope?.creatorId??null,canConfigure:!!scope&&scope.creatorId===userId&&authority.role!=='read'&&!['accepted','cancelled','integrating','verifying'].includes(task.status)};
+  }
+  async taskForkPermissionUpdate(taskId:string,userId:string,input:{enabled:boolean;expectedRevision:number},credential:TaskCreationCredential){
+    const parsed=z.object({enabled:z.boolean(),expectedRevision:z.number().int().nonnegative().safe()}).strict().parse(input),authorize=await this.taskCreationCredentialFence(userId,credential);authorize();
+    const scope=this.humanForkScope(taskId),task=this.load().tasks[taskId];if(!scope||!task||['accepted','cancelled','integrating','verifying'].includes(task.status))throw Error('This human contribution is not open for permission changes');
+    const result=new ForkPermissions(this.ctx.storage).update(scope,userId,parsed.expectedRevision,parsed.enabled,()=>{authorize();if(JSON.stringify(this.humanForkScope(taskId))!==JSON.stringify(scope)||['accepted','cancelled','integrating','verifying'].includes(this.load().tasks[taskId]?.status??''))throw Error('Human fork permission authority changed');});
+    return {...result,creatorId:scope.creatorId,canConfigure:true};
+  }
+  private forkPermissionViews(userId:string){
+    return Object.fromEntries(Object.values(this.load().tasks).filter(task=>this.taskForkOrigin(task.id).human).map(task=>{
+      const scope=this.humanForkScope(task.id),current=scope?new ForkPermissions(this.ctx.storage).read(scope):{enabled:false,revision:0};
+      return [task.id,{...current,creatorId:scope?.creatorId??null,canConfigure:scope?.creatorId===userId&&!!this.localRepositoryMember(userId,true)&&!['accepted','cancelled','integrating','verifying'].includes(task.status)}];
+    }));
+  }
   private gitGatewayStamp(task:Task):string{const view=this.projectedTask(task);return view.targetGeneration?JSON.stringify({eventId:view.targetGeneration.eventId,generation:view.targetGeneration.generation}):"creation";}
   private async currentGitGatewayScope(taskId:string,userId:string,parentTokenHash:string|null):Promise<GitGatewayScope>{
-    if(!await this.canGitAccess(userId,taskId,true))throw Error("Git writer authority unavailable");const account=accountOf(this.env,await accountKeyFor(userId));if(await account.accountLifecycle()!=="active"||(parentTokenHash&&!await account.apiTokenHashActive(parentTokenHash)))throw Error("Git credential authority unavailable");if(!await this.canGitAccess(userId,taskId,true))throw Error("Git writer authority changed");const state=this.load(),task=state.tasks[taskId],incarnation=this.readRepositoryIncarnation()??new PrivateRecoveryOperations(this.ctx.storage).incarnation();if(!task)throw Error("Git task scope unavailable");return{projectId:state.projectId,incarnation,taskId,repoName:task.workspace.repoName,actorId:userId,parentTokenHash,generationStamp:this.gitGatewayStamp(task)};
+    if(!await this.canGitAccess(userId,taskId,true))throw Error("Git writer authority unavailable");
+    const account=accountOf(this.env,await accountKeyFor(userId));if(await account.accountLifecycle()!=="active"||(parentTokenHash&&!await account.apiTokenHashActive(parentTokenHash)))throw Error("Git credential authority unavailable");
+    if(!await this.canGitAccess(userId,taskId,true))throw Error("Git writer authority changed");
+    const permission=await this.repositoryAccessFence(userId,true);permission.assert();const state=this.load(),task=state.tasks[taskId],incarnation=this.readRepositoryIncarnation()??new PrivateRecoveryOperations(this.ctx.storage).incarnation();if(!task)throw Error("Git task scope unavailable");
+    const maintainerWriteSource=this.forkWriteSource(taskId,userId);
+    return{projectId:state.projectId,incarnation,taskId,repoName:task.workspace.repoName,actorId:userId,parentTokenHash,generationStamp:this.gitGatewayStamp(task),...(maintainerWriteSource?{maintainerWriteSource}:{}),...(permission.source?{organizationSource:permission.source}:{})};
   }
-  private assertGitGatewayScopeLocal(scope:GitGatewayScope):void{this.gitTables();const state=this.load(),task=state.tasks[scope.taskId],role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",scope.actorId).toArray()[0]?.role,writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",scope.taskId).toArray()[0]?.user_id;if(this.repositoryDeleting()||!task||["accepted","cancelled"].includes(task.status)||!role||(role!=="owner"&&writer!==scope.actorId)||state.projectId!==scope.projectId||this.readRepositoryIncarnation()!==scope.incarnation||task.workspace.repoName!==scope.repoName||this.gitGatewayStamp(task)!==scope.generationStamp)throw Error("Git gateway authority or generation changed");}
+  private assertGitGatewayScopeLocal(scope:GitGatewayScope):void{
+    this.gitTables();const state=this.load(),task=state.tasks[scope.taskId],role=this.localRepositoryMember(scope.actorId,true),writer=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",scope.taskId).toArray()[0]?.user_id;
+    if(scope.organizationSource)this.assertInheritedSource(scope.actorId,scope.organizationSource,true);
+    this.assertTaskWriteUnlocked(scope.taskId);this.assertForkWriteSource(scope.taskId,scope.actorId,scope.maintainerWriteSource);
+    if(this.repositoryDeleting()||state.lifecycle?.state==='archived'||!task||["accepted","cancelled"].includes(task.status)||!role||(role!=="owner"&&writer!==scope.actorId)||state.projectId!==scope.projectId||this.readRepositoryIncarnation()!==scope.incarnation||task.workspace.repoName!==scope.repoName||this.gitGatewayStamp(task)!==scope.generationStamp)throw Error("Git gateway authority or generation changed");
+  }
   async beginGitGatewayAttempt(id:string,taskId:string|null,write:boolean,userId:string,parentTokenHash:string|null):Promise<GitGatewayScope>{
     if(!write||taskId===null)throw Error("Only contribution writes use gateway ownership");const scope=await this.currentGitGatewayScope(taskId,userId,parentTokenHash);this.assertGitGatewayScopeLocal(scope);new GitGatewayLedger(this.ctx.storage).begin(id,scope);return scope;
   }
   async recordGitGatewayCredential(id:string,token:string,expiresAt:number,providerScope:string):Promise<void>{
     const ledger=new GitGatewayLedger(this.ctx.storage),attempt=ledger.get(id);if(!attempt)throw Error("Git gateway issuance intent unavailable");ledger.issued(id,token);
     if(providerScope!=="write"||!Number.isSafeInteger(expiresAt)||expiresAt<=Date.now()||expiresAt>Date.now()+605000)throw Error("Git transport credential scope or expiry unavailable");
-    const scope=await this.currentGitGatewayScope(attempt.scope.taskId,attempt.scope.actorId,attempt.scope.parentTokenHash);this.assertGitGatewayScopeLocal(scope);if((["projectId","incarnation","taskId","repoName","actorId","generationStamp","parentTokenHash"] as const).some(key=>scope[key]!==attempt.scope[key]))throw Error("Git transport generation changed before use");
+    const scope=await this.currentGitGatewayScope(attempt.scope.taskId,attempt.scope.actorId,attempt.scope.parentTokenHash);this.assertGitGatewayScopeLocal(scope);if(JSON.stringify(scope.maintainerWriteSource)!==JSON.stringify(attempt.scope.maintainerWriteSource)||JSON.stringify(scope.organizationSource)!==JSON.stringify(attempt.scope.organizationSource)||(["projectId","incarnation","taskId","repoName","actorId","generationStamp","parentTokenHash"] as const).some(key=>scope[key]!==attempt.scope[key]))throw Error("Git transport generation changed before use");
   }
   async markGitGatewayDispatch(id:string):Promise<boolean>{
     try{const ledger=new GitGatewayLedger(this.ctx.storage),attempt=ledger.get(id);if(!attempt)return false;const scope=await this.currentGitGatewayScope(attempt.scope.taskId,attempt.scope.actorId,attempt.scope.parentTokenHash);this.assertGitGatewayScopeLocal(scope);ledger.dispatch(id,scope);return true;}catch{return false;}
@@ -2443,24 +2920,29 @@ export class RepositoryController extends DurableObject<Env> {
   async finishGitGatewayAttempt(id:string,result:{transportFinished:boolean;credentialRevoked:boolean}):Promise<boolean>{return new GitGatewayLedger(this.ctx.storage).finish(id,result.transportFinished,result.credentialRevoked);}
 
   private targetGenerationSource(task:Task){if(task.currentCommit===null)throw Error("Target generation requires a recorded real checkpoint");return{id:task.id,goal:task.goal,contributorId:task.contributor.id,workspaceRepoName:task.workspace.repoName,branch:task.workspace.branch,...(task.dependsOn?{dependsOn:task.dependsOn}:{}),baseCommit:task.baseCommit,currentCommit:task.currentCommit,requirements:acceptedRequirementsSchema.parse(task.requirements),originalAcceptedTarget:task.acceptedTarget};}
-  private targetGenerationSettlement(record:import("./task-target-generations").TaskTargetGeneration):TaskTargetGenerationSettlement{
-    const state=this.load(),task=state.tasks[record.source.taskId];if(!task||["accepted","cancelled","working","checkpointed"].includes(task.status))throw Error("Prior task work is not quiescent");
+  private targetGenerationSettlement(record:import("./task-target-generations").TaskTargetGeneration,verifyRetargetProof=true):TaskTargetGenerationSettlement{
+    const state=this.load(),task=state.tasks[record.source.taskId];if(!task||["accepted","cancelled"].includes(task.status)||(record.change.kind!=="retarget"&&["working","checkpointed"].includes(task.status)))throw Error("Prior task work is not quiescent");
     if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='task_creation_receipts'").toArray().length||!this.ctx.storage.sql.exec("SELECT task_id FROM task_creation_receipts WHERE task_id=?",task.id).toArray().length)throw Error("Original task allocation coverage unavailable");
     assertTaskCreationQuiescence(this.ctx.storage,{projectId:record.projectId,incarnation:record.incarnation,canonicalRepoName:record.canonicalRepoName,taskId:task.id,workspaceRepoName:task.workspace.repoName},()=>{const current=this.load(),selected=current.tasks[task.id];if(this.repositoryDeleting()||current.projectId!==record.projectId||current.canonicalRepoName!==record.canonicalRepoName||this.readRepositoryIncarnation()!==record.incarnation||selected?.workspace.repoName!==task.workspace.repoName)throw Error("Original task creation scope changed");});
     if(!new GitGatewayLedger(this.ctx.storage).taskQuiescence({projectId:record.projectId,incarnation:record.incarnation,taskId:task.id,repoName:task.workspace.repoName}))throw Error("Human Git transport coverage or cleanup remains unverified");
     const creation=this.ctx.storage.sql.exec<{payload:string}>("SELECT payload FROM task_creation_receipts WHERE task_id=?",task.id).toArray()[0];const creationTarget=JSON.parse(creation!.payload) as {acceptedTarget?:FrozenAcceptedTarget};if(!creationTarget.acceptedTarget||!task.acceptedTarget)throw Error("Original creation target receipt unavailable");assertCompatibleAcceptedTargetBatch([task.acceptedTarget,creationTarget.acceptedTarget,record.source.originalAcceptedTarget]);
-    let allocated=false;for(const candidate of Object.values(state.candidates).filter(value=>value.participatingTaskIds.includes(task.id))){if(state.journal.some(journal=>journal.candidateId===candidate.id&&journal.state==="PREPARED"))throw Error("An original publication is still pending");if(!candidate.workflowInstanceId)throw Error("Prior integration coverage unavailable");const runtime=IntegrationNativeRuntimeLedger.inspect(this.ctx.storage,{workflowId:candidate.workflowInstanceId,candidateId:candidate.id,projectId:state.projectId,incarnation:record.incarnation});if(!runtime.coverage||runtime.sealed!==true||runtime.status!=="stopped")throw Error("Prior integration shutdown remains unconfirmed");allocated ||=!!runtime.allocations?.length;}
+    let allocated=false;for(const candidate of Object.values(state.candidates).filter(value=>value.participatingTaskIds.includes(task.id))){if(record.change.kind==="retarget"&&!['accepted','failed','stale'].includes(candidate.status))throw Error("Existing candidate review or checks must be settled before retargeting");if(state.journal.some(journal=>journal.candidateId===candidate.id&&journal.state==="PREPARED"))throw Error("An original publication is still pending");if(!candidate.workflowInstanceId)throw Error("Prior integration coverage unavailable");const runtime=IntegrationNativeRuntimeLedger.inspect(this.ctx.storage,{workflowId:candidate.workflowInstanceId,candidateId:candidate.id,projectId:state.projectId,incarnation:record.incarnation});if(!runtime.coverage||runtime.sealed!==true||runtime.status!=="stopped")throw Error("Prior integration shutdown remains unconfirmed");allocated ||=!!runtime.allocations?.length;}
     this.agentRuns();new AgentRuntimeLedger(this.ctx.storage);new AgentCredentialIncidents(this.ctx.storage);new RetainedCredentialIncidents(this.ctx.storage);
     const runs=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM agent_runs WHERE json_extract(doc,'$.taskId')=?",task.id).toArray();for(const row of runs){const run=JSON.parse(row.doc) as AgentRunRecord;if(!["failed","checkpointed"].includes(run.phase))throw Error("Prior proposal remains unsettled");const attempts=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM agent_native_attempts WHERE json_extract(doc,'$.taskId')=? AND json_extract(doc,'$.runId')=?",task.id,run.runId).toArray();if(!attempts.length||attempts.some(item=>(JSON.parse(item.doc) as {state:string}).state!=="stopped"))throw Error("Prior agent native shutdown remains unverified");allocated=true;}
     if(this.ctx.storage.sql.exec("SELECT id FROM agent_credential_incidents WHERE json_extract(payload,'$.taskId')=? AND status!='revoked' LIMIT 1",task.id).toArray().length||this.ctx.storage.sql.exec("SELECT input_id FROM retained_credential_incidents WHERE json_extract(payload,'$.taskId')=? AND status!='revoked' LIMIT 1",task.id).toArray().length)throw Error("Prior task credential cleanup remains unconfirmed");
+    if(record.change.kind==='retarget'){
+      new BranchNativeAttempts(this.ctx.storage);new BranchCredentialIncidents(this.ctx.storage);
+      if(this.ctx.storage.sql.exec("SELECT id FROM branch_native_attempts WHERE json_extract(doc,'$.projectId')=? AND json_extract(doc,'$.incarnation')=? AND json_extract(doc,'$.state')!='stopped' LIMIT 1",record.projectId,record.incarnation).toArray().length||this.ctx.storage.sql.exec("SELECT id FROM branch_credential_incidents WHERE json_extract(payload,'$.projectId')=? AND json_extract(payload,'$.incarnation')=? AND status!='revoked' LIMIT 1",record.projectId,record.incarnation).toArray().length)throw Error('Prior native fork inspection/edit cleanup remains unconfirmed');
+    }
     let git:TaskTargetGenerationSettlement["git"]={kind:"unchanged",baseCommit:record.source.baseCommit,currentCommit:record.source.currentCommit};
     if(record.change.kind==="rebase"){const application=new RetainedInputs(this.ctx.storage).application(record.change.receiptId);if(!application||!["remote_verified","applied"].includes(application.status)||application.input.followup===true||application.input.taskId!==task.id||application.input.projectId!==record.projectId||application.input.incarnation!==record.incarnation||application.input.canonicalRepoName!==record.canonicalRepoName||application.input.workspaceRepoName!==record.source.workspaceRepoName||application.input.branch!==record.source.branch||application.input.base!==record.source.baseCommit||application.input.commit!==record.source.currentCommit||application.base!==record.target.acceptedCommit)throw Error("Exact verified rebase receipt unavailable");git={kind:"rebased",receiptId:record.change.receiptId,oldBase:application.input.base,oldCommit:application.input.commit,newBase:application.base,newCommit:application.commit,remoteVerified:true};}
+    if(record.change.kind==='retarget'&&verifyRetargetProof){const saved=new TaskRetargets(this.ctx.storage).get(record.change.receiptId);if(!saved?.proof||saved.phase!=='verified'||saved.intent.eventId!==record.eventId||saved.proof.head!==record.source.currentCommit||saved.proof.base!==record.target.acceptedCommit||!saved.proof.ancestryVerified)throw Error('Exact native retarget ancestry receipt unavailable');git={kind:'retargeted',receiptId:record.change.receiptId,oldBase:record.source.baseCommit,oldCommit:record.source.currentCommit,newBase:saved.proof.base,currentCommit:saved.proof.head,ancestryVerified:true};}
     if(record.change.kind==="accepted-parent-alignment"){const parent=state.tasks[record.change.parentTaskId],base=record.source.baseCommit;if(!parent||parent.status!=="accepted"||task.dependsOn!==parent.id||base===null||record.target.kind==="unborn"||record.target.acceptedCommit!==base)throw Error("Original accepted parent dependency unavailable");const journal=state.journal.find(item=>{const candidate=state.candidates[item.candidateId];return item.state==="ACCEPTED"&&item.newHead===base&&candidate?.status==="accepted"&&candidate.participatingTaskIds.includes(parent.id)&&candidate.participatingCommits[parent.id]===base&&candidate.acceptedTarget?.ref===record.target.ref&&candidate.acceptedTarget.projectId===record.projectId&&candidate.acceptedTarget.incarnation===record.incarnation&&candidate.acceptedTarget.canonicalRepoName===record.canonicalRepoName;});if(!journal||!state.acceptedState.history.some(item=>item.candidateId===journal.candidateId&&item.commit===base&&item.participatingTasks.includes(parent.id)))throw Error("Exact accepted parent journal/history unavailable");const childProof=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM retained_inputs WHERE json_extract(doc,'$.taskId')=? AND json_extract(doc,'$.commit')=? AND json_extract(doc,'$.base')=? LIMIT 2",task.id,record.source.currentCommit,base).toArray().map(row=>JSON.parse(row.doc) as RetainedInputReceipt).find(proof=>proof.projectId===record.projectId&&proof.incarnation===record.incarnation&&proof.canonicalRepoName===record.canonicalRepoName&&proof.workspaceRepoName===record.source.workspaceRepoName&&proof.branch===record.source.branch);if(!childProof)throw Error("Actual retained child ancestry proof unavailable");git={kind:"aligned-parent",parentTaskId:parent.id,parentCandidateId:journal.candidateId,journalId:journal.id,parentTarget:{projectId:record.target.projectId,incarnation:record.target.incarnation,canonicalRepoName:record.target.canonicalRepoName,ref:record.target.ref,acceptedCommit:record.target.acceptedCommit,acceptedVersion:record.target.acceptedVersion},parentCheckpoint:base,acceptedCommit:base,baseCommit:base,currentCommit:record.source.currentCommit,ancestryVerified:true};}
     return{eventId:record.eventId,taskId:task.id,previousGeneration:record.expectedGeneration,sourceSnapshotDigest:record.source.snapshotDigest,coverage:"complete",native:allocated?"stopped":"unallocated",proposals:runs.length?"settled":"none",git};
   }
   async prepareTaskTargetGeneration(taskId:string,eventId:string,expectedGeneration:number,change:TaskTargetGenerationIntent["change"],actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){
     const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authorize();const ledger=new TaskTargetGenerations(this.ctx.storage),prior=ledger.get(eventId);if(prior){if(prior.projectId!==this.load().projectId||prior.canonicalRepoName!==this.load().canonicalRepoName||prior.incarnation!==this.readRepositoryIncarnation())throw Error("Generation repository scope changed");if(prior.source.taskId!==taskId||prior.expectedGeneration!==expectedGeneration||JSON.stringify(prior.change)!==JSON.stringify(change)||prior.ownerId!==actor.userId)throw Error("Generation retry identity changed");return prior;}
-    const state=this.load(),task=state.tasks[taskId],incarnation=this.readRepositoryIncarnation();if(!task?.acceptedTarget||!incarnation)throw Error("Bound original task required");const source=this.targetGenerationSource(task),snapshot=JSON.stringify(source),snapshotDigest=await this.sha256(snapshot);authorize();if(JSON.stringify(this.targetGenerationSource(this.load().tasks[taskId]!))!==snapshot)throw Error("Task changed during generation preparation");const target=freezeAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),this.load(),incarnation,task.acceptedTarget.ref);
+    const state=this.load(),task=state.tasks[taskId],incarnation=this.readRepositoryIncarnation();if(!task?.acceptedTarget||!incarnation)throw Error("Bound original task required");const source=this.targetGenerationSource(task),snapshot=JSON.stringify(source),snapshotDigest=await this.sha256(snapshot);authorize();if(JSON.stringify(this.targetGenerationSource(this.load().tasks[taskId]!))!==snapshot)throw Error("Task changed during generation preparation");const target=freezeAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),this.load(),incarnation,effectiveTaskAcceptedTarget(this.projectedTask(task))?.ref??task.acceptedTarget.ref);
     return ledger.prepare({eventId,expectedGeneration,projectId:state.projectId,incarnation,canonicalRepoName:state.canonicalRepoName,ownerId:actor.userId,actor,source:{taskId,...(({id:_id,...value})=>value)(source),originalAcceptedTarget:task.acceptedTarget,snapshotDigest},target,change},()=>{authorize();if(JSON.stringify(this.targetGenerationSource(this.load().tasks[taskId]!))!==snapshot)throw Error("Original generation inputs changed");});
   }
   async activateTaskTargetGeneration(eventId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){
@@ -2469,6 +2951,53 @@ export class RepositoryController extends DurableObject<Env> {
       if(!alreadyActivated&&new TaskTargetGenerations(this.ctx.storage).current(activated.source.taskId)?.eventId===activated.eventId&&activated.change.kind==="rebase"&&activated.activation){const task=this.load().tasks[activated.source.taskId]!;if(task.baseCommit!==activated.activation.baseCommit||task.currentCommit!==activated.activation.currentCommit){new RetainedInputs(this.ctx.storage).applyApplication(activated.change.receiptId,application=>{task.baseCommit=activated.activation!.baseCommit;task.currentCommit=activated.activation!.currentCommit;if(application.parentAccepted)delete task.dependsOn;task.updatedAt=new Date().toISOString();});this.save();}}
       return activated;
     });
+  }
+
+  private retargetView(record:TaskRetargetRecord){const locked=this.ctx.storage.sql.exec('SELECT request_id FROM task_retarget_locks WHERE task_id=? AND request_id=?',record.intent.source.taskId,record.requestId).toArray().length>0;return{cleanupRequired:locked,originalRequest:{requestId:record.requestId,expectedGeneration:record.intent.expectedGeneration,expectedHead:record.intent.source.currentCommit,target:{ref:record.intent.target.ref,acceptedCommit:record.intent.target.acceptedCommit!,acceptedVersion:record.intent.target.acceptedVersion,policyVersion:record.intent.target.policyVersion}},requestId:record.requestId,taskId:record.intent.source.taskId,phase:record.phase,target:{ref:record.intent.target.ref,acceptedCommit:record.intent.target.acceptedCommit},...(record.reason?{reason:record.reason}:{}),generation:record.intent.expectedGeneration+1,requiresFreshReadiness:record.phase==='activated'};}
+  async taskRetargets(taskId:string,userId:string){const authority=await this.repositoryAccessFence(userId);authority.assert();if(!this.load().tasks[taskId])throw Error('Contribution unavailable');const rows=new TaskRetargets(this.ctx.storage).list(taskId);return{operations:rows.slice(0,20).map(record=>this.retargetView(record)),truncated:rows.length>20};}
+  async recoverTaskRetarget(taskId:string,requestId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){
+    const authorize=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authorize();const ledger=new TaskRetargets(this.ctx.storage),record=ledger.get(requestId);if(!record||record.intent.source.taskId!==taskId||record.intent.projectId!==this.load().projectId||record.intent.incarnation!==this.readRepositoryIncarnation())throw Error('Original retarget scope unavailable');
+    const lock=ledger.lockState(taskId);if(!lock||lock.request_id!==requestId)return this.retargetView(record);if(!lock.execution_id||!lock.native_attempt_id)throw Error('Original inspection allocation ownership is unverified; no lock was released');
+    const native=new BranchNativeAttempts(this.ctx.storage).get(lock.native_attempt_id);if(!native||native.operationId!==requestId||native.projectId!==record.intent.projectId||native.incarnation!==record.intent.incarnation)throw Error('Original retarget native identity unavailable');
+    new BranchNativeAttempts(this.ctx.storage);new BranchCredentialIncidents(this.ctx.storage);const attempts=this.ctx.storage.sql.exec<{id:string}>("SELECT id FROM branch_native_attempts WHERE operation_id=? AND json_extract(doc,'$.state')!='stopped' LIMIT 21",requestId).toArray();if(attempts.length>20)throw Error('Retarget cleanup requires bounded operator inspection');
+    for(const attempt of attempts){await this.cleanupBranchAttempt(attempt.id,requestId,actor,credentialHash,sessionExpiresAt);authorize();}
+    const credentials=this.ctx.storage.sql.exec<{id:string}>("SELECT id FROM branch_credential_incidents WHERE json_extract(payload,'$.operationId')=? AND status!='revoked' LIMIT 21",requestId).toArray();if(credentials.length>20)throw Error('Retarget credential cleanup remains unconfirmed');
+    for(const credential of credentials){if(!await this.revokeBranchCredential(credential.id))throw Error('Retarget credential revocation remains unconfirmed');authorize();}
+    const linkedCredential=new BranchCredentialIncidents(this.ctx.storage).summary(lock.native_attempt_id);if(linkedCredential?.status!=='revoked'&&lock.credential_state!=='not_issued')throw Error('Original retarget credential issuance coverage is unconfirmed');
+    if(this.ctx.storage.sql.exec("SELECT id FROM branch_native_attempts WHERE operation_id=? AND json_extract(doc,'$.state')!='stopped' LIMIT 1",requestId).toArray().length||this.ctx.storage.sql.exec("SELECT id FROM branch_credential_incidents WHERE json_extract(payload,'$.operationId')=? AND status!='revoked' LIMIT 1",requestId).toArray().length)throw Error('Retarget native/credential shutdown remains unconfirmed');
+    authorize();ledger.unlock(taskId,requestId,lock.execution_id);return this.retargetView(record);
+  }
+  async retargetTaskBase(taskId:string,input:TaskRetargetRequest,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){
+    const request=taskRetargetRequestSchema.parse(input),owner=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);owner();const operations=new TaskRetargets(this.ctx.storage),saved=operations.get(request.requestId);
+    if(saved&&(saved.intent.source.taskId!==taskId||saved.intent.ownerId!==actor.userId||saved.intent.expectedGeneration!==request.expectedGeneration||saved.intent.source.currentCommit!==request.expectedHead||saved.intent.target.ref!==request.target.ref||saved.intent.target.acceptedCommit!==request.target.acceptedCommit||saved.intent.target.acceptedVersion!==request.target.acceptedVersion||saved.intent.target.policyVersion!==request.target.policyVersion))throw Error('Original retarget request changed');
+    if(saved?.phase==='activated')return this.retargetView(saved);
+    if(operations.lockState(taskId))throw Error('Original retarget execution is active; recover its exact inspection before retrying');
+    if(!await this.canGitAccess(actor.userId,taskId,true))throw Error('Contribution creator consent or write authority unavailable');owner();
+    const state=this.load(),task=state.tasks[taskId],incarnation=this.readRepositoryIncarnation();if(!task?.acceptedTarget||task.currentCommit===null||!incarnation||task.dependsOn||!['working','checkpointed','ready','blocked'].includes(task.status)||!this.taskForkOrigin(taskId).human)throw Error('An unstacked open original human contribution is required');
+    const currentGeneration=new TaskTargetGenerations(this.ctx.storage).current(taskId)?.generation??0;if(currentGeneration!==request.expectedGeneration||task.currentCommit!==request.expectedHead)throw Error('Contribution generation or exact head changed');
+    const target=freezeAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),state,incarnation,request.target.ref),previous=effectiveTaskAcceptedTarget(this.projectedTask(task))!;
+    if(target.kind==='unborn'||target.acceptedCommit!==request.target.acceptedCommit||target.acceptedVersion!==request.target.acceptedVersion||target.policyVersion!==request.target.policyVersion||target.policyVersion<task.acceptedTarget.policyVersion)throw Error('Recorded committed target changed');
+    const choice=retargetBaseBranch({headBranch:task.workspace.branch,baseBranch:previous.branch,previousBases:[],reviews:[]},target.branch);if(!choice.ok||target.ref===previous.ref)throw Error(choice.ok?'Choose a different recorded base branch':choice.error);
+    const creation=new TaskCreationIntents(this.ctx.storage).forTask(taskId);if(!creation||creation.phase!=='committed'||!creation.providerRepoId||creation.workspaceRepoName!==task.workspace.repoName||creation.projectId!==state.projectId||creation.incarnation!==incarnation)throw Error('Original confirmed fork provider identity required');
+    const source=this.targetGenerationSource(task),captured=JSON.stringify(source),snapshotDigest=await this.sha256(captured);owner();
+    const maintainerWriteSource=saved?saved.maintainerWriteSource:this.forkWriteSource(taskId,actor.userId),intent:TaskTargetGenerationIntent=saved?.intent??{eventId:request.requestId,expectedGeneration:request.expectedGeneration,projectId:state.projectId,incarnation,canonicalRepoName:state.canonicalRepoName,ownerId:actor.userId,actor,source:{taskId,...(({id:_id,...rest})=>rest)(source),originalAcceptedTarget:task.acceptedTarget,snapshotDigest},target,change:{kind:'retarget',receiptId:request.requestId}};
+    let executionId:string|undefined=undefined,allocatedAttemptId:string|undefined,cleanupConfirmed=false;
+    const assert=()=>{owner();if(executionId){const lease=operations.lockState(taskId);if(!lease||lease.request_id!==request.requestId||lease.execution_id!==executionId||allocatedAttemptId&&lease.native_attempt_id!==allocatedAttemptId)throw Error('Original retarget execution lease was released or replaced');}this.assertForkWriteSource(taskId,actor.userId,maintainerWriteSource);const current=this.load(),selected=current.tasks[taskId];if(!selected||JSON.stringify(this.targetGenerationSource(selected))!==captured||current.projectId!==intent.projectId||this.readRepositoryIncarnation()!==intent.incarnation||selected.workspace.remote!==task.workspace.remote||selected.dependsOn)throw Error('Original retarget contribution scope changed');assertCompatibleAcceptedTargetBatch([freezeAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),current,intent.incarnation,intent.target.ref),intent.target]);};
+    const coverage={...intent,generation:intent.expectedGeneration+1,phase:'prepared' as const,createdAt:Date.now()};assert();this.targetGenerationSettlement(coverage,false);
+    let record=operations.prepare({requestId:request.requestId,intent,providerRepoId:creation.providerRepoId,remote:task.workspace.remote,...(maintainerWriteSource?{maintainerWriteSource}:{})},assert);
+    if(record.phase==='requires_rebase')return this.retargetView(record);
+    const authorize=async()=>{assert();await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();const write=await this.repositoryAccessFence(actor.userId,true);write.assert();this.forkWriteSource(taskId,actor.userId);assert();};
+    const ownedExecutionId=operations.lock(taskId,request.requestId);executionId=ownedExecutionId;
+    try{
+      const proof=await this.withBranchNative(request.requestId,'inventory',actor,authorize,JSON.stringify(record),(executor,_remote,token)=>inspectTaskRetarget(executor,{remote:record.remote,token,branch:record.intent.source.branch,head:record.intent.source.currentCommit,base:record.intent.target.acceptedCommit!,directory:'/workspace/retarget-inspection'}),{prepared:attempt=>{allocatedAttemptId=attempt.attemptId;operations.bindNative(taskId,request.requestId,ownedExecutionId,attempt.attemptId);},finished:(attempt,proof)=>{operations.finished(taskId,request.requestId,ownedExecutionId,attempt.attemptId,proof.credentialState);cleanupConfirmed=proof.nativeStopped&&proof.credentialState!=="unconfirmed";}}, {repoName:record.intent.source.workspaceRepoName,remote:record.remote,providerRepoId:record.providerRepoId});
+      await authorize();record=operations.record(request.requestId,proof,assert);if(record.phase!=='requires_rebase')this.ctx.storage.transactionSync(()=>{
+        assert();const generations=new TaskTargetGenerations(this.ctx.storage);generations.prepare(record.intent,assert);const activated=generations.activate(request.requestId,generation=>this.targetGenerationSettlement(generation),()=>assert());
+        const selected=this.load().tasks[taskId]!;selected.baseCommit=activated.activation!.baseCommit;selected.status='checkpointed';delete selected.activeCandidateId;selected.updatedAt=new Date().toISOString();
+        for(const candidate of Object.values(this.load().candidates)){if(candidate.status!=='accepted'&&candidate.participatingTaskIds.includes(taskId)){candidate.status='stale';candidate.failureBlocker??='Base branch changed; fresh checks and exact-head review required.';}}
+        this.save();return operations.activated(request.requestId,()=>owner());
+      });
+    }catch{this.state=null;/* Provider/native identity, cleanup or coverage absence keeps original history and prepared request intact. */}finally{if(allocatedAttemptId===undefined||cleanupConfirmed)operations.unlock(taskId,request.requestId,ownedExecutionId);}
+    return this.retargetView(operations.get(request.requestId)!);
   }
 
   /** Returns false if this event id was already processed (at-least-once delivery safe). */
@@ -2500,7 +3029,7 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   private initialForkScope(record:TaskCreationIntentRecord):InitialForkCredentialScope{return{eventId:record.eventId,allocationId:record.allocationId,taskId:record.taskId,projectId:record.projectId,incarnation:record.incarnation,canonicalRepoName:record.canonicalRepoName,workspaceRepoName:record.workspaceRepoName,accountKey:record.accountKey,actorId:record.actor.userId};}
-  private assertTaskCreationIntentLocal(record:TaskCreationIntentRecord,actorId:string):void{const state=this.load();if(this.repositoryDeleting()||record.actor.userId!==actorId||state.projectId!==record.projectId||state.canonicalRepoName!==record.canonicalRepoName||this.readRepositoryIncarnation()!==record.incarnation||!this.ctx.storage.sql.exec("SELECT user_id FROM members WHERE user_id=?",actorId).toArray().length)throw Error("Saved task creation scope changed");if(record.phase!=="committed"&&this.captureTaskCreationTarget(actorId,record.input).scope!==record.selection.scope)throw Error("Original task creation source changed");}
+  private assertTaskCreationIntentLocal(record:TaskCreationIntentRecord,actorId:string):void{const state=this.load();if(this.repositoryDeleting()||record.actor.userId!==actorId||state.projectId!==record.projectId||state.canonicalRepoName!==record.canonicalRepoName||this.readRepositoryIncarnation()!==record.incarnation||!this.localRepositoryMember(actorId,true))throw Error("Saved task creation scope changed");if(record.phase!=="committed"&&record.input.issue!==null)assertIssueWritable(this.ctx.storage,record.input.issue);if(record.phase!=="committed"&&record.input.issue!==null&&!isIssueActive(this.ctx.storage,record.input.issue))throw new IssueLifecycleError("Original issue is unavailable; no new task was registered",410);if(record.phase!=="committed"&&this.captureTaskCreationTarget(actorId,record.input).scope!==record.selection.scope)throw Error("Original task creation source changed");}
   async prepareTaskCreationIntent(taskId:string,actorId:string,input:TaskCreationInput,credential:TaskCreationCredential):Promise<TaskCreationIntentRecord>{
     const assert=await this.taskCreationCredentialFence(actorId,credential);assert();const ledger=new TaskCreationIntents(this.ctx.storage),old=ledger.forTask(taskId);if(old){this.assertTaskCreationIntentLocal(old,actorId);if(taskCreationPayload(old.input)!==taskCreationPayload(input))throw Error("Saved task creation request changed");return old;}
     if(this.load().tasks[taskId])throw Error("Saved task must be recovered through its creation receipt");const incarnation=new PrivateRecoveryOperations(this.ctx.storage).incarnation(),selection=await this.resolveTaskCreationTarget(actorId,input,credential),accountKey=await accountKeyFor(actorId);assert();const state=this.load();const intent=taskCreationIntentSchema.parse({eventId:crypto.randomUUID(),allocationId:crypto.randomUUID(),nativeProtocol:"sdk-only",taskId,actor:{userId:actorId,viaToken:credential.viaToken,credentialHash:credential.credentialHash??null,sessionExpiresAt:credential.sessionExpiresAt??null},accountKey,projectId:state.projectId,incarnation,canonicalRepoName:state.canonicalRepoName,workspaceRepoName:`t-${state.projectId}-${taskId}`,input,selection});return ledger.prepare(intent,()=>{assert();this.assertTaskCreationIntentLocal({...intent,phase:"prepared",createdAt:0,updatedAt:0},actorId);});
@@ -2531,9 +3060,12 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   private async taskCreationCredentialFence(actorId:string,credential?:TaskCreationCredential):Promise<()=>void>{
-    await this.requireTaskCreationActor(actorId);if(credential?.viaToken){if(!credential.credentialHash||!await accountOf(this.env,await accountKeyFor(actorId)).apiTokenHashActive(credential.credentialHash))throw Error("Task creation credential unavailable");}else if(credential&&(!Number.isFinite(credential.sessionExpiresAt)||Date.now()>=credential.sessionExpiresAt!))throw Error("Task creation session expired");
-    if(credential)new PrivateRecoveryOperations(this.ctx.storage).incarnation();const repositoryContext=credential?await this.repositoryReadContext(actorId):null;
-    const assert=()=>{if(repositoryContext&&(this.load().projectId!==repositoryContext.projectId||this.load().canonicalRepoName!==repositoryContext.canonicalRepoName||this.readRepositoryIncarnation()!==repositoryContext.incarnation||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==repositoryContext.ownerId))throw Error("Task creation repository owner changed");if(this.repositoryDeleting()||!this.ctx.storage.sql.exec("SELECT user_id FROM members WHERE user_id=?",actorId).toArray().length||(!credential?.viaToken&&credential&&(!Number.isFinite(credential.sessionExpiresAt)||Date.now()>=credential.sessionExpiresAt!)))throw Error("Task creation authority changed");};assert();return assert;
+    await this.requireTaskCreationActor(actorId);
+    if(credential?.viaToken){if(!credential.credentialHash||!await accountOf(this.env,await accountKeyFor(actorId)).apiTokenHashActive(credential.credentialHash))throw Error("Task creation credential unavailable");}
+    else if(credential&&(!Number.isFinite(credential.sessionExpiresAt)||Date.now()>=credential.sessionExpiresAt!))throw Error("Task creation session expired");
+    if(credential)new PrivateRecoveryOperations(this.ctx.storage).incarnation();
+    const repositoryContext=credential?await this.repositoryReadContext(actorId):null,permission=await this.repositoryAccessFence(actorId,true);
+    const assert=()=>{permission.assert();if(repositoryContext&&(this.load().projectId!==repositoryContext.projectId||this.load().canonicalRepoName!==repositoryContext.canonicalRepoName||this.readRepositoryIncarnation()!==repositoryContext.incarnation||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==repositoryContext.ownerId))throw Error("Task creation repository owner changed");if(this.repositoryDeleting()||!this.localRepositoryMember(actorId,true)||(!credential?.viaToken&&credential&&(!Number.isFinite(credential.sessionExpiresAt)||Date.now()>=credential.sessionExpiresAt!)))throw Error("Task creation authority changed");};assert();return assert;
   }
   async contributionTargets(actorId:string):Promise<{targets:Array<{ref:string;branch:string;acceptedCommit:string|null;acceptedVersion:number;policyVersion:number}>;truncated:boolean}>{
     const context=await this.repositoryReadContext(actorId);this.synchronizePrimaryAcceptedRegistry(this.load());const state=this.load(),incarnation=this.readRepositoryIncarnation();if(!incarnation)return{targets:[],truncated:false};
@@ -2551,11 +3083,10 @@ export class RepositoryController extends DurableObject<Env> {
   async assertTaskCreationTarget(actorId:string,input:TaskCreationInput,selection:TaskCreationSelection,credential?:TaskCreationCredential):Promise<boolean>{try{const current=await this.resolveTaskCreationTarget(actorId,input,credential);return current.scope===selection.scope&&current.baseCommit===selection.baseCommit&&current.sourceRepoName===selection.sourceRepoName;}catch{return false;}}
 
   private async requireTaskCreationActor(actorId:string):Promise<void>{
-    if(!actorId||!await this.roleOf(actorId)||this.repositoryDeleting())throw new Error("Task creation access changed");
-    const accountKey=await accountKeyFor(actorId);
-    if(await accountOf(this.env,accountKey).accountLifecycle()!=="active")throw new Error("Task creation account is unavailable");
-    const role=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId).toArray()[0]?.role;
-    if(this.repositoryDeleting()||(role!=="owner"&&role!=="member"))throw new Error("Task creation access changed");
+    if(!actorId)throw Error('Task creation actor required');
+    const permission=await this.repositoryAccessFence(actorId,true);permission.assert();
+    if(await accountOf(this.env,await accountKeyFor(actorId)).accountLifecycle()!=="active")throw Error("Task creation account is unavailable");
+    permission.assert();
   }
   async taskCreationReplay(taskId:string,actorId:string,input:TaskCreationInput,internalTarget?:InternalTaskTargetOptions,credential?:TaskCreationCredential):Promise<Task|null>{
     const assertCredential=await this.taskCreationCredentialFence(actorId,credential);assertCredential();
@@ -2574,10 +3105,14 @@ export class RepositoryController extends DurableObject<Env> {
     const next={...s,tasks:{...s.tasks,[task.id]:task}};
     this.ctx.storage.transactionSync(() => {
       assertCredential();
-      if((creationInput||boundIntent)&&this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId!).toArray()[0]?.role===undefined)throw new Error("Task creation access changed");
-      if(creationInput)assertExternalTaskProvenance(creationInput,actorId,this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId!).toArray()[0]?.role,task);
+      if(task.issue!==undefined)assertIssueWritable(this.ctx.storage,task.issue);
+      if(task.issue!==undefined&&!isIssueActive(this.ctx.storage,task.issue))throw new IssueLifecycleError("Original issue is unavailable; no new task was registered",410);
+      if((creationInput||boundIntent)&&!this.localRepositoryMember(actorId!,true))throw new Error("Task creation access changed");
+      if(creationInput)assertExternalTaskProvenance(creationInput,actorId,this.localRepositoryMember(actorId!,true)??undefined,task);
       if(task.acceptedTarget){const current=freezeAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),this.load(),new PrivateRecoveryOperations(this.ctx.storage).incarnation(),task.acceptedTarget.ref);assertCompatibleAcceptedTargetBatch([task.acceptedTarget,current]);}
       if(actorId) { this.gitTables(); this.ctx.storage.sql.exec("INSERT INTO git_task_writers(task_id,user_id) VALUES (?,?)",task.id,actorId); }
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS task_fork_origins(task_id TEXT PRIMARY KEY,scope TEXT NOT NULL,human INTEGER NOT NULL,creator_id TEXT)');
+      this.ctx.storage.sql.exec('INSERT INTO task_fork_origins VALUES(?,?,?,?)',task.id,JSON.stringify({projectId:s.projectId,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation(),repoName:task.workspace.repoName,branch:task.workspace.branch}),task.contributor.type==='human'?1:0,actorId??null);
       new GitGatewayLedger(this.ctx.storage).declareTask({projectId:s.projectId,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation(),taskId:task.id,repoName:task.workspace.repoName});
       if(payload){this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS task_creation_receipts(task_id TEXT PRIMARY KEY,actor_id TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL)");this.ctx.storage.sql.exec("INSERT INTO task_creation_receipts VALUES(?,?,?,?)",task.id,actorId!,payload,task.createdAt);}
       if(this.repositoryDeleting())throw new Error("Repository deletion is in progress");
@@ -2648,6 +3183,138 @@ export class RepositoryController extends DurableObject<Env> {
     return { applied: true };
   }
 
+  // Canonical organizations live on the global instance. Inherited grants never enter members.
+  private async organizationActor(userId:string,expiresAt:number) {
+    if (!userId || !Number.isSafeInteger(expiresAt) || Date.now()>=expiresAt || await accountOf(this.env,await accountKeyFor(userId)).accountLifecycle()!=='active') throw Error('Organization session unavailable');
+    if(Date.now()>=expiresAt) throw Error('Organization session expired');
+  }
+  async organizations(userId:string,expiresAt:number) {
+    await this.organizationActor(userId,expiresAt);
+    const ledger=new OrganizationAccessLedger(this.ctx.storage);
+    return ledger.listForUser(userId).map(doc=>this.organizationView(doc,userId));
+  }
+  private organizationView(doc:OrganizationAccessSnapshot,userId:string) {
+    const viewerRole=doc.members.find(m=>m.userId===userId)?.role??(doc.grants.some(g=>g.subject.kind==='user'&&g.subject.id===userId)?'outside':'invited');
+    if(viewerRole==='outside')return {...doc,members:[],teams:[],grants:doc.grants.filter(g=>g.subject.kind==='user'&&g.subject.id===userId),repositories:doc.grants.filter(g=>g.subject.kind==='user'&&g.subject.id===userId).map(g=>g.repositoryId),invitations:doc.invitations.filter(i=>i.userId===userId),viewerRole};
+    if(viewerRole==='invited') return {...doc,members:[],teams:[],grants:[],repositories:[],invitations:doc.invitations.filter(i=>i.userId===userId),viewerRole};
+    return {...doc,invitations:viewerRole==='owner'?doc.invitations:doc.invitations.filter(i=>i.userId===userId),viewerRole,accessSyncPending:new OrganizationAccessLedger(this.ctx.storage).pending(doc.id).length>0};
+  }
+  async organizationRead(id:string,userId:string,expiresAt:number) {
+    await this.organizationActor(userId,expiresAt);
+    const doc=new OrganizationAccessLedger(this.ctx.storage).listForUser(userId).find(d=>d.id===id);
+    if(!doc) throw Error('Organization unavailable');return this.organizationView(doc,userId);
+  }
+  async organizationCreate(name:string,userId:string,expiresAt:number) {
+    await this.organizationActor(userId,expiresAt);
+    const ledger=new OrganizationAccessLedger(this.ctx.storage);
+    if(ledger.listForUser(userId).length>=20)throw Error('Organization capacity reached');
+    return this.organizationView(ledger.createOrganization(crypto.randomUUID(),name,userId),userId);
+  }
+  async repositoryDiscoverySnapshot(userId:string,credential?:RepositoryDiscoveryCredential):Promise<RepositoryDiscoverySnapshot|null>{
+    try{
+      if(!credential)return null;const account=accountOf(this.env,await accountKeyFor(userId));
+      const authenticate=async(projectId:string)=>{if(credential.personalTokenHash){if(!await account.apiTokenHashCanRead(credential.personalTokenHash,userId,projectId))throw Error('Discovery credential changed');}else if(await account.accountLifecycle()!=='active'||!Number.isFinite(credential.sessionExpiresAt)||Date.now()>=credential.sessionExpiresAt!)throw Error('Discovery session unavailable');};
+      if(this.repositoryDeleting()){const member=this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',userId).toArray()[0];if(member?.role!=='owner')return null;const original=this.load(true),epoch=this.membershipEpochs().read(userId),identity=JSON.stringify([original.projectId,original.canonicalRepoName,original.projectName,original.kind??'repository',this.readRepositoryIncarnation(),this.repositoryDeleting()]);await authenticate(original.projectId);const state=this.load(true);if(!this.repositoryDeleting()||JSON.stringify([state.projectId,state.canonicalRepoName,state.projectName,state.kind??'repository',this.readRepositoryIncarnation(),this.repositoryDeleting()])!==identity||this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',userId).toArray()[0]?.role!=='owner'||this.membershipEpochs().read(userId)!==epoch||!credential.personalTokenHash&&Date.now()>=credential.sessionExpiresAt!)return null;return{project:{id:state.projectId,name:state.projectName,role:'owner',kind:state.kind??'repository',created_at:state.acceptedState.acceptedAt??''},authorityEpoch:JSON.stringify([state.projectId,state.canonicalRepoName,state.projectName,state.kind??'repository',this.readRepositoryIncarnation(),epoch,'deleting'])};}
+      const permission=await this.repositoryAccessFence(userId);permission.assert();const captured=this.load(),memberEpoch=permission.direct?this.membershipEpochs().read(userId):null;
+      await authenticate(captured.projectId);permission.assert();if(permission.direct&&this.membershipEpochs().read(userId)!==memberEpoch)return null;if(!credential.personalTokenHash&&Date.now()>=credential.sessionExpiresAt!)return null;
+      const state=this.load();return{project:{id:state.projectId,name:state.projectName,role:permission.direct==='owner'?'owner':'member',kind:state.kind??'repository',created_at:state.acceptedState.acceptedAt??''},authorityEpoch:JSON.stringify([state.projectId,state.canonicalRepoName,state.projectName,state.kind??'repository',this.readRepositoryIncarnation(),memberEpoch,permission.source??null])};
+    }catch{return null;}
+  }
+  async assertRepositoryDiscovery(userId:string,authorityEpoch:string,credential?:RepositoryDiscoveryCredential){const current=await this.repositoryDiscoverySnapshot(userId,credential);return current!==null&&current.authorityEpoch===authorityEpoch;}
+  async inheritedRepositoryDiscovery(userId:string){return inheritedRepositoryDiscovery(this.ctx.storage,userId);}
+  async organizationSource(id:string) { return new OrganizationAccessLedger(this.ctx.storage).snapshot(id); }
+  private async reconcileOrganization(id:string) {
+    const ledger=new OrganizationAccessLedger(this.ctx.storage);
+    const deliveries=ledger.pending(id);
+    const results=await Promise.allSettled(deliveries.map(async row=>{
+      const doc=ledger.snapshot(id);if(!doc||doc.revision!==row.revision)throw Error('Organization revision changed');
+      await projectOf(this.env,row.repository_id).synchronizeOrganization(doc);
+      ledger.acknowledge(id,row.repository_id,row.revision);
+    }));
+    if(results.some(result=>result.status==='rejected')||ledger.pending(id).length)throw Error('Organization access revision saved; repository revocation fanout incomplete. Refresh and reconcile.');
+  }
+  async organizationMutate(id:string,userId:string,expiresAt:number,input:OrganizationMutation) {
+    await this.organizationActor(userId,expiresAt);const value=organizationMutationSchema.parse(input),ledger=new OrganizationAccessLedger(this.ctx.storage),doc=ledger.snapshot(id);
+    if(!doc||doc.revision!==value.expectedRevision)throw Error('Organization revision changed');
+    if(value.action!=='accept-invite'&&!doc.members.some(m=>m.userId===userId&&m.role==='owner'))throw Error('Organization owner required');
+    if(value.action==='grant'||value.action==='revoke-grant'){
+      if(await projectOf(this.env,value.repositoryId).roleOf(userId)!=='owner')throw Error('Direct repository owner required to share access');
+      await this.organizationActor(userId,expiresAt);
+    }
+    const args=[id,userId,value.expectedRevision] as const;
+    switch(value.action){
+      case 'member':ledger.setMember(...args,value.userId,value.role);break;
+      case 'remove-member':ledger.removeMember(...args,value.userId);break;
+      case 'team':ledger.createTeam(...args,value.teamId,value.name);break;
+      case 'remove-team':ledger.removeTeam(...args,value.teamId);break;
+      case 'team-member':ledger.setTeamMember(...args,value.teamId,value.userId,value.present);break;
+      case 'team-child':ledger.setTeamChild(...args,value.teamId,value.childTeamId,value.present);break;
+      case 'grant':ledger.grantRepository(...args,value.repositoryId,value.subject,value.role);break;
+      case 'revoke-grant':ledger.revokeRepositoryGrant(...args,value.repositoryId,value.subject);break;
+      case 'invite':ledger.invite(...args,{id:crypto.randomUUID(),userId:value.userId,role:value.role,expiresAt:Date.now()+7*86400000});break;
+      case 'revoke-invite':ledger.revokeInvitation(...args,value.invitationId);break;
+      case 'accept-invite':ledger.acceptInvitation(id,userId,value.invitationId);break;
+      case 'reconcile':break;
+    }
+    await this.reconcileOrganization(id);await this.organizationActor(userId,expiresAt);
+    const current=ledger.snapshot(id)!;return this.organizationView(current,userId);
+  }
+  private inheritedTable() { this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS repository_organization_sources(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,doc TEXT NOT NULL)'); }
+  async synchronizeOrganization(input:OrganizationAccessSnapshot) {
+    const doc=organizationDocumentSchema.parse(input);this.inheritedTable();
+    const fresh=await globalOf(this.env).organizationSource(doc.id);
+    if(!fresh||JSON.stringify(fresh)!==JSON.stringify(doc)||!doc.repositories.includes(this.load().projectId))throw Error('Original organization source revision required');
+    this.ctx.storage.transactionSync(()=>{
+      const old=this.ctx.storage.sql.exec<{revision:number}>('SELECT revision FROM repository_organization_sources WHERE id=?',doc.id).toArray()[0];
+      if(old&&old.revision>doc.revision)throw Error('Organization source revision was superseded');
+      this.ctx.storage.sql.exec('INSERT INTO repository_organization_sources VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,doc=excluded.doc',doc.id,doc.revision,JSON.stringify(doc));
+    });
+  }
+  private inheritedRole(doc:OrganizationAccessSnapshot,userId:string):OrganizationRepositoryRole|null {
+    if(!doc.repositories.includes(this.load().projectId))return null;
+    if(doc.members.some(m=>m.userId===userId&&m.role==='owner'))return 'admin';
+    const teams=organizationTeamsFor(doc,userId);
+    const roles=doc.grants.filter(g=>g.repositoryId===this.load().projectId&&((g.subject.kind==='user'&&g.subject.id===userId)||(g.subject.kind==='team'&&teams.has(g.subject.id)))).map(g=>g.role);
+    return roles.includes('admin')?'admin':roles.includes('write')?'write':roles.includes('read')?'read':null;
+  }
+  /** A final local fence only. Every caller must first await repositoryAccessFence or a source-bound read context. */
+  private localRepositoryMember(userId:string,write=false):"owner"|"member"|null {
+    const direct=this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',userId).toArray()[0]?.role;
+    if(direct==='owner'||direct==='member')return direct;
+    this.inheritedTable();
+    for(const row of this.ctx.storage.sql.exec<{doc:string}>('SELECT doc FROM repository_organization_sources').toArray()){
+      const role=this.inheritedRole(organizationDocumentSchema.parse(JSON.parse(row.doc)),userId);
+      if(role&&(!write||role!=='read'))return 'member';
+    }
+    return null;
+  }
+  private assertInheritedSource(userId:string,source:{id:string;revision:number},write=false) {
+    this.inheritedTable();const row=this.ctx.storage.sql.exec<{revision:number;doc:string}>('SELECT revision,doc FROM repository_organization_sources WHERE id=?',source.id).toArray()[0];
+    const role=row?this.inheritedRole(organizationDocumentSchema.parse(JSON.parse(row.doc)),userId):null;
+    if(!row||row.revision!==source.revision||!role||write&&role==='read')throw Error('Inherited repository source authority changed');
+  }
+  private async repositoryAccessFence(userId:string,write=false) {
+    const scope=JSON.stringify([this.load().projectId,this.load().canonicalRepoName,this.readRepositoryIncarnation()]);
+    const scopeCurrent=()=>{if(scope!==JSON.stringify([this.load().projectId,this.load().canonicalRepoName,this.readRepositoryIncarnation()])||write&&this.load().lifecycle?.state==='archived')throw Error('Repository access scope changed');};scopeCurrent();
+    if(this.repositoryDeleting())throw Error('Repository access revoked');
+    const direct=this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',userId).toArray()[0]?.role;
+    if(direct){return {role:direct==='owner'?'admin' as const:'write' as const,direct:direct==='owner'?'owner' as const:'member' as const,source:undefined,assert:()=>{scopeCurrent();if(this.repositoryDeleting()||this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',userId).toArray()[0]?.role!==direct)throw Error('Direct repository authority changed');}};}
+    this.inheritedTable();const rows=this.ctx.storage.sql.exec<{id:string;revision:number;doc:string}>('SELECT id,revision,doc FROM repository_organization_sources').toArray();
+    let selected:{role:OrganizationRepositoryRole;direct:null;source:{id:string;revision:number};assert:()=>void}|null=null;
+    for(const row of rows){
+      const fresh=await globalOf(this.env).organizationSource(row.id);if(!fresh||fresh.revision!==row.revision)continue;
+      const role=this.inheritedRole(fresh,userId);if(!role||write&&role==='read')continue;
+      const assert=()=>{scopeCurrent();const current=this.ctx.storage.sql.exec<{revision:number;doc:string}>('SELECT revision,doc FROM repository_organization_sources WHERE id=?',row.id).toArray()[0];if(this.repositoryDeleting()||!current||current.revision!==fresh.revision||JSON.stringify(organizationDocumentSchema.parse(JSON.parse(current.doc)))!==JSON.stringify(fresh))throw Error('Inherited repository authority changed');};assert();const ranks={read:1,write:2,admin:3};if(!selected||ranks[role]>ranks[selected.role])selected={role,direct:null,source:{id:fresh.id,revision:fresh.revision},assert};
+    }
+    if(selected){selected.assert();return selected;}
+    throw Error('Repository access revoked');
+  }
+  async repositoryAccess(userId:string) {try{
+    const access=await this.repositoryAccessFence(userId);access.assert();
+    const writers=this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='git_task_writers'").toArray().length?this.ctx.storage.sql.exec<{task_id:string}>('SELECT task_id FROM git_task_writers WHERE user_id=?',userId).toArray().map(row=>row.task_id):[];
+    return {role:access.role,direct:access.direct,writableTaskIds:access.role==='read'?[]:Object.keys(this.load().tasks).filter(taskId=>{try{this.forkWriteSource(taskId,userId);return access.direct==='owner'||writers.includes(taskId);}catch{return false;}}),cancellableTaskIds:access.role==='read'?[]:access.direct==='owner'?Object.keys(this.load().tasks):writers,forkPermissions:this.forkPermissionViews(userId)};
+  }catch{return null;}}
+
   // ---- account registry (used on the per-account instance) ----
   async listProjects(): Promise<ProjectRow[]> {
     return this.ctx.storage.sql.exec("SELECT id, name, role, kind, created_at FROM projects ORDER BY created_at DESC").toArray() as unknown as ProjectRow[];
@@ -2663,7 +3330,8 @@ export class RepositoryController extends DurableObject<Env> {
   // ---- membership and invites (per project) ----
   async roleOf(userId: string): Promise<"owner" | "member" | null> {
     const row = this.ctx.storage.sql.exec<{ role: string }>("SELECT role FROM members WHERE user_id = ?", userId).toArray()[0];
-    return (row?.role as "owner" | "member" | undefined) ?? null;
+    if(row) return (row.role as "owner" | "member");
+    return await this.repositoryAccess(userId) ? "member" : null;
   }
   async addMember(userId: string, role: "owner" | "member", label?: string): Promise<void> {
     if (this.repositoryDeleting()) throw new Error("Repository deletion is in progress");
@@ -2673,6 +3341,13 @@ export class RepositoryController extends DurableObject<Env> {
     const role = await this.roleOf(userId);
     if (role === "owner") throw new Error("The owner cannot be removed");
     await this.cancelContributorRegistration(userId);
+  }
+  async removeRepositoryMember(userId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<void>{
+    const authorize=actor.userId===userId?await this.authorizeBranchRead(actor,credentialHash,sessionExpiresAt):await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);
+    authorize();
+    if(actor.viaToken){const account=accountOf(this.env,await accountKeyFor(actor.userId));if(!credentialHash||!await account.apiTokenHashCanAdminister(credentialHash,actor.userId,this.load().projectId))throw Error("Member removal token authority changed");authorize();}
+    this.registrationTable();
+    this.ctx.storage.transactionSync(()=>{authorize();if(this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",userId).toArray()[0]?.role==="owner")throw Error("The owner cannot be removed");this.ctx.storage.sql.exec("UPDATE member_registrations SET status='revoked' WHERE user_id=?",userId);this.ctx.storage.sql.exec("DELETE FROM members WHERE user_id=?",userId);});
   }
   async peopleAttributionSnapshot(userId:string){
     if(this.repositoryDeleting()||!this.ctx.storage.sql.exec("SELECT 1 FROM members WHERE user_id=?",userId).toArray().length)throw Error("Private people access unavailable");
@@ -2720,10 +3395,23 @@ export class RepositoryController extends DurableObject<Env> {
       .exec("SELECT id, generation, seq, queue_ms, webhook_id, event, status, attempts, last_status, last_error, latency_ms, created_at, updated_at, dispatch_state, dispatch_attempts, dispatch_error, dispatch_at FROM deliveries ORDER BY created_at DESC LIMIT ?", Math.min(limit, 100))
       .toArray() as unknown as DeliveryRow[];
   }
+  async deploymentDispatchAllowed(deliveryId:string,expectedGeneration:number,expectedWebhook:{url:string;secret:string;active:number;events:string}):Promise<boolean>{
+    const read=()=>this.ctx.storage.sql.exec<{event:string;payload:string;generation:number;status:string;webhook_id:string}>("SELECT event,payload,generation,status,webhook_id FROM deliveries WHERE id=?",deliveryId).toArray()[0],row=read();if(!row||row.generation!==expectedGeneration||row.status!=="pending")return false;if(row.event!=="deployment.requested")return true;
+    const webhook=()=>this.ctx.storage.sql.exec<{url:string;secret:string;active:number;events:string}>("SELECT url,secret,active,events FROM webhooks WHERE id=?",row.webhook_id).toArray()[0];const activeWebhook=()=>{const current=webhook();return Boolean(current?.active&&current.events.split(",").includes("deployment.requested")&&JSON.stringify(current)===JSON.stringify(expectedWebhook));};
+    if(this.repositoryDeleting()||!activeWebhook())return false;
+    try{
+      const state=this.load(),incarnation=this.readRepositoryIncarnation(),event=z.object({id:z.string(),data:z.object({deploymentId:z.string()}).passthrough()}).passthrough().parse(JSON.parse(row.payload));
+      const ledger=new RepositoryDeployments(this.ctx.storage,state.projectId,actorId=>this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId).toArray()[0]?.role==="owner",actorId=>this.membershipEpochs().read(actorId)),proof=ledger.dispatchAuthority(event.data.deploymentId,event.id);
+      const currentArtifact=()=>{const saved=ledger.get(event.data.deploymentId)!;if(!saved.artifact)return;const selector=saved.artifactSelector;if(!selector)throw Error("Exact deployment artifact selector unavailable");const resolved={...this.deploymentArtifact(saved.target,selector),...(selector.approvalId?{approvalId:selector.approvalId}:{})};if(JSON.stringify(resolved)!==JSON.stringify(saved.artifact))throw Error("Deployment artifact is no longer available");};currentArtifact();
+      const eligibility=await Promise.all(proof.actors.map(async actorId=>await accountOf(this.env,await accountKeyFor(actorId)).accountLifecycle()==="active"));
+      currentArtifact();const fresh=this.load();if(eligibility.some(active=>!active)||!activeWebhook()||this.repositoryDeleting()||fresh.projectId!==state.projectId||fresh.canonicalRepoName!==state.canonicalRepoName||this.readRepositoryIncarnation()!==incarnation||JSON.stringify(read())!==JSON.stringify(row)||ledger.dispatchAuthority(event.data.deploymentId,event.id).identity!==proof.identity)return false;
+      const record=ledger.get(event.data.deploymentId)!;return this.connections().signingConfig(record.serviceId)?.capabilities.includes("report-deployment")===true;
+    }catch{return false;}
+  }
   async getDelivery(id: string) {
     const d = this.ctx.storage.sql.exec("SELECT * FROM deliveries WHERE id = ?", id).toArray()[0] as unknown as (DeliveryRow & { payload: string; generation: number }) | undefined;
     if (!d) return null;
-    const w = this.ctx.storage.sql.exec("SELECT url, secret, active FROM webhooks WHERE id = ?", d.webhook_id).toArray()[0] as unknown as { url: string; secret: string; active: number } | undefined;
+    const w = this.ctx.storage.sql.exec("SELECT url, secret, active, events FROM webhooks WHERE id = ?", d.webhook_id).toArray()[0] as unknown as { url: string; secret: string; active: number;events:string } | undefined;
     return w ? { delivery: d, webhook: w } : null;
   }
   /** Records this generation only; null suppresses retries from stale or terminal completions. */
@@ -2773,14 +3461,35 @@ export class RepositoryController extends DurableObject<Env> {
     await this.authorizeRetainedInput(input,!historical);
     return this.ctx.storage.transactionSync(()=>{if(historical&&!this.retainedReceiptHistorical(input))throw new Error("Historical retained input provenance changed");this.assertRetainedLocal(input,!historical);return new RetainedInputs(this.ctx.storage).record(input,proof);});
   }
+  async assertRetainedWorkspaceWrite(input:RetainedInput,actorId?:string,lineage?:string):Promise<void>{
+    const actor=actorId??input.actorId;
+    const local=()=>{
+      if(!actorId){this.assertRetainedLocal(input);return;}
+      const saved=new RetainedInputs(this.ctx.storage).application(input.id),task=this.load().tasks[input.taskId];
+      if(!saved||JSON.stringify(saved.input)!==JSON.stringify(input)||!task||task.workspace.repoName!==input.workspaceRepoName||task.workspace.branch!==input.branch||this.load().projectId!==input.projectId||this.readRepositoryIncarnation()!==input.incarnation||this.repositoryDeleting()||this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',actor).toArray()[0]?.role!=='owner')throw Error('Saved maintainer fork write scope changed');
+    };
+    if(!actorId)await this.authorizeRetainedInput(input);
+    else if(await accountOf(this.env,await accountKeyFor(actor)).accountLifecycle()!=='active')throw Error('Saved maintainer account unavailable');
+    local();const source=this.forkWriteSource(input.taskId,actor),snapshot=JSON.stringify({projectId:input.projectId,incarnation:input.incarnation,taskId:input.taskId,repoName:input.workspaceRepoName,branch:input.branch,actorId:actor,source:source??null}),key=lineage?`${input.id}:${z.string().min(1).max(200).parse(lineage)}`:input.id;
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS retained_workspace_write_sources(input_id TEXT PRIMARY KEY,snapshot TEXT NOT NULL)');
+    this.ctx.storage.transactionSync(()=>{
+      local();this.assertForkWriteSource(input.taskId,actor,source);
+      const old=this.ctx.storage.sql.exec<{snapshot:string}>('SELECT snapshot FROM retained_workspace_write_sources WHERE input_id=?',key).toArray()[0];
+      if(old&&old.snapshot!==snapshot)throw Error('Original retained workspace consent revision changed');
+      if(!old)this.ctx.storage.sql.exec('INSERT INTO retained_workspace_write_sources VALUES(?,?)',key,snapshot);
+    });
+  }
   async beginRetainedCredential(input:RetainedInput,purpose:"workspace"|"canonical",expiresAt:number,scope:"read"|"write"):Promise<boolean>{
     if(input.followup&&(purpose!=="canonical"||scope!=="read"))throw new Error("Accepted followup only permits canonical reads");
+    if(purpose==="workspace"&&scope==="write")await this.assertRetainedWorkspaceWrite(input);
     await this.ensureRecoveryAlarm();await this.authorizeRetainedInput(input);
-    const incidents=new RetainedCredentialIncidents(this.ctx.storage);if(incidents.summary(input.id,purpose))return incidents.begin(input,purpose,expiresAt,scope,()=>this.assertRetainedLocal(input));
+    const forkConsent=purpose==="workspace"&&scope==="write"?this.forkWriteSource(input.taskId,input.actorId):undefined;
+    const incidents=new RetainedCredentialIncidents(this.ctx.storage);if(incidents.summary(input.id,purpose))return incidents.begin(input,purpose,expiresAt,scope,()=>{this.assertRetainedLocal(input);if(purpose==="workspace"&&scope==="write")this.assertForkWriteSource(input.taskId,input.actorId,forkConsent);});
     const prepaid=new RetainedCleanupPrepayments(this.ctx.storage),record=prepaid.prepare(input,purpose,expiresAt,scope,()=>this.assertRetainedLocal(input));
     const global=globalOf(this.env),admission=await global.reserveCoreGitOperation(record.operationId,input.accountKey,this.currentGitBudget());if(!admission.allowed)throw Error('Credential cleanup capacity unavailable before issuance');await this.authorizeRetainedInput(input);
     const proof=await global.existingCoreGitReservation(record.operationId,record.accountKey,record.month);await this.authorizeRetainedInput(input);prepaid.confirm(record,proof,()=>this.assertRetainedLocal(input));
-    return incidents.begin(input,purpose,expiresAt,scope,()=>this.assertRetainedLocal(input));
+    if(purpose==="workspace"&&scope==="write")await this.assertRetainedWorkspaceWrite(input);
+    return incidents.begin(input,purpose,expiresAt,scope,()=>{this.assertRetainedLocal(input);if(purpose==="workspace"&&scope==="write")this.assertForkWriteSource(input.taskId,input.actorId,forkConsent);});
   }
   async recordRetainedCredential(inputId:string,purpose:"workspace"|"canonical",repoName:string,token:string,expiresAt:number):Promise<void>{
     await new RetainedCredentialIncidents(this.ctx.storage).record(inputId,purpose,repoName,token,expiresAt);
@@ -3423,6 +4132,7 @@ export class RepositoryController extends DurableObject<Env> {
   async beginRebaseResumeCredential(id:string,generation:number,purpose:SavedRebaseResumeCredentialPurpose,expiresAt:number,scope:"read"|"write"):Promise<boolean>{
     const attempt=new RebaseResumeAttempts(this.ctx.storage).get(id);if(!attempt)throw new RebaseRecoveryError("Saved resume missing",409);
     const {application,validate}=await this.authorizeSavedResume(id,generation,attempt.workflowId);
+    if(purpose==="workspace"&&scope==="write")await this.assertRetainedWorkspaceWrite(application.input,attempt.actor.userId,`${attempt.id}:${generation}`);
     if(scope!==(purpose==="canonical"?"read":"write"))throw new RebaseRecoveryError("Credential scope does not match saved recovery",409);
     const accountKey=await accountKeyFor(attempt.actor.userId);validate();await this.ensureRecoveryAlarm();validate();
     return new SavedRebaseResumeCredentials(this.ctx.storage).begin({attemptId:id,applicationId:attempt.applicationId,projectId:attempt.scope.projectId,incarnation:attempt.scope.incarnation!,accountKey,canonicalRepoName:application.input.canonicalRepoName,workspaceRepoName:application.input.workspaceRepoName,actorId:attempt.actor.userId},purpose,expiresAt,validate);
@@ -3462,7 +4172,7 @@ export class RepositoryController extends DurableObject<Env> {
     let result:RebaseResumeAttempt|null;try{result=await this.observeRebaseResume(attempt.id,attempt.generation,actor,credentialHash,sessionExpiresAt);}catch{validate();result=new RebaseResumeAttempts(this.ctx.storage).get(attempt.id);}validate();return result;
   }
   async rebaseResumeCurrent(id:string){return new RebaseResumeAttempts(this.ctx.storage).get(id);}
-  async assertRebaseResume(id:string,generation:number,workflowId:string){const {attempt,application,validate,receipt}=await this.authorizeSavedResume(id,generation,workflowId);const accountKey=await accountKeyFor(attempt.actor.userId);validate();return {application,snapshot:attempt.snapshot,actor:attempt.actor,accountKey,nativeRunId:attempt.nativeRunId,workflowId:attempt.workflowId,...(receipt?{receipt}:{})};}
+  async assertRebaseResume(id:string,generation:number,workflowId:string){const {attempt,application,validate,receipt}=await this.authorizeSavedResume(id,generation,workflowId);if(!receipt)await this.assertRetainedWorkspaceWrite(application.input,attempt.actor.userId,`${attempt.id}:${generation}`);const accountKey=await accountKeyFor(attempt.actor.userId);validate();return {application,snapshot:attempt.snapshot,actor:attempt.actor,accountKey,nativeRunId:attempt.nativeRunId,workflowId:attempt.workflowId,...(receipt?{receipt}:{})};}
   async markRebaseResumeDispatch(id:string,generation:number,state:RebaseResumeAttempt["dispatch"]){const attempt=new RebaseResumeAttempts(this.ctx.storage).get(id);if(!attempt)throw new RebaseRecoveryError("Saved resume missing",409);const {validate}=await this.authorizeSavedResume(id,generation,attempt.workflowId);validate();return new RebaseResumeAttempts(this.ctx.storage).dispatch(id,generation,state);}
   async rebaseResumeNativeIntent(id:string,generation:number,workflowId:string){const {validate}=await this.authorizeSavedResume(id,generation,workflowId);validate();return new RebaseResumeAttempts(this.ctx.storage).nativeIntent(id,generation);}
   async rebaseResumeNativeStopped(id:string,generation:number,nativeRunId:string){
@@ -3600,6 +4310,8 @@ export class RepositoryController extends DurableObject<Env> {
   private async retryInvitationProjections(){if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='repository_invitation_receipts'").toArray().length)return;const ledger=new RepositoryInvitations(this.ctx.storage),state=this.load(),incarnation=this.readRepositoryIncarnation(),rows=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM repository_invitation_receipts WHERE json_extract(doc,'$.projection')='pending' AND json_extract(doc,'$.scope.projectId')=? AND json_extract(doc,'$.scope.incarnation')=? ORDER BY invitation_id LIMIT 20",state.projectId,incarnation??"").toArray();for(const row of rows){const receipt=JSON.parse(row.doc) as import("./repository-invitations").InvitationJoinReceipt,role=await this.roleOf(receipt.userId);if(!role)continue;try{const account=accountOf(this.env,await accountKeyFor(receipt.userId));if(await account.accountLifecycle()!=="active")continue;await account.addProject({id:state.projectId,name:state.projectName,role,kind:state.kind??"demo"});const projection=(await account.listProjects()).find(project=>project.id===state.projectId&&project.role===role);ledger.confirmProjection(receipt,()=>!!projection&&!this.repositoryDeleting()&&this.readRepositoryIncarnation()===receipt.scope.incarnation&&this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",receipt.userId).toArray()[0]?.role===role);}catch{/* Pending projection remains visible and never restores removed membership. */}}}
   private async retryRepositoryInitializationCredentials():Promise<void>{if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='repository_initialization_intents'").toArray().length)return;const intents=new RepositoryInitializationIntents(this.ctx.storage);for(const ledger of [intents.credentials,intents.readCredentials]){for(const pending of ledger.pendingBatch()){if(!ledger.markAutomaticSweep(pending.scope.eventId))continue;const record=intents.get(pending.scope.eventId);if(!record?.metadata||record.scope.canonicalRepoName!==pending.scope.canonicalRepoName)continue;const funding=await globalOf(this.env).reserveCoreGitOperation(`repository-init-cleanup-${crypto.randomUUID()}`,pending.scope.accountKey,this.currentGitBudget()).catch(()=>null);if(!funding?.allowed||!ledger.markAttempt(pending.scope.eventId))continue;try{using repository=await this.env.ARTIFACTS.get(pending.scope.canonicalRepoName);const info=await repository.info();if(info.id!==record.metadata.id||info.name!==record.metadata.name||info.remote!==record.metadata.remote)continue;if(await repository.revokeToken(pending.token))await ledger.markRevoked(pending.scope,pending.token,{repoName:pending.scope.canonicalRepoName,revoked:true});}catch{/* Unconfirmed cleanup retains its exact private capability and hold. */}}const wake=ledger.nextWake();if(wake!==null)await this.ensureRecoveryAlarm(Math.max(1,wake-Date.now()));}}
   override async alarm(): Promise<void> {
+    await this.deliverThreadNotifications();
+    await this.deliverDiscussionNotifications();
     await this.retryRepositoryInitializationCredentials();
     await this.retryInvitationProjections();
     await this.reconcileLegacyPublicationReadbacks();
@@ -3654,19 +4366,73 @@ export class RepositoryController extends DurableObject<Env> {
   async artifactStorageSnapshot():Promise<ReturnType<ArtifactStorageAdmission["snapshot"]>>{return new ArtifactStorageAdmission(this.ctx.storage).snapshot();}
   async artifactStorageCapacity(owner:string,namespace:string|undefined,policy:StorageAdmissionPolicy){return new ArtifactStorageAdmission(this.ctx.storage).capacity(owner,namespace,policy);}
 
+  private lfsStorageInstance?:DurableLfsStore;
+  private lfsStorage(){return this.lfsStorageInstance??=new DurableLfsStore(this.ctx.storage);}
+  private lfsWriteAuthority(actor:LfsCredential){if(!actor.taskId)throw new LfsStorageError("LFS writes require an original task writer",403);return{actorId:actor.userId,taskId:actor.taskId,source:this.forkWriteSource(actor.taskId,actor.userId)};}
+  private async lfsAuthorize(actor:LfsCredential,write:boolean,expected?:LfsScope,lineage?:{actorId:string;taskId:string;source?:ForkPermissionSource}):Promise<LfsScope>{
+    const assertSource=()=>{if(!lineage)return;if(!write||lineage.actorId!==actor.userId||lineage.taskId!==actor.taskId)throw new LfsStorageError("Original LFS writer lineage changed",403);try{this.assertForkWriteSource(lineage.taskId,lineage.actorId,lineage.source);}catch{throw new LfsStorageError("Original LFS fork consent was revoked or changed",403);}};
+    assertSource();
+    if(!actor.userId||!await this.canGitAccess(actor.userId,actor.taskId,write))throw new LfsStorageError("Repository LFS access denied",404);
+    assertSource();
+    const state=this.load(),scope={projectId:state.projectId,incarnation:this.readRepositoryIncarnation()??new PrivateRecoveryOperations(this.ctx.storage).incarnation()};
+    if(expected&&(expected.projectId!==scope.projectId||expected.incarnation!==scope.incarnation))throw new LfsStorageError("Repository incarnation changed",409);
+    const account=accountOf(this.env,await accountKeyFor(actor.userId));assertSource();
+    if(await account.accountLifecycle()!=="active")throw new LfsStorageError("Account unavailable",403);assertSource();
+    if(actor.gitCapability){const current=await this.verifyGitCapability(actor.gitCapability,actor.taskId,write);assertSource();if(!current||current.userId!==actor.userId||current.parentTokenHash!==(actor.credentialHash??null))throw new LfsStorageError("Git credential changed",401);}
+    if(actor.credentialHash){if(!await account.apiTokenHashCanRead(actor.credentialHash,actor.userId,scope.projectId,write))throw new LfsStorageError("LFS originating credential was revoked",401);assertSource();}
+    else if(!actor.gitCapability&&(!actor.sessionExpiresAt||actor.sessionExpiresAt<=Date.now()))throw new LfsStorageError("LFS session expired",401);
+    if(!await this.canGitAccess(actor.userId,actor.taskId,write)||this.repositoryDeleting()||this.readRepositoryIncarnation()!==scope.incarnation)throw new LfsStorageError("LFS access changed",403);
+    assertSource();return scope;
+  }
+  private async lfsPublicAuthorize(proof:Omit<PublicLfsProof,"objects">):Promise<LfsScope>{const context=await this.repositoryReadContext(null,null);if(context.acceptedCommit!==proof.acceptedCommit||context.incarnation!==proof.incarnation||context.publicationVersion!==proof.publicationVersion||!await this.assertRepositoryReadContext(context,null,null))throw new LfsStorageError("Public LFS publication changed",409);return{projectId:context.projectId,incarnation:proof.incarnation};}
+  async lfsPublicExpectedSizes(oids:string[],proof:Omit<PublicLfsProof,"objects">){if(oids.length>100||oids.some(oid=>! /^[a-f0-9]{64}$/.test(oid)))throw new LfsStorageError("Invalid public LFS size inspection",400);const scope=await this.lfsPublicAuthorize(proof),store=this.lfsStorage(),objects=oids.flatMap(oid=>{const object=store.get(scope,oid);return object?.phase==="verified"?[{oid:object.oid,size:object.size}]:[];});await this.lfsPublicAuthorize(proof);return objects;}
+  async lfsPublicBatch(objects:LfsObjectRef[],proof:PublicLfsProof){const scope=await this.lfsPublicAuthorize(proof),store=this.lfsStorage();const rows=objects.map(object=>{const accepted=proof.objects.find(pointer=>pointer.oid===object.oid&&pointer.size===object.size),stored=store.get(scope,object.oid);return{...object,...(!accepted||stored?.phase!=="verified"||stored.size!==object.size?{error:{code:404,message:"Accepted LFS object not found"}}:{})};});await this.lfsPublicAuthorize(proof);return rows;}
+  async lfsPublicDownload(oid:string,proof:PublicLfsProof){const scope=await this.lfsPublicAuthorize(proof),accepted=proof.objects.find(pointer=>pointer.oid===oid);if(!accepted)throw new LfsStorageError("Accepted LFS pointer not found",404);const stored=this.lfsStorage().get(scope,oid);if(stored?.size!==accepted.size)throw new LfsStorageError("Accepted LFS object size differs",404);return this.lfsStorage().download(scope,oid,this.env.EVIDENCE_BUCKET,async()=>{await this.lfsPublicAuthorize(proof);});}
+  async lfsBatch(operation:"upload"|"download",objects:LfsObjectRef[],actor:LfsCredential){
+    const scope=await this.lfsAuthorize(actor,operation==="upload"),lineage=operation==="upload"?this.lfsWriteAuthority(actor):undefined,store=this.lfsStorage();
+    if(objects.length>100)throw new LfsStorageError("LFS batch exceeds its object limit",413);
+    const rows=objects.map(object=>{
+      try{const stored=operation==="upload"?store.admitObject(scope,object):store.get(scope,object.oid);const exists=stored?.phase==="verified"&&stored.size===object.size;return{...object,exists,...(stored&&stored.size!==object.size?{error:{code:409,message:"LFS object size is immutable"}}:operation==="download"&&!exists?{error:{code:404,message:"LFS object not found"}}:{})};}
+      catch(error){return{...object,exists:false,error:{code:error instanceof LfsStorageError?error.status:503,message:error instanceof LfsStorageError?error.message:"LFS admission unavailable"}};}
+    });
+    await this.lfsAuthorize(actor,operation==="upload",scope,lineage);return rows;
+  }
+  async lfsUpload(object:{oid:string;size?:number},body:ReadableStream<Uint8Array>,actor:LfsCredential){
+    let admitted;
+    try{
+      const scope=await this.lfsAuthorize(actor,true),lineage=this.lfsWriteAuthority(actor),store=this.lfsStorage(),reservation=store.get(scope,object.oid);
+      if(!reservation)throw new LfsStorageError("An authenticated LFS batch reservation is required before upload",409);
+      if(object.size!==undefined&&object.size!==reservation.size)throw new LfsStorageError("LFS content length differs from the admitted object size",409);
+      admitted={scope,lineage,store,reservation};
+    }catch(error){
+      // Refused before storage owns the body: release the sender, or a streamed
+      // request body stays unconsumed and the client never sees the refusal.
+      await body.cancel(error).catch(()=>{});
+      throw error;
+    }
+    const {scope,lineage,store,reservation}=admitted;
+    return store.upload(scope,{oid:reservation.oid,size:reservation.size},body,this.env.EVIDENCE_BUCKET,async()=>{await this.lfsAuthorize(actor,true,scope,lineage);});
+  }
+  async lfsDownload(oid:string,actor:LfsCredential){const scope=await this.lfsAuthorize(actor,false);return this.lfsStorage().download(scope,oid,this.env.EVIDENCE_BUCKET,async()=>{await this.lfsAuthorize(actor,false,scope);});}
+  async lfsReconcile(oid:string,actor:LfsCredential){if(!/^[a-f0-9]{64}$/.test(oid))throw new LfsStorageError("Invalid LFS object",400);const scope=await this.lfsAuthorize(actor,true),lineage=this.lfsWriteAuthority(actor);await this.lfsAuthorize(actor,true,scope,lineage);const result=await this.lfsStorage().reconcile(scope,oid,this.env.EVIDENCE_BUCKET);await this.lfsAuthorize(actor,true,scope,lineage);return result;}
+  async lfsVerify(object:LfsObjectRef,actor:LfsCredential){const scope=await this.lfsAuthorize(actor,true),lineage=this.lfsWriteAuthority(actor),stored=this.lfsStorage().get(scope,object.oid);if(!stored||stored.phase!=="verified"||stored.size!==object.size)throw new LfsStorageError("LFS object verification is unconfirmed",404);const actual=await this.env.EVIDENCE_BUCKET.head(stored.key);if(!actual||actual.size!==stored.size||actual.customMetadata?.oid!==stored.oid)throw new LfsStorageError("LFS object storage is unavailable",503);await this.lfsAuthorize(actor,true,scope,lineage);}
+
+  private assertTaskWriteUnlocked(taskId:string){if(this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='task_retarget_locks'").toArray().length&&this.ctx.storage.sql.exec('SELECT request_id FROM task_retarget_locks WHERE task_id=?',taskId).toArray().length)throw Error('Retarget inspection is active; contribution history remains preserved');}
   private gitTables(): void {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS git_task_writers(task_id TEXT PRIMARY KEY,user_id TEXT NOT NULL)");
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS git_capabilities(hash TEXT PRIMARY KEY,user_id TEXT NOT NULL,task_id TEXT,write_access INTEGER NOT NULL,expires_at INTEGER NOT NULL,parent_token_hash TEXT)");
   }
-  async canGitAccess(userId: string, taskId: string | null, write: boolean): Promise<boolean> {
-    if (this.repositoryDeleting()) return false;
-    const role=await this.roleOf(userId); if(!role)return false;
-    if(taskId===null)return !write;
-    const task=this.load().tasks[taskId];if(!task)return false;
-    if(!write)return true;
-    if(task.status==="accepted"||task.status==="cancelled")return false;
-    this.gitTables();
-    return role==="owner"||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM git_task_writers WHERE task_id=?",taskId).toArray()[0]?.user_id===userId;
+  async canGitAccess(userId:string,taskId:string|null,write:boolean):Promise<boolean>{
+    try{
+      if(taskId===null&&write)return false;
+      if(write&&taskId)this.assertTaskWriteUnlocked(taskId);
+      const permission=await this.repositoryAccessFence(userId,write);permission.assert();
+      if(taskId===null)return true;
+      const task=this.load().tasks[taskId];if(!task)return false;if(!write)return true;
+      if(task.status==='accepted'||task.status==='cancelled')return false;
+      this.gitTables();permission.assert();
+      this.forkWriteSource(taskId,userId);return true;
+    }catch{return false;}
   }
   async mintGitCapability(userId: string, taskId: string | null, write: boolean, parentTokenHash?: string): Promise<{token:string;expiresInSeconds:number}> {
     if(!(await this.canGitAccess(userId,taskId,write)))throw new Error("Git access denied");
@@ -3675,13 +4441,16 @@ export class RepositoryController extends DurableObject<Env> {
     if((this.ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) AS n FROM git_capabilities WHERE user_id=?",userId).toArray()[0]?.n??0)>=50)throw new Error("Active Git capability limit reached; existing credentials remain usable until expiry");
     const token=`fgg_${this.load().projectId}_${crypto.randomUUID().replaceAll("-","")}${crypto.randomUUID().replaceAll("-","")}`;
     const hash=await this.sha256(token);if(!(await this.canGitAccess(userId,taskId,write)))throw new Error("Git access changed");
-    this.ctx.storage.sql.exec("INSERT INTO git_capabilities VALUES(?,?,?,?,?,?)",hash,userId,taskId,write?1:0,Date.now()+3600_000,parentTokenHash??null);
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS git_capability_fork_permissions(hash TEXT PRIMARY KEY,source TEXT NOT NULL)');
+    const consent=write&&taskId?this.forkWriteSource(taskId,userId):undefined;
+    this.ctx.storage.transactionSync(()=>{this.ctx.storage.sql.exec("INSERT INTO git_capabilities VALUES(?,?,?,?,?,?)",hash,userId,taskId,write?1:0,Date.now()+3600_000,parentTokenHash??null);if(consent)this.ctx.storage.sql.exec('INSERT INTO git_capability_fork_permissions VALUES(?,?)',hash,JSON.stringify(consent));});
     return {token,expiresInSeconds:3600};
   }
   async verifyGitCapability(secret:string,taskId:string|null,write:boolean):Promise<{userId:string;parentTokenHash:string|null}|null>{
     this.gitTables(); const hash=await this.sha256(secret);
     const row=this.ctx.storage.sql.exec<{user_id:string;task_id:string|null;write_access:number;expires_at:number;parent_token_hash:string|null}>("SELECT * FROM git_capabilities WHERE hash=?",hash).toArray()[0];
     if(!row||row.expires_at<=Date.now()||row.task_id!==taskId||(write&&!row.write_access)||!(await this.canGitAccess(row.user_id,taskId,write)))return null;
+    if(write&&taskId){try{const exists=this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='git_capability_fork_permissions'").toArray().length,source=exists?this.ctx.storage.sql.exec<{source:string}>('SELECT source FROM git_capability_fork_permissions WHERE hash=?',hash).toArray()[0]?.source:undefined;this.assertForkWriteSource(taskId,row.user_id,source?JSON.parse(source) as ForkPermissionSource:undefined);}catch{return null;}}
     return {userId:row.user_id,parentTokenHash:row.parent_token_hash};
   }
   async revokeGitCapabilities(userId:string):Promise<void>{
@@ -3693,6 +4462,9 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   async apiTokenHashCanRead(hash:string,userId:string,projectId:string,write=false):Promise<boolean>{
+    return this.apiTokenHashCanReadLocal(hash,userId,projectId,write);
+  }
+  private apiTokenHashCanReadLocal(hash:string,userId:string,projectId:string,write=false):boolean{
     if(!/^[a-f0-9]{64}$/.test(hash)||this.accountLifecycleState()!=="active")return false;
     return this.ctx.storage.sql.exec("SELECT id FROM api_tokens WHERE hash=? AND user_id=? AND scope IN ("+(write?"'write','full'":"'read','write','full'")+") AND (repo IS NULL OR repo=?) AND (expires_at IS NULL OR expires_at>?)",hash,userId,projectId,Date.now()).toArray().length===1;
   }
@@ -3884,6 +4656,7 @@ export class RepositoryController extends DurableObject<Env> {
     const active = task.agentRunId ? this.agentRuns().get(task.agentRunId) : null;
     if (active && !["checkpointed", "failed"].includes(active.phase) && active.runId !== runId) return false;
     if (runId) task.agentWorkflowInstanceId = runId;
+    new PrivateRecoveryOperations(this.ctx.storage).incarnation();this.taskForkOrigin(taskId);
     task.initiatedBy ??= task.contributor;
     task.contributor = { id: `agent-${taskId}`, name: "FlareGit agent", type: "agent" };
     task.status = "working";
@@ -3923,54 +4696,136 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   // ---- activity feed ----
-  async logActivity(actor: string, type: string, summary: string, opts?: { exceptUser?: string }): Promise<void> {
-    this.ctx.storage.sql.exec("INSERT INTO activity (at, actor, type, summary) VALUES (?, ?, ?, ?)", new Date().toISOString(), actor, type, summary.slice(0, 300));
+  async logActivity(actor: string, type: string, summary: string, opts?: { exceptUser?: string;issueNumber?:number }): Promise<void> {
+    ensureIssueEventSources(this.ctx.storage);
+    const issueSource=opts?.issueNumber!==undefined?{number:opts.issueNumber,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation()}:undefined;
+    const saved=this.ctx.storage.sql.exec<{id:number}>("INSERT INTO activity (at, actor, type, summary) VALUES (?, ?, ?, ?) RETURNING id", new Date().toISOString(), actor, type, summary.slice(0, 300)).one();if(issueSource)bindIssueActivity(this.ctx.storage,saved.id,issueSource);
     this.ctx.storage.sql.exec("DELETE FROM activity WHERE id <= (SELECT MAX(id) FROM activity) - 500");
-    await this.notifyMembers(type, summary, opts?.exceptUser);
+    this.ctx.storage.sql.exec("DELETE FROM activity_issue_sources WHERE NOT EXISTS(SELECT 1 FROM activity WHERE activity.id=activity_issue_sources.activity_id)");
+    await this.notifyMembers(type, summary, opts?.exceptUser,issueSource);
   }
 
   /**
    * Fans an activity out to every member's inbox. Things that need a person (a change to review, a decision,
    * a blocked landing or stack) are "direct"; everything else is repository chatter kept apart from them.
    */
-  private async notifyMembers(type: string, summary: string, exceptUser?: string): Promise<void> {
+  private async notifyMembers(type: string, summary: string, exceptUser?: string,issueSource?:IssueEventSource): Promise<void> {
     const DIRECT = new Set(["integration.not_started", "mirror.failed", "review.requested", "task.ready", "decision.needed", "integration.blocked", "integration.stale", "stack.rebase_blocked"]);
     const CHATTER = new Set(["issue.opened", "issue.closed", "comment.added", "review.approved", "review.rejected", "integration.accepted", "stack.rebased", "member.joined", "task.created"]);
     if (!DIRECT.has(type) && !CHATTER.has(type)) return;
     const s = this.state ?? (() => { try { return this.load(); } catch { return null; } })();
     if (!s) return;
+    const sourceActive=()=>!issueSource||this.readRepositoryIncarnation()===issueSource.incarnation&&isIssueActive(this.ctx.storage,issueSource.number);if(!sourceActive())return;
     const members = this.ctx.storage.sql.exec<{ user_id: string }>("SELECT user_id FROM members").toArray();
     await Promise.all(
       members
         .filter((m) => !exceptUser || !m.user_id.endsWith(exceptUser))
         .map(async (m) => {
           const account = accountOf(this.env, await accountKeyFor(m.user_id));
-          await account.addInbox({ projectId: s.projectId, projectName: s.projectName, kind: DIRECT.has(type) ? "direct" : "activity", type, title: summary.slice(0, 200) }).catch(() => undefined);
+          if(!sourceActive())return;
+          await account.addInbox({ projectId: s.projectId, projectName: s.projectName, kind: DIRECT.has(type) ? "direct" : "activity", type, title: summary.slice(0, 200),...(issueSource?{issueSource}:{}) }).catch(() => undefined);
         })
     );
   }
 
+  private async issueFeatureAccess(userId:string,write=false){
+    const authority=await this.repositoryAccessFence(userId,write);authority.assert();
+    if(write&&this.load().lifecycle?.state==='archived')throw Error('Repository is archived and read-only');
+    return {store:new IssueFeatureStore(this.ctx.storage),owner:authority.role==='admin',canTriage:authority.role!=='read'&&this.load().lifecycle?.state!=='archived',assert:authority.assert};
+  }
+  private async issueFilterAccess(userId:string){
+    let access=await this.issueFeatureAccess(userId);access.assert();
+    if(!this.readRepositoryIncarnation()){new PrivateRecoveryOperations(this.ctx.storage).incarnation();access=await this.issueFeatureAccess(userId);access.assert();}
+    const scope=JSON.stringify([this.load().projectId,this.readRepositoryIncarnation(),this.load().canonicalRepoName]);
+    return {...access,scope,assert:()=>{access.assert();if(scope!==JSON.stringify([this.load().projectId,this.readRepositoryIncarnation(),this.load().canonicalRepoName]))throw Error('Issue filter repository scope changed');}};
+  }
+  async savedIssueFilters(userId:string){const access=await this.issueFilterAccess(userId),scope=await this.sha256(JSON.stringify([access.scope,userId]));access.assert();return {scope,filters:access.store.savedFilters(access.scope,userId),complete:true as const};}
+  async saveIssueFilter(userId:string,input:SavedIssueFilterWrite){try{const access=await this.issueFilterAccess(userId),scope=await this.sha256(JSON.stringify([access.scope,userId]));access.assert();if(input.expectedScope!==scope)throw new IssueFilterError('Personal issue view repository scope changed; refresh before saving',409);return {ok:true as const,value:access.store.savedFilterUpdate(access.scope,userId,input,access.assert)};}catch(error){if(error instanceof IssueFilterError)return {ok:false as const,status:error.status,error:error.message};throw error;}}
+  async filteredIssues(userId:string,input:IssueFilterCriteria,cursor?:string){try{
+    const access=await this.issueFilterAccess(userId);access.assert();const result=await access.store.filteredIssues(access.scope,userId,issueFilterSchema.parse(input),cursor);access.assert();
+    const fresh=await this.issueFilterAccess(userId);fresh.assert();if(fresh.scope!==access.scope)throw Error('Issue filter access changed');
+    if(fresh.store.filterSnapshot(input).source!==result.sourceFingerprint)throw new IssueFilterError('Issues changed during access validation; reload this view',409);
+    const {sourceFingerprint:_source,...page}=result;
+    const issues=result.issues.map(summary=>{const origin=this.issueRow(summary.number);return {...summary,...(origin?.importedOrigin?{importedOrigin:origin.importedOrigin}:{}),...(origin?.discussionOrigin?{discussionOrigin:origin.discussionOrigin}:{})};});
+    fresh.assert();return {ok:true as const,value:{...page,issues,members:this.ctx.storage.sql.exec<{user_id:string;label:string}>('SELECT user_id,label FROM members ORDER BY user_id LIMIT 100').toArray()}};
+  }catch(error){if(error instanceof IssueFilterError)return {ok:false as const,status:error.status,error:error.message};throw error;}}
+  async issueRelationships(userId:string,number:number,cursor?:string){try{
+    const access=await this.issueFilterAccess(userId);access.assert();const result=await access.store.issueRelationships(access.scope,userId,number,cursor);access.assert();
+    const fresh=await this.issueFilterAccess(userId);fresh.assert();if(fresh.scope!==access.scope)throw Error('Issue relationship access changed');
+    if(fresh.store.relationshipSnapshot(number).source!==result.sourceFingerprint)throw new IssueFilterError('Issue relationships changed during access validation; reload this issue',409);
+    const {sourceFingerprint:_source,...page}=result;fresh.assert();return {ok:true as const,value:{...page,canRemove:fresh.canTriage}};
+  }catch(error){if(error instanceof IssueFilterError)return {ok:false as const,status:error.status,error:error.message};throw error;}}
+  async issueFeatures(userId:string){const access=await this.issueFeatureAccess(userId);access.assert();return {...access.store.view(),canManage:access.owner,canTriage:access.canTriage,members:this.ctx.storage.sql.exec<{user_id:string;label:string}>('SELECT user_id,label FROM members ORDER BY user_id LIMIT 100').toArray()};}
+  async issueFeatureUpdate(userId:string,input:IssueFeatureWrite){const access=await this.issueFeatureAccess(userId,true);access.assert();return access.store.update(input,this.ctx.storage.sql.exec<{user_id:string}>('SELECT user_id FROM members').toArray().map(m=>m.user_id),access.owner);}
+  async issueTemplatePreview(userId:string,name:string,values:Record<string,unknown>){const access=await this.issueFeatureAccess(userId);access.assert();return access.store.preview(name,values);}
+  async createTemplateIssue(userId:string,input:{title:string;name:string;values:Record<string,string|boolean>;idempotencyKey:string;expectedRevision:number;author:string}){
+    if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(input.idempotencyKey))throw Error('Invalid issue creation request key');
+    const access=await this.issueFeatureAccess(userId,true),payload=JSON.stringify([input.title,input.name,Object.entries(input.values).sort(([a],[b])=>a.localeCompare(b)),input.expectedRevision]);
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS template_issue_requests(actor_id TEXT,event_key TEXT,payload TEXT,title TEXT,body TEXT,PRIMARY KEY(actor_id,event_key))');
+    const rendered=this.ctx.storage.transactionSync(()=>{
+      access.assert();
+      const old=this.ctx.storage.sql.exec<{payload:string;title:string;body:string}>('SELECT payload,title,body FROM template_issue_requests WHERE actor_id=? AND event_key=?',userId,input.idempotencyKey).toArray()[0];
+      if(old){if(old.payload!==payload)throw Error('Template issue request key was used for different content');return old;}
+      if(access.store.read().revision!==input.expectedRevision)throw Error('Issue template changed; reload before creating an issue');
+      const result=access.store.preview(input.name,input.values);if(!result.ok)throw Error('error' in result?result.error:result.errors.map(e=>e.field+': '+e.error).join('; '));
+      const usage=this.ctx.storage.sql.exec<{count:number;bytes:number}>('SELECT COUNT(*) AS count,COALESCE(SUM(length(CAST(body AS BLOB))),0) AS bytes FROM template_issue_requests').toArray()[0]!;
+      if(usage.count>=1000||usage.bytes+new TextEncoder().encode(result.body).length>5_000_000)throw Error('Template issue recovery capacity reached');
+      this.ctx.storage.sql.exec('INSERT INTO template_issue_requests VALUES(?,?,?,?,?)',userId,input.idempotencyKey,payload,input.title,result.body);return {title:input.title,body:result.body};
+    });
+    return this.createMemberIssue(userId,{...rendered,author:input.author,idempotencyKey:input.idempotencyKey});
+  }
+
+
   // ---- issues and conversations (per project) ----
-  private issueRow(n: number): IssueRow | null {
+  private issueRow(n:number):IssueRow|null{if(!isIssueActive(this.ctx.storage,n))return null;return this.rawIssueRow(n);}
+  private rawIssueRow(n: number): IssueRow | null {
     const row = this.ctx.storage.sql
       .exec("SELECT i.*, (SELECT COUNT(*) FROM comments c WHERE c.subject = 'issue:' || i.number) AS comments FROM issues i WHERE number = ?", n)
       .toArray()[0];
-    if(!row)return null;const origin=new MigrationConversationPublication(this.ctx.storage).issueOrigin(n);return origin?{...(row as unknown as IssueRow),importedOrigin:origin}:row as unknown as IssueRow;
+    if(!row)return null;const discussionOrigin=this.discussions(false).conversionOrigin(n)??this.discussions(true).conversionOrigin(n);const origin=new MigrationConversationPublication(this.ctx.storage).issueOrigin(n),archiveOrigin=new MetadataArchives(this.ctx.storage).origin("issues",String(n));return {...(row as unknown as IssueRow),...(discussionOrigin?{discussionOrigin}:{}),...(origin?{importedOrigin:origin}:{}),...(archiveOrigin?{archiveOrigin}:{})};
   }
+  private async issueAttachmentReply<T>(operation:()=>Promise<T>):Promise<IssueAttachmentReply<T>>{try{return{ok:true,value:await operation()};}catch(error){if(error instanceof z.ZodError)return{ok:false,status:400,error:"Invalid attachment request"};if(error instanceof LfsStorageError&&[400,401,403,404,409,410,413,415,422,429,503].includes(error.status))return{ok:false,status:error.status,error:error.message.replace(/LFS/g,"Attachment")};return{ok:false,status:503,error:"Attachment outcome was not confirmed. Retry the original file and request identity."};}}
+  private issueAttachmentsInstance?:IssueAttachments;
+  private issueAttachments(){return this.issueAttachmentsInstance??=new IssueAttachments(this.ctx.storage);}
+  private issueAttachmentScope(number:number):IssueAttachmentScope{if(!Number.isSafeInteger(number)||number<1)throw new LfsStorageError("Invalid issue",400);const issue=this.issueRow(number);if(!issue)throw new LfsStorageError(new IssueLifecycleStore(this.ctx.storage).tombstone(number)?"Issue removed":"Issue not found",new IssueLifecycleStore(this.ctx.storage).tombstone(number)?410:404);return{projectId:this.load().projectId,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation(),issue:number,issueCreatedAt:issue.created_at,issueAuthor:issue.author};}
+  private async issueAttachmentAuthority(number:number,actor:HumanDecisionActor,write:boolean,credentialHash?:string,sessionExpiresAt?:number){
+    const initial=await this.repositoryAccessFence(actor.userId,write);initial.assert();const scope=this.issueAttachmentScope(number);const permission=await this.repositoryAccessFence(actor.userId,write);permission.assert();
+    const assert=()=>{try{permission.assert();if(write)assertIssueWritable(this.ctx.storage,number);if(JSON.stringify(this.issueAttachmentScope(number))!==JSON.stringify(scope)||write&&this.load().lifecycle?.state==='archived'||!actor.viaToken&&(!sessionExpiresAt||sessionExpiresAt<=Date.now()))throw Error("Issue attachment authority changed");}catch(error){if(error instanceof IssueTransferError)throw new LfsStorageError(error.message,error.status);throw new LfsStorageError("Issue attachment access changed",403);}};
+    const account=accountOf(this.env,await accountKeyFor(actor.userId));assert();
+    const authorize=async()=>{assert();if(await account.accountLifecycle()!=="active")throw new LfsStorageError("Account unavailable",403);assert();if(actor.viaToken&&(!credentialHash||!await account.apiTokenHashCanRead(credentialHash,actor.userId,scope.projectId,write)))throw new LfsStorageError("Attachment credential changed",401);assert();};await authorize();
+    const canUpload=permission.role!=='read'&&this.load().lifecycle?.state!=='archived'&&(!actor.viaToken||!!credentialHash&&await account.apiTokenHashCanRead(credentialHash,actor.userId,scope.projectId,true));assert();
+    const canAdminister=permission.role==='admin'&&(!actor.viaToken||!!credentialHash&&await account.apiTokenHashCanAdminister(credentialHash,actor.userId,scope.projectId));assert();
+    return{scope,assert,authorize,canUpload,canManage:(authorId:string)=>canUpload&&(authorId===actor.userId||canAdminister)};
+  }
+  private attachmentView(attachment:IssueAttachmentInput&{authorId:string;author:string;createdAt:string;phase:IssueAttachmentView['phase']},canManage:(authorId:string)=>boolean):IssueAttachmentView{const{id,name,sha256,size,authorId,author,createdAt,phase}=attachment;return{id,name,sha256,size,authorId,author,createdAt,phase,canRemove:canManage(authorId),canReconcile:canManage(authorId)};}
+  async issueAttachmentList(number:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){return this.issueAttachmentReply(async()=>{const authority=await this.issueAttachmentAuthority(number,actor,false,credentialHash,sessionExpiresAt),attachments=this.issueAttachments().list(authority.scope).filter(row=>row.phase!=='removed').map(row=>this.attachmentView(row,authority.canManage));await authority.authorize();return{attachments,canUpload:authority.canUpload};});}
+  async issueAttachmentPrepare(number:number,value:unknown,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){return this.issueAttachmentReply(async()=>{const authority=await this.issueAttachmentAuthority(number,actor,true,credentialHash,sessionExpiresAt),saved=this.issueAttachments().prepare(authority.scope,value,actor,authority.assert);await authority.authorize();return this.attachmentView(saved,authority.canManage);});}
+  async issueAttachmentUpload(number:number,id:string,body:ReadableStream<Uint8Array>,declaredSize:number|undefined,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){return this.issueAttachmentReply(async()=>{const authority=await this.issueAttachmentAuthority(number,actor,true,credentialHash,sessionExpiresAt),saved=await this.issueAttachments().upload(authority.scope,id,body,declaredSize,this.env.EVIDENCE_BUCKET,authority.authorize,actor.userId);await authority.authorize();return this.attachmentView(saved,authority.canManage);});}
+  async issueAttachmentDownload(number:number,id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){return this.issueAttachmentReply(async()=>{const authority=await this.issueAttachmentAuthority(number,actor,false,credentialHash,sessionExpiresAt),result=await this.issueAttachments().download(authority.scope,id,this.env.EVIDENCE_BUCKET,authority.authorize);return{name:result.attachment.name,size:result.attachment.size,body:result.body};});}
+  async issueAttachmentReconcile(number:number,id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){return this.issueAttachmentReply(async()=>{const authority=await this.issueAttachmentAuthority(number,actor,true,credentialHash,sessionExpiresAt),store=this.issueAttachments(),saved=store.current(authority.scope,id);if(!authority.canManage(saved.authorId))throw new LfsStorageError("Only the uploader or owner can check this upload",403);const result=await store.reconcile(authority.scope,id,this.env.EVIDENCE_BUCKET,authority.authorize);await authority.authorize();return{...this.attachmentView(result.attachment,authority.canManage),reconciled:result.reconciled};});}
+  async issueAttachmentRemove(number:number,id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){return this.issueAttachmentReply(async()=>{const authority=await this.issueAttachmentAuthority(number,actor,true,credentialHash,sessionExpiresAt),store=this.issueAttachments(),saved=store.list(authority.scope).find(row=>row.id===id);if(!saved||!authority.canManage(saved.authorId))throw new LfsStorageError("Only the uploader or owner can remove this attachment",403);await authority.authorize();const removed=store.remove(authority.scope,id,authority.assert);return this.attachmentView(removed,authority.canManage);});}
+  async issueAttachmentReferences(number:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){return this.issueAttachmentReply(async()=>{const authority=await this.issueAttachmentAuthority(number,actor,false,credentialHash,sessionExpiresAt),result=this.issueAttachments().references(authority.scope);await authority.authorize();return result;});}
+  async issueAttachmentRetention(number:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){return this.issueAttachmentReply(async()=>{const authority=await this.issueAttachmentAuthority(number,actor,true,credentialHash,sessionExpiresAt);if(await this.roleOf(actor.userId)!=='owner')throw new LfsStorageError("Only the owner can release expired attachment storage",403);const owner=await this.authorizeHumanDecision(actor,credentialHash,true);owner();return this.issueAttachments().retention(authority.scope,this.env.EVIDENCE_BUCKET,async()=>{await authority.authorize();owner();});});}
+
   async listIssues(state: "open" | "closed"): Promise<IssueRow[]> {
     return this.ctx.storage.sql
-      .exec("SELECT i.*, (SELECT COUNT(*) FROM comments c WHERE c.subject = 'issue:' || i.number) AS comments FROM issues i WHERE state = ? ORDER BY number DESC LIMIT 200", state)
-      .toArray().map(row=>{const issue=row as unknown as IssueRow;const origin=new MigrationConversationPublication(this.ctx.storage).issueOrigin(issue.number);return origin?{...issue,importedOrigin:origin}:issue;});
+      .exec(`SELECT i.*, (SELECT COUNT(*) FROM comments c WHERE c.subject = 'issue:' || i.number) AS comments FROM issues i WHERE state = ? AND ${activeIssueSql('i')} ORDER BY number DESC LIMIT 200`, state)
+      .toArray().map(row=>{const issue=row as unknown as IssueRow;const origin=new MigrationConversationPublication(this.ctx.storage).issueOrigin(issue.number),archiveOrigin=new MetadataArchives(this.ctx.storage).origin("issues",String(issue.number));return {...issue,...(origin?{importedOrigin:origin}:{}),...(archiveOrigin?{archiveOrigin}:{})};});
   }
+  private issueTransferOrigin(number:number):IssueRow['transferOrigin']{if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_transfer_origins'").toArray().length)return undefined;const row=this.ctx.storage.sql.exec<{document:string}>('SELECT document FROM issue_transfer_origins WHERE issue_number=?',number).toArray()[0];if(!row)return undefined;const saved=JSON.parse(row.document) as {source:IssueTransferManifest['source'];attribution:IssueTransferManifest['attribution']};return{source:{projectId:saved.source.projectId,number:saved.source.number},attribution:saved.attribution,inlineAnchors:'source-origin-only',authorityTransferred:false};}
+  private issueTransferMappingAvailable(number:number){try{this.issueTransferMappingScope(number);return true;}catch{return false;}}
   async getIssue(n: number): Promise<IssueRow | null> {
-    return this.issueRow(n);
+    const issue=this.issueRow(n);return issue?{...issue,stateRevision:new IssueStateLedger(this.ctx.storage).snapshot(this.issueStateScope(n)).stateRevision,transferPending:this.ctx.storage.sql.exec('SELECT issue_number FROM issue_transfer_locks WHERE issue_number=?',n).toArray().length>0,transferContext:new IssueFeatureStore(this.ctx.storage).transferContext(n),transferMappingAvailable:this.issueTransferMappingAvailable(n),...(this.issueTransferOrigin(n)?{transferOrigin:this.issueTransferOrigin(n)!}:{})}:null;
   }
   async createMemberIssue(userId:string,input:MemberIssueInput):Promise<IssueRow>{
     if(typeof input.title!=="string"||typeof input.body!=="string"||typeof input.author!=="string"||!input.title.trim()||input.title.trim().length>200||input.body.trim().length>20_000||!input.author.trim()||input.author.trim().length>120)throw new Error("Invalid issue creation content");
     const normalized={...input,title:input.title.trim(),body:input.body.trim(),author:input.author.trim()};
+    const initial=await this.repositoryAccessFence(userId,true);initial.assert();
+    const incarnation=new PrivateRecoveryOperations(this.ctx.storage).incarnation();ensureIssueEventSources(this.ctx.storage);
+    const authority=await this.repositoryAccessFence(userId,true);
     let opened=false;
     const issue=this.ctx.storage.transactionSync(()=>{
-      if(this.repositoryDeleting()||!this.ctx.storage.sql.exec("SELECT 1 FROM members WHERE user_id=?",userId).toArray().length)throw new Error("Issue creation access was revoked");
+      authority.assert();
       if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(normalized.idempotencyKey))throw new Error("Invalid issue creation request key");
       const payload=JSON.stringify([normalized.title,normalized.body]);
       const receipt=this.ctx.storage.sql.exec<{payload:string;issue_number:number}>("SELECT payload,issue_number FROM member_issue_receipts WHERE actor_id=? AND event_key=?",userId,normalized.idempotencyKey).toArray()[0];
@@ -3978,29 +4833,177 @@ export class RepositoryController extends DurableObject<Env> {
       const at=new Date().toISOString();
       const number=this.ctx.storage.sql.exec<{number:number}>("INSERT INTO issues(title,body,author,created_at,updated_at) VALUES(?,?,?,?,?) RETURNING number",normalized.title,normalized.body,normalized.author,at,at).one().number;
       this.ctx.storage.sql.exec("INSERT INTO member_issue_receipts VALUES(?,?,?,?)",userId,normalized.idempotencyKey,payload,number);
-      this.ctx.storage.sql.exec("INSERT INTO activity(at,actor,type,summary) VALUES(?,?,?,?)",at,normalized.author,"issue.opened",`#${number} opened: ${normalized.title}`.slice(0,300));opened=true;
+      const activity=this.ctx.storage.sql.exec<{id:number}>("INSERT INTO activity(at,actor,type,summary) VALUES(?,?,?,?) RETURNING id",at,normalized.author,"issue.opened",`#${number} opened: ${normalized.title}`.slice(0,300)).one();bindIssueActivity(this.ctx.storage,activity.id,{number,incarnation});opened=true;
       return this.issueRow(number)!;
     });
-    if(opened)await this.notifyMembers("issue.opened",`#${issue.number} opened: ${issue.title}`).catch(()=>undefined);
+    if(opened)await this.notifyMembers("issue.opened",`#${issue.number} opened: ${issue.title}`,undefined,{number:issue.number,incarnation}).catch(()=>undefined);
     return issue;
   }
   async createIssue(i: { title: string; body: string; author: string }): Promise<IssueRow> {
     const now = new Date().toISOString();
     const n = this.ctx.storage.sql.exec<{ number: number }>("INSERT INTO issues (title, body, author, created_at, updated_at) VALUES (?, ?, ?, ?, ?) RETURNING number", i.title, i.body, i.author, now, now).toArray()[0]!.number;
-    await this.logActivity(i.author, "issue.opened", `#${n} opened: ${i.title}`);
+    await this.logActivity(i.author, "issue.opened", `#${n} opened: ${i.title}`,{issueNumber:n});
     return this.issueRow(n)!;
   }
+  private async issueLifecycleAuthority(number:number,actor:HumanDecisionActor,credential:IssueStateCredential,admin:boolean){
+    const initial=await this.repositoryAccessFence(actor.userId,admin).catch(()=>{throw new IssueLifecycleError("Issue access denied",403);});initial.assert();if(admin)new PrivateRecoveryOperations(this.ctx.storage).incarnation();const permission=await this.repositoryAccessFence(actor.userId,admin);permission.assert();const projectId=this.load().projectId,incarnation=this.readRepositoryIncarnation();
+    const assert=()=>{try{permission.assert();if(this.repositoryDeleting()||this.load().projectId!==projectId||this.readRepositoryIncarnation()!==incarnation||admin&&this.load().lifecycle?.state==='archived'||admin&&permission.role!=='admin')throw Error("Issue scope changed");if(!actor.viaToken&&(!credential.sessionExpiresAt||credential.sessionExpiresAt<=Date.now()))throw new IssueLifecycleError("Issue session expired",401);}catch(error){if(error instanceof IssueLifecycleError)throw error;throw new IssueLifecycleError("Issue access changed",403);}};
+    const authorize=async()=>{assert();const account=accountOf(this.env,await accountKeyFor(actor.userId));assert();if(await account.accountLifecycle()!=='active')throw new IssueLifecycleError("Account unavailable",403);assert();if(credential.oauth){if(admin)throw new IssueLifecycleError("App scope does not permit issue removal",403);const token=await this.env.AUTHORITY.get(this.env.AUTHORITY.idFromName('authority')).introspect(credential.oauth.token);assert();if(!token.active||token.userId!==actor.userId||token.clientId!==credential.oauth.clientId||token.repositoryId!==projectId||!token.scopes.includes('issues:read')||token.expiresAt<=Date.now())throw new IssueLifecycleError("Issue app access changed",403);}else if(actor.viaToken&&(!credential.personalTokenHash||!await(admin?account.apiTokenHashCanAdminister(credential.personalTokenHash,actor.userId,projectId):account.apiTokenHashCanRead(credential.personalTokenHash,actor.userId,projectId))))throw new IssueLifecycleError("Issue credential changed",401);assert();};await authorize();return{assert,authorize};
+  }
+  private async issueTransferAuthority(number:number,actor:HumanDecisionActor,credential:IssueStateCredential){
+    const epochs=this.membershipEpochs();
+    const snapshot=()=>{const direct=this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',actor.userId).toArray()[0];return JSON.stringify({role:direct?.role??null,epoch:direct?epochs.read(actor.userId):null});};
+    const issued=snapshot();
+    const assertEpoch=()=>{if(snapshot()!==issued)throw new IssueTransferError('Original transfer membership generation changed',403);};
+    const authority=await this.issueLifecycleAuthority(number,actor,credential,true);assertEpoch();
+    const assert=()=>{assertEpoch();authority.assert();assertEpoch();};
+    const authorize=async()=>{assert();await authority.authorize();assert();};
+    return{assert,authorize};
+  }
+  private issueTransferAudienceSnapshot(){this.inheritedTable();new MembershipEpochs(this.ctx.storage);const direct=this.ctx.storage.sql.exec<{user_id:string;role:string;epoch:number}>('SELECT m.user_id,m.role,e.epoch FROM members m JOIN membership_epochs e ON e.user_id=m.user_id ORDER BY m.user_id LIMIT 1001').toArray(),inherited=this.ctx.storage.sql.exec<{id:string;revision:number;doc:string}>('SELECT id,revision,doc FROM repository_organization_sources ORDER BY id LIMIT 101').toArray();if(direct.length>1000||inherited.length>100)throw new IssueTransferError('Repository audience exceeds transfer proof capacity',413);return{direct,inherited};}
+  private async issueTransferAudience(){const snapshot=this.issueTransferAudienceSnapshot();for(const row of snapshot.inherited){const fresh=await globalOf(this.env).organizationSource(row.id);if(!fresh||fresh.revision!==row.revision||JSON.stringify(fresh)!==JSON.stringify(JSON.parse(row.doc)))throw new IssueTransferError('Destination inherited audience changed',409);}if(JSON.stringify(snapshot)!==JSON.stringify(this.issueTransferAudienceSnapshot()))throw new IssueTransferError('Destination audience changed',409);const digest=await this.sha256(JSON.stringify(snapshot));if(JSON.stringify(snapshot)!==JSON.stringify(this.issueTransferAudienceSnapshot()))throw new IssueTransferError('Destination audience changed during digest proof',409);return digest;}
+  async issueTransferContext(actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<{projectId:string;incarnation:string;audienceDigest:string;audienceVersion:'repository-members-v1'}>>{return this.issueTransferReply(async()=>{const authority=await this.issueTransferAuthority(0,actor,credential),audienceDigest=await this.issueTransferAudience();await authority.authorize();return{projectId:this.load().projectId,incarnation:this.readRepositoryIncarnation()!,audienceDigest,audienceVersion:'repository-members-v1' as const};});}
+  protected issueTransferUnexpectedError(_error:unknown):void{}
+  private async issueTransferReply<T>(operation:()=>Promise<T>):Promise<IssueStateReply<T>>{try{return{ok:true,value:await operation()};}catch(error){if(error instanceof z.ZodError)return{ok:false,status:400,error:'Original transfer confirmation and repository identities are required'};if(error instanceof IssueTransferError||error instanceof IssueFilterError||error instanceof IssueLifecycleError||error instanceof IssueStateError||error instanceof LfsStorageError)return{ok:false,status:error.status,error:error.message};this.issueTransferUnexpectedError(error);return{ok:false,status:503,error:'Transfer outcome is not confirmed. Retry the original request.'};}}
+  async issueTransferReadableDestination(number:number,incarnation:string,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<boolean>>{return this.issueTransferReply(async()=>{const authority=await this.issueLifecycleAuthority(number,actor,credential,false);const readable=this.readRepositoryIncarnation()===incarnation&&isIssueActive(this.ctx.storage,number);await authority.authorize();return readable;});}
+  async issueTransferRollbackContext(actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<{projectId:string;incarnation:string}>>{return this.issueTransferReply(async()=>{const authority=await this.issueTransferAuthority(0,actor,credential);await authority.authorize();return{projectId:this.load().projectId,incarnation:this.readRepositoryIncarnation()!};});}
+  async issueTransferPendingRecovery(number:number,actor:HumanDecisionActor,credential:IssueStateCredential,readContext?:RepositoryReadContext,allowTransferred=false):Promise<IssueStateReply<IssueTransferPendingRecovery|null>>{return this.issueTransferReply(async()=>{
+    const authority=await this.issueTransferAuthority(number,actor,credential),ledger=new IssueTransferLedger(this.ctx.storage);
+    const sourceRelease=()=>{authority.assert();if(readContext&&(readContext.projectId!==this.load().projectId||readContext.incarnation!==this.readRepositoryIncarnation()||readContext.canonicalRepoName!==this.load().canonicalRepoName))throw new IssueTransferError('Original issue read scope changed',403);if(!isIssueActive(this.ctx.storage,number)&&!(allowTransferred&&new IssueLifecycleStore(this.ctx.storage).tombstone(number)?.transfer))throw new IssueTransferError('Source issue unavailable',410);};sourceRelease();
+    const lock=this.ctx.storage.sql.exec<{request_id:string}>('SELECT request_id FROM issue_transfer_locks WHERE issue_number=?',number).toArray()[0],record=lock?ledger.read(lock.request_id):undefined;
+    if(!record||record.destinationNumber!==undefined||record.manifest.source.projectId!==this.load().projectId||record.manifest.source.incarnation!==this.readRepositoryIncarnation()||record.phase==='cancelled')return null;
+    const manifest=record.manifest,destination=projectOf(this.env,manifest.destination.projectId),rollback=await destination.issueTransferRollbackContext(actor,credential);if(!rollback.ok||rollback.value.incarnation!==manifest.destination.incarnation){await authority.authorize();sourceRelease();return null;}
+    const active=await destination.issueTransferCancellationRead(manifest.requestId,actor,credential),activeRecord=active.ok?active.value.record:undefined,activeApproved=activeRecord?.phase==='active'&&canonicalTransferJson(activeRecord.manifest)===canonicalTransferJson(manifest),canFinalizeActive=activeApproved&&!activeRecord.finalized&&activeRecord.destinationNumber!==undefined;if(allowTransferred&&!canFinalizeActive){sourceRelease();return null;}if(record.phase==='completed'){const marker=new IssueLifecycleStore(this.ctx.storage).tombstone(number);if(marker?.transfer?.requestId!==manifest.requestId||marker.transfer.projectId!==manifest.destination.projectId||marker.transfer.incarnation!==manifest.destination.incarnation||marker.transfer.number!==activeRecord?.destinationNumber||record.activatedDestinationNumber!==activeRecord?.destinationNumber)throw new IssueTransferError('Exact completed source recovery binding changed',409);}let canResumeOriginal=false;if(manifest.actorId===actor.userId&&record.phase!=='cancelling'){if(activeApproved)canResumeOriginal=!activeRecord.finalized;else{const context=await destination.issueTransferContext(actor,credential);canResumeOriginal=context.ok&&canonicalTransferJson(context.value)===canonicalTransferJson(manifest.destination);}}
+    await authority.authorize();sourceRelease();
+    if(canResumeOriginal&&!activeApproved){const finalAudience=await destination.issueTransferContext(actor,credential);canResumeOriginal=finalAudience.ok&&canonicalTransferJson(finalAudience.value)===canonicalTransferJson(manifest.destination);if(!canResumeOriginal){const finalAccess=await destination.issueTransferRollbackContext(actor,credential);if(!finalAccess.ok||finalAccess.value.incarnation!==manifest.destination.incarnation){await authority.authorize();sourceRelease();return null;}}}else{const finalAccess=await destination.issueTransferRollbackContext(actor,credential);if(!finalAccess.ok||finalAccess.value.incarnation!==manifest.destination.incarnation){await authority.authorize();sourceRelease();return null;}}
+    sourceRelease();const currentLock=this.ctx.storage.sql.exec<{request_id:string}>('SELECT request_id FROM issue_transfer_locks WHERE issue_number=?',number).toArray()[0],current=ledger.read(manifest.requestId);if(currentLock?.request_id!==manifest.requestId||current?.phase!==record.phase||canonicalTransferJson(current.manifest)!==canonicalTransferJson(manifest))throw new IssueTransferError('Original pending transfer changed before release',409);
+    return{originalRequest:{destinationProjectId:manifest.destination.projectId,expectedRevision:manifest.source.stateRevision,requestId:manifest.requestId,confirmed:true as const,expectedManifestDigest:manifest.previewDigest,expectedDestinationIncarnation:manifest.destination.incarnation},canResumeOriginal,canCancel:true as const,canFinalizeActive,...(canFinalizeActive?{activeDestinationNumber:activeRecord!.destinationNumber!}:{})};
+  });}
+  async issueTransferCancellationRead(requestId:string,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<{record:IssueTransferRecord|undefined;cancellation:IssueTransferCancellationRecord|undefined}>>{return this.issueTransferReply(async()=>{const authority=await this.issueTransferAuthority(0,actor,credential),ledger=new IssueTransferLedger(this.ctx.storage),record=ledger.read(z.uuid().parse(requestId)),cancellation=ledger.readCancellation(requestId),manifest=record?.manifest??cancellation?.manifest;if(!manifest)throw new IssueTransferError('Original transfer unavailable',404);const local=manifest.source.projectId===this.load().projectId?manifest.source:manifest.destination.projectId===this.load().projectId?manifest.destination:null;if(!local||local.incarnation!==this.readRepositoryIncarnation())throw new IssueTransferError('Original transfer repository identity changed',409);await authority.authorize();return{record,cancellation};});}
+  private async issueTransferRollbackAuthority(manifest:IssueTransferManifest,input:IssueTransferCancellation,actor:HumanDecisionActor,credential:IssueStateCredential){const authority=await this.issueTransferAuthority(0,actor,credential),ledger=new IssueTransferLedger(this.ctx.storage);const assert=()=>{authority.assert();if(this.load().projectId!==manifest.destination.projectId||this.readRepositoryIncarnation()!==manifest.destination.incarnation)throw new IssueTransferError('Original cancellation destination changed',409);};const authorize=async()=>{assert();await authority.authorize();const source=this.issueTransferUnwrap(await projectOf(this.env,manifest.source.projectId).issueTransferCancellationRead(input.requestId,actor,credential));assert();const cancellation=source.cancellation;if(!cancellation||cancellation.actorId!==actor.userId||cancellation.location!=='source'||cancellation.phase==='denied-active'||canonicalTransferJson(cancellation.manifest)!==canonicalTransferJson(manifest)||canonicalTransferJson(cancellation.input)!==canonicalTransferJson(input))throw new IssueTransferError('Original source cancellation intent changed',409);await authority.authorize();assert();};const authorizeCancelled=async()=>{await authorize();const saved=ledger.readCancellation(input.requestId);if(!saved||saved.phase!=='cancelled'||saved.location!=='destination'||saved.actorId!==actor.userId||canonicalTransferJson(saved.input)!==canonicalTransferJson(input)||canonicalTransferJson(saved.manifest)!==canonicalTransferJson(manifest))throw new IssueTransferError('Irreversible destination cancellation fence changed',409);assert();};await authorize();return{ledger,assert,authorize,authorizeCancelled};}
+  async issueTransferCancelDestination(manifest:IssueTransferManifest,input:IssueTransferCancellation,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<{cancelled:true;physicalCleanup:'pending'|'confirmed'}|{cancelled:false;reason:'destination-active'}>>{return this.issueTransferReply(async()=>{const parsed=normalizeIssueTransferCancellation(manifest,input),authority=await this.issueTransferRollbackAuthority(manifest,parsed,actor,credential);try{authority.ledger.cancelDestination(manifest,parsed,actor.userId,authority.assert);}catch(error){if(error instanceof IssueTransferActiveDestinationError)return{cancelled:false as const,reason:'destination-active' as const};throw error;}const record=authority.ledger.read(parsed.requestId);let physicalCleanup:'pending'|'confirmed'='confirmed';if(record?.destinationNumber!==undefined){const cleanup=await this.issueAttachments().cancelTransfer(this.issueTransferDestinationScope(record),manifest.attachments.map(attachment=>attachment.destinationId),this.env.EVIDENCE_BUCKET,authority.authorizeCancelled);physicalCleanup=cleanup.physicalCleanup;}await this.afterIssueTransferDestinationCancellation();await authority.authorize();return{cancelled:true as const,physicalCleanup};});}
+  async issueTransferCancellationReadback(requestId:string,cancelId:string,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<{cancellation:IssueTransferCancellationRecord;physicalCleanup:'pending'|'confirmed'}>>{return this.issueTransferReply(async()=>{const ledger=new IssueTransferLedger(this.ctx.storage),cancellation=ledger.readCancellation(requestId);if(!cancellation||cancellation.location!=='destination'||cancellation.phase!=='cancelled'||cancellation.cancelId!==cancelId||cancellation.actorId!==actor.userId)throw new IssueTransferError('Exact destination cancellation receipt unavailable',409);const authority=await this.issueTransferRollbackAuthority(cancellation.manifest,cancellation.input,actor,credential),record=ledger.read(requestId);if(record?.destinationNumber!==undefined){const incoming=this.ctx.storage.sql.exec<{active:number;request_id:string}>('SELECT active,request_id FROM issue_transfer_incoming WHERE issue_number=?',record.destinationNumber).toArray()[0];if(record.phase!=='cancelled'||incoming?.active!==0||incoming.request_id!==requestId)throw new IssueTransferError('Cancelled incoming issue identity changed',409);}let physicalCleanup:'pending'|'confirmed'='confirmed';if(record?.destinationNumber!==undefined)physicalCleanup=(await this.issueAttachments().cancelTransfer(this.issueTransferDestinationScope(record),cancellation.manifest.attachments.map(attachment=>attachment.destinationId),this.env.EVIDENCE_BUCKET,authority.authorizeCancelled)).physicalCleanup;await authority.authorize();return{cancellation,physicalCleanup};});}
+  async issueTransferCancelledCleanupInspection(requestId:string,cancelId:string,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<{physicalCleanup:'pending'|'confirmed'}>>{return this.issueTransferReply(async()=>{
+    const authority=await this.issueTransferAuthority(0,actor,credential),ledger=new IssueTransferLedger(this.ctx.storage),cancellation=ledger.readCancellation(requestId),record=ledger.read(requestId);
+    if(!cancellation||cancellation.location!=='destination'||cancellation.phase!=='cancelled'||cancellation.cancelId!==cancelId||cancellation.manifest.destination.projectId!==this.load().projectId||cancellation.manifest.destination.incarnation!==this.readRepositoryIncarnation())throw new IssueTransferError('Exact cancelled destination receipt unavailable',409);
+    const manifest=cancellation.manifest,source=this.issueTransferUnwrap(await projectOf(this.env,manifest.source.projectId).issueTransferCancellationRead(requestId,actor,credential));authority.assert();
+    if(source.record?.phase!=='cancelled'||source.cancellation?.phase!=='cancelled'||source.cancellation.actorId!==cancellation.actorId||source.cancellation.cancelId!==cancelId||canonicalTransferJson(source.cancellation.input)!==canonicalTransferJson(cancellation.input)||canonicalTransferJson(source.cancellation.manifest)!==canonicalTransferJson(manifest))throw new IssueTransferError('Exact source unlock receipt unavailable',409);
+    await authority.authorize();authority.assert();const current=ledger.readCancellation(requestId);if(!current||canonicalTransferJson(current)!==canonicalTransferJson(cancellation))throw new IssueTransferError('Cancelled destination receipt changed during inspection',409);
+    if(record?.destinationNumber!==undefined){const incoming=this.ctx.storage.sql.exec<{active:number;request_id:string}>('SELECT active,request_id FROM issue_transfer_incoming WHERE issue_number=?',record.destinationNumber).toArray()[0];if(ledger.read(requestId)?.phase!=='cancelled'||incoming?.active!==0||incoming.request_id!==requestId)throw new IssueTransferError('Cancelled incoming destination changed',409);const authorize=async()=>{authority.assert();const freshSource=this.issueTransferUnwrap(await projectOf(this.env,manifest.source.projectId).issueTransferCancellationRead(requestId,actor,credential));authority.assert();if(freshSource.record?.phase!=='cancelled'||freshSource.cancellation?.phase!=='cancelled'||freshSource.cancellation.cancelId!==cancelId||freshSource.cancellation.actorId!==cancellation.actorId||canonicalTransferJson(freshSource.cancellation.input)!==canonicalTransferJson(cancellation.input)||canonicalTransferJson(freshSource.cancellation.manifest)!==canonicalTransferJson(manifest))throw new IssueTransferError('Current source cancellation authority changed',409);await authority.authorize();authority.assert();if(canonicalTransferJson(ledger.readCancellation(requestId))!==canonicalTransferJson(cancellation)||ledger.read(requestId)?.phase!=='cancelled')throw new IssueTransferError('Cancelled destination changed during read-only inspection',409);};const cleanup=await this.issueAttachments().inspectCancelledTransferCleanup(this.issueTransferDestinationScope(record),manifest.attachments.map(attachment=>attachment.destinationId),authorize);authority.assert();return{physicalCleanup:cleanup.physicalCleanup};}
+    return{physicalCleanup:'confirmed' as const};
+  });}
+  private issueTransferRecoveryEpoch(userId:string){this.inheritedTable();const role=this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',userId).toArray()[0]?.role,inherited=role?[]:this.ctx.storage.sql.exec<{id:string;revision:number}>('SELECT id,revision FROM repository_organization_sources ORDER BY id LIMIT 101').toArray();if(inherited.length>100)throw new IssueTransferError('Inherited finalization authority exceeds proof capacity',413);return canonicalTransferJson({projectId:this.load().projectId,incarnation:this.readRepositoryIncarnation(),role:role??null,epoch:role?this.membershipEpochs().read(userId):null,inherited});}
+  private issueTransferMappingScope(number:number){const issue=this.issueRow(number);if(!issue)throw new IssueFilterError('Destination issue unavailable',410);const incarnation=this.readRepositoryIncarnation();if(!incarnation)throw new IssueFilterError('Destination incarnation unavailable',409);const incoming=this.ctx.storage.sql.exec<{document:string;active:number}>('SELECT document,active FROM issue_transfer_incoming WHERE issue_number=?',number).toArray()[0];if(!incoming||incoming.active!==1)throw new IssueFilterError('A finalized incoming destination is required',409);const value=JSON.parse(incoming.document) as IssueTransferRecord,record=new IssueTransferLedger(this.ctx.storage).read(value.manifest.requestId);if(!record||record.phase!=='active'||!record.finalized||record.destinationNumber!==number||record.manifest.destination.projectId!==this.load().projectId||record.manifest.destination.incarnation!==incarnation||record.manifest.issue.created_at!==issue.created_at||record.manifest.issue.author!==issue.author||canonicalTransferJson(record)!==canonicalTransferJson(value))throw new IssueFilterError('Exact finalized destination identity changed',409);return canonicalTransferJson({projectId:this.load().projectId,incarnation,number,createdAt:issue.created_at,author:issue.author,transferRequestId:record.manifest.requestId});}
+  private async issueTransferMappingEligibility(ids:readonly string[],assert:()=>void){const eligible:string[]=[];for(let offset=0;offset<ids.length;offset+=4){const batch=await Promise.all(ids.slice(offset,offset+4).map(async userId=>{const account=accountOf(this.env,await accountKeyFor(userId));assert();const active=await account.accountLifecycle()==='active';assert();return{userId,active};}));for(const row of batch)if(row.active)eligible.push(row.userId);assert();}return eligible;}
+  private async issueTransferMappingAuthority(number:number,actor:HumanDecisionActor,credential:IssueStateCredential){const authority=await this.issueTransferAuthority(number,actor,credential),scope=this.issueTransferMappingScope(number),epochs=this.membershipEpochs(),generation=epochs.generation();const assert=()=>{authority.assert();if(this.issueTransferMappingScope(number)!==scope||epochs.generation()!==generation)throw new IssueFilterError('Destination identity or whole principal roster changed',409);};const authorize=async()=>{assert();await authority.authorize();assert();const fresh=await this.repositoryAccessFence(actor.userId,true);fresh.assert();if(fresh.role!=='admin')throw new IssueTransferError('Current destination administrator required',403);assert();};await authorize();const principalGeneration=await this.sha256(canonicalTransferJson({scope,generation}));assert();return{scope,principalGeneration,assert,authorize};}
+  private issueTransferMappingCurrentMembers(ids:readonly string[]){return [...new Set(ids)].filter(userId=>this.ctx.storage.sql.exec('SELECT user_id FROM members WHERE user_id=?',userId).toArray().length===1);}
+  async issueTransferMappingPreview(number:number,actor:HumanDecisionActor,credential:IssueStateCredential,principalCursor?:string):Promise<IssueStateReply<Awaited<ReturnType<IssueFeatureStore['transferMappingSnapshot']>>&{canMap:true;principalPage:{complete:boolean;nextCursor:string|null;generation:string}}|{canMap:true;originDigest:string;featureRevision:number;principalGeneration:string;catalog:{principals:string[]};principalPage:{complete:boolean;nextCursor:string|null;generation:string}}>>{return this.issueTransferReply(async()=>{
+    const authority=await this.issueTransferMappingAuthority(number,actor,credential);let after='';if(principalCursor){if(principalCursor.length>2048||!/^[A-Za-z0-9_-]+$/.test(principalCursor))throw new IssueFilterError('Invalid principal cursor',400);try{const bytes=Uint8Array.from(atob(principalCursor.replaceAll('-','+').replaceAll('_','/')),value=>value.charCodeAt(0)),value=z.object({generation:z.string().regex(/^[a-f0-9]{64}$/),after:z.string().min(1).max(256)}).strict().parse(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes)));if(value.generation!==authority.principalGeneration)throw new IssueFilterError('Principal roster changed; reload the catalog',409);after=value.after;if(!this.ctx.storage.sql.exec('SELECT user_id FROM members WHERE user_id=?',after).toArray().length)throw new IssueFilterError('Principal cursor no longer identifies a member',409);}catch(error){if(error instanceof IssueFilterError)throw error;throw new IssueFilterError('Invalid principal cursor',400);}}
+    const rows=this.ctx.storage.sql.exec<{user_id:string}>('SELECT user_id FROM members WHERE user_id>? ORDER BY user_id LIMIT 51',after).toArray(),page=rows.slice(0,50).map(row=>row.user_id),store=new IssueFeatureStore(this.ctx.storage),context=principalCursor?null:store.transferContext(number),associated=this.issueTransferMappingCurrentMembers([...(context?.applied.assignees.map(pair=>pair.destination)??[]),...(context?.currentTriage.assignees??[])]),eligible=await this.issueTransferMappingEligibility([...new Set([...page,...associated])],authority.assert);await authority.authorize();const last=page.at(-1),nextCursor=rows.length>50&&last?btoa(String.fromCharCode(...new TextEncoder().encode(canonicalTransferJson({generation:authority.principalGeneration,after:last})))).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,''):null,principalPage={complete:nextCursor===null,nextCursor,generation:authority.principalGeneration},principals=page.filter(userId=>eligible.includes(userId));
+    if(principalCursor){const proof=await store.transferMappingProof(number);authority.assert();await authority.authorize();if(store.read().revision!==proof.featureRevision)throw new IssueFilterError('Feature catalog changed during principal page',409);authority.assert();return{...proof,principalGeneration:authority.principalGeneration,catalog:{principals},principalPage,canMap:true as const};}
+    const snapshot=await store.transferMappingSnapshot(number,authority.principalGeneration,eligible);authority.assert();await authority.authorize();if(store.read().revision!==snapshot.featureRevision)throw new IssueFilterError('Destination feature catalog changed during proposal',409);authority.assert();return{...snapshot,catalog:{...snapshot.catalog,principals},canMap:true as const,principalPage};
+  });}
+  async issueTransferMappingMutation(number:number,value:unknown,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<Awaited<ReturnType<IssueFeatureStore['mapTransferFeatures']>>>>{return this.issueTransferReply(async()=>{
+    const input=issueTransferMappingSchema.parse(value),authority=await this.issueTransferMappingAuthority(number,actor,credential),selected=[...new Set(input.assignees.map(pair=>pair.destination))],members=this.issueTransferMappingCurrentMembers(selected);
+    await this.beforeIssueTransferMappingCommit();authority.assert();const prepare=async(mutation:boolean)=>{await authority.authorize();if(mutation){const current=this.issueTransferMappingCurrentMembers(selected),eligible=await this.issueTransferMappingEligibility(current,authority.assert);authority.assert();if(current.length!==selected.length||eligible.length!==selected.length)throw new IssueFilterError('Selected destination principal was withdrawn or deleted',409);}authority.assert();};
+    const result=await new IssueFeatureStore(this.ctx.storage).mapTransferFeatures(number,input,actor.userId,authority.scope,members,authority.principalGeneration,authority.assert,prepare);await this.afterIssueTransferMappingCommit();await authority.authorize();authority.assert();return result;
+  });}
+  async issueTransferMappingRelease(number:number,actor:HumanDecisionActor,credential:IssueStateCredential,principalGeneration?:string):Promise<IssueStateReply<true>>{return this.issueTransferReply(async()=>{const authority=await this.issueTransferMappingAuthority(number,actor,credential);if(principalGeneration!==undefined&&authority.principalGeneration!==principalGeneration)throw new IssueFilterError('Principal proposal generation changed before release',409);await authority.authorize();authority.assert();return true as const;});}
+  private issueTransferFinalizationProof(record:IssueTransferRecord,input:IssueTransferFinalization){if(record.manifest.requestId!==input.requestId||record.manifest.previewDigest!==input.expectedManifestDigest||record.manifest.destination.incarnation!==input.expectedDestinationIncarnation||record.destinationNumber!==undefined&&record.destinationNumber!==input.destinationNumber||record.activatedDestinationNumber!==undefined&&record.activatedDestinationNumber!==input.destinationNumber)throw new IssueTransferError('Exact activated transfer proof changed',409);}
+  private issueTransferCompletedSource(record:IssueTransferRecord,input:IssueTransferFinalization){this.issueTransferFinalizationProof(record,input);const tombstone=new IssueLifecycleStore(this.ctx.storage).tombstone(record.manifest.source.number),raw=this.rawIssueRow(record.manifest.source.number);if(record.phase!=='completed'||record.activatedDestinationNumber!==input.destinationNumber||!raw||raw.created_at!==record.manifest.source.createdAt||raw.author!==record.manifest.source.author||tombstone?.identity!==JSON.stringify({projectId:record.manifest.source.projectId,incarnation:record.manifest.source.incarnation,number:record.manifest.source.number,createdAt:raw.created_at,author:raw.author})||tombstone.transfer?.requestId!==input.requestId||tombstone.transfer.projectId!==record.manifest.destination.projectId||tombstone.transfer.incarnation!==input.expectedDestinationIncarnation||tombstone.transfer.number!==input.destinationNumber)throw new IssueTransferError('Exact completed source tombstone is unavailable',409);}
+  async issueTransferFinalizationSourceFence(value:IssueTransferFinalization,actor:HumanDecisionActor,credential:IssueStateCredential,expectedEpoch:string):Promise<IssueStateReply<{phase:IssueTransferRecord['phase'];finalizationPhase?:'prepared'|'source-completed'|'completed'}>>{return this.issueTransferReply(async()=>{const input=issueTransferFinalizationSchema.parse(value),authority=await this.issueTransferAuthority(0,actor,credential),ledger=new IssueTransferLedger(this.ctx.storage),record=ledger.read(input.requestId);const assert=()=>{authority.assert();if(this.issueTransferRecoveryEpoch(actor.userId)!==expectedEpoch)throw new IssueTransferError('Original finalizer source authority generation changed',403);};assert();if(!record||record.destinationNumber!==undefined||record.manifest.source.projectId!==this.load().projectId||record.manifest.source.incarnation!==this.readRepositoryIncarnation())throw new IssueTransferError('Original recovery source unavailable',404);this.issueTransferFinalizationProof(record,input);if(record.phase==='completed')this.issueTransferCompletedSource(record,input);else if(record.phase!=='frozen'&&record.phase!=='cancelling')throw new IssueTransferError('Original source no longer accepts active finalization',409);if(ledger.readCancellation(input.requestId)?.phase==='cancelled'||ledger.readUnfrozenCancellation(input.requestId))throw new IssueTransferError('Cancelled transfer cannot finalize',410);await authority.authorize();assert();const saved=ledger.readFinalization(input.requestId,input.finalizeId,actor.userId);return{phase:record.phase,...(saved?{finalizationPhase:saved.phase}:{})};});}
+  private async issueTransferRecoveryDestinationAuthority(input:IssueTransferFinalization,actor:HumanDecisionActor,credential:IssueStateCredential,sourceEpoch:string,expectedDestinationEpoch?:string){const destinationEpoch=this.issueTransferRecoveryEpoch(actor.userId),authority=await this.issueTransferAuthority(0,actor,credential),ledger=new IssueTransferLedger(this.ctx.storage),record=ledger.read(input.requestId);if(!record||record.destinationNumber===undefined||record.phase!=='active'||record.manifest.destination.projectId!==this.load().projectId||record.manifest.destination.incarnation!==this.readRepositoryIncarnation())throw new IssueTransferError('An exact active destination is required for finalization',409);this.issueTransferFinalizationProof(record,input);const assert=()=>{authority.assert();if(this.issueTransferRecoveryEpoch(actor.userId)!==(expectedDestinationEpoch??destinationEpoch))throw new IssueTransferError('Original finalizer destination authority generation changed',403);const current=ledger.read(input.requestId);if(current?.phase!=='active'||canonicalTransferJson(current.manifest)!==canonicalTransferJson(record.manifest)||current.destinationNumber!==input.destinationNumber||ledger.readCancellation(input.requestId)?.phase==='cancelled')throw new IssueTransferError('Activated destination identity changed',409);if(!current.finalized&&this.ctx.storage.sql.exec<{request_id:string}>('SELECT request_id FROM issue_transfer_locks WHERE issue_number=?',input.destinationNumber).toArray()[0]?.request_id!==input.requestId)throw new IssueTransferError('Exact active destination lock changed',409);};const authorize=async()=>{assert();await authority.authorize();const source=this.issueTransferUnwrap(await projectOf(this.env,record.manifest.source.projectId).issueTransferFinalizationSourceFence(input,actor,credential,sourceEpoch));assert();await authority.authorize();assert();return source;};await authorize();return{record,ledger,assert,authorize,destinationEpoch};}
+  async issueTransferRecoveryDestinationFence(value:IssueTransferFinalization,actor:HumanDecisionActor,credential:IssueStateCredential,sourceEpoch:string,expectedDestinationEpoch?:string):Promise<IssueStateReply<{record:IssueTransferRecord;destinationEpoch:string}>>{return this.issueTransferReply(async()=>{const input=issueTransferFinalizationSchema.parse(value),authority=await this.issueTransferRecoveryDestinationAuthority(input,actor,credential,sourceEpoch,expectedDestinationEpoch);await authority.authorize();authority.assert();return{record:authority.ledger.read(input.requestId)!,destinationEpoch:authority.destinationEpoch};});}
+  async issueTransferRecoveryReadback(value:IssueTransferFinalization,actor:HumanDecisionActor,credential:IssueStateCredential,sourceEpoch:string,destinationEpoch:string):Promise<IssueStateReply<IssueTransferRecord>>{return this.issueTransferReply(async()=>{const input=issueTransferFinalizationSchema.parse(value),authority=await this.issueTransferRecoveryDestinationAuthority(input,actor,credential,sourceEpoch,destinationEpoch);if(!authority.record.finalized){const store=this.issueAttachments(),scope=this.issueTransferDestinationScope(authority.record);for(const attachment of authority.record.manifest.attachments){const confirmed=await store.readbackForFinalization(scope,attachment.destinationId,this.env.EVIDENCE_BUCKET,async()=>{await authority.authorize();});authority.assert();if(confirmed.attachment.authorId!==authority.record.manifest.actorId||confirmed.attachment.sha256!==attachment.sha256||confirmed.attachment.size!==attachment.size)throw new IssueTransferError('Activated attachment producer proof changed',409);}if(!this.issueTransferContentVerified(authority.record.manifest,input.destinationNumber))throw new IssueTransferError('Exact activated content readback failed',409);}await authority.authorize();authority.assert();return authority.ledger.read(input.requestId)!;});}
+  async issueTransferRecoveryFinishDestination(value:IssueTransferFinalization,actor:HumanDecisionActor,credential:IssueStateCredential,sourceEpoch:string,destinationEpoch:string):Promise<IssueStateReply<IssueTransferRecord>>{return this.issueTransferReply(async()=>{const input=issueTransferFinalizationSchema.parse(value),authority=await this.issueTransferRecoveryDestinationAuthority(input,actor,credential,sourceEpoch,destinationEpoch),source=await authority.authorize();if(source.phase!=='completed'||source.finalizationPhase!=='source-completed'&&source.finalizationPhase!=='completed')throw new IssueTransferError('Current finalizer source completion receipt unavailable',409);const record=authority.ledger.finishDestination(input.requestId,authority.assert,{actorId:actor.userId,finalizeId:input.finalizeId});await this.afterIssueTransferFinalization();await authority.authorize();return record;});}
+  async issueTransferFinalize(number:number,value:unknown,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<ReturnType<typeof issueTransferView>>>{return this.issueTransferReply(async()=>{const input=issueTransferFinalizationSchema.parse(value),sourceEpoch=this.issueTransferRecoveryEpoch(actor.userId),authority=await this.issueTransferAuthority(number,actor,credential),ledger=new IssueTransferLedger(this.ctx.storage);const assert=()=>{authority.assert();if(this.issueTransferRecoveryEpoch(actor.userId)!==sourceEpoch)throw new IssueTransferError('Original finalizer source authority generation changed',403);};assert();let record=ledger.read(input.requestId);if(!record||record.destinationNumber!==undefined||record.manifest.source.number!==number||record.manifest.source.projectId!==this.load().projectId||record.manifest.source.incarnation!==this.readRepositoryIncarnation())throw new IssueTransferError('Original finalization source unavailable',404);this.issueTransferFinalizationProof(record,input);const manifest=record.manifest,destination=projectOf(this.env,manifest.destination.projectId),previous=ledger.readFinalization(input.requestId,input.finalizeId,actor.userId),initialFence=this.issueTransferUnwrap(await destination.issueTransferRecoveryDestinationFence(input,actor,credential,sourceEpoch)),destinationEpoch=initialFence.destinationEpoch,active=this.issueTransferUnwrap(await destination.issueTransferRecoveryReadback(input,actor,credential,sourceEpoch,destinationEpoch));assert();if(active.phase!=='active'||active.destinationNumber!==input.destinationNumber||canonicalTransferJson(active.manifest)!==canonicalTransferJson(manifest))throw new IssueTransferError('Exact active destination proof changed',409);await authority.authorize();assert();const cancellation=ledger.readCancellation(input.requestId);if(cancellation?.phase==='cancelling')ledger.denyCancellationActive(input.requestId,cancellation.cancelId,assert);ledger.beginFinalization(input.requestId,input,actor.userId,assert);await this.beforeIssueTransferFinalizationRecovery();await authority.authorize();assert();const finalFence=this.issueTransferUnwrap(await destination.issueTransferRecoveryDestinationFence(input,actor,credential,sourceEpoch,destinationEpoch));assert();if(finalFence.record.phase!=='active'||canonicalTransferJson(finalFence.record.manifest)!==canonicalTransferJson(manifest)||finalFence.record.destinationNumber!==input.destinationNumber)throw new IssueTransferError('Final active destination consent changed',409);this.ctx.storage.transactionSync(()=>{assert();record=ledger.read(input.requestId)!;if(record.phase==='completed')this.issueTransferCompletedSource(record,input);else{if(record.phase!=='frozen')throw new IssueTransferError('Original source cannot finalize in this phase',409);const lock=this.ctx.storage.sql.exec<{request_id:string}>('SELECT request_id FROM issue_transfer_locks WHERE issue_number=?',number).toArray()[0];if(lock?.request_id!==input.requestId)throw new IssueTransferError('Original source transfer lock changed',409);const current=this.issueTransferSourceSnapshot(number),expected={source:manifest.source,issue:manifest.issue,comments:manifest.comments,features:manifest.features,attribution:manifest.attribution,attachments:manifest.attachments.map(({destinationId:_id,...attachment})=>attachment)};if(canonicalTransferJson(current)!==canonicalTransferJson(expected))throw new IssueTransferError('Frozen source content changed before finalization',409);const raw=this.rawIssueRow(number)!;ledger.bindDestination(input.requestId,input.destinationNumber,assert);const scope:IssueStateScope={projectId:manifest.source.projectId,incarnation:manifest.source.incarnation,number,createdAt:raw.created_at,author:raw.author};if(new IssueLifecycleStore(this.ctx.storage).tombstone(number))throw new IssueTransferError('Source already removed by another operation',410);const identity=JSON.stringify(scope);this.ctx.storage.sql.exec('INSERT INTO issue_tombstones VALUES(?,?,?)',number,identity,JSON.stringify({version:1,number,identity,actorId:actor.userId,requestId:input.requestId,expectedRevision:manifest.source.stateRevision,deletedAt:new Date().toISOString(),finalization:{actorId:actor.userId,finalizeId:input.finalizeId},transfer:{...manifest.destination,number:input.destinationNumber,requestId:input.requestId}}));record=ledger.complete(input.requestId,assert);}ledger.markFinalizationSourceCompleted(input.requestId,input.finalizeId,actor.userId,assert);});await this.afterIssueTransferFinalizationSource();await authority.authorize();assert();const finished=this.issueTransferUnwrap(await destination.issueTransferRecoveryFinishDestination(input,actor,credential,sourceEpoch,destinationEpoch));assert();if(!finished.finalized||finished.destinationNumber!==input.destinationNumber||canonicalTransferJson(finished.manifest)!==canonicalTransferJson(manifest))throw new IssueTransferError('Exact recovery destination unlock receipt unavailable',503);await authority.authorize();assert();ledger.completeFinalization(input.requestId,input.finalizeId,actor.userId,()=>{assert();this.issueTransferCompletedSource(ledger.read(input.requestId)!,input);});await this.afterIssueTransferFinalizationRecovery();await authority.authorize();assert();return{...issueTransferView(ledger.read(input.requestId)!),finalization:{finalizeId:input.finalizeId,actorId:actor.userId,completed:true,replayed:previous!==undefined,performedSource:new IssueLifecycleStore(this.ctx.storage).tombstone(number)?.finalization?.finalizeId===input.finalizeId&&new IssueLifecycleStore(this.ctx.storage).tombstone(number)?.finalization?.actorId===actor.userId,sourceCompletedBy:new IssueLifecycleStore(this.ctx.storage).tombstone(number)!.actorId,...(finished.destinationFinalization?{destinationFinalizedBy:finished.destinationFinalization.actorId}:{})}};});}
+  async issueTransferCancel(number:number,value:unknown,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<IssueTransferCancellationResult>>{return this.issueTransferReply(async()=>{let input=issueTransferCancellationSchema.parse(value);const authority=await this.issueTransferAuthority(number,actor,credential),ledger=new IssueTransferLedger(this.ctx.storage);let record=ledger.read(input.requestId);
+    if(!record){if(!input.originalRequest)throw new IssueTransferError('Include the exact saved transfer confirmation to cancel an unfrozen intent',400);const previous=ledger.readUnfrozenCancellation(input.requestId),raw=this.rawIssueRow(number);if(!raw)throw new IssueTransferError('Original source issue unavailable',404);const scope=previous?.scope??{projectId:this.load().projectId,incarnation:this.readRepositoryIncarnation()!,number,createdAt:raw.created_at,author:raw.author};if(scope.projectId!==this.load().projectId||scope.incarnation!==this.readRepositoryIncarnation()||scope.number!==number||scope.createdAt!==raw.created_at||scope.author!==raw.author)throw new IssueTransferError('Original unfrozen source identity changed',409);const target=projectOf(this.env,input.originalRequest.destinationProjectId),destination=this.issueTransferUnwrap(await target.issueTransferRollbackContext(actor,credential));if(destination.projectId===scope.projectId||destination.incarnation!==input.expectedDestinationIncarnation)throw new IssueTransferError('Original unfrozen destination identity changed',409);await authority.authorize();const cancelled=ledger.cancelUnfrozen(scope,input,actor.userId,authority.assert);if(cancelled){await this.afterIssueTransferSourceCancellation();await authority.authorize();return{requestId:input.requestId,cancelId:input.cancelId,cancelled:true as const,replayed:previous!==undefined,sourceUnlocked:true as const,physicalCleanup:'confirmed' as const};}record=ledger.read(input.requestId);}
+    if(!record||record.destinationNumber!==undefined||record.manifest.source.number!==number||record.manifest.source.projectId!==this.load().projectId||record.manifest.source.incarnation!==this.readRepositoryIncarnation())throw new IssueTransferError('Original source transfer unavailable',404);input=normalizeIssueTransferCancellation(record.manifest,input);const manifest=record.manifest;if(input.expectedManifestDigest!==manifest.previewDigest||input.expectedDestinationIncarnation!==manifest.destination.incarnation)throw new IssueTransferError('Original cancellation proof does not match transfer',409);const destination=projectOf(this.env,manifest.destination.projectId),context=this.issueTransferUnwrap(await destination.issueTransferRollbackContext(actor,credential));if(context.projectId!==manifest.destination.projectId||context.incarnation!==manifest.destination.incarnation)throw new IssueTransferError('Original cancellation destination was replaced',409);await authority.authorize();if(record.phase==='completed')return{requestId:input.requestId,cancelId:input.cancelId,cancelled:false as const,reason:'destination-active' as const,phase:'active' as const,sourceUnlocked:false as const};const previous=ledger.readCancellation(input.requestId);ledger.beginCancellation(input.requestId,input,actor.userId,authority.assert);await this.beforeIssueTransferCancellation();await authority.authorize();const cancelled=this.issueTransferUnwrap(await destination.issueTransferCancelDestination(manifest,input,actor,credential));await authority.authorize();if(!cancelled.cancelled){ledger.denyCancellationActive(input.requestId,input.cancelId,authority.assert);return{requestId:input.requestId,cancelId:input.cancelId,cancelled:false as const,reason:'destination-active' as const,phase:'active' as const,sourceUnlocked:false as const};}const confirmed=this.issueTransferUnwrap(await destination.issueTransferCancellationReadback(input.requestId,input.cancelId,actor,credential));await authority.authorize();if(confirmed.cancellation.phase!=='cancelled'||canonicalTransferJson(confirmed.cancellation.manifest)!==canonicalTransferJson(manifest)||canonicalTransferJson(confirmed.cancellation.input)!==canonicalTransferJson(input)||confirmed.cancellation.actorId!==actor.userId)throw new IssueTransferError('Exact destination cancellation proof changed',409);this.ctx.storage.transactionSync(()=>{authority.assert();const alreadyCancelled=ledger.readCancellation(input.requestId)?.phase==='cancelled';ledger.completeCancellation(input.requestId,input.cancelId,authority.assert);const incoming=this.ctx.storage.sql.exec('SELECT issue_number FROM issue_transfer_incoming WHERE issue_number=?',number).toArray().length;if(!alreadyCancelled&&!incoming){const old=this.ctx.storage.sql.exec<{document:string}>('SELECT document FROM issue_transfer_feature_origins WHERE issue_number=?',number).toArray()[0];if(old&&canonicalTransferJson(JSON.parse(old.document))===canonicalTransferJson(manifest.features))new IssueFeatureStore(this.ctx.storage).releaseCancelledSourceOrigin(number,manifest.features,()=>{authority.assert();if(ledger.readCancellation(input.requestId)?.phase!=='cancelled')throw new IssueTransferError('Exact cancelled source proof changed',409);});}});await this.afterIssueTransferSourceCancellation();await authority.authorize();return{requestId:input.requestId,cancelId:input.cancelId,cancelled:true as const,replayed:previous?.phase==='cancelled',sourceUnlocked:true as const,physicalCleanup:confirmed.physicalCleanup};});}
+  private issueTransferUnwrap<T>(reply:IssueStateReply<T>):T{if(!reply.ok)throw new IssueTransferError(reply.error,reply.status);return reply.value;}
+  private issueTransferSourceSnapshot(number:number){const raw=this.issueRow(number);if(!raw)throw new IssueTransferError('Source issue unavailable',410);const scope=this.issueStateScope(number),state=new IssueStateLedger(this.ctx.storage).snapshot(scope),comments=this.ctx.storage.sql.exec<{id:number;subject:string;author:string;body:string;path:string|null;line:number|null;commit:string|null;created_at:string}>('SELECT id,subject,author,body,path,line,"commit",created_at FROM comments WHERE subject=? ORDER BY id LIMIT 1001',`issue:${number}`).toArray();if(comments.length>1000)throw new IssueTransferError('Issue conversation exceeds transfer capacity',413);const attachmentScope=this.issueAttachmentScope(number),attachmentStore=this.issueAttachments(),attachments=attachmentStore.list(attachmentScope).filter(row=>row.phase!=='removed').map(row=>{const value=attachmentStore.transferSource(attachmentScope,row.id);return{id:value.id,name:value.name,sha256:value.sha256,size:value.size,authorId:value.authorId,author:value.author,createdAt:value.createdAt,producerIdentity:value.producerIdentity};});const features=issueTransferManifestSchema.shape.features.parse(new IssueFeatureStore(this.ctx.storage).transferSnapshot(number));const issueActorId=this.ctx.storage.sql.exec<{actor_id:string}>('SELECT actor_id FROM member_issue_receipts WHERE issue_number=? ORDER BY actor_id LIMIT 1',number).toArray()[0]?.actor_id??null;const commentActorIds=Object.fromEntries(comments.map(comment=>[String(comment.id),this.ctx.storage.sql.exec<{actor_id:string}>('SELECT actor_id FROM member_comment_receipts WHERE comment_id=? ORDER BY actor_id LIMIT 1',comment.id).toArray()[0]?.actor_id??null]));const attribution={issueActorId,commentActorIds,identity:'source-origin' as const};return{source:{projectId:scope.projectId,incarnation:scope.incarnation,number,createdAt:scope.createdAt,author:scope.author,stateRevision:state.stateRevision},issue:{number,title:raw.title,body:raw.body,state:raw.state,author:raw.author,created_at:raw.created_at,updated_at:raw.updated_at,closed_by:raw.closed_by},comments,features,attribution,attachments};}
+  async issueTransferPreview(number:number,destinationProjectId:string,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<IssueTransferPreview>>{return this.issueTransferReply(async()=>{if(destinationProjectId===this.load().projectId)throw new IssueTransferError('Choose another repository',400);const authority=await this.issueTransferAuthority(number,actor,credential);assertIssueWritable(this.ctx.storage,number);const destination=this.issueTransferUnwrap(await projectOf(this.env,destinationProjectId).issueTransferContext(actor,credential));await authority.authorize();const snapshot=this.issueTransferSourceSnapshot(number),value={...snapshot,destination,audienceVersion:'repository-members-v1' as const};const manifestDigest=await this.sha256(canonicalTransferJson(value));await authority.authorize();if(canonicalTransferJson(snapshot)!==canonicalTransferJson(this.issueTransferSourceSnapshot(number)))throw new IssueTransferError('Source issue changed during preview',409);return{manifestDigest,source:snapshot.source,destination:{...destination,audience:'repository-members' as const},audienceVersion:'repository-members-v1' as const,manifest:{issue:snapshot.issue,comments:snapshot.comments,features:snapshot.features,attribution:snapshot.attribution,attachments:snapshot.attachments}} satisfies IssueTransferPreview;});}
+  async issueTransferRead(requestId:string,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<IssueTransferRecord>>{return this.issueTransferReply(async()=>{const record=new IssueTransferLedger(this.ctx.storage).read(z.uuid().parse(requestId));if(!record||record.manifest.actorId!==actor.userId)throw new IssueTransferError('Original transfer unavailable',404);const authority=await this.issueTransferAuthority(record.manifest.source.number,actor,credential);await authority.authorize();return record;});}
+  protected async beforeIssueTransferFreeze():Promise<void>{}
+  protected async beforeIssueTransferReservation():Promise<void>{}
+  protected async afterIssueTransferReservation():Promise<void>{}
+  protected async beforeIssueTransferActivation():Promise<void>{}
+  protected async afterIssueTransferActivation():Promise<void>{}
+  protected async afterIssueTransferFinalization():Promise<void>{}
+  protected async beforeIssueTransferCancellation():Promise<void>{}
+  protected async afterIssueTransferDestinationCancellation():Promise<void>{}
+  protected async afterIssueTransferSourceCancellation():Promise<void>{}
+  protected async beforeIssueTransferFinalizationRecovery():Promise<void>{}
+  protected async afterIssueTransferFinalizationSource():Promise<void>{}
+  protected async afterIssueTransferFinalizationRecovery():Promise<void>{}
+  protected async beforeIssueTransferMappingCommit():Promise<void>{}
+  protected async afterIssueTransferMappingCommit():Promise<void>{}
+  private readonly issueTransferExecutions=new Set<string>();
+  private issueTransferDestinationScope(record:IssueTransferRecord){if(record.destinationNumber===undefined)throw new IssueTransferError('Incoming transfer number unavailable',409);return{projectId:record.manifest.destination.projectId,incarnation:record.manifest.destination.incarnation,issue:record.destinationNumber,issueCreatedAt:record.manifest.issue.created_at,issueAuthor:record.manifest.issue.author};}
+  private async issueTransferDestinationAuthority(requestId:string,actor:HumanDecisionActor,credential:IssueStateCredential){const ledger=new IssueTransferLedger(this.ctx.storage),record=ledger.read(requestId);if(!record||record.destinationNumber===undefined||record.manifest.actorId!==actor.userId)throw new IssueTransferError('Incoming transfer unavailable',404);const authority=await this.issueTransferAuthority(record.destinationNumber,actor,credential),audienceSnapshot=JSON.stringify(this.issueTransferAudienceSnapshot());const assert=()=>{authority.assert();ledger.assertTransferContinues(requestId);if(audienceSnapshot!==JSON.stringify(this.issueTransferAudienceSnapshot()))throw new IssueTransferError('Original destination audience generation changed',409);if(this.load().projectId!==record.manifest.destination.projectId||this.readRepositoryIncarnation()!==record.manifest.destination.incarnation||JSON.stringify(ledger.read(requestId)?.manifest)!==JSON.stringify(record.manifest))throw new IssueTransferError('Incoming transfer identity changed',409);};const authorize=async()=>{assert();await authority.authorize();const audienceDigest=record.phase==='active'?record.manifest.destination.audienceDigest:await this.issueTransferAudience();assert();if(record.phase!=='active'&&audienceDigest!==record.manifest.destination.audienceDigest)throw new IssueTransferError('Confirmed destination audience changed',409);const source=this.issueTransferUnwrap(await projectOf(this.env,record.manifest.source.projectId).issueTransferRead(requestId,actor,credential));assert();if(JSON.stringify(source.manifest)!==JSON.stringify(record.manifest)||source.phase!=='frozen'&&source.phase!=='completed')throw new IssueTransferError('Original frozen source transfer changed',409);await authority.authorize();};await authorize();return{record,ledger,assert,authorize};}
+  async issueTransferReserve(manifest:IssueTransferManifest,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<IssueTransferRecord>>{return this.issueTransferReply(async()=>{const authority=await this.issueTransferAuthority(0,actor,credential);const source=this.issueTransferUnwrap(await projectOf(this.env,manifest.source.projectId).issueTransferRead(manifest.requestId,actor,credential));if(JSON.stringify(source.manifest)!==JSON.stringify(manifest)||manifest.actorId!==actor.userId||source.phase!=='frozen'&&source.phase!=='completed')throw new IssueTransferError('Frozen transfer source is unavailable',409);if(manifest.destination.projectId!==this.load().projectId||manifest.destination.incarnation!==this.readRepositoryIncarnation())throw new IssueTransferError('Confirmed destination scope changed',409);const active=new IssueTransferLedger(this.ctx.storage).read(manifest.requestId);if(active?.phase==='active'){if(canonicalTransferJson(active.manifest)!==canonicalTransferJson(manifest))throw new IssueTransferError('Activated transfer manifest changed',409);await authority.authorize();return active;}if(manifest.destination.audienceDigest!==await this.issueTransferAudience())throw new IssueTransferError('Confirmed destination audience changed',409);await this.beforeIssueTransferReservation();await authority.authorize();const ledger=new IssueTransferLedger(this.ctx.storage),record=ledger.reserve(manifest,()=>{authority.assert();const issue=manifest.issue;const number=this.ctx.storage.sql.exec<{number:number}>('INSERT INTO issues(title,body,state,author,created_at,updated_at,closed_by) VALUES(?,?,?,?,?,?,?) RETURNING number',issue.title,issue.body,issue.state,issue.author,issue.created_at,issue.updated_at,issue.closed_by).one().number;this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS issue_transfer_origins(issue_number INTEGER PRIMARY KEY,document TEXT NOT NULL)');this.ctx.storage.sql.exec('INSERT INTO issue_transfer_origins VALUES(?,?)',number,JSON.stringify({source:manifest.source,requestId:manifest.requestId,issue:manifest.issue,comments:manifest.comments,attribution:manifest.attribution,attachments:manifest.attachments,authorityTransferred:false,inlineAnchors:'source-origin-only'}));for(const comment of manifest.comments)this.ctx.storage.sql.exec('INSERT INTO comments(subject,author,body,path,line,"commit",created_at) VALUES(?,?,?,NULL,NULL,NULL,?)',`issue:${number}`,comment.author,comment.body,comment.created_at);new IssueFeatureStore(this.ctx.storage).transferOrigin(number,manifest.features,authority.assert);return number;},authority.assert);await this.afterIssueTransferReservation();await authority.authorize();return record;});}
+  async issueTransferCopyAttempt(requestId:string,attachmentId:string,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<IssueTransferCopyAttempt&{newlyIssued:boolean}>>{return this.issueTransferReply(async()=>{const authority=await this.issueTransferDestinationAuthority(requestId,actor,credential);return authority.ledger.beginCopy(requestId,attachmentId,authority.ledger.readCopy(requestId,attachmentId)?.nonce??crypto.randomUUID(),authority.assert);});}
+  async issueTransferCopyFence(requestId:string,attachmentId:string,nonce:string,markUnknown:boolean,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<IssueTransferCopyAttempt>>{return this.issueTransferReply(async()=>{const authority=await this.issueTransferDestinationAuthority(requestId,actor,credential),attempt=authority.ledger.readCopy(requestId,attachmentId);if(!attempt||attempt.nonce!==nonce)throw new IssueTransferError('Original copy attempt ownership changed',409);if(markUnknown)authority.ledger.markCopyUnknown(requestId,attachmentId,nonce,authority.assert);await authority.authorize();return attempt;});}
+  async issueTransferUpload(requestId:string,attachmentId:string,nonce:string,body:ReadableStream<Uint8Array>,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<IssueAttachment>>{return this.issueTransferReply(async()=>{const key=requestId+':'+attachmentId;if(this.issueTransferExecutions.has(key))throw new IssueTransferError('Original attachment copy is already running',409);this.issueTransferExecutions.add(key);try{const authority=await this.issueTransferDestinationAuthority(requestId,actor,credential),attachment=authority.record.manifest.attachments.find(value=>value.id===attachmentId),attempt=authority.ledger.readCopy(requestId,attachmentId);if(!attachment||attempt?.nonce!==nonce||attempt.phase!=='unknown')throw new IssueTransferError('Original copy dispatch ownership changed',409);const store=this.issueAttachments(),scope=this.issueTransferDestinationScope(authority.record),authorize=async()=>{await authority.authorize();if(authority.ledger.readCopy(requestId,attachmentId)?.nonce!==nonce)throw new IssueTransferError('Original copy attempt changed',409);};store.prepare(scope,{id:attachment.destinationId,name:attachment.name,sha256:attachment.sha256,size:attachment.size},actor,authority.assert);const result=await store.upload(scope,attachment.destinationId,body,attachment.size,this.env.EVIDENCE_BUCKET,authorize,actor.userId);await authorize();return result;}finally{this.issueTransferExecutions.delete(key);}});}
+  async issueTransferConfirmAttachment(requestId:string,attachmentId:string,nonce:string,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<{attachment:VerifiedTransferAttachment}>>{return this.issueTransferReply(async()=>{if(this.issueTransferExecutions.has(requestId+':'+attachmentId))throw new IssueTransferError('Original attachment upload remains in flight',409);const authority=await this.issueTransferDestinationAuthority(requestId,actor,credential),attachment=authority.record.manifest.attachments.find(value=>value.id===attachmentId),attempt=authority.ledger.readCopy(requestId,attachmentId);if(!attachment||attempt?.nonce!==nonce)throw new IssueTransferError('Original copy readback ownership changed',409);const result=await this.issueAttachments().confirmForTransfer(this.issueTransferDestinationScope(authority.record),attachment.destinationId,this.env.EVIDENCE_BUCKET,authority.authorize);await authority.authorize();authority.ledger.markCopyVerified(requestId,attachmentId,nonce,authority.assert);return result;});}
+  private issueTransferContentVerified(manifest:IssueTransferManifest,number:number){const raw=this.rawIssueRow(number);if(!raw)return false;const featureOrigin=this.ctx.storage.sql.exec<{document:string}>('SELECT document FROM issue_transfer_feature_origins WHERE issue_number=?',number).toArray()[0];if(!featureOrigin||JSON.stringify(JSON.parse(featureOrigin.document))!==JSON.stringify(manifest.features))return false;const expected=manifest.issue;if(raw.title!==expected.title||raw.body!==expected.body||raw.state!==expected.state||raw.author!==expected.author||raw.created_at!==expected.created_at||raw.updated_at!==expected.updated_at||raw.closed_by!==expected.closed_by)return false;const comments=this.ctx.storage.sql.exec<{author:string;body:string;created_at:string}>('SELECT author,body,created_at FROM comments WHERE subject=? ORDER BY id',`issue:${number}`).toArray();if(JSON.stringify(comments)!==JSON.stringify(manifest.comments.map(({author,body,created_at})=>({author,body,created_at}))))return false;const ledger=new IssueTransferLedger(this.ctx.storage),record=ledger.read(manifest.requestId);if(!record)return false;const store=this.issueAttachments(),scope=this.issueTransferDestinationScope(record);return manifest.attachments.every(attachment=>{if(ledger.readCopy(manifest.requestId,attachment.id)?.phase!=='verified')return false;try{const saved=store.transferSource(scope,attachment.destinationId);return saved.sha256===attachment.sha256&&saved.size===attachment.size&&saved.authorId===manifest.actorId;}catch{return false;}});}
+  async issueTransferActivate(requestId:string,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<IssueTransferRecord>>{return this.issueTransferReply(async()=>{const authority=await this.issueTransferDestinationAuthority(requestId,actor,credential);await this.beforeIssueTransferActivation();await authority.authorize();authority.ledger.markReady(requestId,(manifest,number)=>this.issueTransferContentVerified(manifest,number),authority.assert);const record=authority.ledger.activate(requestId,(manifest,number)=>this.issueTransferContentVerified(manifest,number),authority.assert);await this.afterIssueTransferActivation();await authority.authorize();return record;});}
+  async issueTransferFinalReadback(requestId:string,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<IssueTransferRecord>>{return this.issueTransferReply(async()=>{const authority=await this.issueTransferDestinationAuthority(requestId,actor,credential);if(authority.record.phase!=='active'||!this.issueTransferContentVerified(authority.record.manifest,authority.record.destinationNumber!))throw new IssueTransferError('Exact active destination readback is unavailable',409);await authority.authorize();return authority.record;});}
+  async issueTransferFinishDestination(requestId:string,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<IssueTransferRecord>>{return this.issueTransferReply(async()=>{const authority=await this.issueTransferDestinationAuthority(requestId,actor,credential),source=this.issueTransferUnwrap(await projectOf(this.env,authority.record.manifest.source.projectId).issueTransferRead(requestId,actor,credential));if(source.phase!=='completed'||source.activatedDestinationNumber!==authority.record.destinationNumber)throw new IssueTransferError('Source completion receipt unavailable',409);await authority.authorize();const finished=authority.ledger.finishDestination(requestId,authority.assert);await this.afterIssueTransferFinalization();await authority.authorize();return finished;});}
+  async issueTransferStatus(number:number,requestId:string,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<ReturnType<typeof issueTransferView>>>{return this.issueTransferReply(async()=>{
+    const authority=await this.issueTransferAuthority(number,actor,credential),ledger=new IssueTransferLedger(this.ctx.storage),record=ledger.read(z.uuid().parse(requestId)),cancellation=ledger.readCancellation(requestId);
+    if(!record){const saved=ledger.readUnfrozenCancellation(requestId),original=saved?.input.originalRequest;if(!saved||!original||saved.scope.projectId!==this.load().projectId||saved.scope.incarnation!==this.readRepositoryIncarnation()||saved.scope.number!==number)throw new IssueTransferError('Original unfrozen cancellation unavailable',404);const destination=this.issueTransferUnwrap(await projectOf(this.env,original.destinationProjectId).issueTransferRollbackContext(actor,credential));if(destination.incarnation!==saved.input.expectedDestinationIncarnation)throw new IssueTransferError('Original unfrozen destination changed',409);await authority.authorize();const finalAccess=this.issueTransferUnwrap(await projectOf(this.env,original.destinationProjectId).issueTransferRollbackContext(actor,credential));authority.assert();if(finalAccess.incarnation!==saved.input.expectedDestinationIncarnation||canonicalTransferJson(ledger.readUnfrozenCancellation(requestId))!==canonicalTransferJson(saved))throw new IssueTransferError('Unfrozen cancellation proof changed during release',409);return{requestId,phase:'cancelled',source:{projectId:saved.scope.projectId,number},destination:{projectId:original.destinationProjectId},audience:'repository-members',audienceVersion:'repository-members-v1',manifestDigest:saved.input.expectedManifestDigest,completed:false,cancelled:true,cancelId:saved.cancelId,cancellationReceipt:{requestId,cancelId:saved.cancelId,cancelled:true as const,sourceUnlocked:true as const,physicalCleanup:'confirmed' as const,canReplayCancellation:saved.actorId===actor.userId}};}
+    if(!record||record.destinationNumber!==undefined||record.manifest.source.number!==number||record.manifest.source.projectId!==this.load().projectId||record.manifest.source.incarnation!==this.readRepositoryIncarnation())throw new IssueTransferError('Original source transfer unavailable',404);
+    const target=projectOf(this.env,record.manifest.destination.projectId),destination=this.issueTransferUnwrap(await target.issueTransferRollbackContext(actor,credential));
+    if(destination.incarnation!==record.manifest.destination.incarnation)throw new IssueTransferError('Original destination was replaced',409);
+    const incoming=await target.issueTransferCancellationRead(requestId,actor,credential);await authority.authorize();
+    if(cancellation&&cancellation.phase!=='denied-active'){
+      if(!incoming.ok&&incoming.status!==404)throw new IssueTransferError(incoming.error,incoming.status);
+      if(incoming.ok&&incoming.value.cancellation&&(incoming.value.cancellation.phase!=='cancelled'||canonicalTransferJson(incoming.value.cancellation.manifest)!==canonicalTransferJson(record.manifest)||canonicalTransferJson(incoming.value.cancellation.input)!==canonicalTransferJson(cancellation.input)))throw new IssueTransferError('Exact destination cancellation receipt changed',409);
+      if(cancellation.phase==='cancelled'&&(!incoming.ok||incoming.value.cancellation?.phase!=='cancelled'))throw new IssueTransferError('Exact completed cancellation proof unavailable',409);
+      if(cancellation.phase==='cancelled'){const cleanup=this.issueTransferUnwrap(await target.issueTransferCancelledCleanupInspection(requestId,cancellation.cancelId,actor,credential));authority.assert();if(ledger.read(requestId)?.phase!=='cancelled'||canonicalTransferJson(ledger.readCancellation(requestId))!==canonicalTransferJson(cancellation)||this.readRepositoryIncarnation()!==record.manifest.source.incarnation)throw new IssueTransferError('Terminal source cancellation proof changed during release',409);return{...issueTransferView(record),phase:'cancelled' as const,completed:false,cancelled:true,cancelId:cancellation.cancelId,cancellationReceipt:{requestId,cancelId:cancellation.cancelId,cancelled:true as const,sourceUnlocked:true as const,physicalCleanup:cleanup.physicalCleanup,canReplayCancellation:cancellation.actorId===actor.userId}};}return{...issueTransferView(record),phase:'cancelling' as const,completed:false,cancelled:false,cancelId:cancellation.cancelId};
+    }
+    if(!incoming.ok){if(incoming.status===404&&record.phase!=='completed')return{...issueTransferView(record),...(cancellation?.phase==='denied-active'?{cancelId:cancellation.cancelId,cancellationRefused:'destination-active' as const}:{})};throw new IssueTransferError(incoming.error,incoming.status);}
+    const saved=incoming.value.record;if(!saved||canonicalTransferJson(saved.manifest)!==canonicalTransferJson(record.manifest)||saved.destinationNumber===undefined||record.activatedDestinationNumber!==undefined&&record.activatedDestinationNumber!==saved.destinationNumber)throw new IssueTransferError('Original destination receipt changed',409);
+    const completed=record.phase==='completed'&&saved.finalized===true;
+    return{...issueTransferView({...record,activatedDestinationNumber:saved.destinationNumber}),phase:completed?'completed':saved.phase,completed,...(cancellation?.phase==='denied-active'?{cancelId:cancellation.cancelId,cancellationRefused:'destination-active' as const}:{})};
+  });}
+  async issueTransferRun(number:number,value:unknown,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<ReturnType<typeof issueTransferView>>>{return this.issueTransferReply(async()=>{const input=issueTransferRequestSchema.parse(value),key=input.requestId;if(this.issueTransferExecutions.has(key))throw new IssueTransferError('Original transfer execution is already running',409);this.issueTransferExecutions.add(key);try{const authority=await this.issueTransferAuthority(number,actor,credential),ledger=new IssueTransferLedger(this.ctx.storage);ledger.assertTransferContinues(input.requestId);let record=ledger.read(input.requestId);if(record){const manifest=record.manifest;if(manifest.actorId!==actor.userId||manifest.source.number!==number||manifest.source.projectId!==this.load().projectId||manifest.source.incarnation!==this.readRepositoryIncarnation()||manifest.destination.projectId!==input.destinationProjectId||manifest.destination.incarnation!==input.expectedDestinationIncarnation||manifest.source.stateRevision!==input.expectedRevision||manifest.previewDigest!==input.expectedManifestDigest)throw new IssueTransferError('Original transfer request cannot change',409);}else{const preview=this.issueTransferUnwrap(await this.issueTransferPreview(number,input.destinationProjectId,actor,credential));if(preview.manifestDigest!==input.expectedManifestDigest||preview.destination.incarnation!==input.expectedDestinationIncarnation||preview.source.stateRevision!==input.expectedRevision)throw new IssueTransferError('Issue or destination audience changed. Preview again before confirming.',409);const {audience:_audience,...destination}=preview.destination;const manifest=issueTransferManifestSchema.parse({requestId:input.requestId,actorId:actor.userId,previewDigest:input.expectedManifestDigest,audienceVersion:preview.audienceVersion,source:preview.source,destination,...preview.manifest,attachments:preview.manifest.attachments.map(attachment=>({...attachment,destinationId:crypto.randomUUID()}))});await this.beforeIssueTransferFreeze();await authority.authorize();const destinationNow=this.issueTransferUnwrap(await projectOf(this.env,input.destinationProjectId).issueTransferContext(actor,credential));authority.assert();if(JSON.stringify(destinationNow)!==JSON.stringify(manifest.destination))throw new IssueTransferError('Confirmed destination audience changed before transfer lock',409);const current=this.issueTransferSourceSnapshot(number);const expected={source:manifest.source,issue:manifest.issue,comments:manifest.comments,features:manifest.features,attribution:manifest.attribution,attachments:manifest.attachments.map(({destinationId:_id,...attachment})=>attachment)};if(canonicalTransferJson(current)!==canonicalTransferJson(expected))throw new IssueTransferError('Source changed before transfer lock',409);record=ledger.freeze(manifest,authority.assert);}
+    const manifest=record.manifest,destination=projectOf(this.env,manifest.destination.projectId);const authorize=async()=>{ledger.assertTransferContinues(input.requestId);await authority.authorize();ledger.assertTransferContinues(input.requestId);if(JSON.stringify(ledger.read(input.requestId)?.manifest)!==JSON.stringify(manifest)||this.readRepositoryIncarnation()!==manifest.source.incarnation)throw new IssueTransferError('Original transfer source changed',409);const activeProof=await destination.issueTransferCancellationRead(input.requestId,actor,credential);authority.assert();if(activeProof.ok&&activeProof.value.record?.phase==='active'&&canonicalTransferJson(activeProof.value.record.manifest)===canonicalTransferJson(manifest)){const context=this.issueTransferUnwrap(await destination.issueTransferRollbackContext(actor,credential));authority.assert();if(context.incarnation!==manifest.destination.incarnation)throw new IssueTransferError('Activated destination identity changed',409);}else{if(!activeProof.ok&&activeProof.status!==404)throw new IssueTransferError(activeProof.error,activeProof.status);const context=this.issueTransferUnwrap(await destination.issueTransferContext(actor,credential));authority.assert();if(canonicalTransferJson(context)!==canonicalTransferJson(manifest.destination))throw new IssueTransferError('Confirmed destination audience changed',409);}await authority.authorize();};await authorize();
+    if(record.phase!=='completed'){const incoming=this.issueTransferUnwrap(await destination.issueTransferReserve(manifest,actor,credential));await authorize();if(incoming.destinationNumber===undefined)throw new IssueTransferError('Original destination allocation unavailable',503);const sourceScope={projectId:manifest.source.projectId,incarnation:manifest.source.incarnation,issue:number,issueCreatedAt:manifest.issue.created_at,issueAuthor:manifest.issue.author},destinationScope={projectId:manifest.destination.projectId,incarnation:manifest.destination.incarnation,issue:incoming.destinationNumber,issueCreatedAt:manifest.issue.created_at,issueAuthor:manifest.issue.author};for(const attachment of manifest.attachments){const attempt=this.issueTransferUnwrap(await destination.issueTransferCopyAttempt(input.requestId,attachment.id,actor,credential));await copyIssueTransferAttachment({transferId:input.requestId,manifestDigest:manifest.previewDigest,attemptNonce:attempt.nonce,actorId:actor.userId,sourceScope,destinationScope,attachment,mode:attempt.newlyIssued?'copy':'recover'},{authorize,assertAttempt:async()=>{this.issueTransferUnwrap(await destination.issueTransferCopyFence(input.requestId,attachment.id,attempt.nonce,false,actor,credential));},markUnknown:async()=>{this.issueTransferUnwrap(await destination.issueTransferCopyFence(input.requestId,attachment.id,attempt.nonce,true,actor,credential));},download:()=>this.issueAttachments().downloadForTransfer(sourceScope,attachment.id,attachment.producerIdentity,this.env.EVIDENCE_BUCKET,authorize),upload:async body=>this.issueTransferUnwrap(await destination.issueTransferUpload(input.requestId,attachment.id,attempt.nonce,body,actor,credential)),confirm:async()=>this.issueTransferUnwrap(await destination.issueTransferConfirmAttachment(input.requestId,attachment.id,attempt.nonce,actor,credential))});}
+      this.issueTransferUnwrap(await destination.issueTransferActivate(input.requestId,actor,credential));await authorize();const confirmed=this.issueTransferUnwrap(await destination.issueTransferFinalReadback(input.requestId,actor,credential));await authorize();if(confirmed.destinationNumber!==incoming.destinationNumber||JSON.stringify(confirmed.manifest)!==JSON.stringify(manifest))throw new IssueTransferError('Exact destination activation receipt changed',409);this.ctx.storage.transactionSync(()=>{authority.assert();const current=this.issueTransferSourceSnapshot(number),expected={source:manifest.source,issue:manifest.issue,comments:manifest.comments,features:manifest.features,attribution:manifest.attribution,attachments:manifest.attachments.map(({destinationId:_id,...attachment})=>attachment)};if(canonicalTransferJson(current)!==canonicalTransferJson(expected))throw new IssueTransferError('Frozen source content changed',409);ledger.bindDestination(input.requestId,incoming.destinationNumber!,authority.assert);const tombstones=new IssueLifecycleStore(this.ctx.storage),previous=tombstones.tombstone(number);if(previous)throw new IssueTransferError('Source issue already removed',410);this.ctx.storage.sql.exec('INSERT INTO issue_tombstones VALUES(?,?,?)',number,JSON.stringify(this.issueStateScope(number)),JSON.stringify({version:1,number,identity:JSON.stringify(this.issueStateScope(number)),actorId:actor.userId,requestId:input.requestId,expectedRevision:manifest.source.stateRevision,deletedAt:new Date().toISOString(),transfer:{...manifest.destination,number:incoming.destinationNumber,requestId:input.requestId}}));record=ledger.complete(input.requestId,authority.assert);});}
+    const finished=this.issueTransferUnwrap(await destination.issueTransferFinishDestination(input.requestId,actor,credential));await authorize();if(!finished.finalized||finished.destinationNumber!==record.activatedDestinationNumber||JSON.stringify(finished.manifest)!==JSON.stringify(manifest))throw new IssueTransferError('Destination finalization receipt unavailable',503);return issueTransferView(record);
+  }finally{this.issueTransferExecutions.delete(key);}});}
+  async issueAvailability(number:number,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<{number:number;status:'active'|'deleted'|'missing';transferred?:boolean;transfer?:{projectId:string;number:number}}>>{try{const authority=await this.issueLifecycleAuthority(number,actor,credential,false);const lifecycle=new IssueLifecycleStore(this.ctx.storage),available=lifecycle.availability(number),tombstone=lifecycle.tombstone(number);let transfer:{projectId:string;number:number}|undefined;if(tombstone?.transfer){const target=tombstone.transfer;const readable=await projectOf(this.env,target.projectId).issueTransferReadableDestination(target.number,target.incarnation,actor,credential);if(readable.ok&&readable.value)transfer={projectId:target.projectId,number:target.number};}await authority.authorize();return{ok:true,value:{...available,...(tombstone?.transfer?{transferred:true,...(transfer?{transfer}:{})}:{})}};}catch(error){if(error instanceof IssueLifecycleError)return{ok:false,status:error.status,error:error.message};return{ok:false,status:503,error:"Issue availability is not confirmed"};}}
+  protected async beforeIssueDeletionCommit():Promise<void>{}
+  async deleteIssueMutation(number:number,value:unknown,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<IssueDeletionResult>>{try{const input=issueDeletionSchema.parse(value),authority=await this.issueLifecycleAuthority(number,actor,credential,true),raw=this.rawIssueRow(number);if(!raw)throw new IssueLifecycleError("Unknown issue",404);const scope:IssueStateScope={projectId:this.load().projectId,incarnation:this.readRepositoryIncarnation()!,number,createdAt:raw.created_at,author:raw.author};await this.beforeIssueDeletionCommit();await authority.authorize();const result=new IssueLifecycleStore(this.ctx.storage).delete(scope,input,actor.userId,()=>{authority.assert();const current=this.rawIssueRow(number);if(!current||current.created_at!==scope.createdAt||current.author!==scope.author)throw new IssueLifecycleError("Original issue changed",409);});return{ok:true,value:result};}catch(error){if(error instanceof z.ZodError)return{ok:false,status:400,error:"Confirm removal with the current issue revision and original request ID"};if(error instanceof IssueLifecycleError||error instanceof IssueStateError)return{ok:false,status:error.status,error:error.message};return{ok:false,status:503,error:"Issue removal outcome was not confirmed. Retry the original request."};}}
+  private issueStateScope(number:number):IssueStateScope{if(!Number.isSafeInteger(number)||number<1)throw new IssueStateError("Invalid issue",400);const issue=this.issueRow(number);if(!issue)throw new IssueStateError(new IssueLifecycleStore(this.ctx.storage).tombstone(number)?"Issue removed":"Unknown issue",new IssueLifecycleStore(this.ctx.storage).tombstone(number)?410:404);return{projectId:this.load().projectId,incarnation:this.readRepositoryIncarnation()??"",number,createdAt:issue.created_at,author:issue.author};}
+  protected async beforeIssueStateCommit():Promise<void>{}
+  async issueStateMutation(number:number,value:unknown,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<IssueStateResult>>{try{
+    const input=issueStateMutationSchema.parse(value);if(!actor.userId||!actor.displayName)throw new IssueStateError("Server-derived issue actor required",403);
+    const initial=await this.repositoryAccessFence(actor.userId,true).catch(()=>{throw new IssueStateError("Issue write permission required",403);});initial.assert();new PrivateRecoveryOperations(this.ctx.storage).incarnation();const scope=this.issueStateScope(number),permission=await this.repositoryAccessFence(actor.userId,true).catch(()=>{throw new IssueStateError("Issue write permission required",403);});permission.assert();
+    const assert=()=>{try{permission.assert();assertIssueWritable(this.ctx.storage,number);if(this.load().lifecycle?.state==='archived'||JSON.stringify(this.issueStateScope(number))!==JSON.stringify(scope))throw Error("Scope changed");if(!actor.viaToken&&(!credential.sessionExpiresAt||credential.sessionExpiresAt<=Date.now()))throw new IssueStateError("Issue session expired",401);if(credential.oauth&&(!credential.oauth.token||credential.oauth.repositoryId!==scope.projectId))throw new IssueStateError("App repository scope changed",403);}catch(error){if(error instanceof IssueTransferError)throw new IssueStateError(error.message,error.status);if(error instanceof IssueStateError)throw error;throw new IssueStateError("Issue writer access changed",403);}};assert();
+    await this.beforeIssueStateCommit();assert();const account=accountOf(this.env,await accountKeyFor(actor.userId));assert();if(await account.accountLifecycle()!=="active")throw new IssueStateError("Issue account unavailable",403);assert();
+    let oauthExpiry:number|undefined;
+    if(credential.oauth){const token=await this.env.AUTHORITY.get(this.env.AUTHORITY.idFromName("authority")).introspect(credential.oauth.token);assert();if(!token.active||token.userId!==actor.userId||token.clientId!==credential.oauth.clientId||token.repositoryId!==scope.projectId||!token.scopes.includes("issues:write")||token.expiresAt<=Date.now())throw new IssueStateError("App issue authority changed",403);oauthExpiry=token.expiresAt;}
+    else if(actor.viaToken&&(!credential.personalTokenHash||!await account.apiTokenHashCanRead(credential.personalTokenHash,actor.userId,scope.projectId,true)))throw new IssueStateError("Issue token was revoked or outside its write scope",401);
+    assert();if(oauthExpiry!==undefined&&oauthExpiry<=Date.now())throw new IssueStateError("App issue token expired",401);
+    return{ok:true,value:new IssueStateLedger(this.ctx.storage).mutate(scope,input,actor,()=>{assert();if(oauthExpiry!==undefined&&oauthExpiry<=Date.now())throw new IssueStateError("App issue token expired",401);})};
+  }catch(error){if(error instanceof z.ZodError)return{ok:false,status:400,error:"State, original request ID and current issue revision are required"};if(error instanceof IssueStateError)return{ok:false,status:error.status,error:error.message};return{ok:false,status:503,error:"Issue status outcome was not confirmed. Retry the original status request."};}}
   async setIssueState(n: number, state: "open" | "closed", by: string): Promise<IssueRow | null> {
     if (!this.issueRow(n)) return null;
-    this.ctx.storage.sql.exec("UPDATE issues SET state = ?, updated_at = ?, closed_by = ? WHERE number = ?", state, new Date().toISOString(), state === "closed" ? by : null, n);
-    await this.logActivity(by, state === "closed" ? "issue.closed" : "issue.reopened", `#${n} ${state === "closed" ? "closed" : "reopened"} by ${by}`);
-    return this.issueRow(n);
+    if(this.ctx.storage.sql.exec('SELECT issue_number FROM issue_transfer_locks WHERE issue_number=?',n).toArray().length)return null;
+    new IssueStateLedger(this.ctx.storage).internal(this.issueStateScope(n),state,by);
+    await this.logActivity(by, state === "closed" ? "issue.closed" : "issue.reopened", `#${n} ${state === "closed" ? "closed" : "reopened"} by ${by}`,{issueNumber:n});
+    return this.getIssue(n);
   }
   async listComments(subject: string): Promise<CommentRow[]> {
+    if(subject.startsWith("issue:")&&!this.issueRow(Number(subject.slice(6))))throw new IssueLifecycleError("Issue unavailable",410);
     return this.ctx.storage.sql.exec('SELECT id, subject, author, body, path, line, "commit", created_at FROM comments WHERE subject = ? ORDER BY id LIMIT 500', subject).toArray() as unknown as CommentRow[];
   }
   async listMemberCommentsPage(userId: string, subject: string, cursor?: string): Promise<CommentPage> {
-    if (this.repositoryDeleting() || !this.ctx.storage.sql.exec("SELECT 1 FROM members WHERE user_id=?", userId).toArray().length) throw new Error("Comment access was revoked");
+    (await this.repositoryAccessFence(userId)).assert();
+    if(subject.startsWith("issue:")&&!this.issueRow(Number(subject.slice(6))))throw new IssueLifecycleError("Issue unavailable",410);
     let before = Number.MAX_SAFE_INTEGER;
     if (cursor !== undefined) {
       try {
@@ -4011,14 +5014,105 @@ export class RepositoryController extends DurableObject<Env> {
       } catch { throw new Error("Invalid comment cursor"); }
     }
     const rows = this.ctx.storage.sql.exec('SELECT id,subject,author,body,path,line,"commit",created_at FROM comments WHERE subject=? AND id<? ORDER BY id DESC LIMIT 101', subject, before).toArray() as unknown as CommentRow[];
-    const publication=new MigrationConversationPublication(this.ctx.storage);const page = rows.slice(0,100).map(row=>{const origin=publication.commentOrigin(row.id);return origin?{...row,importedOrigin:origin}:row;});
+    const publication=new MigrationConversationPublication(this.ctx.storage);const page = rows.slice(0,100).map(row=>{const origin=publication.commentOrigin(row.id),archiveOrigin=new MetadataArchives(this.ctx.storage).origin("comments",String(row.id));return {...row,...(origin?{importedOrigin:origin}:{}),...(archiveOrigin?{archiveOrigin}:{})};});
     const nextCursor = rows.length > 100 ? btoa(JSON.stringify([subject,page.at(-1)!.id])).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "") : null;
     return { comments: page.reverse(), nextCursor, hasMore: nextCursor !== null };
   }
-  async addMemberComment(userId: string, input: MemberCommentInput): Promise<CommentRow> {
+  private threadExists(subject:string):boolean{
+    const [kind,id]=threadSubjectSchema.parse(subject).split(':');
+    return kind==='issue'?Boolean(this.issueRow(Number(id))):kind==='change'?Boolean(this.load().tasks[id!]):Boolean(this.load().candidates[id!]);
+  }
+  async threadPreference(userId:string,subject:string,input?:unknown,sessionExpiresAt?:number):Promise<ThreadPreference>{
+    const sessionCurrent=()=>{if(!Number.isFinite(sessionExpiresAt)||Date.now()>=sessionExpiresAt!)throw Error('Thread preference session expired');};sessionCurrent();
+    if(await accountOf(this.env,await accountKeyFor(userId)).accountLifecycle()!=='active')throw Error('Thread preference account unavailable');sessionCurrent();
+    const initial=await this.repositoryAccessFence(userId);initial.assert();if(!this.threadExists(subject))throw Error('Thread unavailable');
+    const incarnation=this.readRepositoryIncarnation()??new PrivateRecoveryOperations(this.ctx.storage).incarnation(),ledger=new ThreadNotifications(this.ctx.storage),authority=await this.repositoryAccessFence(userId);authority.assert();
+    const assert=()=>{sessionCurrent();authority.assert();if(this.readRepositoryIncarnation()!==incarnation||!this.threadExists(subject))throw Error('Thread access changed');};assert();
+    return input===undefined?ledger.read(incarnation,subject,userId):ledger.update(incarnation,subject,userId,input,assert);
+  }
+  private membershipEpochsInstance?:MembershipEpochs;
+  private membershipEpochs(){return this.membershipEpochsInstance??=new MembershipEpochs(this.ctx.storage);}
+  private mentionAuthorityStamp(userId:string,permission:{source?:{id:string;revision:number}}):string{
+    const epochs=this.membershipEpochs(),member=this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',userId).toArray()[0]??null;
+    const membershipEpoch=member?epochs.read(userId):null;
+    // Older timestamp-only evidence cannot equal this generation-bearing stamp.
+    return JSON.stringify({projectId:this.load().projectId,canonicalRepoName:this.load().canonicalRepoName,incarnation:this.readRepositoryIncarnation(),member,membershipEpoch,source:permission.source??null});
+  }
+  private async resolveCommentMentions(body:string,authorId:string):Promise<{recipients:MentionRecipient[];assert:()=>void}>{
+    const handles=plainTextMentions(body);if(!handles.length)return{recipients:[],assert:()=>{}};
+    const identities=new Set(this.ctx.storage.sql.exec<{user_id:string}>('SELECT user_id FROM members ORDER BY user_id LIMIT 1001').toArray().map(row=>row.user_id));
+    const add=(id:string)=>{identities.add(id);if(identities.size>1000)throw Error('Mention identity capacity reached');};
+    if(identities.size>1000)throw Error('Mention identity capacity reached');
+    this.inheritedTable();const sources=this.ctx.storage.sql.exec<{doc:string}>('SELECT doc FROM repository_organization_sources ORDER BY id LIMIT 101').toArray();if(sources.length>100)throw Error('Mention source capacity reached');
+    for(const source of sources){const doc=organizationDocumentSchema.parse(JSON.parse(source.doc));if(!doc.repositories.includes(this.load().projectId))continue;for(const member of doc.members)add(member.userId);for(const team of doc.teams)for(const id of team.members)add(id);for(const grant of doc.grants)if(grant.repositoryId===this.load().projectId&&grant.subject.kind==='user')add(grant.subject.id);}
+    const keys=new Map<string,string>();for(const id of identities){const key=await accountKeyFor(id);if(keys.has(key)&&keys.get(key)!==id)throw Error('Ambiguous mention identity');keys.set(key,id);}
+    const registry=globalOf(this.env),resolved:MentionRecipient[]=[],fences:Array<()=>void>=[];
+    for(const handle of handles){
+      const accountKey=await registry.accountForHandle(handle),userId=accountKey?keys.get(accountKey):undefined;if(!accountKey||!userId||userId===authorId)continue;
+      const authority=await this.repositoryAccessFence(userId).catch(error=>{if(String(error).includes('Repository access revoked'))return null;throw error;});if(!authority)continue;authority.assert();
+      const account=accountOf(this.env,accountKey),profile=await account.mentionProfileSnapshot();authority.assert();if(!profile.active||profile.handle!==handle)continue;
+      if(await registry.accountForHandle(handle)!==accountKey)throw Error('Mention handle ownership changed');
+      const fresh=await account.mentionProfileSnapshot();authority.assert();if(!fresh.active||fresh.handle!==handle||fresh.version!==profile.version)throw Error('Mention profile changed');
+      const stamp=this.mentionAuthorityStamp(userId,authority);
+      fences.push(()=>{authority.assert();if(this.mentionAuthorityStamp(userId,authority)!==stamp)throw Error('Mention reader authority changed');});
+      resolved.push({userId,handle,accountKey,profileVersion:profile.version,authoritySource:stamp});
+    }
+    for(const recipient of resolved){if(await registry.accountForHandle(recipient.handle)!==recipient.accountKey)throw Error('Mention handle ownership changed');const profile=await accountOf(this.env,recipient.accountKey).mentionProfileSnapshot();if(!profile.active||profile.handle!==recipient.handle)throw Error('Mention profile changed');recipient.profileVersion=profile.version;const fresh=await this.repositoryAccessFence(recipient.userId);fresh.assert();if(this.mentionAuthorityStamp(recipient.userId,fresh)!==recipient.authoritySource)throw Error('Mention reader authority changed');}
+    const assert=()=>{for(const fence of fences)fence();};assert();return{recipients:resolved,assert};
+  }
+  private async mentionEvidenceCurrent(userId:string,item:{incarnation:string;comment_id:number;actor_id:string}):Promise<boolean>{
+    const evidence=new ThreadNotifications(this.ctx.storage).evidence(item);if(evidence?.kind!=='mention'||!evidence.handle||!evidence.account_key||evidence.profile_version===null||!evidence.authority_source)return false;
+    if(await accountKeyFor(userId)!==evidence.account_key)return false;
+    // The original recipient is immutable. Later handle transfers or unrelated
+    // profile edits cannot re-route or erase an already-canonical mention.
+    if(await accountOf(this.env,evidence.account_key).accountLifecycle()!=='active')return false;
+    const authority=await this.repositoryAccessFence(userId);authority.assert();return this.mentionAuthorityStamp(userId,authority)===evidence.authority_source;
+  }
+  async memberThreadNotification(userId:string,incarnation:string,subject:string,commentId:number,preferenceVersion:number,kind:'subscription'|'mention'='subscription'):Promise<{projectName:string}|null>{
+    try{
+      const authority=await this.repositoryAccessFence(userId);authority.assert();
+      if(this.readRepositoryIncarnation()!==incarnation||!threadSubjectSchema.safeParse(subject).success||!this.threadExists(subject)||!Number.isSafeInteger(commentId)||commentId<1||!Number.isSafeInteger(preferenceVersion)||preferenceVersion<(kind==='mention'?0:1))return null;
+      if(!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_preferences'").toArray().length)return null;
+      const ledger=new ThreadNotifications(this.ctx.storage),item={incarnation,subject,comment_id:commentId,actor_id:userId,preference_version:preferenceVersion,delivery_kind:kind};if(!ledger.available(item))return null;
+      if(kind==='mention'&&!await this.mentionEvidenceCurrent(userId,item))return null;
+      const freshAuthority=await this.repositoryAccessFence(userId);authority.assert();freshAuthority.assert();if(!ledger.available(item))return null;return{projectName:this.load().projectName};
+    }catch{return null;}
+  }
+  private async deliverThreadNotifications(){
+    if(!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_notification_outbox'").toArray().length)return;
+    const ledger=new ThreadNotifications(this.ctx.storage);
+    for(const item of ledger.pending()){
+      try{
+        const available=()=>!this.repositoryDeleting()&&this.readRepositoryIncarnation()===item.incarnation&&this.threadExists(item.subject)&&ledger.available(item);
+        if(!available()){ledger.acknowledge(item);continue;}
+        const authority=await this.repositoryAccessFence(item.actor_id);authority.assert();if(!available()){ledger.acknowledge(item);continue;}
+        if(item.delivery_kind==='mention'&&!await this.mentionEvidenceCurrent(item.actor_id,item)){ledger.acknowledge(item);continue;}
+        const freshAuthority=await this.repositoryAccessFence(item.actor_id);freshAuthority.assert();
+        const account=accountOf(this.env,await accountKeyFor(item.actor_id));authority.assert();freshAuthority.assert();if(!available()){ledger.acknowledge(item);continue;}
+        const state=this.load();
+        await account.addInbox({projectId:state.projectId,projectName:state.projectName,kind:item.delivery_kind==='mention'?'direct':'activity',type:`thread.${item.delivery_kind==='mention'?'mention':'comment'}.${item.incarnation}.${item.subject.replace(':','.')}.${item.comment_id}.${item.preference_version}`,title:item.delivery_kind==='mention'?'You were mentioned in a thread':'New comment in a subscribed thread',eventKey:`thread:${item.incarnation}:${item.comment_id}`});
+        authority.assert();
+        ledger.acknowledge(item);
+      }catch(error){
+        // A confirmed revocation drops its queued private event. An unavailable
+        // access source remains pending for bounded, idempotent retry.
+        if(this.repositoryDeleting()||this.readRepositoryIncarnation()!==item.incarnation||String(error).includes('Repository access revoked'))ledger.acknowledge(item);
+      }
+    }
+    if(ledger.hasPending())await this.ensureRecoveryAlarm(60000);
+  }
+  async addMemberComment(userId: string, input: MemberCommentInput,credential?:{viaToken:boolean;hash?:string;expiresAt?:number}): Promise<CommentRow> {
+    const initial=await this.repositoryAccessFence(userId,true);initial.assert();
+    const incarnation=this.readRepositoryIncarnation()??new PrivateRecoveryOperations(this.ctx.storage).incarnation(),notifications=new ThreadNotifications(this.ctx.storage),authority=await this.repositoryAccessFence(userId,true);
+    if(input.subject.startsWith("issue:"))assertIssueWritable(this.ctx.storage,Number(input.subject.slice(6)));if(input.subject.startsWith("issue:")&&!this.issueRow(Number(input.subject.slice(6))))throw new IssueLifecycleError("Issue unavailable",410);
+    const payload=JSON.stringify([input.subject,input.body,input.path??null,input.line??null,input.commit??null]);
+    if(input.idempotencyKey){const prior=this.ctx.storage.sql.exec<{payload:string;comment_id:number}>('SELECT payload,comment_id FROM member_comment_receipts WHERE actor_id=? AND event_key=?',userId,input.idempotencyKey).toArray()[0];if(prior){authority.assert();if(prior.payload!==payload)throw Error('Comment request key was used for different content');const existing=this.ctx.storage.sql.exec('SELECT id,subject,author,body,path,line,"commit",created_at FROM comments WHERE id=?',prior.comment_id).toArray()[0] as unknown as CommentRow|undefined;if(!existing)throw Error('The recorded comment is unavailable; it cannot be recreated with this request key');return existing;}}
+    const resolution=await this.resolveCommentMentions(input.body,userId),mentions=resolution.recipients;authority.assert();resolution.assert();
+    const authorAccount=accountOf(this.env,await accountKeyFor(userId));if(await authorAccount.accountLifecycle()!=='active'||credential?.viaToken&&(!credential.hash||!await authorAccount.apiTokenHashCanRead(credential.hash,userId,this.load().projectId,true)))throw Error('Comment access was revoked');
+    await this.ensureRecoveryAlarm(60000);
+    const finalAuthority=await this.repositoryAccessFence(userId,true);finalAuthority.assert();
     return this.ctx.storage.transactionSync(() => {
-      if (this.repositoryDeleting() || !this.ctx.storage.sql.exec("SELECT 1 FROM members WHERE user_id=?",userId).toArray().length) throw new Error("Comment access was revoked");
-      const payload = JSON.stringify([input.subject,input.body,input.path ?? null,input.line ?? null,input.commit ?? null]);
+      authority.assert();finalAuthority.assert();resolution.assert();if(input.subject.startsWith("issue:"))assertIssueWritable(this.ctx.storage,Number(input.subject.slice(6)));if(input.subject.startsWith("issue:")&&!this.issueRow(Number(input.subject.slice(6))))throw new IssueLifecycleError("Issue unavailable",410);if(credential&&!credential.viaToken&&(!Number.isFinite(credential.expiresAt)||Date.now()>=credential.expiresAt!))throw Error('Comment access was revoked');
       if (input.idempotencyKey) {
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(input.idempotencyKey)) throw new Error("Invalid comment request key");
         const receipt=this.ctx.storage.sql.exec<{payload:string;comment_id:number}>("SELECT payload,comment_id FROM member_comment_receipts WHERE actor_id=? AND event_key=?",userId,input.idempotencyKey).toArray()[0];
@@ -4041,21 +5135,25 @@ export class RepositoryController extends DurableObject<Env> {
       const at=new Date().toISOString();
       const id=this.ctx.storage.sql.exec<{id:number}>('INSERT INTO comments(subject,author,body,path,line,"commit",created_at) VALUES(?,?,?,?,?,?,?) RETURNING id',input.subject,input.author,input.body,input.path ?? null,input.line ?? null,input.commit ?? null,at).one().id;
       if(input.idempotencyKey)this.ctx.storage.sql.exec("INSERT INTO member_comment_receipts VALUES(?,?,?,?)",userId,input.idempotencyKey,payload,id);
+      if(threadSubjectSchema.safeParse(input.subject).success)notifications.stage(incarnation,input.subject,id,userId,mentions);
       if(input.subject.startsWith("issue:"))this.ctx.storage.sql.exec("UPDATE issues SET updated_at=? WHERE number=?",at,Number(input.subject.slice(6)));
-      this.ctx.storage.sql.exec("INSERT INTO activity(at,actor,type,summary) VALUES(?,?,?,?)",at,input.author,"comment.added",input.author+" commented on "+input.subject.replace(":"," "));
+      ensureIssueEventSources(this.ctx.storage);const activity=this.ctx.storage.sql.exec<{id:number}>("INSERT INTO activity(at,actor,type,summary) VALUES(?,?,?,?) RETURNING id",at,input.author,"comment.added",input.author+" commented on "+input.subject.replace(":"," ")).one();if(input.subject.startsWith("issue:"))bindIssueActivity(this.ctx.storage,activity.id,{number:Number(input.subject.slice(6)),incarnation});
       return this.ctx.storage.sql.exec('SELECT id,subject,author,body,path,line,"commit",created_at FROM comments WHERE id=?',id).one() as unknown as CommentRow;
     });
   }
+  async addMemberCommentMutation(userId:string,input:MemberCommentInput,credential?:{viaToken:boolean;hash?:string;expiresAt?:number}):Promise<IssueStateReply<CommentRow>>{try{return{ok:true,value:await this.addMemberComment(userId,input,credential)};}catch(error){if(error instanceof IssueTransferError||error instanceof IssueLifecycleError)return{ok:false,status:error.status,error:error.message};throw error;}}
   async addComment(c: { subject: string; author: string; body: string; path?: string; line?: number; commit?: string }): Promise<CommentRow> {
+    if(c.subject.startsWith("issue:"))assertIssueWritable(this.ctx.storage,Number(c.subject.slice(6)));if(c.subject.startsWith("issue:")&&!this.issueRow(Number(c.subject.slice(6))))throw new IssueLifecycleError("Issue unavailable",410);
     const id = this.ctx.storage.sql
       .exec<{ id: number }>('INSERT INTO comments (subject, author, body, path, line, "commit", created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id', c.subject, c.author, c.body, c.path ?? null, c.line ?? null, c.commit ?? null, new Date().toISOString())
       .toArray()[0]!.id;
     if (c.subject.startsWith("issue:")) this.ctx.storage.sql.exec("UPDATE issues SET updated_at = ? WHERE number = ?", new Date().toISOString(), Number(c.subject.slice(6)));
-    await this.logActivity(c.author, "comment.added", `${c.author} commented on ${c.subject.replace(":", " ")}${c.path ? ` (${c.path}${c.line ? `:${c.line}` : ""})` : ""}`);
+    await this.logActivity(c.author, "comment.added", `${c.author} commented on ${c.subject.replace(":", " ")}${c.path ? ` (${c.path}${c.line ? `:${c.line}` : ""})` : ""}`,c.subject.startsWith("issue:")?{issueNumber:Number(c.subject.slice(6))}:undefined);
     return this.ctx.storage.sql.exec('SELECT id, subject, author, body, path, line, "commit", created_at FROM comments WHERE id = ?', id).toArray()[0] as unknown as CommentRow;
   }
 
   // ---- abuse and impersonation reports (global instance): a human queue whose backlog is published ----
+  async forumModeration(actorId:string,moderator:boolean,operation:string,id:string,input:unknown) {const ledger=new PlatformCommunity(this.ctx.storage).moderation();switch(operation){case "report":return ledger.report(id,actorId,input);case "inbox":return ledger.inbox(actorId,moderator);case "audit":return ledger.history(actorId,moderator);case "resolve":return ledger.resolve(id,actorId,moderator,input);case "appeal":return ledger.appeal(id,actorId,input);case "decide":return ledger.decide(id,actorId,moderator,input);default:throw Error("Unknown moderation operation");}}
   async forumList(input:{category?:string;q?:string;sort?:string}) {return new PlatformCommunity(this.ctx.storage).list(input);}
   async forumTopic(id:string) {return new PlatformCommunity(this.ctx.storage).topic(id);}
   async forumCreate(actor:PublicCommunityActor,input:unknown,topicId?:string) {return new PlatformCommunity(this.ctx.storage).create(actor,input,topicId);}
@@ -4163,15 +5261,17 @@ export class RepositoryController extends DurableObject<Env> {
     if(!record)throw Error("Saved release unavailable");
     this.releaseScope(id);
     const editHistory=ledger.editHistory(record.scope,authority);authority();
-    return {...record,editHistory,assetsSupported:false as const};
+    return {...record,editHistory,assets:new ReleaseAssets(this.ctx.storage).list(record.scope).map(({key:_key,scope:_scope,...asset})=>asset),assetsSupported:true as const};
   }
+  async uploadReleaseAsset(id:string,input:ReleaseAssetInput,bytes:ArrayBuffer,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authority=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authority();const scope=this.releaseScope(id);return new ReleaseAssets(this.ctx.storage).upload(scope,input,bytes,this.env.EVIDENCE_BUCKET,authority,()=>{this.releaseScope(id);if(new ReleaseRecords(this.ctx.storage).get(id)?.phase!=="draft")throw Error("Published release assets are immutable");});}
+  async downloadReleaseAsset(id:string,assetId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authority=await this.authorizeBranchRead(actor,credentialHash,sessionExpiresAt);authority();const scope=this.releaseScope(id);return new ReleaseAssets(this.ctx.storage).download(scope,assetId,this.env.EVIDENCE_BUCKET,()=>{authority();this.releaseScope(id);});}
   async tagOperations(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authority=await this.authorizeBranchRead(actor,credentialHash,sessionExpiresAt);authority();this.tagSources();new BranchCredentialIncidents(this.ctx.storage);const state=this.load(),rows=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM tag_creation_operations WHERE project_id=? AND incarnation=? AND repo_name=? ORDER BY (json_extract(doc,'$.phase') IN ('prepared','unknown')) DESC,rowid DESC LIMIT 21",state.projectId,this.readRepositoryIncarnation()??"",state.canonicalRepoName).toArray();return{operations:rows.slice(0,20).map(row=>this.tagView(JSON.parse(row.doc) as TagCreationOperation)),truncated:rows.length>20};}
   private releaseTagSource(tagOperationId:string){const operation=new TagCreationOperations(this.ctx.storage).get(tagOperationId);if(!operation||operation.phase!=="confirmed"||!operation.observation)throw Error("Confirmed native tag required");const view=this.tagView(operation);if(!view.nativeStopped||!view.credentialsComplete)throw Error("Tag native and credential cleanup remains unconfirmed");const accepted=this.assertTagScope(operation);return{operation,source:{name:operation.tag,tagOperationId,acceptedJournalId:accepted.acceptedJournalId,acceptedRef:accepted.acceptedRef,acceptedRootVersion:accepted.acceptedRootVersion,commit:accepted.commit,tree:accepted.tree}};}
-  async createRelease(input:{id:string;tagOperationId:string;title:string;notes:string},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authority=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authority();const {operation,source}=this.releaseTagSource(input.tagOperationId);return new ReleaseRecords(this.ctx.storage).create({id:input.id,projectId:operation.projectId,incarnation:operation.incarnation,canonicalRepoName:operation.canonicalRepoName,authorId:actor.userId,source},{title:input.title,notes:input.notes},authority);}
+  async createRelease(input:{id:string;tagOperationId:string;title:string;notes:string;prerelease?:boolean},actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authority=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authority();const {operation,source}=this.releaseTagSource(input.tagOperationId);return new ReleaseRecords(this.ctx.storage).create({id:input.id,projectId:operation.projectId,incarnation:operation.incarnation,canonicalRepoName:operation.canonicalRepoName,authorId:actor.userId,source},{title:input.title,notes:input.notes,...(input.prerelease!==undefined?{prerelease:input.prerelease}:{})},authority);}
   private releaseScope(id:string){const record=new ReleaseRecords(this.ctx.storage).get(id);if(!record)throw Error("Saved release unavailable");const state=this.load();if(record.scope.projectId!==state.projectId||record.scope.incarnation!==this.readRepositoryIncarnation()||record.scope.canonicalRepoName!==state.canonicalRepoName)throw Error("Release repository scope changed");this.releaseTagSource(record.scope.source.tagOperationId);return record.scope;}
-  async publishRelease(id:string,expectedRevision:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const original=new ReleaseRecords(this.ctx.storage).get(id);if(!original)throw Error("Saved release unavailable");if(original.phase!=="published"){const observed=await this.reconcileTag(original.scope.source.tagOperationId,actor,credentialHash,sessionExpiresAt);if(!observed.currentTagVerified)throw Error("Current exact native tag could not be verified; release remains draft");}const authority=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authority();const scope=this.releaseScope(id),{operation}=this.releaseTagSource(scope.source.tagOperationId),observation=operation.observation!;if(!observation.commit||!observation.tree||!observation.type)throw Error("Exact native tag observation unavailable");return new ReleaseRecords(this.ctx.storage).publish(scope,{projectId:scope.projectId,incarnation:scope.incarnation,canonicalRepoName:scope.canonicalRepoName,source:scope.source,status:"confirmed",object:observation.object,type:observation.type,commit:observation.commit,tree:observation.tree},actor.userId,expectedRevision,authority);}
+  async publishRelease(id:string,expectedRevision:number,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const original=new ReleaseRecords(this.ctx.storage).get(id);if(!original)throw Error("Saved release unavailable");if(original.phase!=="published"){const observed=await this.reconcileTag(original.scope.source.tagOperationId,actor,credentialHash,sessionExpiresAt);if(!observed.currentTagVerified)throw Error("Current exact native tag could not be verified; release remains draft");}const authority=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authority();const scope=this.releaseScope(id),{operation}=this.releaseTagSource(scope.source.tagOperationId),observation=operation.observation!;if(!observation.commit||!observation.tree||!observation.type)throw Error("Exact native tag observation unavailable");new ReleaseAssets(this.ctx.storage).assertPublishable(scope);return new ReleaseRecords(this.ctx.storage).publish(scope,{projectId:scope.projectId,incarnation:scope.incarnation,canonicalRepoName:scope.canonicalRepoName,source:scope.source,status:"confirmed",object:observation.object,type:observation.type,commit:observation.commit,tree:observation.tree},actor.userId,expectedRevision,authority);}
   async editRelease(id:string,editId:string,expectedRevision:number,content:ReleaseContent,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authority=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);authority();return new ReleaseRecords(this.ctx.storage).edit(this.releaseScope(id),editId,expectedRevision,content,actor.userId,authority);}
-  async releases(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authority=await this.authorizeBranchRead(actor,credentialHash,sessionExpiresAt);authority();new ReleaseRecords(this.ctx.storage);const state=this.load(),rows=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM release_records WHERE project_id=? AND incarnation=? AND repo_name=? ORDER BY rowid DESC LIMIT 21",state.projectId,this.readRepositoryIncarnation()??"",state.canonicalRepoName).toArray();return{releases:rows.slice(0,20).map(row=>{const record=JSON.parse(row.doc) as import("./release-records").ReleaseRecord;return{...record,editHistory:new ReleaseRecords(this.ctx.storage).editHistory(record.scope,authority)};}),truncated:rows.length>20,assetsSupported:false as const};}
+  async releases(actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const authority=await this.authorizeBranchRead(actor,credentialHash,sessionExpiresAt);authority();new ReleaseRecords(this.ctx.storage);const state=this.load(),rows=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM release_records WHERE project_id=? AND incarnation=? AND repo_name=? ORDER BY rowid DESC LIMIT 21",state.projectId,this.readRepositoryIncarnation()??"",state.canonicalRepoName).toArray();return{releases:rows.slice(0,20).map(row=>{const record=JSON.parse(row.doc) as import("./release-records").ReleaseRecord;return{...record,editHistory:new ReleaseRecords(this.ctx.storage).editHistory(record.scope,authority),assets:new ReleaseAssets(this.ctx.storage).list(record.scope).map(({key:_key,scope:_scope,...asset})=>asset)};}),truncated:rows.length>20,assetsSupported:true as const};}
 
   // ---- GitHub mirror (per project) ----
   private mirrorConfiguration(){const row=this.ctx.storage.sql.exec<{target:string;token:string;enabled:number;created_at:string}>("SELECT target,token,enabled,created_at FROM mirror WHERE id=1").toArray()[0];if(!row||validateMirrorTarget(row.target)!==row.target)throw Error("Approved normalized mirror configuration unavailable");return row;}
@@ -4242,6 +5342,61 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   // ---- identity (profile on the account instance; handle registry on the global instance) ----
+  /** F02: trusted GPG public keys for this account; empty when none are registered. */
+  async trustedGpgKeys(): Promise<TrustedGpgKey[]> {
+    return this.readSigningTrust().gpg;
+  }
+  async addTrustedGpgKey(armored: unknown): Promise<TrustedGpgResult> {
+    const parsed = await parseTrustedGpgKey(armored);
+    if (!parsed.ok) return parsed;
+    const result = addTrustedGpgKey(this.readSigningTrust().gpg, parsed.key);
+    if (result.ok) this.saveGpgKeys(result.keys);
+    return result;
+  }
+  async removeTrustedGpgKey(fingerprint: unknown): Promise<TrustedGpgResult> {
+    const result = removeTrustedGpgKey(this.readSigningTrust().gpg, fingerprint);
+    if (result.ok) this.saveGpgKeys(result.keys);
+    return result;
+  }
+  private ensureGpgKeyTable(): void {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS trusted_gpg_keys (id INTEGER PRIMARY KEY CHECK (id = 1), doc TEXT NOT NULL)");
+  }
+  private saveGpgKeys(keys: TrustedGpgKey[]): void {
+    this.readSigningTrust();
+    this.ctx.storage.transactionSync(()=>{const doc=JSON.stringify(keys),current=this.ctx.storage.sql.exec<{doc:string}>('SELECT doc FROM trusted_gpg_keys WHERE id=1').toArray()[0]?.doc??'[]';if(current===doc)return;this.ctx.storage.sql.exec("INSERT INTO trusted_gpg_keys (id, doc) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET doc = excluded.doc",doc);this.ctx.storage.sql.exec('UPDATE signing_trust_state SET revision=revision+1 WHERE id=1');});
+  }
+  /** F02: trusted SSH signing keys for this account; empty when none are registered. */
+  async trustedSigningKeys(): Promise<TrustedKey[]> {
+    return this.readSigningTrust().ssh;
+  }
+  async addTrustedSigningKey(line: unknown): Promise<TrustedKeyResult> {
+    const result = addTrustedKey(this.readSigningTrust().ssh, line);
+    if (result.ok) this.saveSigningKeys(result.keys);
+    return result;
+  }
+  async removeTrustedSigningKey(blob: unknown): Promise<TrustedKeyResult> {
+    const result = removeTrustedKey(this.readSigningTrust().ssh, blob);
+    if (result.ok) this.saveSigningKeys(result.keys);
+    return result;
+  }
+  private ensureSigningKeyTable(): void {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS trusted_signing_keys (id INTEGER PRIMARY KEY CHECK (id = 1), doc TEXT NOT NULL)");
+  }
+  private saveSigningKeys(keys: TrustedKey[]): void {
+    this.readSigningTrust();
+    this.ctx.storage.transactionSync(()=>{const doc=JSON.stringify(keys),current=this.ctx.storage.sql.exec<{doc:string}>('SELECT doc FROM trusted_signing_keys WHERE id=1').toArray()[0]?.doc??'[]';if(current===doc)return;this.ctx.storage.sql.exec("INSERT INTO trusted_signing_keys (id, doc) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET doc = excluded.doc",doc);this.ctx.storage.sql.exec('UPDATE signing_trust_state SET revision=revision+1 WHERE id=1');});
+  }
+  private readSigningTrust():SigningTrustSnapshot{
+    if(this.accountLifecycleState()!=='active')throw Error('Signing account unavailable');
+    this.ensureGpgKeyTable();this.ensureSigningKeyTable();this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS signing_trust_state(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL)');this.ctx.storage.sql.exec('INSERT OR IGNORE INTO signing_trust_state VALUES(1,0)');
+    const ssh=this.ctx.storage.sql.exec<{doc:string}>('SELECT doc FROM trusted_signing_keys WHERE id=1').toArray()[0],gpg=this.ctx.storage.sql.exec<{doc:string}>('SELECT doc FROM trusted_gpg_keys WHERE id=1').toArray()[0],revision=this.ctx.storage.sql.exec<{revision:number}>('SELECT revision FROM signing_trust_state WHERE id=1').toArray()[0]!.revision;
+    if(!Number.isSafeInteger(revision)||revision<0)throw Error('Signing trust revision unavailable');
+    return{ssh:ssh?JSON.parse(ssh.doc) as TrustedKey[]:[],gpg:gpg?JSON.parse(gpg.doc) as TrustedGpgKey[]:[],revision,observedAt:new Date().toISOString()};
+  }
+  async signingTrustSnapshot(credential?:{hash:string;userId:string;projectId:string}):Promise<SigningTrustSnapshot>{if(credential&&!this.apiTokenHashCanReadLocal(credential.hash,credential.userId,credential.projectId))throw Error('Signing credential unavailable');return this.readSigningTrust();}
+  async snippetsList(viewerId?:string){if(this.accountLifecycleState()!=="active")throw Error("Account unavailable");return new DurableSnippets(this.ctx.storage).list(viewerId);}
+  async snippetRead(id:string,viewerId?:string,revision?:number){if(this.accountLifecycleState()!=="active")throw Error("Account unavailable");return new DurableSnippets(this.ctx.storage).read(id,viewerId,revision);}
+  async snippetSave(id:string,ownerId:string,input:SnippetWrite){if(this.accountLifecycleState()!=="active")throw Error("Account unavailable");return new DurableSnippets(this.ctx.storage).save(id,ownerId,input);}
   async getProfile(): Promise<Profile> {
     const row = this.ctx.storage.sql.exec<{ doc: string }>("SELECT doc FROM profile WHERE id = 1").toArray()[0];
     return row ? (JSON.parse(row.doc) as Profile) : { handle: "", displayName: "", bio: "", joinedAt: new Date().toISOString() };
@@ -4265,6 +5420,7 @@ export class RepositoryController extends DurableObject<Env> {
     const profile:Profile=row?JSON.parse(row.doc) as Profile:{handle:"",displayName:"",bio:"",joinedAt:""};
     return {profile,visibility:publication?.visibility??"private",version:publication?.version??0,ownerId:publication?.owner_id??null,moderation:publication?.owner_id?new PublicationModeration(this.ctx.storage).state("profile",publication.owner_id):undefined};
   }
+  async mentionProfileSnapshot():Promise<{handle:string;version:number;active:boolean}>{const profile=this.profileSnapshot();return{handle:profile.profile.handle,version:profile.version,active:this.accountLifecycleState()==='active'};}
   async peopleSnapshot():Promise<PeopleSnapshot>{return {profile:this.profileSnapshot(),discovery:new CommunityPeople(this.ctx.storage).state(),active:this.accountLifecycleState()==="active"};}
   async configureDiscovery(input:unknown,userId:string){if(this.accountLifecycleState()!=="active")throw new Error("Account unavailable");const profile=this.profileSnapshot();if(profile.ownerId&&profile.ownerId!==userId)throw new Error("Profile owner changed");return new CommunityPeople(this.ctx.storage).configure(input,profile);}
   async registerPerson(value:PeopleRegistration){new CommunityPeople(this.ctx.storage).register(value);}
@@ -4374,11 +5530,25 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   // ---- notification inbox (used on the account instance) ----
-  async addInbox(item: { projectId: string; projectName: string; kind: "direct" | "activity"; type: string; title: string }): Promise<void> {
+  async inboxPreference(projectId:string):Promise<InboxPreference>{return new InboxPreferences(this.ctx.storage).read(projectId);}
+  async updateInboxPreference(projectId:string,input:unknown):Promise<InboxPreference>{return new InboxPreferences(this.ctx.storage).update(projectId,input);}
+  async addInbox(item: { projectId: string; projectName: string; kind: "direct" | "activity"; type: string; title: string; eventKey?:string;issueSource?:IssueEventSource }): Promise<void> {
+    if(item.issueSource)issueEventSourceSchema.parse(item.issueSource);ensureIssueEventSources(this.ctx.storage);
+    if(this.accountLifecycleState()!=="active")return;
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS inbox_event_receipts(project_id TEXT NOT NULL,event_key TEXT NOT NULL,PRIMARY KEY(project_id,event_key))");
+    if(item.eventKey&&(!/^[A-Za-z0-9:_-]{1,200}$/.test(item.eventKey)||this.ctx.storage.sql.exec('SELECT 1 FROM inbox_event_receipts WHERE project_id=? AND event_key=?',item.projectId,item.eventKey).toArray().length))return;
+    this.ctx.storage.transactionSync(()=>{
+    if(item.eventKey)this.ctx.storage.sql.exec('INSERT INTO inbox_event_receipts VALUES(?,?)',item.projectId,item.eventKey);
+    if(!new InboxPreferences(this.ctx.storage).allows(item.projectId,item.kind))return;
     // "Snooze until the next push" ends as soon as anything new happens in that repository.
     this.ctx.storage.sql.exec("UPDATE inbox SET state = 'unread' WHERE project_id = ? AND state = 'snoozed'", item.projectId);
-    this.ctx.storage.sql.exec("INSERT INTO inbox (project_id, project_name, kind, type, title, created_at) VALUES (?, ?, ?, ?, ?, ?)", item.projectId, item.projectName, item.kind, item.type, item.title, new Date().toISOString());
+    const saved=this.ctx.storage.sql.exec<{id:number}>("INSERT INTO inbox (project_id, project_name, kind, type, title, created_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id", item.projectId, item.projectName, item.kind, item.type, item.title, new Date().toISOString()).one();if(item.issueSource)this.ctx.storage.sql.exec("INSERT INTO inbox_issue_sources VALUES(?,?,?)",saved.id,item.issueSource.number,item.issueSource.incarnation);
     this.ctx.storage.sql.exec("DELETE FROM inbox WHERE id <= (SELECT MAX(id) FROM inbox) - 300");
+    this.ctx.storage.sql.exec("DELETE FROM inbox_issue_sources WHERE NOT EXISTS(SELECT 1 FROM inbox WHERE inbox.id=inbox_issue_sources.inbox_id)");
+    });
+  }
+  async inboxSnapshot(): Promise<InboxRow[]> {
+    ensureIssueEventSources(this.ctx.storage);const rows=this.ctx.storage.sql.exec("SELECT i.*,s.issue_number,s.incarnation AS issue_incarnation FROM inbox i LEFT JOIN inbox_issue_sources s ON s.inbox_id=i.id ORDER BY i.id DESC LIMIT 300").toArray() as unknown as Array<InboxRow&{issue_number:number|null;issue_incarnation:string|null}>;return rows.map(({issue_number,issue_incarnation,...row})=>({...row,...(issue_number!==null&&issue_incarnation!==null?{issueSource:{number:issue_number,incarnation:issue_incarnation}}:{})}));
   }
   async listInbox(filter: "direct" | "activity" | "snoozed" | "archived"): Promise<InboxRow[]> {
     const byState = filter === "snoozed" || filter === "archived";
@@ -4393,8 +5563,12 @@ export class RepositoryController extends DurableObject<Env> {
     const rows = this.ctx.storage.sql.exec<{ kind: string; n: number }>("SELECT kind, COUNT(*) AS n FROM inbox WHERE state = 'unread' GROUP BY kind").toArray();
     return { direct: rows.find((r) => r.kind === "direct")?.n ?? 0, activity: rows.find((r) => r.kind === "activity")?.n ?? 0 };
   }
-  async listActivity(limit: number): Promise<ActivityRow[]> {
-    return this.ctx.storage.sql.exec("SELECT id, at, actor, type, summary FROM activity ORDER BY id DESC LIMIT ?", Math.min(limit, 200)).toArray() as unknown as ActivityRow[];
+  async issueEventAvailable(userId:string,source:IssueEventSource):Promise<{projectName:string}|null>{try{issueEventSourceSchema.parse(source);const permission=await this.repositoryAccessFence(userId);permission.assert();if(this.readRepositoryIncarnation()!==source.incarnation||!isIssueActive(this.ctx.storage,source.number))return null;return{projectName:this.load().projectName};}catch{return null;}}
+  async listActivity(limit: number,userId?:string,credentialHash?:string,sessionExpiresAt?:number): Promise<ActivityRow[]> {
+    if(userId){const account=accountOf(this.env,await accountKeyFor(userId));if(await account.accountLifecycle()!=='active'||credentialHash&&!await account.apiTokenHashCanRead(credentialHash,userId,this.load().projectId))throw Error('Activity credential changed');if(!credentialHash&&(!Number.isFinite(sessionExpiresAt)||Date.now()>=sessionExpiresAt!))throw Error('Activity session expired');(await this.repositoryAccessFence(userId)).assert();if(!credentialHash&&Date.now()>=sessionExpiresAt!)throw Error('Activity session expired');}
+    ensureIssueEventSources(this.ctx.storage);
+    const rows=this.ctx.storage.sql.exec("SELECT a.id,a.at,a.actor,a.type,a.summary,s.issue_number,s.incarnation FROM activity a LEFT JOIN activity_issue_sources s ON s.activity_id=a.id ORDER BY a.id DESC LIMIT ?",Math.min(limit,200)).toArray() as unknown as Array<ActivityRow&{issue_number:number|null;incarnation:string|null}>;
+    return rows.flatMap(({issue_number,incarnation,...row})=>issue_number!==null&&incarnation!==null?(this.readRepositoryIncarnation()===incarnation&&isIssueActive(this.ctx.storage,issue_number)?[row]:[]):[sensitiveLegacyIssueEvent(row.type)?{...row,actor:'Contributor',summary:genericLegacyIssueEvent(row.type)}:row]);
   }
 
   async setVerificationPolicy(policy: Record<string, unknown>): Promise<void> {
@@ -4434,6 +5608,8 @@ export class RepositoryController extends DurableObject<Env> {
     if(new BranchNativeAttempts(this.ctx.storage).hasUnconfirmed()||new BranchCredentialIncidents(this.ctx.storage).hasPending())throw Error("Branch native or credential cleanup remains unconfirmed; metadata preserved");
     const agentRuntime=new AgentRuntimeLedger(this.ctx.storage),agentCredentials=new AgentCredentialIncidents(this.ctx.storage);agentCredentials.pendingBatch();if(agentRuntime.hasUnconfirmed()||this.ctx.storage.sql.exec("SELECT id FROM agent_credential_incidents WHERE status!='revoked' LIMIT 1").toArray().length)throw Error("Agent shutdown or credential cleanup remains unconfirmed; metadata preserved");
     const integrationNative=new IntegrationNativeRuntimeLedger(this.ctx.storage);if(integrationNative.hasUnconfirmed()||this.integrationNativeMissingCoverage().some(run=>run.native_protocol!==1||Object.values(this.load(true).candidates).some(candidate=>candidate.workflowInstanceId===run.instance_id)))throw new Error("Integration native shutdown remains unconfirmed; metadata was preserved");
+    if(this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='lfs_objects'").toArray().length){if(!this.repositoryDeleting())throw new LfsStorageError("Repository deletion must fence LFS writers first",409);await this.lfsStorage().cleanupForDeletion(this.load(true).projectId,this.env.EVIDENCE_BUCKET);}
+    if(this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_attachment_refs'").toArray().length){if(!this.repositoryDeleting())throw new LfsStorageError("Repository deletion must fence attachment writers first",409);await this.issueAttachments().cleanupForDeletion(this.load(true).projectId,this.env.EVIDENCE_BUCKET);}
     const tables = this.ctx.storage.sql.exec<{name:string}>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name!='repository_deletion'").toArray();
     this.ctx.storage.transactionSync(() => {
       for (const table of tables) this.ctx.storage.sql.exec(`DELETE FROM "${table.name.replaceAll('"','""')}"`);
@@ -4457,10 +5633,10 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   /** Spend guard: atomically count a model-backed run against today's per-project allowance. */
-  async existingDeploymentRequest(target: AcceptedDeploymentTarget, serviceId: string, environment: string, key: string, actorId: string): Promise<DeploymentRecord | null> {
+  async existingDeploymentRequest(target: AcceptedDeploymentTarget, serviceId: string, environment: string, key: string, actorId: string,artifactInput?:DeploymentArtifactParameters): Promise<DeploymentRecord | null> {
     if(await this.roleOf(actorId)!=="owner")throw new Error("Owner required");
     const state=await this.getState();
-    const selection=this.selectRecordedDeployment(target.journalId);return new RepositoryDeployments(this.ctx.storage,state.projectId).existingRequest(target,serviceId,environment,key,actorId,selection?this.legacyPrimaryDeploymentCompatibility(selection):undefined);
+    const selection=this.selectRecordedDeployment(target.journalId),saved=new RepositoryDeployments(this.ctx.storage,state.projectId,actorId=>this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",actorId).toArray()[0]?.role==="owner",actorId=>this.membershipEpochs().read(actorId)).existingRequest(target,serviceId,environment,key,actorId,selection?this.legacyPrimaryDeploymentCompatibility(selection):undefined,artifactInput);return saved;
   }
   async reserveHealthProbe(): Promise<HealthProbeAdmission> {
     return new HealthProbeBudget(this.ctx.storage).reserve();
@@ -4560,6 +5736,7 @@ export class RepositoryController extends DurableObject<Env> {
   private readRepositoryIncarnation():string|null {return this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='private_recovery_incarnation'").toArray().length?this.ctx.storage.sql.exec<{value:string}>("SELECT value FROM private_recovery_incarnation WHERE id=1").toArray()[0]?.value??null:null;}
   async repositoryReadContext(userId:string|null,taskId:string|null=null,candidateId:string|null=null):Promise<RepositoryReadContext>{
     if(this.repositoryDeleting())throw new Error("Repository unavailable");
+    const authority=userId?await this.repositoryAccessFence(userId):null;authority?.assert();
     const state=this.load(),incarnation=this.readRepositoryIncarnation();
     const ownerId=this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id;
     if(!ownerId)throw new Error("Repository owner unavailable");
@@ -4574,7 +5751,8 @@ export class RepositoryController extends DurableObject<Env> {
     if(userId!==null&&!await this.canGitAccess(userId,taskId,false))throw new Error("Repository access changed");
     if(userId===null&&JSON.stringify(await this.publicGrant())!==JSON.stringify(grant))throw new Error("Public repository changed");
     const latest=this.load();
-    if(this.repositoryDeleting()||latest.canonicalRepoName!==state.canonicalRepoName||latest.projectId!==state.projectId||this.readRepositoryIncarnation()!==incarnation||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==ownerId||(userId!==null&&!this.ctx.storage.sql.exec("SELECT role FROM members WHERE user_id=?",userId).toArray().length))throw new Error("Repository authority changed");
+    if(this.repositoryDeleting()||latest.canonicalRepoName!==state.canonicalRepoName||latest.projectId!==state.projectId||this.readRepositoryIncarnation()!==incarnation||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==ownerId||(userId!==null&&!authority))throw new Error("Repository authority changed");
+    authority?.assert();
     let repoName=taskId?latest.tasks[taskId]?.workspace.repoName:latest.canonicalRepoName;if(!repoName)throw new Error("Workspace unavailable");
     const candidate=candidateId?latest.candidates[candidateId]:null;
     if(candidateId&&(!candidate||(!taskId&&!candidate.candidateCommit)))throw new Error("Candidate unavailable");
@@ -4587,16 +5765,20 @@ export class RepositoryController extends DurableObject<Env> {
       retained=new RetainedInputs(this.ctx.storage).lookup(taskId,candidate.id,inputCommit);
       if(retained){if(retained.projectId!==latest.projectId||retained.incarnation!==incarnation||retained.canonicalRepoName!==latest.canonicalRepoName||retained.workflowId!==candidate.workflowInstanceId||(inputBase!==undefined&&retained.base!==inputBase))throw new Error("Retained input scope changed");inputBase=retained.base;repoName=latest.canonicalRepoName;}
     }
-    return {projectId:fresh.projectId,incarnation,canonicalRepoName:fresh.canonicalRepoName,repoName,ownerId,accountKey,...(retained?{retainedInputReceiptId:retained.id}:{}),...(candidate?{candidateId:candidate.id,candidateCommit:candidate.candidateCommit,candidateBase:candidate.expectedAcceptedBase,...(taskId?{candidateInputCommit:inputCommit,candidateInputBase:inputBase}:{})}:{}),...(taskId&&!retained?{taskBase:latest.tasks[taskId]!.baseCommit,taskCommit:latest.tasks[taskId]!.currentCommit,taskBranch:latest.tasks[taskId]!.workspace.branch,taskContributorId:latest.tasks[taskId]!.contributor.id,taskInitiatorId:latest.tasks[taskId]!.initiatedBy?.id}:{}),...(grant?{publicationVersion:grant.version,acceptedCommit:grant.acceptedCommit}:{})};
+    let maintainerWriteSource:ForkPermissionSource|undefined;if(userId&&taskId){try{maintainerWriteSource=this.forkWriteSource(taskId,userId);}catch{/* Read authority is independent of creator consent. */}}
+    return {projectId:fresh.projectId,incarnation,...(maintainerWriteSource?{maintainerWriteSource}:{}),canonicalRepoName:fresh.canonicalRepoName,repoName,ownerId,accountKey,...(authority?.source?{organizationSource:authority.source}:{}),...(retained?{retainedInputReceiptId:retained.id}:{}),...(candidate?{candidateId:candidate.id,candidateCommit:candidate.candidateCommit,candidateBase:candidate.expectedAcceptedBase,...(taskId?{candidateInputCommit:inputCommit,candidateInputBase:inputBase}:{})}:{}),...(taskId&&!retained?{taskBase:latest.tasks[taskId]!.baseCommit,taskCommit:latest.tasks[taskId]!.currentCommit,taskBranch:latest.tasks[taskId]!.workspace.branch,taskContributorId:latest.tasks[taskId]!.contributor.id,taskInitiatorId:latest.tasks[taskId]!.initiatedBy?.id}:{}),...(grant?{publicationVersion:grant.version,acceptedCommit:grant.acceptedCommit}:{})};
   }
   private assertReadLocal(context:RepositoryReadContext,userId:string|null,taskId:string|null,write=false):void {
     const state=this.load(),task=taskId?state.tasks[taskId]:null;
     const role=userId?this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",userId).toArray()[0]?.role:null;
-    if(this.repositoryDeleting()||state.projectId!==context.projectId||state.canonicalRepoName!==context.canonicalRepoName||this.readRepositoryIncarnation()!==context.incarnation||(userId&&!role)||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==context.ownerId)throw new Error("Repository read authority changed");
+    if(this.repositoryDeleting()||state.projectId!==context.projectId||state.canonicalRepoName!==context.canonicalRepoName||this.readRepositoryIncarnation()!==context.incarnation||(userId&&!role&&!context.organizationSource)||this.ctx.storage.sql.exec<{user_id:string}>("SELECT user_id FROM members WHERE role='owner' ORDER BY user_id LIMIT 1").toArray()[0]?.user_id!==context.ownerId)throw new Error("Repository read authority changed");
+    if(context.organizationSource){this.inheritedTable();const row=this.ctx.storage.sql.exec<{revision:number;doc:string}>('SELECT revision,doc FROM repository_organization_sources WHERE id=?',context.organizationSource.id).toArray()[0];if(!userId||!row||row.revision!==context.organizationSource.revision||!this.inheritedRole(organizationDocumentSchema.parse(JSON.parse(row.doc)),userId))throw Error('Inherited read authority changed');}
     if(taskId&&(!task||(!context.retainedInputReceiptId&&(task.workspace.repoName!==context.repoName||task.baseCommit!==context.taskBase||task.currentCommit!==context.taskCommit||task.workspace.branch!==context.taskBranch||task.contributor.id!==context.taskContributorId||task.initiatedBy?.id!==context.taskInitiatorId))))throw new Error("Contribution checkpoint changed");
     if(context.candidateId){const candidate=state.candidates[context.candidateId];if(!candidate||candidate.candidateCommit!==context.candidateCommit||candidate.expectedAcceptedBase!==context.candidateBase)throw new Error("Candidate review changed");if(taskId&&( !candidate.participatingTaskIds.includes(taskId)||candidate.participatingCommits[taskId]!==context.candidateInputCommit||((candidate.frozenContributorProofs?.find(proof=>proof.id===taskId&&proof.commit===context.candidateInputCommit)?.baseCommit!==undefined||!context.retainedInputReceiptId)&&candidate.frozenContributorProofs?.find(proof=>proof.id===taskId&&proof.commit===context.candidateInputCommit)?.baseCommit!==context.candidateInputBase)))throw new Error("Frozen candidate input changed");}
     if(context.retainedInputReceiptId){const retained=new RetainedInputs(this.ctx.storage).get(context.retainedInputReceiptId);if(!retained||retained.projectId!==context.projectId||retained.incarnation!==context.incarnation||retained.canonicalRepoName!==context.repoName||retained.taskId!==taskId||retained.candidateId!==context.candidateId||retained.commit!==context.candidateInputCommit||retained.base!==context.candidateInputBase)throw new Error("Retained input read scope changed");}
-    if(write){this.gitTables();if(!task||["accepted","cancelled"].includes(task.status)||(role!=="owner"&&!this.ctx.storage.sql.exec("SELECT task_id FROM git_task_writers WHERE task_id=? AND user_id=?",taskId!,userId!).toArray().length))throw new Error("Contribution writer authority changed");}
+    if(write&&context.organizationSource&&userId)this.assertInheritedSource(userId,context.organizationSource,true);
+    if(write&&userId&&taskId){this.assertTaskWriteUnlocked(taskId);this.assertForkWriteSource(taskId,userId,context.maintainerWriteSource);}
+    if(write){this.gitTables();if(state.lifecycle?.state==='archived'||!task||["accepted","cancelled"].includes(task.status)||(role!=="owner"&&!this.ctx.storage.sql.exec("SELECT task_id FROM git_task_writers WHERE task_id=? AND user_id=?",taskId!,userId!).toArray().length))throw new Error("Contribution writer authority changed");}
     if(userId===null){this.requirePublicRepository();const visibility=this.ctx.storage.sql.exec<{version:number}>("SELECT version FROM repository_visibility WHERE id=1").toArray()[0];if(visibility?.version!==context.publicationVersion||state.acceptedState.currentCommit!==context.acceptedCommit)throw new Error("Public read scope changed");}
   }
   async assertRepositoryReadContext(context:RepositoryReadContext,userId:string|null,taskId:string|null=null,credentialHash?:string,candidateId:string|null=null):Promise<boolean>{try{
@@ -4671,6 +5853,18 @@ export class RepositoryController extends DurableObject<Env> {
     });
   }
 
+  async cancelMemberTask(taskId:string,userId:string,credentialHash?:string,sessionExpiresAt?:number):Promise<void>{
+    const context=await this.repositoryReadContext(userId,taskId);
+    const authorize=await this.taskCreationCredentialFence(userId,{viaToken:!!credentialHash,...(credentialHash?{credentialHash}:{sessionExpiresAt})});authorize();
+    const eligible=()=>{this.gitTables();const owner=this.ctx.storage.sql.exec<{role:string}>('SELECT role FROM members WHERE user_id=?',userId).toArray()[0]?.role==='owner',creator=this.ctx.storage.sql.exec<{user_id:string}>('SELECT user_id FROM git_task_writers WHERE task_id=?',taskId).toArray()[0]?.user_id;if(!owner&&creator!==userId)throw Error('Only the creator or direct repository owner may cancel');};
+    const current=await this.repositoryReadContext(userId,taskId),readScope=({maintainerWriteSource:_consent,...scope}:RepositoryReadContext)=>JSON.stringify(scope);
+    if(readScope(current)!==readScope(context))throw Error('Contribution cancellation authority changed');
+    try{this.ctx.storage.transactionSync(()=>{
+      authorize();this.assertReadLocal(context,userId,taskId);eligible();
+      const task=this.load().tasks[taskId];if(!task||['accepted','integrating','verifying'].includes(task.status))throw Error('Contribution is no longer cancellable');
+      task.status='cancelled';task.updatedAt=new Date().toISOString();this.save();
+    });}catch(error){this.state=null;throw error;}
+  }
   async cancelTask(taskId: string): Promise<void> {
     const task = this.load().tasks[taskId];
     if (!task || task.status === "accepted") throw new Error("Cannot cancel");
@@ -5175,6 +6369,14 @@ export class RepositoryController extends DurableObject<Env> {
       this.state = null;
       throw error;
     }
+    if(!alreadyAccepted&&!nonprimary){
+      try{
+        const planning=new PlanningStore(this.ctx.storage);
+        for(const issueNumber of new Set(c.participatingTaskIds.flatMap(id=>{const task=s.tasks[id];return task?.status==='accepted'&&task.issue?[task.issue]:[];}))){
+          try{planning.recordAccepted(j.id,issueNumber,j.newHead);}catch{console.warn('Accepted planning follow-up unavailable; accepted Git history remains preserved');}
+        }
+      }catch{console.warn('Accepted planning storage unavailable; accepted Git history remains preserved');}
+    }
     for (const deliveryId of deliveries) await this.enqueueWebhookDelivery(deliveryId);
     if(nonprimary){await this.logActivity("FlareGit","integration.branch_accepted",`Accepted ${j.newHead.slice(0,7)} on ${c.acceptedTarget!.ref}`);return;}
     // Issues resolved by accepted changes close with a pointer to the commit that is now in history.
@@ -5182,11 +6384,10 @@ export class RepositoryController extends DurableObject<Env> {
       const t = s.tasks[id]!;
       if (t.status !== "accepted" || !t.issue) continue;
       const issue = this.issueRow(t.issue);
-      if (!issue || issue.state === "closed") continue;
+      if (!issue){if(new IssueLifecycleStore(this.ctx.storage).tombstone(t.issue))await this.logActivity("FlareGit","integration.issue_unavailable",`Accepted change ${t.id} retains unavailable issue #${t.issue} as its original purpose`);continue;}if(issue.state==="closed")continue;
       const subject = `issue:${t.issue}`;
       const exists = this.ctx.storage.sql.exec('SELECT id FROM comments WHERE subject = ? AND author = ? AND "commit" = ? LIMIT 1', subject, "FlareGit", j.newHead).toArray().length > 0;
-      if (!exists) await this.addComment({ subject, author: "FlareGit", body: `Resolved by change ${t.id}, accepted as ${j.newHead.slice(0, 7)}.`, commit: j.newHead });
-      await this.setIssueState(t.issue, "closed", `change ${t.id}`);
+      try{const closed=await this.setIssueState(t.issue,"closed",`change ${t.id}`);if(!closed||!this.issueRow(t.issue))throw new IssueLifecycleError("Issue unavailable after accepted close",410);if (!exists) await this.addComment({ subject, author: "FlareGit", body: `Resolved by change ${t.id}, accepted as ${j.newHead.slice(0, 7)}.`, commit: j.newHead });}catch(error){if(!new IssueLifecycleStore(this.ctx.storage).tombstone(t.issue)&&!this.ctx.storage.sql.exec('SELECT issue_number FROM issue_transfer_locks WHERE issue_number=?',t.issue).toArray().length)throw error;await this.logActivity("FlareGit","integration.issue_unavailable",`Accepted change ${t.id} retains unavailable issue #${t.issue} as its original purpose`);}
     }
     await this.logActivity("FlareGit", "integration.accepted", `Accepted ${j.newHead.slice(0, 7)} (${c.participatingTaskIds.join(" + ")})`);
   }

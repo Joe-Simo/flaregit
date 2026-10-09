@@ -6,6 +6,7 @@ export interface MetadataSearchResult { id: string; kind: "repository" | "change
 interface SearchRepository {
   roleOf(userId: string): Promise<unknown>;
   getState(): Promise<FlareGitProjectState>;
+  getIssue(number:number):Promise<IssueRow|null>;
   listIssues(state: "open" | "closed"): Promise<IssueRow[]>;
 }
 export function safeSearchText(value: string, length = 240): string {
@@ -31,7 +32,7 @@ export async function searchAccountMetadata(input: {
   const resultRepositories = new Map<string, SearchRepository>();
   const seen = new Set<string>();
   for (const reference of input.references.slice(0, 10)) {
-    if (!/^p?[0-9a-f]{12}$/.test(reference.id) || seen.has(reference.id)) continue;
+    if (!/^[a-z0-9]{12,16}$/.test(reference.id) || seen.has(reference.id)) continue;
     seen.add(reference.id);
     const repository = input.repository(reference.id);
     try {
@@ -51,7 +52,7 @@ export async function searchAccountMetadata(input: {
       }
       for (const issue of [...open, ...closed]) {
         if (!Number.isSafeInteger(issue.number) || issue.number < 1) continue;
-        add({ id: `${reference.id}:issue:${issue.number}`, kind: "issue", title: issue.title, description: `${state.projectName} · #${issue.number} · ${issue.state}`, href: `${base}/issues` });
+        add({ id: `${reference.id}:issue:${issue.number}`, kind: "issue", title: issue.title, description: `${state.projectName} · #${issue.number} · ${issue.state}`, href: `${base}/issues?n=${issue.number}` });
       }
       if (!await repository.roleOf(input.userId)) { incomplete = true; continue; }
       results.push(...local);
@@ -65,5 +66,12 @@ export async function searchAccountMetadata(input: {
     else incomplete = true;
   }
   if (await input.lifecycle() !== "active") return { results: [], incomplete: true };
-  return { results: results.filter((row) => permitted.has(row.id.split(":")[0]!)).slice(0, 20), incomplete };
+  const active:MetadataSearchResult[]=[];
+  for(const row of results.filter(row=>permitted.has(row.id.split(':')[0]!)).slice(0,20)){
+    if(row.kind!=='issue'){active.push(row);continue;}
+    const [project,,number]=row.id.split(':'),repository=resultRepositories.get(project!);if(!repository)continue;
+    try{const issue=await repository.getIssue(Number(number));if(!issue||!await repository.roleOf(input.userId)){incomplete=true;continue;}const title=safeSearchText(issue.title,160),description=safeSearchText(row.description.replace(/ · (open|closed)$/u,` · ${issue.state}`));if(`${title} ${description}`.normalize('NFKC').toLocaleLowerCase('en-US').includes(query))active.push({...row,title,description});}catch{incomplete=true;}
+  }
+  if(await input.lifecycle()!=='active')return {results:[],incomplete:true};
+  return {results:active,incomplete};
 }

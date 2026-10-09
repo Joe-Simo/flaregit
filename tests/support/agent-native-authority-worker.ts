@@ -8,10 +8,16 @@ export class AgentAuthorityFixture extends RepositoryController {
  override async reserveCoreGitOperation(){return {allowed:true,existing:false,basis:"conservative_operation_envelope"} as const;}
  override async fetch(request:Request){const path=new URL(request.url).pathname;try{
   if(path==='/seed'){
-   const task={id:'task',goal:'Improve source',baseCommit:'a'.repeat(40),currentCommit:'a'.repeat(40),workspace:{repoName:'workspace',branch:'task',remote:'https://example.com/git'},status:'working',agentWorkflowInstanceId:'run'};
+   const task={contributor:{id:'agent-task',name:'Synthetic agent',type:'agent'},allowedScope:['*'],id:'task',goal:'Improve source',baseCommit:'a'.repeat(40),currentCommit:'a'.repeat(40),workspace:{repoName:'workspace',branch:'task',remote:'https://example.com/git'},status:'working',agentWorkflowInstanceId:'run'};
    this.ctx.storage.sql.exec('INSERT INTO project VALUES(1,?)',JSON.stringify({projectId:'p123456789abc',projectName:'Fixture',canonicalRepoName:'canonical',tasks:{task},candidates:{},verificationPolicy:{}}));
    await this.addMember('owner','owner');await this.registerWorkflow('run','agent',undefined,'owner');return Response.json({seeded:true});
   }
+  if(path==='/seed-maintainer'){
+   await this.initialize({projectId:'p123456789abc',projectName:'Maintainer consent fixture',canonicalRepoName:'canonical',head:'a'.repeat(40),verificationPolicy:{},ownerId:'owner'});await this.addMember('creator','member');
+   const now=new Date().toISOString();await this.createTask({id:'task',goal:'Improve source',contributor:{id:'creator',name:'Creator',type:'human'},baseCommit:'a'.repeat(40),currentCommit:'a'.repeat(40),workspace:{repoName:'workspace',branch:'task',remote:'https://example.com/git'},allowedScope:['*'],status:'working',requirements:[],checkpoints:[],createdAt:now,updatedAt:now},'creator',{goal:'Improve source',dependsOn:null,issue:null},undefined,{viaToken:false,sessionExpiresAt:Date.now()+60000});
+   await this.taskForkPermissionUpdate('task','creator',{enabled:true,expectedRevision:0},{viaToken:false,sessionExpiresAt:Date.now()+60000});await this.beginAgentTask('task','run');await this.registerWorkflow('run','agent',undefined,'owner');return Response.json({ok:true});
+  }
+  if(path==='/consent'){const input=await request.json() as {enabled:boolean;expectedRevision:number};return Response.json(await this.taskForkPermissionUpdate('task','creator',input,{viaToken:false,sessionExpiresAt:Date.now()+60000}));}
   if(path==='/sweep'){this.observedStatus=new URL(request.url).searchParams.get('status')??'running';await this.retryAgentNativeStops();return Response.json({stopCalls:this.stopCalls});}
   if(path==='/recover')return Response.json(await this.recoverAgentNativeAttempt(new URL(request.url).searchParams.get('id')!,{userId:'owner',displayName:'Owner',viaToken:false},undefined,Date.now()+60000));
   if(path==='/claim')return Response.json(await this.claimAgentRun({runId:'run',taskId:'task',startingCommit:'a'.repeat(40),startingBranchHead:'a'.repeat(40),branch:'task',goal:'Improve source',context:{comments:[]},allowedScope:['*'],protectedPaths:[]}));
