@@ -32,6 +32,8 @@ export interface RequirementAssertion {
   description: string;
   input?: Record<string, unknown>;
   expectedOutput?: unknown;
+  /** Exported function that computes this assertion's output; lets the platform prove a contradiction by running code. */
+  probe?: { module: string; export: string };
 }
 
 export interface Requirement {

@@ -12,14 +12,16 @@ import { Button } from "@/components/ui/button";
 import { StatusBanner } from "../components/StatusBanner";
 import { CandidateJournal } from "../components/CandidateJournal";
 import { LivePreview } from "../components/LivePreview";
-import { DecisionModal } from "../components/DecisionModal";
+import { RequirementDecision } from "../components/RequirementDecision";
+import { MergeQueue } from "../components/MergeQueue";
+import { useCoordination } from "../coordination";
 import { EvidenceDrawer } from "../components/EvidenceDrawer";
 import { CandidateReview, LegacyCandidateRerun } from "../components/CandidateReview";
 import { apiJson } from "../api";
 import { RebaseRecovery } from "../components/RebaseRecovery";
 import { Badge } from "@/components/ui/badge";
 import { timeAgo } from "../router";
-import type { CandidateGeneration, FlareGitProjectState, ProductDecision } from "@/core/types";
+import type { CandidateGeneration, FlareGitProjectState } from "@/core/types";
 
 const PublicationRecoveryPanel=lazy(async()=>({default:(await import("../components/PublicationRecoveryPanel")).PublicationRecoveryPanel}));
 
@@ -45,9 +47,6 @@ export function IntegrationTab({
   const linkedDecisionElement=useRef<HTMLDivElement|HTMLDetailsElement|null>(null);
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const [resolving, setResolving] = useState(false);
-  const [reviewDecisionId, setReviewDecisionId] = useState<{id:string;link:string|null|undefined} | null>(null);
-  const [dismissed, setDismissed] = useState<string | null>(null);
-  useEffect(()=>{setReviewDecisionId(null);setDismissed(null);},[projectId,decisionId]);
   const scenarioScope=projectId;
   const activeScope=useRef(scenarioScope);activeScope.current=scenarioScope;
   const [scenario, setScenario] = useState<SavedScenarioRun | null>(null);
@@ -104,9 +103,10 @@ export function IntegrationTab({
   const failed = all.filter((c) => c.status === "failed" || c.status === "stale").slice(-10).reverse();
   const pendingDecisions = Object.values(state.decisions).filter(decision => decision.status === "pending");
   const resolvedDecisions = Object.values(state.decisions).filter(decision => decision.status === "resolved").sort((a, b) => (b.resolvedAt ?? b.createdAt).localeCompare(a.resolvedAt ?? a.createdAt));
-  const pending: ProductDecision | undefined = pendingDecisions.find(decision => decision.id === (reviewDecisionId?.link===decisionId?reviewDecisionId?.id:undefined) && decision.id !== dismissed) ?? (decisionId?pendingDecisions.find(decision=>decision.id===linkedDecision?.id&&decision.id!==dismissed):pendingDecisions.find(decision => decision.id !== dismissed));
+  const coordination = useCoordination(projectId);
+  const decisionViews = new Map((coordination.view?.decisions ?? []).map(view => [view.decisionId, view]));
 
-  useEffect(()=>{if(!linkedDecision||pending)return;linkedDecisionElement.current?.focus({preventScroll:true});linkedDecisionElement.current?.scrollIntoView({block:"center",behavior:"instant"});},[projectId,linkedDecision?.id,pending?.id]);
+  useEffect(()=>{if(!linkedDecision)return;linkedDecisionElement.current?.focus({preventScroll:true});linkedDecisionElement.current?.scrollIntoView({block:"center",behavior:"instant"});},[projectId,linkedDecision?.id]);
 
   const resolve = async (decisionId: string, selectedOptionId: string) => {
     setResolving(true);
@@ -117,6 +117,7 @@ export function IntegrationTab({
     } finally {
       setResolving(false);
       reload();
+      void coordination.refresh();
     }
   };
 
@@ -162,6 +163,8 @@ export function IntegrationTab({
       {preserved.size>0&&<section aria-label="Preserved attempts" className="space-y-2 text-sm"><h2 className="font-semibold">Preserved attempts</h2>{[...preserved].map(([id,next])=>{const previous=state.candidates[id]!;return <div key={id} className="rounded-lg border border-border p-3"><p>Recorded original status: {previous.status.replaceAll('_',' ')}</p><div className="flex gap-3 text-xs"><a className="text-primary underline" href={`/#/p/${projectId}/review?candidate=${encodeURIComponent(id)}`}>Original review and context</a><a className="text-primary underline" href={`/#/p/${projectId}/review?candidate=${encodeURIComponent(next.id)}`}>Successor review · {next.id.slice(0,12)}</a></div>{isOwner&&previous.workflowInstanceId&&<WorkflowRunControls projectId={projectId} instanceId={previous.workflowInstanceId} isOwner readOnly onChange={reload}/>}</div>;})}</section>}
       {isOwner&&<Suspense fallback={null}><PublicationRecoveryPanel key={`publication-recovery:${projectId}`} projectId={projectId} onChange={reload}/></Suspense>}
       <RebaseRecovery projectId={projectId} isOwner={isOwner} tasks={state.tasks} onRecovered={reload} />
+      {coordination.error && !coordination.view && <p role="status" className="text-xs text-muted-foreground">Merge queue status is unavailable: {coordination.error}</p>}
+      <MergeQueue projectId={projectId} state={state} view={coordination.view} isOwner={isOwner} canQueue={state.acceptedState.currentCommit !== null} onChange={() => { reload(); void coordination.refresh(); }} />
       {isOwner && savedRuns.length > 0 && <section id="int-saved-runs" tabIndex={-1} aria-labelledby="int-saved-runs-title" className="space-y-3"><h2 id="int-saved-runs-title" className="text-sm font-semibold">Saved integration runs</h2><p className="text-xs text-muted-foreground">Check a saved run, pause it, or continue it after interruption. Review stays available.</p><ul className="space-y-3">{visibleRuns.map(candidate => <li key={`${projectId}:${candidate.workflowInstanceId}`} className="rounded-lg border border-border p-3 min-w-0"><a href={`/#/p/${projectId}/review?candidate=${encodeURIComponent(candidate.id)}`} className="text-sm font-medium break-words hover:underline">{describe(candidate)}</a><p className="mt-1 text-xs text-muted-foreground">Candidate {candidate.status.replaceAll("_", " ")} · {candidate.participatingTaskIds.length} {candidate.participatingTaskIds.length === 1 ? "recorded input" : "recorded inputs"} · base <code>{candidate.expectedAcceptedBase?.slice(0, 12)??"empty accepted history"}</code></p><WorkflowRunControls projectId={projectId} instanceId={candidate.workflowInstanceId!} savedDecision={savedWorkflowDecision(candidate, state.journal.some(entry => entry.candidateId === candidate.id))} isOwner={isOwner} onChange={reload} /><CandidateRuntimeRecord projectId={projectId} candidateId={candidate.id} workflowId={candidate.workflowInstanceId!} commit={candidate.candidateCommit} evidenceId={candidate.evidenceId}/></li>)}</ul><div className="flex flex-wrap gap-3 items-center"><p className="text-[11px] text-muted-foreground">Showing {currentRunPage * 10 + 1}–{currentRunPage * 10 + visibleRuns.length} of {savedRuns.length} saved runs</p>{savedRuns.length > 10 && <><Button size="sm" variant="outline" disabled={currentRunPage === 0} onClick={() => setRunPage(currentRunPage - 1)}>Newer runs</Button><Button size="sm" variant="outline" disabled={(currentRunPage + 1) * 10 >= savedRuns.length} onClick={() => setRunPage(currentRunPage + 1)}>Older runs</Button></>}</div></section>}
       <section aria-labelledby="int-review" className="space-y-2">
         <h2 id="int-review" className="text-sm font-semibold">Review & saved decisions ({reviewing.length})</h2>
@@ -225,9 +228,8 @@ export function IntegrationTab({
           </div>
         )}
       </div>
-      {pendingDecisions.length > 0 && <section aria-labelledby="pending-decisions" className="rounded-lg border border-border p-4 space-y-3"><h2 id="pending-decisions" className="text-sm font-semibold">Decisions needed</h2>{pendingDecisions.map(decision => <div key={decision.id} ref={element=>{if(decision.id===linkedDecision?.id)linkedDecisionElement.current=element;}} tabIndex={decision.id===linkedDecision?.id?-1:undefined} role={decision.id===linkedDecision?.id?"group":undefined} aria-label={decision.id===linkedDecision?.id?`Linked decision: ${decision.question}`:undefined} className={`flex flex-wrap items-center justify-between gap-3 ${decision.id===linkedDecision?.id?"rounded-md bg-primary/5 ring-2 ring-primary p-3 outline-none scroll-mt-24":""}`}><p className="text-sm min-w-0 break-words">{decision.question}</p><Button variant="outline" size="sm" onClick={() => { setReviewDecisionId({id:decision.id,link:decisionId}); setDismissed(null); }}>Review choices</Button></div>)}</section>}
-      {resolvedDecisions.length > 0 && <section aria-labelledby="resolved-decisions" className="space-y-3"><h2 id="resolved-decisions" className="text-sm font-semibold">Decision history</h2>{resolvedDecisions.map(decision => { const selected = decision.options.find(option => option.id === decision.selectedOptionId); return <details key={decision.id} ref={element=>{if(decision.id===linkedDecision?.id)linkedDecisionElement.current=element;}} tabIndex={decision.id===linkedDecision?.id?-1:undefined} open={decision.id===linkedDecision?.id?true:undefined} className={`rounded-lg border border-border p-4 ${decision.id===linkedDecision?.id?"ring-2 ring-primary outline-none scroll-mt-24":""}`}><summary className="cursor-pointer text-sm font-medium break-words focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{decision.question}</summary><p className="mt-3 text-sm text-muted-foreground whitespace-pre-wrap break-words">{decision.explanation}</p><p className="mt-3 text-sm">Chosen: <strong>{selected?.label ?? "The selected option is unavailable"}</strong>{decision.resolvedAt && <span className="ml-2 text-xs text-muted-foreground"><time dateTime={decision.resolvedAt}>{new Date(decision.resolvedAt).toLocaleString()}</time></span>}</p><p className="mt-2 text-xs text-muted-foreground break-words">{decision.resolvedBy ? <>Recorded choice by <span className="text-foreground">{decision.resolvedBy.displayName}</span>{decision.resolvedBy.viaToken ? " · via a full-access API credential" : " · signed-in session"}</> : "Decision actor was not recorded for this older choice."}</p><ul className="mt-3 space-y-3">{decision.options.map(option => <li key={option.id} className="text-sm border-t border-border pt-3"><p className="font-medium break-words">{option.label}{option.id === decision.selectedOptionId ? " · Chosen" : ""}</p><p className="mt-1 text-xs text-muted-foreground whitespace-pre-wrap break-words">{option.description}</p><p className="mt-2 text-xs font-mono break-words">{option.concreteExample}</p></li>)}</ul></details>; })}</section>}
-      <DecisionModal key={pending?.id ?? "no-decision"} decision={pending ?? null} onResolve={resolve} onDismiss={() => setDismissed(pending?.id ?? null)} isResolving={resolving} />
+      {pendingDecisions.length > 0 && <section aria-labelledby="pending-decisions" className="space-y-3"><h2 id="pending-decisions" className="text-sm font-semibold">Decisions needed ({pendingDecisions.length})</h2>{pendingDecisions.map(decision => <div key={decision.id} ref={element=>{if(decision.id===linkedDecision?.id)linkedDecisionElement.current=element;}} tabIndex={decision.id===linkedDecision?.id?-1:undefined} role={decision.id===linkedDecision?.id?"group":undefined} aria-label={decision.id===linkedDecision?.id?`Linked decision: ${decision.question}`:undefined} className={decision.id===linkedDecision?.id?"rounded-lg ring-2 ring-primary outline-none scroll-mt-24":undefined}><RequirementDecision decision={decision} proof={decisionViews.get(decision.id)?.proof ?? null} revisions={decisionViews.get(decision.id)?.revisions ?? []} tasks={state.tasks} isOwner={isOwner} resolving={resolving} onResolve={resolve} /></div>)}</section>}
+      {resolvedDecisions.length > 0 && <section aria-labelledby="resolved-decisions" className="space-y-3"><h2 id="resolved-decisions" className="text-sm font-semibold">Decision history</h2>{resolvedDecisions.map(decision => { const selected = decision.options.find(option => option.id === decision.selectedOptionId); return <details key={decision.id} ref={element=>{if(decision.id===linkedDecision?.id)linkedDecisionElement.current=element;}} tabIndex={decision.id===linkedDecision?.id?-1:undefined} open={decision.id===linkedDecision?.id?true:undefined} className={`rounded-lg border border-border p-4 ${decision.id===linkedDecision?.id?"ring-2 ring-primary outline-none scroll-mt-24":""}`}><summary className="cursor-pointer text-sm font-medium break-words focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{decision.question}</summary><div className="mt-3"><RequirementDecision decision={decision} proof={decisionViews.get(decision.id)?.proof ?? null} revisions={decisionViews.get(decision.id)?.revisions ?? []} tasks={state.tasks} isOwner={isOwner} resolving={resolving} onResolve={resolve} /></div><p className="mt-3 text-sm text-muted-foreground whitespace-pre-wrap break-words">{decision.explanation}</p><p className="mt-3 text-sm">Chosen: <strong>{selected?.label ?? "The selected option is unavailable"}</strong>{decision.resolvedAt && <span className="ml-2 text-xs text-muted-foreground"><time dateTime={decision.resolvedAt}>{new Date(decision.resolvedAt).toLocaleString()}</time></span>}</p><p className="mt-2 text-xs text-muted-foreground break-words">{decision.resolvedBy ? <>Recorded choice by <span className="text-foreground">{decision.resolvedBy.displayName}</span>{decision.resolvedBy.viaToken ? " · via a full-access API credential" : " · signed-in session"}</> : "Decision actor was not recorded for this older choice."}</p><ul className="mt-3 space-y-3">{decision.options.map(option => <li key={option.id} className="text-sm border-t border-border pt-3"><p className="font-medium break-words">{option.label}{option.id === decision.selectedOptionId ? " · Chosen" : ""}</p><p className="mt-1 text-xs text-muted-foreground whitespace-pre-wrap break-words">{option.description}</p><p className="mt-2 text-xs font-mono break-words">{option.concreteExample}</p></li>)}</ul></details>; })}</section>}
       <EvidenceDrawer
         open={evidenceOpen}
         onOpenChange={setEvidenceOpen}

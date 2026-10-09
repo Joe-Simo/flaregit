@@ -4,6 +4,7 @@ import { ledgerOf } from "./scenario-workflow.js";
 import { runAgentTask } from "./agent-run.js";
 import {restrictedAgentRuntimeOptions} from './restricted-agent-runtime';
 import { globalOf } from "./projects.js";
+import { advanceMergeQueue } from "./coordination-dispatch.js";
 
 export interface AgentParams {
   projectId: string;
@@ -23,6 +24,8 @@ export class FlareGitAgentWorkflow extends WorkflowEntrypoint<Env, AgentParams> 
     try {
       const result = await this.execute(event, step);
       await record(result.commit ? "completed" : "skipped");
+      // A revised change re-enters the merge queue as soon as it is ready again.
+      if (result.commit) await step.do("merge-queue-advance", async () => { try { return (await advanceMergeQueue(this.env, event.payload.projectId)).action; } catch { console.warn("Merge queue advance after agent work was not confirmed"); return "unconfirmed"; } });
       return result;
     } catch (error) {
       await record("failed");
