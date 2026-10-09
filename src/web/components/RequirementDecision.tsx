@@ -6,7 +6,7 @@ import type { ProductDecision, Task } from "@/core/types";
 import { plainValue, type ProofView, type RevisionView } from "../coordination";
 
 const VERDICT: Record<ProofView["verdict"], { label: string; variant: "success" | "warning" | "destructive" }> = {
-  proven: { label: "Proven by running both changes", variant: "success" },
+  proven: { label: "Running both changes shows they disagree", variant: "success" },
   not_reproduced: { label: "Requirements disagree; code does not show it yet", variant: "warning" },
   execution_failed: { label: "Code could not be run; requirements still disagree", variant: "destructive" },
 };
@@ -106,6 +106,7 @@ export function RequirementDecision({ decision, proof, revisions, tasks, isOwner
           <p className="flex items-center gap-1.5 font-medium"><FlaskConical className="h-3.5 w-3.5" aria-hidden="true" />What FlareGit ran</p>
           <p className="text-muted-foreground break-words">Input: {plainValue(proof.input)} → <code>{proof.probe.export}</code> in <code className="break-all">{proof.probe.module}</code></p>
           <p className="break-words">{proof.summary}</p>
+          <p className="text-xs text-muted-foreground">These are the results each change's own code returned when run. They inform your choice; only you decide which requirement wins.</p>
         </div>
       )}
 
