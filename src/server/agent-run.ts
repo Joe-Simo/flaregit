@@ -169,7 +169,9 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
         total += content.length; files[file] = content;
       }
       const acceptedContext=durable.acceptedTarget&&durable.acceptedTarget.kind!=="unborn"?`Existing accepted behavior on ${durable.acceptedTarget.ref} at ${durable.acceptedTarget.acceptedCommit} (preserve unless this task explicitly proposes a change):\n${durable.acceptedTarget.requirements.filter(requirement=>requirement.status==="approved").map(requirement=>`- ${requirement.title}: ${requirement.description}`).join("\n")}`:"";
-      const context = [acceptedContext,durable.context.issue ? `Issue #${durable.context.issue.number}: ${durable.context.issue.title}\n${durable.context.issue.summary}` : "", ...durable.context.comments.map((comment) => comment.summary), durable.startingCommit===null ? "Create the first contribution in this empty Git repository; no existing commit or accepted behavior exists." : `Continue from saved Git commit ${durable.startingCommit}.`].filter(Boolean).join("\n\n");
+      // Shared multi-agent context: concurrent branches and persisted overlap warnings (agent-board.ts).
+      const coordination = await ledger.agentCoordinationContext(runId, task.id);
+      const context = [acceptedContext,...coordination,durable.context.issue ? `Issue #${durable.context.issue.number}: ${durable.context.issue.title}\n${durable.context.issue.summary}` : "", ...durable.context.comments.map((comment) => comment.summary), durable.startingCommit===null ? "Create the first contribution in this empty Git repository; no existing commit or accepted behavior exists." : `Continue from saved Git commit ${durable.startingCommit}.`].filter(Boolean).join("\n\n");
       const ai = new WorkersAIClient({ binding: env.AI, gatewayId: env.AI_GATEWAY_ID, model: DEFAULT_CODE_MODEL, maxCalls: spending.maxCalls, maxOutputTokens: spending.maxOutputTokens, beforeDispatch: async ({ model, inputBytes, maxOutputTokens }) => {
         if (model !== DEFAULT_CODE_MODEL || Date.now() >= deadline) throw new Error("Managed execution model or deadline unavailable");
         await authorize();
