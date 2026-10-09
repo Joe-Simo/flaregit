@@ -1,3 +1,4 @@
+import {IssueLifecycleStore} from '../src/server/issue-lifecycle';
 import {Database} from 'bun:sqlite';
 import {test,expect} from 'bun:test';
 import {PlanningStore,planningMutationSchema,validatePlanningArchive,} from '../src/server/planning-store';
@@ -49,5 +50,26 @@ test('blocked accepted planning retry requires owner and current versions while 
   expect(store.recordAccepted('journal-blocked',1,'a'.repeat(40)).phase).toBe('blocked');act({operation:'setAcceptedStatus',acceptedIssueStatus:null});act({operation:'setAutomation',rules:[]});act({operation:'addItem',issueNumber:1});
   expect(()=>act({operation:'retryAccepted',journalId:'journal-blocked',issueNumber:1,expectedItemVersion:1},false)).toThrow('owner');expect(()=>act({operation:'retryAccepted',journalId:'journal-blocked',issueNumber:1,expectedItemVersion:2})).toThrow('item changed');
   act({operation:'retryAccepted',journalId:'journal-blocked',issueNumber:1,expectedItemVersion:1});expect(store.snapshot().plan.project.items[0]).toMatchObject({status:'Done',fields:{priority:10}});expect(store.snapshot().plan.rules).toEqual([]);expect(store.snapshot().acceptedFollowups[0]!.phase).toBe('applied');const saved=store.snapshot();act({operation:'retryAccepted',journalId:'journal-blocked',issueNumber:1,expectedItemVersion:2});expect(store.snapshot()).toEqual(saved);
+ }finally{db.close();}
+});
+
+test('planning preserves missing-reference contracts while actual tombstones remain gone and never mutate a plan',()=>{
+ const db=new Database(':memory:');try{
+  db.exec('CREATE TABLE issues(number INTEGER PRIMARY KEY,title TEXT,state TEXT,created_at TEXT,updated_at TEXT,author TEXT,closed_by TEXT)');for(const number of [1,2])db.query('INSERT INTO issues VALUES(?,?,?,?,?,?,?)').run(number,`Issue ${number}`,'open','2026-10-08T12:00:00Z','2026-10-08T12:00:00Z','Creator',null);
+  const durable=storage(db),store=new PlanningStore(durable),act=(value:Record<string,unknown>)=>store.mutate(planningMutationSchema.parse({...value,expectedVersion:store.snapshot().version}),true);
+  act({operation:'configure',statuses:['Todo','Done'],fieldTypes:{}});act({operation:'addItem',issueNumber:1});act({operation:'addItem',issueNumber:2});act({operation:'setAcceptedStatus',acceptedIssueStatus:'Done'});
+  const before=store.snapshot();
+  for(const value of [{operation:'addItem',issueNumber:999},{operation:'updateItem',issueNumber:999,expectedItemVersion:1,status:'Done'},{operation:'bulkStatus',issueNumbers:[1,999],expectedVersions:[1,1],status:'Done'}]){
+   let failure:unknown;try{act(value);}catch(error){failure=error;}expect(failure).toMatchObject({status:400});expect(store.snapshot()).toEqual(before);
+  }
+  expect(()=>act({operation:'addItem',issueNumber:999})).toThrow('not accessible');
+  let missingReceipt:unknown;try{act({operation:'retryAccepted',journalId:'missing',issueNumber:999,expectedItemVersion:1});}catch(error){missingReceipt=error;}expect(missingReceipt).toMatchObject({status:404});expect(store.snapshot()).toEqual(before);
+  expect(store.recordAccepted('unknown-issue',999,'a'.repeat(40)).phase).toBe('blocked');
+  // The native lifecycle contract, rather than absence of a live row, establishes 410.
+  const source={projectId:'project',incarnation:'11111111-1111-4111-8111-111111111111',number:2,createdAt:'2026-10-08T12:00:00Z',author:'Creator'};
+  const lifecycle=new IssueLifecycleStore(durable);lifecycle.delete(source,{expectedRevision:0,requestId:crypto.randomUUID(),confirmed:true},'owner',()=>{});
+  const retired=store.snapshot();
+  for(const value of [{operation:'addItem',issueNumber:2},{operation:'updateItem',issueNumber:2,expectedItemVersion:1,status:'Done'},{operation:'bulkStatus',issueNumbers:[1,2],expectedVersions:[1,1],status:'Done'}]){let failure:unknown;try{act(value);}catch(error){failure=error;}expect(failure).toMatchObject({status:410});expect(store.snapshot()).toEqual(retired);}
+  expect(store.recordAccepted('deleted-issue',2,'b'.repeat(40)).phase).toBe('ignored');
  }finally{db.close();}
 });

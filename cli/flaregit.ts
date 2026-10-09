@@ -3,7 +3,8 @@
  * flaregit — scriptable CLI. Output is JSON by default (add --pretty for humans); errors go to stderr as
  * JSON with a non-zero exit code. No interactive prompts anywhere.
  */
-import {prepareIssueStateCommand} from "../src/cli/issue-state-command";
+import {prepareIssueDeletionCommand,readIssueViewResponse} from "../src/cli/issue-delete-command";
+import {prepareIssueStateCommand,parseIssueNumber} from "../src/cli/issue-state-command";
 import { isSafePushOption } from "../src/core/sanitize.js";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -31,6 +32,15 @@ const readConfig = (): Config => {
 
 // ---- argument parsing: positional args plus --flag value / --flag ----
 const argv = process.argv.slice(2);
+// Issue removal uses a boolean confirmation; repository deletion retains its
+// existing named confirmation value. Determine the command without consuming it.
+const confirmationCommand:string[]=[];
+for(let i=0;i<argv.length&&confirmationCommand.length<2;i++){
+  const argument=argv[i]!;
+  if(argument.startsWith("--")){const key=argument.slice(2),next=argv[i+1];if(key!=="confirm"&&!["pretty","agent","help"].includes(key)&&next!==undefined&&!next.startsWith("--"))i++;}
+  else confirmationCommand.push(argument);
+}
+const issueDeletionConfirmation=confirmationCommand[0]==="issue"&&confirmationCommand[1]==="delete";
 const flags = new Map<string, string | true>();
 const pos: string[] = [];
 for (let i = 0; i < argv.length; i++) {
@@ -38,7 +48,7 @@ for (let i = 0; i < argv.length; i++) {
   if (a.startsWith("--")) {
     const key = a.slice(2);
     const next = argv[i + 1];
-    if (next !== undefined && !next.startsWith("--") && !["pretty", "agent", "help"].includes(key)) {
+    if (next !== undefined && !next.startsWith("--") && !["pretty", "agent", "help"].includes(key) && !(key === "confirm" && issueDeletionConfirmation)) {
       flags.set(key, next);
       i++;
     } else flags.set(key, true);
@@ -124,7 +134,7 @@ const HELP = `flaregit — JSON by default (--pretty for humans)
   integrate <repo> <change> [<change> ...]       compose, verify and queue 1-8 changes for review
   workflow status|pause|resume <repo> <instance>  inspect or preserve/resume a running workflow
   log <repo> [--limit N] | tree <repo> [path] | cat <repo> <path>
-  issues <repo> [--state closed] | issue new <repo> "<title>" [--body T] | issue view <repo> <n> | issue close|reopen <repo> <n> [--request UUID --revision N]
+  issues <repo> [--state closed] | issue new <repo> "<title>" [--body T] | issue view <repo> <n> | issue close|reopen <repo> <n> [--request UUID --revision N] | issue delete <repo> <n> --confirm [--request UUID --revision N]
   comment <repo> "<text>" (--issue N | --change ID | --candidate ID) [--path P --line N] [--request UUID]
   candidates <repo> [--all]                      verified candidates waiting for review
   accept|reject <repo> <candidate> [--note T]    decide what becomes history
@@ -275,13 +285,20 @@ async function main() {
   if (cmd === "issue") {
     const id = await repo(rest[0]);
     if (sub === "new") return out(await api("POST", `/p/${id}/issues`, { title: rest[1] ?? fail('Usage: flaregit issue new <repo> "<title>" [--body TEXT]'), body: flag("body") ?? "" }));
-    if (sub === "view") return out(await api("GET", `/p/${id}/issues/${rest[1] ?? fail("Specify an issue number")}`));
+    if(sub==="view"){
+      const issueNumber=parseIssueNumber(rest[1]);if(!TOKEN)fail("Not signed in. Run flaregit auth login with a current token.");
+      return out(await readIssueViewResponse(await fetch(`${API}/api/p/${id}/issues/${issueNumber}`,{method:"GET",redirect:"error",headers:{Authorization:`Bearer ${TOKEN}`}}),issueNumber));
+    }
+    if(sub==="delete"){
+      const command=await prepareIssueDeletionCommand({repositoryId:id,issue:rest[1],confirmed:flags.get("confirm")===true,request:flags.get("request"),revision:flags.get("revision")},()=>api("GET",`/p/${id}/issues/${rest[1]}`));
+      console.error(JSON.stringify(command.metadata));return out(await api("DELETE",command.route,command.body));
+    }
     if(sub==="close"||sub==="reopen"){
       const command=await prepareIssueStateCommand({repositoryId:id,issue:rest[1],action:sub,request:flags.get("request"),revision:flags.get("revision")},()=>api("GET",`/p/${id}/issues/${rest[1]}`));
       console.error(JSON.stringify(command.metadata));
       return out(await api("PATCH",command.route,command.body));
     }
-    fail("Usage: flaregit issue new|view|close|reopen <repo> ...");
+    fail("Usage: flaregit issue new|view|close|reopen|delete <repo> ...");
   }
   if (cmd === "comment") {
     const subject = flag("issue") ? `issue:${flag("issue")}` : flag("change") ? `change:${flag("change")}` : flag("candidate") ? `candidate:${flag("candidate")}` : fail("Pass --issue N, --change ID or --candidate ID");

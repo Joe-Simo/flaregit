@@ -1,3 +1,4 @@
+import {sensitiveLegacyIssueEvent,genericLegacyIssueEvent} from './issue-event-sources';
 import type {InboxRow} from './durable-object';
 
 /** Stored notifications are private history, not continuing authority to read a repository. */
@@ -23,14 +24,14 @@ export async function projectInbox(
   for (const row of rows) {
     // Public discussion authority applies only to this exact source event, never
     // to private notifications from the same repository. Legacy rows stay private.
-    if (/^discussion\.reply\.public\.discussion_[a-f0-9-]{36}\.discussion_[a-f0-9-]{36}$/.test(row.type) || (row.type.startsWith('thread.comment.')||row.type.startsWith('thread.mention.'))) {
+    if (row.issueSource || /^discussion\.reply\.public\.discussion_[a-f0-9-]{36}\.discussion_[a-f0-9-]{36}$/.test(row.type) || (row.type.startsWith('thread.comment.')||row.type.startsWith('thread.mention.'))) {
       try {
         if (await sourceEvent(row)) {
           const current = await sourceEvent(row);
           if (current) { visible.push(current); sourceRows.set(current,row); }
         }
       } catch { /* Unconfirmed source events are withheld. */ }
-    } else if (permitted.has(row.project_id)) visible.push(row);
+    } else if (permitted.has(row.project_id)) visible.push(sensitiveLegacyIssueEvent(row.type)?{...row,title:genericLegacyIssueEvent(row.type)}:row);
   }
   // Public lookups can be slow; revalidate member history after those awaits too.
   await Promise.all([...permitted].map(async id => {

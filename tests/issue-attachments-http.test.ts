@@ -71,3 +71,50 @@ test(raceName,async()=>{
   const fresh=await fetch(`${base}/${next}/content`,{headers});expect(fresh.status).toBe(200);expect(new Uint8Array(await fresh.arrayBuffer())).toEqual(bytes);
  }finally{await fetch(origin+'/fixture/resume').catch(()=>undefined);await inFlight?.catch(()=>undefined);await mf.dispose();}
 },60000);
+
+const copyProofName='a new issue attachment cannot adopt old removed issue bytes without its own verified upload';
+test(copyProofName,async()=>{
+ if(await workerdChild('tests/issue-attachments-http.test.ts',copyProofName))return;
+ const {mf,endpoint,headers}=await fixture(),root=endpoint.origin+'/api/p/p123456789abc/issues',bytes=new Uint8Array([0,255,42,128,7]),sha256=await hash(bytes);
+ const prepare=(issue:number,id:string)=>fetch(`${root}/${issue}/attachments`,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({id,name:'private-evidence.bin',sha256,size:bytes.length})});
+ try{
+  const oldId=crypto.randomUUID();expect((await prepare(1,oldId)).status).toBe(201);
+  expect((await fetch(`${root}/1/attachments/${oldId}/content`,{method:'PUT',headers,body:bytes})).status).toBe(200);
+  const detail=await(await fetch(root+'/1',{headers})).json() as {stateRevision:number};
+  expect((await fetch(root+'/1',{method:'DELETE',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({expectedRevision:detail.stateRevision,requestId:crypto.randomUUID(),confirmed:true})})).status).toBe(200);
+  const newId=crypto.randomUUID();expect((await prepare(2,newId)).status).toBe(201);
+  const base=`${root}/2/attachments/${newId}`;
+  // Knowledge of an old digest and size proves no possession of its bytes.
+  expect((await fetch(base+'/reconcile',{method:'POST',headers})).status).not.toBe(200);
+  expect((await fetch(base+'/content',{headers})).status).not.toBe(200);
+  expect((await fetch(base+'/content',{method:'PUT',headers,body:bytes})).status).toBe(200);
+  const reconciled=await fetch(base+'/reconcile',{method:'POST',headers});expect(reconciled.status).toBe(200);expect((await reconciled.json() as Attachment).phase).toBe('verified');
+  const download=await fetch(base+'/content',{headers});expect(download.status).toBe(200);expect(new Uint8Array(await download.arrayBuffer())).toEqual(bytes);
+ }finally{await mf.dispose();}
+},60000);
+
+const ownInputName='attachment lost acknowledgments retain original caller proof without certifying uncertain bytes';
+test(ownInputName,async()=>{
+ if(await workerdChild('tests/issue-attachments-http.test.ts',ownInputName))return;
+ const {mf,endpoint,headers}=await fixture(),origin=endpoint.origin,base=origin+'/api/p/p123456789abc/issues/1/attachments';
+ const bytes=new Uint8Array([255,0,13,10,128,6]),sha256=await hash(bytes),id=crypto.randomUUID(),input={id,name:'owned-transfer.bin',sha256,size:bytes.length};
+ const prepare=(value:typeof input)=>fetch(base,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(value)});
+ const upload=(target:string,value:Uint8Array<ArrayBuffer>)=>fetch(`${base}/${target}/content`,{method:'PUT',headers,body:new ReadableStream<Uint8Array>({start(controller){controller.enqueue(value);controller.close();}})});
+ try{
+  expect((await prepare(input)).status).toBe(201);expect((await fetch(origin+'/fixture/drop-ack')).status).toBe(200);
+  expect((await upload(id,bytes)).status).not.toBe(200);
+  const uncertain=await fetch(`${base}/${id}/reconcile`,{method:'POST',headers});const uncertainBody=await uncertain.text();expect(uncertainBody.toLowerCase()).not.toContain('must upload');expect(uncertainBody.toLowerCase()).not.toContain('upload bytes before');expect(uncertainBody.toLowerCase()).not.toContain('upload the original file bytes');if(uncertain.ok)expect((JSON.parse(uncertainBody) as Attachment).phase).not.toBe('verified');
+  expect((await fetch(`${base}/${id}/content`,{headers})).status).not.toBe(200);
+  expect((await fetch(origin+'/fixture/complete-late-write')).status).toBe(200);
+  const late=await fetch(`${base}/${id}/reconcile`,{method:'POST',headers});if(late.ok)expect((await late.json() as Attachment).phase).toBe('pending');
+  expect((await prepare(input)).status).toBe(201);expect((await upload(id,bytes)).status).toBe(200);
+  const confirmed=await fetch(`${base}/${id}/reconcile`,{method:'POST',headers});expect(confirmed.status).toBe(200);expect((await confirmed.json() as Attachment).phase).toBe('verified');
+  expect(new Uint8Array(await(await fetch(`${base}/${id}/content`,{headers})).arrayBuffer())).toEqual(bytes);
+  const list=await(await fetch(base,{headers})).json() as {attachments:Attachment[]};expect(list.attachments).toHaveLength(1);expect(list.attachments[0]!.id).toBe(id);
+  for(const invalid of [new Uint8Array([1,2,3,4,5,6,7]),bytes.subarray(0,2)]){
+   const original={...input,id:crypto.randomUUID(),name:'invalid-transfer.bin',sha256:await hash(new Uint8Array([...bytes,9])),size:bytes.length+1};expect((await prepare(original)).status).toBe(201);expect((await upload(original.id,invalid)).status).not.toBe(200);
+   const denied=await fetch(`${base}/${original.id}/reconcile`,{method:'POST',headers});expect(denied.status).toBe(409);expect((await denied.text()).toLowerCase()).toContain('upload the original file bytes');
+   expect((await prepare(original)).status).toBe(201);expect((await upload(original.id,new Uint8Array([...bytes,9]))).status).toBe(200);expect((await fetch(`${base}/${original.id}/reconcile`,{method:'POST',headers})).status).toBe(200);
+  }
+ }finally{await mf.dispose();}
+},60000);

@@ -64,3 +64,8 @@ test('final source release uses current sanitized prose and catches principal re
  let authorized=true;calls=0;
  await expect(projectInbox([source],'activity',async()=>false,async()=>{if(!authorized)throw Error('Principal revoked during release');},async item=>{if(++calls===3)authorized=false;return item;})).rejects.toThrow('Principal revoked during release');
 });
+test('legacy unbound issue/comment prose is generic while exact issue sources are revalidated',async()=>{
+ const legacy={...row(3,'allowed'),kind:'activity' as const,type:'issue.opened',title:'Deleted private title'},comment={...legacy,id:2,type:'comment.added',title:'Deleted private path.ts'},bound={...legacy,id:1,issueSource:{number:12,incarnation:'11111111-1111-4111-8111-111111111111'}};
+ let active=true,calls=0;const projection=await projectInbox([legacy,comment,bound],'activity',async()=>true,async()=>{},async item=>{calls++;if(calls===2)active=false;return active?item:null;});
+ expect(projection.items.map(item=>item.title)).toEqual(['Issue activity','Comment added']);expect(JSON.stringify(projection)).not.toContain('Deleted private');
+});

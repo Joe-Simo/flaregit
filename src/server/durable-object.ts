@@ -1,3 +1,5 @@
+import {ensureIssueEventSources,bindIssueActivity,sensitiveLegacyIssueEvent,genericLegacyIssueEvent,issueEventSourceSchema,type IssueEventSource} from './issue-event-sources';
+import {IssueLifecycleStore,IssueLifecycleError,issueDeletionSchema,ensureIssueLifecycleSchema,activeIssueSql,isIssueActive,type IssueDeletionResult} from './issue-lifecycle';
 import {MembershipEpochs} from './membership-epochs';
 import {IssueStateLedger,IssueStateError,issueStateMutationSchema,type IssueStateScope,type IssueStateCredential,type IssueStateReply,type IssueStateResult} from './issue-state';
 import {plainTextMentions,type MentionRecipient} from './plain-text-mentions';
@@ -321,6 +323,7 @@ export interface InboxRow {
   title: string;
   created_at: string;
   state: "unread" | "archived" | "snoozed";
+  issueSource?:IssueEventSource;
 }
 
 export interface ApiTokenRow {
@@ -658,11 +661,11 @@ export interface Ledger {
   joinRepositoryInvitation(token:string,eventId:string,userId:string,label:string|undefined,credential:TaskCreationCredential):ReturnType<RepositoryController["joinRepositoryInvitation"]>;
   createInvite(createdBy: string): Promise<string>;
   acceptInvite(token: string, userId: string, label?: string): Promise<boolean>;
-  logActivity(actor: string, type: string, summary: string, opts?: { exceptUser?: string }): Promise<void>;
+  logActivity(actor: string, type: string, summary: string, opts?: { exceptUser?: string;issueNumber?:number }): Promise<void>;
   threadPreference(userId:string,subject:string,input?:unknown,sessionExpiresAt?:number):Promise<ThreadPreference>;
   memberThreadNotification(userId:string,incarnation:string,subject:string,commentId:number,preferenceVersion:number,kind?:'subscription'|'mention'):Promise<{projectName:string}|null>;
   mentionProfileSnapshot():Promise<{handle:string;version:number;active:boolean}>;
-  addInbox(item: { projectId: string; projectName: string; kind: "direct" | "activity"; type: string; title: string; eventKey?:string }): Promise<void>;
+  addInbox(item: { projectId: string; projectName: string; kind: "direct" | "activity"; type: string; title: string; eventKey?:string;issueSource?:IssueEventSource }): Promise<void>;
   inboxPreference(projectId:string):Promise<InboxPreference>;
   updateInboxPreference(projectId:string,input:unknown):Promise<InboxPreference>;
   inboxSnapshot(): Promise<InboxRow[]>;
@@ -714,6 +717,8 @@ export interface Ledger {
   getIssue(n: number): Promise<IssueRow | null>;
   createIssue(i: { title: string; body: string; author: string }): Promise<IssueRow>;
   createMemberIssue(userId:string,input:MemberIssueInput):Promise<IssueRow>;
+  issueAvailability(n:number,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<{number:number;status:'active'|'deleted'|'missing'}>>;
+  deleteIssueMutation(n:number,value:unknown,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<IssueDeletionResult>>;
   issueStateMutation(n:number,value:unknown,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<IssueStateResult>>;
   setIssueState(n: number, state: "open" | "closed", by: string): Promise<IssueRow | null>;
   listComments(subject: string): Promise<CommentRow[]>;
@@ -869,7 +874,8 @@ export interface Ledger {
   prepareRetainedInput(taskId:string,workflowId:string,candidateId:string,id:string,followup?:boolean):Promise<RetainedInput>;
   recordRetainedInput(input:RetainedInput,proof:{commit:string;base:string|null;rootCommit?:string;rootAncestryVerified?:true}):Promise<RetainedInputReceipt>;
   applyRebase(taskId: string, r: { commit?: string; base?: string; parentAccepted?: boolean; failed?: string; expected?:RetainedInput; receiptId?:string;applicationId?:string }): Promise<void>;
-  listActivity(limit: number): Promise<ActivityRow[]>;
+  listActivity(limit: number,userId?:string,credentialHash?:string,sessionExpiresAt?:number): Promise<ActivityRow[]>;
+  issueEventAvailable(userId:string,source:IssueEventSource):Promise<{projectName:string}|null>;
   setVerificationPolicy(policy: Record<string, unknown>): Promise<void>;
   destroy(): Promise<void>;
   repositoryDeletionPending(): Promise<boolean>;
@@ -917,9 +923,9 @@ export interface Ledger {
   operationalBackupRead(userId:string,expiresAt:number):Promise<ReturnType<OperationalBackupRetention['exportAudit']>>;
   operationalBackupHold(userId:string,expiresAt:number,id:string,held:boolean):Promise<void>;
   operationalBackupRecover(userId:string,expiresAt:number,id:string):Promise<unknown>;
-  metadataArchiveExport(userId:string):Promise<{archive:MetadataArchive;sha256:string}>;
+  metadataArchiveExport(userId:string,credential:{viaToken:boolean;credentialHash?:string;sessionExpiresAt?:number;includeHistory:boolean}):Promise<{archive:MetadataArchive;sha256:string}>;
   metadataArchiveRestore(userId:string,value:unknown,requestId:string,sha256:string,sessionExpiresAt:number):Promise<Awaited<ReturnType<MetadataArchives["restore"]>>>;
-  metadataArchiveHistory(userId:string):Promise<ReturnType<MetadataArchives["history"]>>;
+  metadataArchiveHistory(userId:string,credential:{viaToken:boolean;credentialHash?:string;sessionExpiresAt?:number;includeHistory:boolean}):Promise<ReturnType<MetadataArchives["history"]>>;
   getState(): Promise<FlareGitProjectState>;
   repositoryLifecycle(): Promise<RepositoryLifecycle>;
   repositoryLifecycleTransition(action: LifecycleAction, actor: LifecycleActor): Promise<LifecycleResult>;
@@ -2541,6 +2547,7 @@ export class RepositoryController extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    ensureIssueLifecycleSchema(ctx.storage);
     ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS project (id INTEGER PRIMARY KEY CHECK (id = 1), doc TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, at TEXT NOT NULL);
@@ -2724,15 +2731,25 @@ export class RepositoryController extends DurableObject<Env> {
     if(!role||(owner&&role!=="owner"))throw new MetadataArchiveError(owner?"Only the owner can restore metadata":"Repository membership required",403);
     const state=this.load();if(owner&&state.lifecycle?.state==='archived')throw new MetadataArchiveError("Repository is archived and read-only");if(!state.acceptedState.currentCommit)throw new MetadataArchiveError("Metadata archives require an accepted Git head");
     new DurableWikiStore(this.ctx.storage);new PlanningStore(this.ctx.storage);new IssueFeatureStore(this.ctx.storage);new RepositoryDiscussions(this.ctx.storage,true);new RepositoryDiscussions(this.ctx.storage,false);new ReleaseRecords(this.ctx.storage);new MigrationConversationPublication(this.ctx.storage);
-    return {projectId:state.projectId,incarnation:this.readRepositoryIncarnation(),head:state.acceptedState.currentCommit};
+    return {projectId:state.projectId,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation(),head:state.acceptedState.currentCommit};
   }
-  async metadataArchiveExport(userId:string){const scope=this.metadataArchiveContext(userId),result=await new MetadataArchives(this.ctx.storage).export(scope);if(JSON.stringify(this.metadataArchiveContext(userId))!==JSON.stringify(scope))throw new MetadataArchiveError("Archive source identity changed");return result;}
+  private async metadataArchiveReadAuthority(userId:string,credential:{viaToken:boolean;credentialHash?:string;sessionExpiresAt?:number;includeHistory:boolean}){
+    if(!credential||typeof credential.viaToken!=="boolean"||typeof credential.includeHistory!=="boolean")throw new MetadataArchiveError("Current archive credential is required",403);
+    const initial=await this.repositoryAccessFence(userId);initial.assert();const scope=this.metadataArchiveContext(userId),permission=await this.repositoryAccessFence(userId);permission.assert();const account=accountOf(this.env,await accountKeyFor(userId));
+    const assert=()=>{permission.assert();if(JSON.stringify(this.metadataArchiveContext(userId))!==JSON.stringify(scope)||!credential.viaToken&&(!Number.isFinite(credential.sessionExpiresAt)||credential.sessionExpiresAt!<=Date.now()))throw new MetadataArchiveError("Archive credential or source changed",403);};
+    const authorize=async()=>{assert();if(await account.accountLifecycle()!=="active"||credential.viaToken&&(!credential.credentialHash||!await account.apiTokenHashCanRead(credential.credentialHash,userId,scope.projectId)))throw new MetadataArchiveError("Archive authentication changed",403);assert();};await authorize();
+    const directOwner=this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",userId).toArray()[0]?.role==="owner",includeHistory=credential.includeHistory&&directOwner&&(!credential.viaToken||!!credential.credentialHash&&await account.apiTokenHashCanAdminister(credential.credentialHash,userId,scope.projectId));assert();
+    const assertMode=async()=>{await authorize();if(includeHistory){if(this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",userId).toArray()[0]?.role!=="owner"||credential.viaToken&&(!credential.credentialHash||!await account.apiTokenHashCanAdminister(credential.credentialHash,userId,scope.projectId)))throw new MetadataArchiveError("Archive history authority changed",403);assert();}};
+    return{scope,includeHistory,authorize:assertMode};
+  }
+  async metadataArchiveExport(userId:string,credential:{viaToken:boolean;credentialHash?:string;sessionExpiresAt?:number;includeHistory:boolean}){const authority=await this.metadataArchiveReadAuthority(userId,credential),result=await new MetadataArchives(this.ctx.storage).export(authority.scope,authority.includeHistory);await authority.authorize();return result;}
   async metadataArchiveRestore(userId:string,value:unknown,requestId:string,sha256:string,sessionExpiresAt:number){
     const scope=this.metadataArchiveContext(userId,true),state=this.load();
     if(Object.keys(state.tasks).length||Object.keys(state.candidates).length||state.journal.length||state.acceptedState.history.length)throw new MetadataArchiveError("Destination must contain no task or review history");
-    return new MetadataArchives(this.ctx.storage).restore(value,scope,requestId,sha256,()=>{const current=this.load();if(Object.keys(current.tasks).length||Object.keys(current.candidates).length||current.journal.length||current.acceptedState.history.length)throw new MetadataArchiveError("Destination acquired task or review history");if(JSON.stringify(this.metadataArchiveContext(userId,true))!==JSON.stringify(scope))throw new MetadataArchiveError("Destination identity changed");},()=>this.authorizeRebaseRecovery({userId,displayName:"Repository owner",viaToken:false},undefined,sessionExpiresAt));
+    return new MetadataArchives(this.ctx.storage).restore(value,scope,requestId,sha256,()=>{const current=this.load();if(Object.keys(current.tasks).length||Object.keys(current.candidates).length||current.journal.length||current.acceptedState.history.length)throw new MetadataArchiveError("Destination acquired task or review history");if(JSON.stringify(this.metadataArchiveContext(userId,true))!==JSON.stringify(scope))throw new MetadataArchiveError("Destination identity changed");},()=>this.authorizeRebaseRecovery({userId,displayName:"Repository owner",viaToken:false},undefined,sessionExpiresAt),userId);
   }
-  async metadataArchiveHistory(userId:string){this.metadataArchiveContext(userId);return new MetadataArchives(this.ctx.storage).history();}
+  async metadataArchiveHistory(userId:string,credential:{viaToken:boolean;credentialHash?:string;sessionExpiresAt?:number;includeHistory:boolean}){const authority=await this.metadataArchiveReadAuthority(userId,credential),result=new MetadataArchives(this.ctx.storage).history(authority.includeHistory);await authority.authorize();return result;}
+
   async getState(): Promise<FlareGitProjectState> {
     const state=this.load(true);if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='task_target_generation_heads'").toArray().length)return state;
     if(!this.ctx.storage.sql.exec("SELECT task_id FROM task_target_generation_heads WHERE event_id IS NOT NULL LIMIT 1").toArray().length)return state;
@@ -2929,7 +2946,7 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   private initialForkScope(record:TaskCreationIntentRecord):InitialForkCredentialScope{return{eventId:record.eventId,allocationId:record.allocationId,taskId:record.taskId,projectId:record.projectId,incarnation:record.incarnation,canonicalRepoName:record.canonicalRepoName,workspaceRepoName:record.workspaceRepoName,accountKey:record.accountKey,actorId:record.actor.userId};}
-  private assertTaskCreationIntentLocal(record:TaskCreationIntentRecord,actorId:string):void{const state=this.load();if(this.repositoryDeleting()||record.actor.userId!==actorId||state.projectId!==record.projectId||state.canonicalRepoName!==record.canonicalRepoName||this.readRepositoryIncarnation()!==record.incarnation||!this.localRepositoryMember(actorId,true))throw Error("Saved task creation scope changed");if(record.phase!=="committed"&&this.captureTaskCreationTarget(actorId,record.input).scope!==record.selection.scope)throw Error("Original task creation source changed");}
+  private assertTaskCreationIntentLocal(record:TaskCreationIntentRecord,actorId:string):void{const state=this.load();if(this.repositoryDeleting()||record.actor.userId!==actorId||state.projectId!==record.projectId||state.canonicalRepoName!==record.canonicalRepoName||this.readRepositoryIncarnation()!==record.incarnation||!this.localRepositoryMember(actorId,true))throw Error("Saved task creation scope changed");if(record.phase!=="committed"&&record.input.issue!==null&&!isIssueActive(this.ctx.storage,record.input.issue))throw new IssueLifecycleError("Original issue is unavailable; no new task was registered",410);if(record.phase!=="committed"&&this.captureTaskCreationTarget(actorId,record.input).scope!==record.selection.scope)throw Error("Original task creation source changed");}
   async prepareTaskCreationIntent(taskId:string,actorId:string,input:TaskCreationInput,credential:TaskCreationCredential):Promise<TaskCreationIntentRecord>{
     const assert=await this.taskCreationCredentialFence(actorId,credential);assert();const ledger=new TaskCreationIntents(this.ctx.storage),old=ledger.forTask(taskId);if(old){this.assertTaskCreationIntentLocal(old,actorId);if(taskCreationPayload(old.input)!==taskCreationPayload(input))throw Error("Saved task creation request changed");return old;}
     if(this.load().tasks[taskId])throw Error("Saved task must be recovered through its creation receipt");const incarnation=new PrivateRecoveryOperations(this.ctx.storage).incarnation(),selection=await this.resolveTaskCreationTarget(actorId,input,credential),accountKey=await accountKeyFor(actorId);assert();const state=this.load();const intent=taskCreationIntentSchema.parse({eventId:crypto.randomUUID(),allocationId:crypto.randomUUID(),nativeProtocol:"sdk-only",taskId,actor:{userId:actorId,viaToken:credential.viaToken,credentialHash:credential.credentialHash??null,sessionExpiresAt:credential.sessionExpiresAt??null},accountKey,projectId:state.projectId,incarnation,canonicalRepoName:state.canonicalRepoName,workspaceRepoName:`t-${state.projectId}-${taskId}`,input,selection});return ledger.prepare(intent,()=>{assert();this.assertTaskCreationIntentLocal({...intent,phase:"prepared",createdAt:0,updatedAt:0},actorId);});
@@ -3005,6 +3022,7 @@ export class RepositoryController extends DurableObject<Env> {
     const next={...s,tasks:{...s.tasks,[task.id]:task}};
     this.ctx.storage.transactionSync(() => {
       assertCredential();
+      if(task.issue!==undefined&&!isIssueActive(this.ctx.storage,task.issue))throw new IssueLifecycleError("Original issue is unavailable; no new task was registered",410);
       if((creationInput||boundIntent)&&!this.localRepositoryMember(actorId!,true))throw new Error("Task creation access changed");
       if(creationInput)assertExternalTaskProvenance(creationInput,actorId,this.localRepositoryMember(actorId!,true)??undefined,task);
       if(task.acceptedTarget){const current=freezeAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),this.load(),new PrivateRecoveryOperations(this.ctx.storage).incarnation(),task.acceptedTarget.ref);assertCompatibleAcceptedTargetBatch([task.acceptedTarget,current]);}
@@ -4559,29 +4577,34 @@ export class RepositoryController extends DurableObject<Env> {
   }
 
   // ---- activity feed ----
-  async logActivity(actor: string, type: string, summary: string, opts?: { exceptUser?: string }): Promise<void> {
-    this.ctx.storage.sql.exec("INSERT INTO activity (at, actor, type, summary) VALUES (?, ?, ?, ?)", new Date().toISOString(), actor, type, summary.slice(0, 300));
+  async logActivity(actor: string, type: string, summary: string, opts?: { exceptUser?: string;issueNumber?:number }): Promise<void> {
+    ensureIssueEventSources(this.ctx.storage);
+    const issueSource=opts?.issueNumber!==undefined?{number:opts.issueNumber,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation()}:undefined;
+    const saved=this.ctx.storage.sql.exec<{id:number}>("INSERT INTO activity (at, actor, type, summary) VALUES (?, ?, ?, ?) RETURNING id", new Date().toISOString(), actor, type, summary.slice(0, 300)).one();if(issueSource)bindIssueActivity(this.ctx.storage,saved.id,issueSource);
     this.ctx.storage.sql.exec("DELETE FROM activity WHERE id <= (SELECT MAX(id) FROM activity) - 500");
-    await this.notifyMembers(type, summary, opts?.exceptUser);
+    this.ctx.storage.sql.exec("DELETE FROM activity_issue_sources WHERE NOT EXISTS(SELECT 1 FROM activity WHERE activity.id=activity_issue_sources.activity_id)");
+    await this.notifyMembers(type, summary, opts?.exceptUser,issueSource);
   }
 
   /**
    * Fans an activity out to every member's inbox. Things that need a person (a change to review, a decision,
    * a blocked landing or stack) are "direct"; everything else is repository chatter kept apart from them.
    */
-  private async notifyMembers(type: string, summary: string, exceptUser?: string): Promise<void> {
+  private async notifyMembers(type: string, summary: string, exceptUser?: string,issueSource?:IssueEventSource): Promise<void> {
     const DIRECT = new Set(["integration.not_started", "mirror.failed", "review.requested", "task.ready", "decision.needed", "integration.blocked", "integration.stale", "stack.rebase_blocked"]);
     const CHATTER = new Set(["issue.opened", "issue.closed", "comment.added", "review.approved", "review.rejected", "integration.accepted", "stack.rebased", "member.joined", "task.created"]);
     if (!DIRECT.has(type) && !CHATTER.has(type)) return;
     const s = this.state ?? (() => { try { return this.load(); } catch { return null; } })();
     if (!s) return;
+    const sourceActive=()=>!issueSource||this.readRepositoryIncarnation()===issueSource.incarnation&&isIssueActive(this.ctx.storage,issueSource.number);if(!sourceActive())return;
     const members = this.ctx.storage.sql.exec<{ user_id: string }>("SELECT user_id FROM members").toArray();
     await Promise.all(
       members
         .filter((m) => !exceptUser || !m.user_id.endsWith(exceptUser))
         .map(async (m) => {
           const account = accountOf(this.env, await accountKeyFor(m.user_id));
-          await account.addInbox({ projectId: s.projectId, projectName: s.projectName, kind: DIRECT.has(type) ? "direct" : "activity", type, title: summary.slice(0, 200) }).catch(() => undefined);
+          if(!sourceActive())return;
+          await account.addInbox({ projectId: s.projectId, projectName: s.projectName, kind: DIRECT.has(type) ? "direct" : "activity", type, title: summary.slice(0, 200),...(issueSource?{issueSource}:{}) }).catch(() => undefined);
         })
     );
   }
@@ -4635,7 +4658,8 @@ export class RepositoryController extends DurableObject<Env> {
 
 
   // ---- issues and conversations (per project) ----
-  private issueRow(n: number): IssueRow | null {
+  private issueRow(n:number):IssueRow|null{if(!isIssueActive(this.ctx.storage,n))return null;return this.rawIssueRow(n);}
+  private rawIssueRow(n: number): IssueRow | null {
     const row = this.ctx.storage.sql
       .exec("SELECT i.*, (SELECT COUNT(*) FROM comments c WHERE c.subject = 'issue:' || i.number) AS comments FROM issues i WHERE number = ?", n)
       .toArray()[0];
@@ -4644,7 +4668,7 @@ export class RepositoryController extends DurableObject<Env> {
   private async issueAttachmentReply<T>(operation:()=>Promise<T>):Promise<IssueAttachmentReply<T>>{try{return{ok:true,value:await operation()};}catch(error){if(error instanceof z.ZodError)return{ok:false,status:400,error:"Invalid attachment request"};if(error instanceof LfsStorageError&&[400,401,403,404,409,410,413,415,422,429,503].includes(error.status))return{ok:false,status:error.status,error:error.message.replace(/LFS/g,"Attachment")};return{ok:false,status:503,error:"Attachment outcome was not confirmed. Retry the original file and request identity."};}}
   private issueAttachmentsInstance?:IssueAttachments;
   private issueAttachments(){return this.issueAttachmentsInstance??=new IssueAttachments(this.ctx.storage);}
-  private issueAttachmentScope(number:number):IssueAttachmentScope{if(!Number.isSafeInteger(number)||number<1)throw new LfsStorageError("Invalid issue",400);const issue=this.issueRow(number);if(!issue)throw new LfsStorageError("Issue not found",404);return{projectId:this.load().projectId,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation(),issue:number,issueCreatedAt:issue.created_at,issueAuthor:issue.author};}
+  private issueAttachmentScope(number:number):IssueAttachmentScope{if(!Number.isSafeInteger(number)||number<1)throw new LfsStorageError("Invalid issue",400);const issue=this.issueRow(number);if(!issue)throw new LfsStorageError(new IssueLifecycleStore(this.ctx.storage).tombstone(number)?"Issue removed":"Issue not found",new IssueLifecycleStore(this.ctx.storage).tombstone(number)?410:404);return{projectId:this.load().projectId,incarnation:new PrivateRecoveryOperations(this.ctx.storage).incarnation(),issue:number,issueCreatedAt:issue.created_at,issueAuthor:issue.author};}
   private async issueAttachmentAuthority(number:number,actor:HumanDecisionActor,write:boolean,credentialHash?:string,sessionExpiresAt?:number){
     const initial=await this.repositoryAccessFence(actor.userId,write);initial.assert();const scope=this.issueAttachmentScope(number);const permission=await this.repositoryAccessFence(actor.userId,write);permission.assert();
     const assert=()=>{try{permission.assert();if(JSON.stringify(this.issueAttachmentScope(number))!==JSON.stringify(scope)||write&&this.load().lifecycle?.state==='archived'||!actor.viaToken&&(!sessionExpiresAt||sessionExpiresAt<=Date.now()))throw Error("Issue attachment authority changed");}catch{throw new LfsStorageError("Issue attachment access changed",403);}};
@@ -4666,7 +4690,7 @@ export class RepositoryController extends DurableObject<Env> {
 
   async listIssues(state: "open" | "closed"): Promise<IssueRow[]> {
     return this.ctx.storage.sql
-      .exec("SELECT i.*, (SELECT COUNT(*) FROM comments c WHERE c.subject = 'issue:' || i.number) AS comments FROM issues i WHERE state = ? ORDER BY number DESC LIMIT 200", state)
+      .exec(`SELECT i.*, (SELECT COUNT(*) FROM comments c WHERE c.subject = 'issue:' || i.number) AS comments FROM issues i WHERE state = ? AND ${activeIssueSql('i')} ORDER BY number DESC LIMIT 200`, state)
       .toArray().map(row=>{const issue=row as unknown as IssueRow;const origin=new MigrationConversationPublication(this.ctx.storage).issueOrigin(issue.number),archiveOrigin=new MetadataArchives(this.ctx.storage).origin("issues",String(issue.number));return {...issue,...(origin?{importedOrigin:origin}:{}),...(archiveOrigin?{archiveOrigin}:{})};});
   }
   async getIssue(n: number): Promise<IssueRow | null> {
@@ -4675,6 +4699,8 @@ export class RepositoryController extends DurableObject<Env> {
   async createMemberIssue(userId:string,input:MemberIssueInput):Promise<IssueRow>{
     if(typeof input.title!=="string"||typeof input.body!=="string"||typeof input.author!=="string"||!input.title.trim()||input.title.trim().length>200||input.body.trim().length>20_000||!input.author.trim()||input.author.trim().length>120)throw new Error("Invalid issue creation content");
     const normalized={...input,title:input.title.trim(),body:input.body.trim(),author:input.author.trim()};
+    const initial=await this.repositoryAccessFence(userId,true);initial.assert();
+    const incarnation=new PrivateRecoveryOperations(this.ctx.storage).incarnation();ensureIssueEventSources(this.ctx.storage);
     const authority=await this.repositoryAccessFence(userId,true);
     let opened=false;
     const issue=this.ctx.storage.transactionSync(()=>{
@@ -4686,19 +4712,27 @@ export class RepositoryController extends DurableObject<Env> {
       const at=new Date().toISOString();
       const number=this.ctx.storage.sql.exec<{number:number}>("INSERT INTO issues(title,body,author,created_at,updated_at) VALUES(?,?,?,?,?) RETURNING number",normalized.title,normalized.body,normalized.author,at,at).one().number;
       this.ctx.storage.sql.exec("INSERT INTO member_issue_receipts VALUES(?,?,?,?)",userId,normalized.idempotencyKey,payload,number);
-      this.ctx.storage.sql.exec("INSERT INTO activity(at,actor,type,summary) VALUES(?,?,?,?)",at,normalized.author,"issue.opened",`#${number} opened: ${normalized.title}`.slice(0,300));opened=true;
+      const activity=this.ctx.storage.sql.exec<{id:number}>("INSERT INTO activity(at,actor,type,summary) VALUES(?,?,?,?) RETURNING id",at,normalized.author,"issue.opened",`#${number} opened: ${normalized.title}`.slice(0,300)).one();bindIssueActivity(this.ctx.storage,activity.id,{number,incarnation});opened=true;
       return this.issueRow(number)!;
     });
-    if(opened)await this.notifyMembers("issue.opened",`#${issue.number} opened: ${issue.title}`).catch(()=>undefined);
+    if(opened)await this.notifyMembers("issue.opened",`#${issue.number} opened: ${issue.title}`,undefined,{number:issue.number,incarnation}).catch(()=>undefined);
     return issue;
   }
   async createIssue(i: { title: string; body: string; author: string }): Promise<IssueRow> {
     const now = new Date().toISOString();
     const n = this.ctx.storage.sql.exec<{ number: number }>("INSERT INTO issues (title, body, author, created_at, updated_at) VALUES (?, ?, ?, ?, ?) RETURNING number", i.title, i.body, i.author, now, now).toArray()[0]!.number;
-    await this.logActivity(i.author, "issue.opened", `#${n} opened: ${i.title}`);
+    await this.logActivity(i.author, "issue.opened", `#${n} opened: ${i.title}`,{issueNumber:n});
     return this.issueRow(n)!;
   }
-  private issueStateScope(number:number):IssueStateScope{if(!Number.isSafeInteger(number)||number<1)throw new IssueStateError("Invalid issue",400);const issue=this.issueRow(number);if(!issue)throw new IssueStateError("Unknown issue",404);return{projectId:this.load().projectId,incarnation:this.readRepositoryIncarnation()??"",number,createdAt:issue.created_at,author:issue.author};}
+  private async issueLifecycleAuthority(number:number,actor:HumanDecisionActor,credential:IssueStateCredential,admin:boolean){
+    const initial=await this.repositoryAccessFence(actor.userId,admin).catch(()=>{throw new IssueLifecycleError("Issue access denied",403);});initial.assert();if(admin)new PrivateRecoveryOperations(this.ctx.storage).incarnation();const permission=await this.repositoryAccessFence(actor.userId,admin);permission.assert();const projectId=this.load().projectId,incarnation=this.readRepositoryIncarnation();
+    const assert=()=>{try{permission.assert();if(this.repositoryDeleting()||this.load().projectId!==projectId||this.readRepositoryIncarnation()!==incarnation||admin&&this.load().lifecycle?.state==='archived'||admin&&permission.role!=='admin')throw Error("Issue scope changed");if(!actor.viaToken&&(!credential.sessionExpiresAt||credential.sessionExpiresAt<=Date.now()))throw new IssueLifecycleError("Issue session expired",401);}catch(error){if(error instanceof IssueLifecycleError)throw error;throw new IssueLifecycleError("Issue access changed",403);}};
+    const authorize=async()=>{assert();const account=accountOf(this.env,await accountKeyFor(actor.userId));assert();if(await account.accountLifecycle()!=='active')throw new IssueLifecycleError("Account unavailable",403);assert();if(credential.oauth){if(admin)throw new IssueLifecycleError("App scope does not permit issue removal",403);const token=await this.env.AUTHORITY.get(this.env.AUTHORITY.idFromName('authority')).introspect(credential.oauth.token);assert();if(!token.active||token.userId!==actor.userId||token.clientId!==credential.oauth.clientId||token.repositoryId!==projectId||!token.scopes.includes('issues:read')||token.expiresAt<=Date.now())throw new IssueLifecycleError("Issue app access changed",403);}else if(actor.viaToken&&(!credential.personalTokenHash||!await(admin?account.apiTokenHashCanAdminister(credential.personalTokenHash,actor.userId,projectId):account.apiTokenHashCanRead(credential.personalTokenHash,actor.userId,projectId))))throw new IssueLifecycleError("Issue credential changed",401);assert();};await authorize();return{assert,authorize};
+  }
+  async issueAvailability(number:number,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<{number:number;status:'active'|'deleted'|'missing'}>>{try{const authority=await this.issueLifecycleAuthority(number,actor,credential,false);const value=new IssueLifecycleStore(this.ctx.storage).availability(number);await authority.authorize();return{ok:true,value};}catch(error){if(error instanceof IssueLifecycleError)return{ok:false,status:error.status,error:error.message};return{ok:false,status:503,error:"Issue availability is not confirmed"};}}
+  protected async beforeIssueDeletionCommit():Promise<void>{}
+  async deleteIssueMutation(number:number,value:unknown,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<IssueDeletionResult>>{try{const input=issueDeletionSchema.parse(value),authority=await this.issueLifecycleAuthority(number,actor,credential,true),raw=this.rawIssueRow(number);if(!raw)throw new IssueLifecycleError("Unknown issue",404);const scope:IssueStateScope={projectId:this.load().projectId,incarnation:this.readRepositoryIncarnation()!,number,createdAt:raw.created_at,author:raw.author};await this.beforeIssueDeletionCommit();await authority.authorize();const result=new IssueLifecycleStore(this.ctx.storage).delete(scope,input,actor.userId,()=>{authority.assert();const current=this.rawIssueRow(number);if(!current||current.created_at!==scope.createdAt||current.author!==scope.author)throw new IssueLifecycleError("Original issue changed",409);});return{ok:true,value:result};}catch(error){if(error instanceof z.ZodError)return{ok:false,status:400,error:"Confirm removal with the current issue revision and original request ID"};if(error instanceof IssueLifecycleError||error instanceof IssueStateError)return{ok:false,status:error.status,error:error.message};return{ok:false,status:503,error:"Issue removal outcome was not confirmed. Retry the original request."};}}
+  private issueStateScope(number:number):IssueStateScope{if(!Number.isSafeInteger(number)||number<1)throw new IssueStateError("Invalid issue",400);const issue=this.issueRow(number);if(!issue)throw new IssueStateError(new IssueLifecycleStore(this.ctx.storage).tombstone(number)?"Issue removed":"Unknown issue",new IssueLifecycleStore(this.ctx.storage).tombstone(number)?410:404);return{projectId:this.load().projectId,incarnation:this.readRepositoryIncarnation()??"",number,createdAt:issue.created_at,author:issue.author};}
   protected async beforeIssueStateCommit():Promise<void>{}
   async issueStateMutation(number:number,value:unknown,actor:HumanDecisionActor,credential:IssueStateCredential):Promise<IssueStateReply<IssueStateResult>>{try{
     const input=issueStateMutationSchema.parse(value);if(!actor.userId||!actor.displayName)throw new IssueStateError("Server-derived issue actor required",403);
@@ -4714,14 +4748,16 @@ export class RepositoryController extends DurableObject<Env> {
   async setIssueState(n: number, state: "open" | "closed", by: string): Promise<IssueRow | null> {
     if (!this.issueRow(n)) return null;
     new IssueStateLedger(this.ctx.storage).internal(this.issueStateScope(n),state,by);
-    await this.logActivity(by, state === "closed" ? "issue.closed" : "issue.reopened", `#${n} ${state === "closed" ? "closed" : "reopened"} by ${by}`);
+    await this.logActivity(by, state === "closed" ? "issue.closed" : "issue.reopened", `#${n} ${state === "closed" ? "closed" : "reopened"} by ${by}`,{issueNumber:n});
     return this.getIssue(n);
   }
   async listComments(subject: string): Promise<CommentRow[]> {
+    if(subject.startsWith("issue:")&&!this.issueRow(Number(subject.slice(6))))throw new IssueLifecycleError("Issue unavailable",410);
     return this.ctx.storage.sql.exec('SELECT id, subject, author, body, path, line, "commit", created_at FROM comments WHERE subject = ? ORDER BY id LIMIT 500', subject).toArray() as unknown as CommentRow[];
   }
   async listMemberCommentsPage(userId: string, subject: string, cursor?: string): Promise<CommentPage> {
     (await this.repositoryAccessFence(userId)).assert();
+    if(subject.startsWith("issue:")&&!this.issueRow(Number(subject.slice(6))))throw new IssueLifecycleError("Issue unavailable",410);
     let before = Number.MAX_SAFE_INTEGER;
     if (cursor !== undefined) {
       try {
@@ -4822,6 +4858,7 @@ export class RepositoryController extends DurableObject<Env> {
   async addMemberComment(userId: string, input: MemberCommentInput,credential?:{viaToken:boolean;hash?:string;expiresAt?:number}): Promise<CommentRow> {
     const initial=await this.repositoryAccessFence(userId,true);initial.assert();
     const incarnation=this.readRepositoryIncarnation()??new PrivateRecoveryOperations(this.ctx.storage).incarnation(),notifications=new ThreadNotifications(this.ctx.storage),authority=await this.repositoryAccessFence(userId,true);
+    if(input.subject.startsWith("issue:")&&!this.issueRow(Number(input.subject.slice(6))))throw new IssueLifecycleError("Issue unavailable",410);
     const payload=JSON.stringify([input.subject,input.body,input.path??null,input.line??null,input.commit??null]);
     if(input.idempotencyKey){const prior=this.ctx.storage.sql.exec<{payload:string;comment_id:number}>('SELECT payload,comment_id FROM member_comment_receipts WHERE actor_id=? AND event_key=?',userId,input.idempotencyKey).toArray()[0];if(prior){authority.assert();if(prior.payload!==payload)throw Error('Comment request key was used for different content');const existing=this.ctx.storage.sql.exec('SELECT id,subject,author,body,path,line,"commit",created_at FROM comments WHERE id=?',prior.comment_id).toArray()[0] as unknown as CommentRow|undefined;if(!existing)throw Error('The recorded comment is unavailable; it cannot be recreated with this request key');return existing;}}
     const resolution=await this.resolveCommentMentions(input.body,userId),mentions=resolution.recipients;authority.assert();resolution.assert();
@@ -4829,7 +4866,7 @@ export class RepositoryController extends DurableObject<Env> {
     await this.ensureRecoveryAlarm(60000);
     const finalAuthority=await this.repositoryAccessFence(userId,true);finalAuthority.assert();
     return this.ctx.storage.transactionSync(() => {
-      authority.assert();finalAuthority.assert();resolution.assert();if(credential&&!credential.viaToken&&(!Number.isFinite(credential.expiresAt)||Date.now()>=credential.expiresAt!))throw Error('Comment access was revoked');
+      authority.assert();finalAuthority.assert();resolution.assert();if(input.subject.startsWith("issue:")&&!this.issueRow(Number(input.subject.slice(6))))throw new IssueLifecycleError("Issue unavailable",410);if(credential&&!credential.viaToken&&(!Number.isFinite(credential.expiresAt)||Date.now()>=credential.expiresAt!))throw Error('Comment access was revoked');
       if (input.idempotencyKey) {
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(input.idempotencyKey)) throw new Error("Invalid comment request key");
         const receipt=this.ctx.storage.sql.exec<{payload:string;comment_id:number}>("SELECT payload,comment_id FROM member_comment_receipts WHERE actor_id=? AND event_key=?",userId,input.idempotencyKey).toArray()[0];
@@ -4854,16 +4891,17 @@ export class RepositoryController extends DurableObject<Env> {
       if(input.idempotencyKey)this.ctx.storage.sql.exec("INSERT INTO member_comment_receipts VALUES(?,?,?,?)",userId,input.idempotencyKey,payload,id);
       if(threadSubjectSchema.safeParse(input.subject).success)notifications.stage(incarnation,input.subject,id,userId,mentions);
       if(input.subject.startsWith("issue:"))this.ctx.storage.sql.exec("UPDATE issues SET updated_at=? WHERE number=?",at,Number(input.subject.slice(6)));
-      this.ctx.storage.sql.exec("INSERT INTO activity(at,actor,type,summary) VALUES(?,?,?,?)",at,input.author,"comment.added",input.author+" commented on "+input.subject.replace(":"," "));
+      ensureIssueEventSources(this.ctx.storage);const activity=this.ctx.storage.sql.exec<{id:number}>("INSERT INTO activity(at,actor,type,summary) VALUES(?,?,?,?) RETURNING id",at,input.author,"comment.added",input.author+" commented on "+input.subject.replace(":"," ")).one();if(input.subject.startsWith("issue:"))bindIssueActivity(this.ctx.storage,activity.id,{number:Number(input.subject.slice(6)),incarnation});
       return this.ctx.storage.sql.exec('SELECT id,subject,author,body,path,line,"commit",created_at FROM comments WHERE id=?',id).one() as unknown as CommentRow;
     });
   }
   async addComment(c: { subject: string; author: string; body: string; path?: string; line?: number; commit?: string }): Promise<CommentRow> {
+    if(c.subject.startsWith("issue:")&&!this.issueRow(Number(c.subject.slice(6))))throw new IssueLifecycleError("Issue unavailable",410);
     const id = this.ctx.storage.sql
       .exec<{ id: number }>('INSERT INTO comments (subject, author, body, path, line, "commit", created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id', c.subject, c.author, c.body, c.path ?? null, c.line ?? null, c.commit ?? null, new Date().toISOString())
       .toArray()[0]!.id;
     if (c.subject.startsWith("issue:")) this.ctx.storage.sql.exec("UPDATE issues SET updated_at = ? WHERE number = ?", new Date().toISOString(), Number(c.subject.slice(6)));
-    await this.logActivity(c.author, "comment.added", `${c.author} commented on ${c.subject.replace(":", " ")}${c.path ? ` (${c.path}${c.line ? `:${c.line}` : ""})` : ""}`);
+    await this.logActivity(c.author, "comment.added", `${c.author} commented on ${c.subject.replace(":", " ")}${c.path ? ` (${c.path}${c.line ? `:${c.line}` : ""})` : ""}`,c.subject.startsWith("issue:")?{issueNumber:Number(c.subject.slice(6))}:undefined);
     return this.ctx.storage.sql.exec('SELECT id, subject, author, body, path, line, "commit", created_at FROM comments WHERE id = ?', id).toArray()[0] as unknown as CommentRow;
   }
 
@@ -5247,7 +5285,8 @@ export class RepositoryController extends DurableObject<Env> {
   // ---- notification inbox (used on the account instance) ----
   async inboxPreference(projectId:string):Promise<InboxPreference>{return new InboxPreferences(this.ctx.storage).read(projectId);}
   async updateInboxPreference(projectId:string,input:unknown):Promise<InboxPreference>{return new InboxPreferences(this.ctx.storage).update(projectId,input);}
-  async addInbox(item: { projectId: string; projectName: string; kind: "direct" | "activity"; type: string; title: string; eventKey?:string }): Promise<void> {
+  async addInbox(item: { projectId: string; projectName: string; kind: "direct" | "activity"; type: string; title: string; eventKey?:string;issueSource?:IssueEventSource }): Promise<void> {
+    if(item.issueSource)issueEventSourceSchema.parse(item.issueSource);ensureIssueEventSources(this.ctx.storage);
     if(this.accountLifecycleState()!=="active")return;
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS inbox_event_receipts(project_id TEXT NOT NULL,event_key TEXT NOT NULL,PRIMARY KEY(project_id,event_key))");
     if(item.eventKey&&(!/^[A-Za-z0-9:_-]{1,200}$/.test(item.eventKey)||this.ctx.storage.sql.exec('SELECT 1 FROM inbox_event_receipts WHERE project_id=? AND event_key=?',item.projectId,item.eventKey).toArray().length))return;
@@ -5256,12 +5295,13 @@ export class RepositoryController extends DurableObject<Env> {
     if(!new InboxPreferences(this.ctx.storage).allows(item.projectId,item.kind))return;
     // "Snooze until the next push" ends as soon as anything new happens in that repository.
     this.ctx.storage.sql.exec("UPDATE inbox SET state = 'unread' WHERE project_id = ? AND state = 'snoozed'", item.projectId);
-    this.ctx.storage.sql.exec("INSERT INTO inbox (project_id, project_name, kind, type, title, created_at) VALUES (?, ?, ?, ?, ?, ?)", item.projectId, item.projectName, item.kind, item.type, item.title, new Date().toISOString());
+    const saved=this.ctx.storage.sql.exec<{id:number}>("INSERT INTO inbox (project_id, project_name, kind, type, title, created_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id", item.projectId, item.projectName, item.kind, item.type, item.title, new Date().toISOString()).one();if(item.issueSource)this.ctx.storage.sql.exec("INSERT INTO inbox_issue_sources VALUES(?,?,?)",saved.id,item.issueSource.number,item.issueSource.incarnation);
     this.ctx.storage.sql.exec("DELETE FROM inbox WHERE id <= (SELECT MAX(id) FROM inbox) - 300");
+    this.ctx.storage.sql.exec("DELETE FROM inbox_issue_sources WHERE NOT EXISTS(SELECT 1 FROM inbox WHERE inbox.id=inbox_issue_sources.inbox_id)");
     });
   }
   async inboxSnapshot(): Promise<InboxRow[]> {
-    return this.ctx.storage.sql.exec("SELECT * FROM inbox ORDER BY id DESC LIMIT 300").toArray() as unknown as InboxRow[];
+    ensureIssueEventSources(this.ctx.storage);const rows=this.ctx.storage.sql.exec("SELECT i.*,s.issue_number,s.incarnation AS issue_incarnation FROM inbox i LEFT JOIN inbox_issue_sources s ON s.inbox_id=i.id ORDER BY i.id DESC LIMIT 300").toArray() as unknown as Array<InboxRow&{issue_number:number|null;issue_incarnation:string|null}>;return rows.map(({issue_number,issue_incarnation,...row})=>({...row,...(issue_number!==null&&issue_incarnation!==null?{issueSource:{number:issue_number,incarnation:issue_incarnation}}:{})}));
   }
   async listInbox(filter: "direct" | "activity" | "snoozed" | "archived"): Promise<InboxRow[]> {
     const byState = filter === "snoozed" || filter === "archived";
@@ -5276,8 +5316,12 @@ export class RepositoryController extends DurableObject<Env> {
     const rows = this.ctx.storage.sql.exec<{ kind: string; n: number }>("SELECT kind, COUNT(*) AS n FROM inbox WHERE state = 'unread' GROUP BY kind").toArray();
     return { direct: rows.find((r) => r.kind === "direct")?.n ?? 0, activity: rows.find((r) => r.kind === "activity")?.n ?? 0 };
   }
-  async listActivity(limit: number): Promise<ActivityRow[]> {
-    return this.ctx.storage.sql.exec("SELECT id, at, actor, type, summary FROM activity ORDER BY id DESC LIMIT ?", Math.min(limit, 200)).toArray() as unknown as ActivityRow[];
+  async issueEventAvailable(userId:string,source:IssueEventSource):Promise<{projectName:string}|null>{try{issueEventSourceSchema.parse(source);const permission=await this.repositoryAccessFence(userId);permission.assert();if(this.readRepositoryIncarnation()!==source.incarnation||!isIssueActive(this.ctx.storage,source.number))return null;return{projectName:this.load().projectName};}catch{return null;}}
+  async listActivity(limit: number,userId?:string,credentialHash?:string,sessionExpiresAt?:number): Promise<ActivityRow[]> {
+    if(userId){const account=accountOf(this.env,await accountKeyFor(userId));if(await account.accountLifecycle()!=='active'||credentialHash&&!await account.apiTokenHashCanRead(credentialHash,userId,this.load().projectId))throw Error('Activity credential changed');if(!credentialHash&&(!Number.isFinite(sessionExpiresAt)||Date.now()>=sessionExpiresAt!))throw Error('Activity session expired');(await this.repositoryAccessFence(userId)).assert();if(!credentialHash&&Date.now()>=sessionExpiresAt!)throw Error('Activity session expired');}
+    ensureIssueEventSources(this.ctx.storage);
+    const rows=this.ctx.storage.sql.exec("SELECT a.id,a.at,a.actor,a.type,a.summary,s.issue_number,s.incarnation FROM activity a LEFT JOIN activity_issue_sources s ON s.activity_id=a.id ORDER BY a.id DESC LIMIT ?",Math.min(limit,200)).toArray() as unknown as Array<ActivityRow&{issue_number:number|null;incarnation:string|null}>;
+    return rows.flatMap(({issue_number,incarnation,...row})=>issue_number!==null&&incarnation!==null?(this.readRepositoryIncarnation()===incarnation&&isIssueActive(this.ctx.storage,issue_number)?[row]:[]):[sensitiveLegacyIssueEvent(row.type)?{...row,actor:'Contributor',summary:genericLegacyIssueEvent(row.type)}:row]);
   }
 
   async setVerificationPolicy(policy: Record<string, unknown>): Promise<void> {
@@ -6093,11 +6137,10 @@ export class RepositoryController extends DurableObject<Env> {
       const t = s.tasks[id]!;
       if (t.status !== "accepted" || !t.issue) continue;
       const issue = this.issueRow(t.issue);
-      if (!issue || issue.state === "closed") continue;
+      if (!issue){if(new IssueLifecycleStore(this.ctx.storage).tombstone(t.issue))await this.logActivity("FlareGit","integration.issue_unavailable",`Accepted change ${t.id} retains unavailable issue #${t.issue} as its original purpose`);continue;}if(issue.state==="closed")continue;
       const subject = `issue:${t.issue}`;
       const exists = this.ctx.storage.sql.exec('SELECT id FROM comments WHERE subject = ? AND author = ? AND "commit" = ? LIMIT 1', subject, "FlareGit", j.newHead).toArray().length > 0;
-      if (!exists) await this.addComment({ subject, author: "FlareGit", body: `Resolved by change ${t.id}, accepted as ${j.newHead.slice(0, 7)}.`, commit: j.newHead });
-      await this.setIssueState(t.issue, "closed", `change ${t.id}`);
+      try{const closed=await this.setIssueState(t.issue,"closed",`change ${t.id}`);if(!closed||!this.issueRow(t.issue))throw new IssueLifecycleError("Issue unavailable after accepted close",410);if (!exists) await this.addComment({ subject, author: "FlareGit", body: `Resolved by change ${t.id}, accepted as ${j.newHead.slice(0, 7)}.`, commit: j.newHead });}catch(error){if(!new IssueLifecycleStore(this.ctx.storage).tombstone(t.issue))throw error;await this.logActivity("FlareGit","integration.issue_unavailable",`Accepted change ${t.id} retains unavailable issue #${t.issue} as its original purpose`);}
     }
     await this.logActivity("FlareGit", "integration.accepted", `Accepted ${j.newHead.slice(0, 7)} (${c.participatingTaskIds.join(" + ")})`);
   }

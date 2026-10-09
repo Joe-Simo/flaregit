@@ -3461,14 +3461,21 @@ and explicit per-issue reference manifests that do not pretend to restore bytes.
 retry, quota, token revocation and inherited team-access checks pass. Removal during reconciliation, overlapping
 retention ownership, same-hash admission holds and late deletion of an old physical generation are also verified.
 Desktop/mobile actual-component fixtures pass.
-Still open: complete duplicate/sub-issue workflows,
-moderation and deleted/transferred-resource routes; this does not close the full ticket.
+Still open: complete duplicate/sub-issue workflows, broader moderation and cross-repository transfer; this does not close the full ticket.
 Issue-state PATCH now checks the current actor, credential/session, lifecycle and direct/inherited writer authority
 at the canonical transaction. Durable revisions observe internal and raw SQL updates; original UUID/CAS receipts
 reconcile lost responses without repeating a status change. Signed HTTP withdrawal/conflict/replay and actual CLI
 retry checks pass. Issue detail reads withhold titles/comments after membership, credential or account withdrawal.
 Relationships now show current title/status navigation, unavailable peers, bounded complete pages and version-bound
 removal through the canonical link store. SQLite, signed HTTP and desktop/mobile interaction checks pass.
+Confirmed owner/admin issue removal now creates a durable tombstone with revision/UUID receipts; canonical rows
+remain audit history. Active reads, comments, state changes, new task references, attachments, search and planning
+exclude removed issues, and late reads return minimal tombstones without old content. CLI and desktop/mobile
+confirmation, lost-response retry, denial and stale-revision flows pass. Same-hash attachment adoption requires
+verified caller bytes for that exact attachment UUID; hash-only reconciliation cannot resurrect retained files.
+Activity and inbox events now carry structured issue references; current availability checks hide retired titles
+and paths, including late deletion. Unbound legacy issue events expose generic descriptions rather than guessed
+source authority. Raw audit records remain separate from these reader projections.
 
 Complete labels, assignees, milestones, templates/forms, attachment handling, linking/closing through accepted work, duplicate/transfer workflows, relationships/subissues, saved filtering, bulk actions, and moderation. Preserve discussion context when tasks are assigned to agents.
 
@@ -3608,6 +3615,11 @@ References: `https://docs.github.com/en/rest`, `https://docs.github.com/en/graph
 object; private objects excluded without access; tampered or missing content reported. Import digest checks and
 complete redirect/tombstone snapshots have source tests. Full Git/LFS/conversation inventory, resumable production
 wiring and export/restore acceptance remain open.
+Metadata archive v2 now preserves portable issue deletion history while restoring a fresh inactive destination
+identity, never source permissions or mutation receipts. Full owner audit exports retain historical content;
+ordinary/read-only exports redact retired issue content, imported-origin documents and identity provenance.
+Native archive round-trip, browser schema and signed HTTP credential checks pass. Attachment bytes remain an
+explicit separate inventory/copy requirement; this does not establish full migration acceptance.
 
 Inventory and transfer all in-scope heads/tags/reachable objects and LFS bytes; map issues, PRs, inline reviews, discussions, reactions, attachments, releases, wiki and project metadata. Support authorized private sources, resumable jobs, deletions, idempotent restart, and provenance. Imported authors retain attribution without impersonating local accounts. Produce a coverage and discrepancy report.
 

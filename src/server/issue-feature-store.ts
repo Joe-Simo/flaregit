@@ -1,3 +1,4 @@
+import {activeIssueSql,ensureIssueLifecycleSchema,isIssueActive} from './issue-lifecycle';
 import {z} from 'zod';
 import {applyBulk} from '../core/issue-bulk';
 import {addLink,removeLink,type IssueLink} from '../core/issue-relations';
@@ -40,10 +41,10 @@ export type SavedIssueFilter=z.infer<typeof savedFilterSchema>;
 export class IssueFilterError extends Error{constructor(message:string,readonly status:400|404|409|410|413){super(message);}}
 type IssueFilterRow={number:number;title:string;author:string;state:'open'|'closed';created_at:string;updated_at:string;closed_by:string|null;comments:number;text_match:number};
 export class IssueFeatureStore{
- constructor(private readonly storage:DurableObjectStorage){storage.sql.exec('CREATE TABLE IF NOT EXISTS issue_features(id INTEGER PRIMARY KEY CHECK(id=1),document TEXT NOT NULL)');storage.sql.exec('CREATE TABLE IF NOT EXISTS issue_saved_filters(scope TEXT NOT NULL,actor_id TEXT NOT NULL,id TEXT NOT NULL,version INTEGER NOT NULL,document TEXT NOT NULL,removed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(scope,actor_id,id))');}
+ constructor(private readonly storage:DurableObjectStorage){ensureIssueLifecycleSchema(storage);storage.sql.exec('CREATE TABLE IF NOT EXISTS issue_features(id INTEGER PRIMARY KEY CHECK(id=1),document TEXT NOT NULL)');storage.sql.exec('CREATE TABLE IF NOT EXISTS issue_saved_filters(scope TEXT NOT NULL,actor_id TEXT NOT NULL,id TEXT NOT NULL,version INTEGER NOT NULL,document TEXT NOT NULL,removed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(scope,actor_id,id))');}
  read():IssueFeatures{const row=this.storage.sql.exec<{document:string}>('SELECT document FROM issue_features WHERE id=1').toArray()[0];return row?JSON.parse(row.document) as IssueFeatures:empty();}
- private issues(state:IssueFeatures){return this.storage.sql.exec<{number:number;state:'open'|'closed'}>('SELECT number,state FROM issues ORDER BY number LIMIT 10001').toArray().map(row=>({...state.triage[row.number],number:row.number,state:row.state,labels:state.triage[row.number]?.labels??[],assignees:state.triage[row.number]?.assignees??[]}));}
- view(){const state=this.read(),issues=this.issues(state);return {...state,issuesComplete:issues.length<=10000,progress:issues.length>10000?[]:state.milestones.map(m=>({id:m.id,...milestoneProgress(m.id,issues)}))};}
+ private issues(state:IssueFeatures){return this.storage.sql.exec<{number:number;state:'open'|'closed'}>(`SELECT i.number,i.state FROM issues i WHERE ${activeIssueSql('i')} ORDER BY i.number LIMIT 10001`).toArray().map(row=>({...state.triage[row.number],number:row.number,state:row.state,labels:state.triage[row.number]?.labels??[],assignees:state.triage[row.number]?.assignees??[]}));}
+ view(){const state=this.read(),issues=this.issues(state),active=new Set(issues.map(issue=>issue.number)),unavailableIssueNumbers=[...new Set([...Object.keys(state.triage).map(Number),...state.links.flatMap(link=>[link.from,link.to])])].filter(number=>!active.has(number));return {...state,triage:Object.fromEntries(Object.entries(state.triage).filter(([number])=>active.has(Number(number)))),links:state.links.filter(link=>active.has(link.from)&&active.has(link.to)),unavailableIssueNumbers,issuesComplete:issues.length<=10000,progress:issues.length>10000?[]:state.milestones.map(m=>({id:m.id,...milestoneProgress(m.id,issues)}))};}
  update(input:IssueFeatureWrite,members:readonly string[],owner:boolean){return this.storage.transactionSync(()=>{
  const state=this.read();if(input.expectedRevision!==state.revision)return {ok:false as const,status:409,error:'Issue planning changed; reload before applying this action'};
  const issues=this.issues(state);if(issues.length>10000)return {ok:false as const,status:413,error:'Issue planning capacity reached'};
@@ -95,7 +96,7 @@ export class IssueFeatureStore{
   const saved:SavedIssueFilter={id:parsed.id,name:parsed.name,filter:parsed.filter,version:(row?.version??0)+1};
   this.storage.sql.exec('INSERT INTO issue_saved_filters VALUES(?,?,?,?,?,0) ON CONFLICT(scope,actor_id,id) DO UPDATE SET version=excluded.version,document=excluded.document',scope,actorId,parsed.id,saved.version,JSON.stringify(saved));return saved;
  });}
- filterSnapshot(input:IssueFilterCriteria){const filter=issueFilterSchema.parse(input),features=this.read(),rows=this.storage.sql.exec<IssueFilterRow>(`SELECT i.number,i.title,i.author,i.state,i.created_at,i.updated_at,i.closed_by,(SELECT COUNT(*) FROM comments c WHERE c.subject='issue:'||i.number) AS comments,(?='' OR instr(lower(i.title||' '||i.body),lower(?))>0) AS text_match FROM issues i ORDER BY i.number LIMIT 10001`,filter.q,filter.q).toArray();
+ filterSnapshot(input:IssueFilterCriteria){const filter=issueFilterSchema.parse(input),features=this.read(),rows=this.storage.sql.exec<IssueFilterRow>(`SELECT i.number,i.title,i.author,i.state,i.created_at,i.updated_at,i.closed_by,(SELECT COUNT(*) FROM comments c WHERE c.subject='issue:'||i.number) AS comments,(?='' OR instr(lower(i.title||' '||i.body),lower(?))>0) AS text_match FROM issues i WHERE ${activeIssueSql('i')} ORDER BY i.number LIMIT 10001`,filter.q,filter.q).toArray();
   if(rows.length>10000)throw new IssueFilterError('Issue filtering supports at most 10000 issues; no incomplete result was returned',413);
   const matching=rows.filter(row=>{const triage=features.triage[row.number];return (filter.state==='all'||row.state===filter.state)&&row.text_match!==0&&(!filter.label||triage?.labels.includes(filter.label))&&(!filter.assignee||triage?.assignees.includes(filter.assignee))&&(filter.milestone===undefined||filter.milestone==='none'?filter.milestone===undefined||triage?.milestone===undefined:triage?.milestone===filter.milestone);});
   matching.sort((a,b)=>filter.sort==='number-asc'?a.number-b.number:filter.sort==='number-desc'?b.number-a.number:(filter.sort==='created-desc'?b.created_at.localeCompare(a.created_at):b.updated_at.localeCompare(a.updated_at))||b.number-a.number);
@@ -111,9 +112,9 @@ export class IssueFeatureStore{
  }
 
  relationshipSnapshot(number:number){
-  id.parse(number);const features=this.read(),rows=this.storage.sql.exec<{number:number;title:string;state:'open'|'closed';updated_at:string}>('SELECT number,title,state,updated_at FROM issues ORDER BY number LIMIT 10001').toArray();
+  id.parse(number);const features=this.read(),rows=this.storage.sql.exec<{number:number;title:string;state:'open'|'closed';updated_at:string}>(`SELECT i.number,i.title,i.state,i.updated_at FROM issues i WHERE ${activeIssueSql('i')} ORDER BY i.number LIMIT 10001`).toArray();
   if(rows.length>10000)throw new IssueFilterError('Issue relationships support at most 10000 issues; no partial graph was returned',413);
-  const byNumber=new Map(rows.map(row=>[row.number,row])),subject=byNumber.get(number);if(!subject)throw new IssueFilterError('Issue unavailable',404);
+  const byNumber=new Map(rows.map(row=>[row.number,row])),subject=byNumber.get(number);if(!subject){const exists=this.storage.sql.exec('SELECT number FROM issues WHERE number=?',number).toArray().length;throw new IssueFilterError('Issue unavailable',exists&&!isIssueActive(this.storage,number)?410:404);}
   const links=features.links.filter(link=>link.from===number||link.to===number);if(links.length>10000)throw new IssueFilterError('This issue exceeds the 10000-relationship inspection bound',413);
   const counts={parent:0,'sub-issue':0,'duplicate-target':0,duplicate:0};
   const items=links.map(link=>{const outgoing=link.from===number,kind=link.kind==='sub-issue-of'?outgoing?'parent' as const:'sub-issue' as const:outgoing?'duplicate-target' as const:'duplicate' as const,peer=outgoing?link.to:link.from,issue=byNumber.get(peer)??null;counts[kind]++;return {kind,link,number:peer,available:issue!==null,issue:issue?{number:issue.number,title:issue.title,state:issue.state}:null};});

@@ -23,6 +23,8 @@ export default {async fetch(request:Request,env:Env,ctx:ExecutionContext){
  if(url.pathname==='/fixture/expire'){await repository.expire(url.searchParams.get('id')!);return Response.json({expired:true});}
  if(url.pathname==='/fixture/late-delete'){await repository.deleteOldKey();return Response.json({deleted:true});}
  if(url.pathname==='/fixture/seed'){await repository.seed();return Response.json({seeded:true});}
+ if(url.pathname==='/fixture/drop-ack'){await repository.dropAcknowledgment();return Response.json({armed:true});}
+ if(url.pathname==='/fixture/complete-late-write'){await repository.completeLateWrite();return Response.json({completed:true});}
  if(url.pathname==='/fixture/token')return Response.json(await repository.token());
  if(url.pathname==='/fixture/revoke'){await repository.revoke(url.searchParams.get('id')!);return Response.json({revoked:true});}
  return worker.fetch(request,{...env,API_LIMITER:{limit:async()=>({success:true})},LOOKUP_LIMITER:{limit:async()=>({success:true})}} as Env,ctx);

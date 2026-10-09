@@ -1,3 +1,4 @@
+import {Dialog,DialogHeader,DialogTitle,DialogDescription,DialogFooter} from '@/components/ui/dialog';
 import {z} from 'zod';
 import {IssueFilters} from '../components/IssueFilters';
 import type {IssueFilterCriteria} from '../../server/issue-feature-store';
@@ -23,11 +24,14 @@ import { changeCreationFollowup, type ChangeCreationResponse } from "../change-c
 import { Conversation } from "../components/Conversation";
 
 interface Issue { discussionOrigin?:{discussionId:string;scope:'public'|'members';author:string;createdAt:string;convertedBy:string}; number: number; title: string; body: string; state: "open" | "closed"; author: string; created_at: string; updated_at: string; closed_by: string | null; comments: number; importedOrigin?:ImportedConversationOrigin|null }
-interface IssueDetail extends Omit<Issue, "comments"> { stateRevision:number;canStateWrite?:boolean; linked: Array<{ id: string; goal: string; status: string }> }
+interface IssueDetail extends Omit<Issue, "comments"> { stateRevision:number;canStateWrite?:boolean;canDeleteIssue?:boolean; linked: Array<{ id: string; goal: string; status: string }> }
 const stateChangeSchema=z.object({state:z.enum(['open','closed']),expectedRevision:z.number().int().nonnegative().safe(),requestId:z.uuid()}).strict();
 type StateChangeIntent=z.infer<typeof stateChangeSchema>;
 type StateChangeReceipt={issue:{number:number;state:'open'|'closed';stateRevision:number;updated_at:string;closed_by:string|null};requestId:string;replayed:boolean;changedSince:boolean;originalState:'open'|'closed';originalRevision:number};
 const stateChangeKey=(identity:string,projectId:string,number:number)=>`flaregit.issue-draft.${JSON.stringify([identity,projectId,number,'state'])}`;
+const deleteIssueSchema=z.object({expectedRevision:z.number().int().nonnegative().safe(),requestId:z.uuid(),confirmed:z.literal(true)}).strict();
+type DeleteIssueIntent=z.infer<typeof deleteIssueSchema>;
+const deleteIssueKey=(identity:string,projectId:string,number:number)=>`flaregit.issue-draft.${JSON.stringify([identity,projectId,number,'delete'])}`;
 const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm";
 const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive";
 const okCls = "rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-200";
@@ -166,9 +170,11 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [busy, setBusy] = useState<null | "toggle" | "change" | "agent">(null);
+  const [busy, setBusy] = useState<null | "toggle" | "change" | "agent" | "delete">(null);
 
   const lifetime=useRef(0), readSequence=useRef(0), readController=useRef<AbortController | null>(null), actionLock=useRef(false);
+  const [deleteIntent,setDeleteIntent]=useState<DeleteIssueIntent|null>(null),[deleteDialog,setDeleteDialog]=useState(false),[removedIdentity,setRemovedIdentity]=useState<string|null>(null);
+  const deleteIntentRef=useRef<{identity:string;intent:DeleteIssueIntent}|null>(null);
   const [stateIntent,setStateIntent]=useState<StateChangeIntent|null>(null);
   const stateIntentRef=useRef<{identity:string;intent:StateChangeIntent}|null>(null),detailIdentity=useRef<string|null>(null);
   const creationIntent=useRef<{identity:string;projectId:string;issue:number;payload:IssueChangeIntent} | null>(null);
@@ -179,10 +185,12 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
     const identity=apiSessionIdentity();
     const generation=lifetime.current,sequence=++readSequence.current;readController.current?.abort();const controller=new AbortController();readController.current=controller;
     setLoadError(null);
+    if(identity)try{const raw=sessionStorage.getItem(deleteIssueKey(identity,projectId,number));if(raw&&raw.length>1000)throw Error();const saved=raw?deleteIssueSchema.parse(JSON.parse(raw)):null;deleteIntentRef.current=saved?{identity,intent:saved}:null;setDeleteIntent(saved);}catch{setError('Saved issue removal could not be read. Restore browser storage before continuing.');}
+    else{deleteIntentRef.current=null;setDeleteIntent(null);}
     try {
       const next=await apiJson<IssueDetail>(`/p/${projectId}/issues/${number}`,{signal:controller.signal});
       if(generation===lifetime.current && sequence===readSequence.current&&apiSessionIdentity()===identity){
-        detailIdentity.current=identity;setIssue(next);setSavedChange(null);setOriginalChange(null);
+        detailIdentity.current=identity;setRemovedIdentity(null);setIssue(next);setSavedChange(null);setOriginalChange(null);
         if(identity)try{const raw=sessionStorage.getItem(stateChangeKey(identity,projectId,number));if(raw&&raw.length>1000)throw Error('Saved status change is invalid.');const saved=raw?stateChangeSchema.parse(JSON.parse(raw)):null;stateIntentRef.current=saved?{identity,intent:saved}:null;setStateIntent(saved);}catch{setError('Your saved status change could not be read. Restore browser storage before changing this issue.');}
         else{stateIntentRef.current=null;setStateIntent(null);}
         if(identity)try{
@@ -191,17 +199,17 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
         }catch{/* Recovery errors must not block reading the issue. Dispatch validates again. */}
       }
     } catch (e) {
-      if(generation===lifetime.current && sequence===readSequence.current && apiSessionIdentity()===identity && !controller.signal.aborted){if(e instanceof ApiError&&[401,403,404].includes(e.status)){detailIdentity.current=null;setIssue(null);}setLoadError(errText(e, "Could not load the issue"));}
+      if(generation===lifetime.current && sequence===readSequence.current && apiSessionIdentity()===identity && !controller.signal.aborted){if(e instanceof ApiError&&[401,403,404,410].includes(e.status)){detailIdentity.current=null;setIssue(null);if(e.status===410)setRemovedIdentity(identity);}setLoadError(errText(e, "Could not load the issue"));}
     }
   }, [projectId, number]);
-  useEffect(() => { detailIdentity.current=null;setIssue(null);void load(); }, [load,activeIdentity]);
+  useEffect(() => { detailIdentity.current=null;setIssue(null);setRemovedIdentity(null);setDeleteDialog(false);void load(); }, [load,activeIdentity]);
 
   const discardStateIntent=()=>{
     const identity=apiSessionIdentity();if(actionLock.current||!identity||detailIdentity.current!==identity)return;
     try{const key=stateChangeKey(identity,projectId,number);sessionStorage.removeItem(key);if(sessionStorage.getItem(key)!==null)throw Error();stateIntentRef.current=null;setStateIntent(null);setError(null);setNotice('Saved status change cleared.');detailIdentity.current=null;void load();}catch{setError('The saved status change could not be cleared.');}
   };
   const toggle = async () => {
-    const identity=apiSessionIdentity();if(!issue||actionLock.current||!identity||detailIdentity.current!==identity||issue.canStateWrite===false)return;
+    const identity=apiSessionIdentity();if(!issue||actionLock.current||!identity||detailIdentity.current!==identity||issue.canStateWrite===false||deleteIntentRef.current!==null)return;
     const generation=lifetime.current;const current=()=>generation===lifetime.current&&apiSessionIdentity()===identity;
     try{
       let original=stateIntentRef.current;if(original&&original.identity!==identity)return;
@@ -217,8 +225,23 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
     }catch(cause){if(current())setError(`Status change could not be confirmed. Retry the saved change or refresh before choosing a new status. ${errText(cause,'')}`);}
     finally{actionLock.current=false;if(current())setBusy(null);}
   };
+  const clearRemoval=()=>{const identity=apiSessionIdentity();if(actionLock.current||!identity||deleteIntentRef.current?.identity!==identity)return;try{const key=deleteIssueKey(identity,projectId,number);sessionStorage.removeItem(key);if(sessionStorage.getItem(key)!==null)throw Error();deleteIntentRef.current=null;setDeleteIntent(null);detailIdentity.current=null;setIssue(null);setError(null);void load();}catch{setError('Saved removal could not be cleared.');}};
+  const removeIssue=async()=>{
+    const identity=apiSessionIdentity();if(actionLock.current||!identity||stateIntentRef.current||(!deleteIntentRef.current&&(!issue?.canDeleteIssue||detailIdentity.current!==identity)))return;
+    const generation=lifetime.current,current=()=>generation===lifetime.current&&apiSessionIdentity()===identity;
+    try{
+      if(sessionStorage.getItem(stateChangeKey(identity,projectId,number)))throw Error('Clear the saved status change and refresh before removing this issue.');
+      let original=deleteIntentRef.current;if(original&&original.identity!==identity)return;
+      if(!original){if(!issue)return;const raw=sessionStorage.getItem(deleteIssueKey(identity,projectId,number));if(raw&&raw.length>1000)throw Error('Saved issue removal is invalid.');original={identity,intent:raw?deleteIssueSchema.parse(JSON.parse(raw)):deleteIssueSchema.parse({expectedRevision:issue.stateRevision,requestId:crypto.randomUUID(),confirmed:true})};deleteIntentRef.current=original;setDeleteIntent(original.intent);}
+      const key=deleteIssueKey(identity,projectId,number),serialized=JSON.stringify(original.intent);sessionStorage.setItem(key,serialized);if(sessionStorage.getItem(key)!==serialized)throw Error('Browser recovery is unavailable.');
+    }catch(cause){setError(`No removal was sent. ${errText(cause,'Restore browser storage before retrying.')}`);return;}
+    const original=deleteIntentRef.current;if(!original||original.identity!==identity)return;actionLock.current=true;setBusy('delete');setError(null);setDeleteDialog(false);
+    try{const receipt=await apiJson<{number:number;deleted:true;requestId:string;replayed:boolean}>(`/p/${projectId}/issues/${number}`,{method:'DELETE',json:original.intent});if(!current())return;if(receipt.number!==number||receipt.deleted!==true||receipt.requestId!==original.intent.requestId)throw Error('The original removal could not be confirmed.');detailIdentity.current=null;setIssue(null);setRemovedIdentity(identity);setLoadError(null);const key=deleteIssueKey(identity,projectId,number);sessionStorage.removeItem(key);if(sessionStorage.getItem(key)===null){deleteIntentRef.current=null;setDeleteIntent(null);}}
+    catch(cause){if(current())setError(`Removal could not be confirmed. Retry the original removal. ${errText(cause,'')}`);}
+    finally{actionLock.current=false;if(current())setBusy(null);}
+  };
   const startChange = async (agent: boolean) => {
-    if (!issue || actionLock.current) return;
+    if (!issue || actionLock.current || deleteIntentRef.current) return;
     actionLock.current=true;const generation=lifetime.current;
     setBusy(agent ? "agent" : "change");
     setError(null);
@@ -254,6 +277,7 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
     } finally { actionLock.current=false;if(generation===lifetime.current)setBusy(null); }
   };
 
+  if(removedIdentity&&removedIdentity===activeIdentity)return <div className="space-y-3"><h2 className="text-lg font-semibold">Issue removed</h2><Button size="sm" variant="ghost" onClick={()=>navigate(`/p/${projectId}/issues`)}>All issues</Button>{deleteIntent&&<Button size="sm" variant="outline" disabled={busy!==null} onClick={()=>void removeIssue()}>Retry original removal</Button>}{error&&<p role="alert" className={alertCls}>{error}</p>}</div>;
   if (loadError && !issue) return <LoadError message={loadError} onRetry={() => void load()} />;
   if (!issue||detailIdentity.current!==activeIdentity) return loadError?<LoadError message={loadError} onRetry={()=>void load()}/>:<p role="status" className="text-sm text-muted-foreground">Loading issue…</p>;
   return (
@@ -274,11 +298,13 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
       {error && <div role="alert" className={alertCls}>{error}</div>}
       {notice && <div role="status" className={okCls}>{notice}</div>}
       <div className="flex flex-wrap gap-2">
-        {issue.state === "open" && <Button size="sm" variant="orange" disabled={busy !== null} onClick={() => void startChange(false)}>{busy === "change" ? "Checking…" : savedChange ? "Check saved change" : "Start a change"}</Button>}
-        {issue.state === "open" && <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void startChange(true)}>{busy === "agent" ? "Checking…" : savedChange ? "Check or request agent" : "Ask an agent"}</Button>}
-        <Button size="sm" variant="ghost" disabled={busy !== null||issue.canStateWrite===false||!apiSessionIdentity()} onClick={() => void toggle()}>{busy === "toggle" ? 'Saving…' : stateIntent ? 'Retry original status change' : issue.state === "open" ? "Close issue" : "Reopen"}</Button>
+        {issue.state === "open" && <Button size="sm" variant="orange" disabled={busy !== null||deleteIntent!==null} onClick={() => void startChange(false)}>{busy === "change" ? "Checking…" : savedChange ? "Check saved change" : "Start a change"}</Button>}
+        {issue.state === "open" && <Button size="sm" variant="outline" disabled={busy !== null||deleteIntent!==null} onClick={() => void startChange(true)}>{busy === "agent" ? "Checking…" : savedChange ? "Check or request agent" : "Ask an agent"}</Button>}
+        <Button size="sm" variant="ghost" disabled={busy !== null||deleteIntent!==null||issue.canStateWrite===false||!apiSessionIdentity()} onClick={() => void toggle()}>{busy === "toggle" ? 'Saving…' : stateIntent ? 'Retry original status change' : issue.state === "open" ? "Close issue" : "Reopen"}</Button>
         {stateIntent&&<><Button size="sm" variant="ghost" disabled={busy!==null} onClick={()=>void load()}>Refresh issue</Button><Button size="sm" variant="ghost" disabled={busy!==null} onClick={discardStateIntent}>Clear saved status change</Button></>}
       </div>
+      {(issue.canDeleteIssue||deleteIntent)&&<div className="flex flex-wrap gap-2"><Button size="sm" variant="destructive" disabled={busy!==null||stateIntent!==null} onClick={()=>deleteIntent?void removeIssue():setDeleteDialog(true)}>{busy==='delete'?'Removing…':deleteIntent?'Retry original removal':'Remove issue'}</Button>{deleteIntent&&<><Button size="sm" variant="ghost" disabled={busy!==null} onClick={()=>void load()}>Refresh issue</Button><Button size="sm" variant="ghost" disabled={busy!==null} onClick={clearRemoval}>Clear saved removal</Button></>}</div>}
+      <Dialog open={deleteDialog} onOpenChange={open=>{if(busy===null)setDeleteDialog(open);}}><DialogHeader><DialogTitle>Remove issue #{number}?</DialogTitle><DialogDescription>This removes the issue from active workflows. Its audit history is retained.</DialogDescription></DialogHeader><DialogFooter><Button size="sm" variant="ghost" disabled={busy!==null} onClick={()=>setDeleteDialog(false)}>Cancel</Button><Button size="sm" variant="destructive" disabled={busy!==null||stateIntent!==null} onClick={()=>void removeIssue()}>Remove issue</Button></DialogFooter></Dialog>
       {issue.linked.length > 0 && (
         <div className="text-sm">
           <h3 className="font-semibold mb-1">Changes for this issue</h3>

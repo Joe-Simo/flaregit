@@ -23,11 +23,11 @@ export default{async fetch(request:Request,env:{TEST:DurableObjectNamespace<Meta
  if(url.pathname==='/seed'){await stub.seed(await request.json() as Parameters<typeof stub.seed>[0],'holder');await stub.addMember('owner','owner');await stub.addMember('member','member');return Response.json({ok:true});}
  if(url.pathname==='/data'){await stub.data();return Response.json({ok:true});}
  if(url.pathname==='/content'){await stub.content();return Response.json({ok:true});}
- if(url.pathname==='/export')return Response.json(await stub.metadataArchiveExport(actor));
+ if(url.pathname==='/export')return Response.json(await stub.metadataArchiveExport(actor,{viaToken:false,sessionExpiresAt:Date.now()+60000,includeHistory:actor==='owner'}));
  if(url.pathname==='/expired-restore')return Response.json(await stub.expiredRestore(await request.json() as {archive:unknown;requestId:string;sha256:string}));
  if(url.pathname==='/restore'){const value=await readRequestJson<{archive:unknown;requestId:string;sha256:string}>(request,MAX_METADATA_ARCHIVE_BYTES+1024);return Response.json(await stub.metadataArchiveRestore(actor,value.archive,value.requestId,value.sha256,Date.now()+60000));}
  if(url.pathname==='/issue')return Response.json(await stub.getIssue(1));
- if(url.pathname==='/history')return Response.json(await stub.metadataArchiveHistory(actor));
+ if(url.pathname==='/history')return Response.json(await stub.metadataArchiveHistory(actor,{viaToken:false,sessionExpiresAt:Date.now()+60000,includeHistory:actor==='owner'}));
  if(url.pathname==='/count')return Response.json({count:await stub.rawCount()});
  return new Response('Missing',{status:404});
  }catch(error){return Response.json({error:String(error)},{status:error instanceof RequestBodyError?413:409});}}};

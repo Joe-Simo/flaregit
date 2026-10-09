@@ -927,6 +927,7 @@ export default {
             const [role, deleting] = await Promise.all([repository.roleOf(userId), repository.repositoryDeletionPending()]);
             return role !== null && !deleting;
           }, freshPrincipal, async row => {
+            if(row.issueSource){const source=await projectOf(env,row.project_id).issueEventAvailable(userId,row.issueSource);return source?{...row,project_name:source.projectName}:null;}
             const thread=/^thread\.(comment|mention)\.([a-f0-9-]{36})\.(issue|change|candidate)\.([a-z0-9_-]+)\.([1-9][0-9]*)\.(0|[1-9][0-9]*)$/.exec(row.type);
             if(thread){
               const commentId=Number(thread[5]),version=Number(thread[6]);
@@ -1172,7 +1173,7 @@ export default {
         if(!effectiveAccess)return text('Not found',404);
         if(method!=='GET'&&!effectiveAccess.direct&&sub!=='/issue-filters'){
           if(effectiveAccess.role==='read'&&sub!=='/clone')return text('Repository access is read-only',403);
-          if(sub!=='/clone'&&!sub.startsWith('/wiki/')&&sub!=='/planning'&&sub!=='/issues'&&!(method==='PATCH'&&/^\/issues\/\d{1,7}$/.test(sub))&&!/^\/issues\/\d{1,7}\/attachments(?:\/(?:[a-f0-9-]{36})(?:\/(?:content|reconcile))?)?$/.test(sub)&&sub!=='/comments'&&sub!=='/tasks'&&!/^\/tasks\/[a-z0-9-]+\/(token|ready|cancel|browser-edit|fork-permission)$/.test(sub))return text('This operation requires direct repository membership',403);
+          if(sub!=='/clone'&&!sub.startsWith('/wiki/')&&sub!=='/planning'&&sub!=='/issues'&&!((method==='PATCH'||method==='DELETE'&&effectiveAccess.role==='admin')&&/^\/issues\/\d{1,7}$/.test(sub))&&!/^\/issues\/\d{1,7}\/attachments(?:\/(?:[a-f0-9-]{36})(?:\/(?:content|reconcile))?)?$/.test(sub)&&sub!=='/comments'&&sub!=='/tasks'&&!/^\/tasks\/[a-z0-9-]+\/(token|ready|cancel|browser-edit|fork-permission)$/.test(sub))return text('This operation requires direct repository membership',403);
         }
         const state = await project.getState().catch(() => null);
         if (!state) return text("Not found", 404);
@@ -1248,10 +1249,10 @@ export default {
           try{const result=await project.planningMutate(userId,parsed.data);return repositoryReadJson(result.ok?result.value:{error:result.error},result.ok?200:result.status);}catch(error){const status=typeof error==='object'&&error!==null&&'status' in error&&typeof error.status==='number'?error.status:409;return repositoryReadJson({error:error instanceof Error?error.message:'Planning changed; refresh before saving'},status);}
         }
         if(sub==='/metadata-archive'||sub==='/metadata-archive/history'){
-          if(auth.viaToken)return text('Signed-in repository membership required',403);
+          if(auth.oauthClientId||auth.viaToken&&method!=='GET')return text('Metadata restore requires a signed-in owner; archive reads require a current personal credential or session',403);
           if([...url.searchParams.keys()].length)return text('Metadata archive routes do not accept query parameters',400);
           try{
-            if(method==='GET'){const result=sub.endsWith('/history')?{records:await project.metadataArchiveHistory(userId)}:await project.metadataArchiveExport(userId);if(!await freshMetadataActor(false))return text('Metadata archive access changed',403);return repositoryReadJson(result);}
+            if(method==='GET'){const current=await freshMetadataActor(false);if(!current)return text('Metadata archive access changed',403);const credential={viaToken:current.identity.viaToken===true,credentialHash:current.identity.viaToken?await gitParentTokenHash(request):undefined,sessionExpiresAt:current.identity.viaToken?undefined:current.identity.expiresAt,includeHistory:current.isOwner};const result=sub.endsWith('/history')?{records:await project.metadataArchiveHistory(userId,credential)}:await project.metadataArchiveExport(userId,credential);const released=await freshMetadataActor(false);if(!released||current.isOwner&&!released.isOwner)return text('Metadata archive access changed',403);return repositoryReadJson(result);}
             if(method==='POST'&&sub==='/metadata-archive'){
               if(!isOwner)return text('Only the owner can restore metadata',403);
               const input=await body<{archive?:unknown;requestId?:unknown;sha256?:unknown;confirmed?:unknown}>(MAX_METADATA_ARCHIVE_BYTES+1024);
@@ -1502,7 +1503,9 @@ export default {
           return json({ ...state, role,permission:effectiveAccess.role,inheritedAccess:!effectiveAccess.direct,writableTaskIds:effectiveAccess.writableTaskIds,cancellableTaskIds:effectiveAccess.cancellableTaskIds,forkPermissions:effectiveAccess.forkPermissions });
         }
 
-        if (sub === "/activity" && method === "GET") return json(await project.listActivity(60));
+        if (sub === "/activity" && method === "GET") {
+          try{await project.listActivity(60,userId,auth.viaToken?await gitParentTokenHash(request):undefined,auth.expiresAt);const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;if(fresh.id!==userId||fresh.viaToken!==auth.viaToken)return repositoryReadText('Activity access changed',403);return repositoryReadJson(await project.listActivity(60,userId,fresh.viaToken?await gitParentTokenHash(request):undefined,fresh.expiresAt));}catch{return repositoryReadText('Activity access unavailable',403);}
+        }
         const privateDiscussion=/^\/discussions(?:\/(settings|permissions|subscriptions|discussion_[a-f0-9-]{36})(?:\/(replies|control|poll|subscription|convert))?)?$/.exec(sub);
         if(privateDiscussion){
           const profile=await account.getProfile(),actor={userId,accountKey,displayName:profile.displayName||"Contributor"};
@@ -2607,19 +2610,28 @@ export default {
 
         const issueRoute = /^\/issues\/(\d{1,7})$/.exec(sub);
         if (issueRoute && method === "GET") {
+          const number=Number(issueRoute[1]),availability=async()=>{const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||Boolean(current.viaToken)!==Boolean(auth.viaToken)||current.oauthClientId!==auth.oauthClientId)return repositoryReadText('Issue access changed',403);const actor={userId,displayName:'Issue reader',viaToken:current.viaToken===true},credential=current.oauthClientId?{oauth:{token:request.headers.get('Authorization')!.slice(7),clientId:current.oauthClientId,repositoryId:projectId}}:current.viaToken?{personalTokenHash:await gitParentTokenHash(request)}:{sessionExpiresAt:current.expiresAt};const reply=await project.issueAvailability(number,actor,credential);return reply.ok?reply.value:repositoryReadJson({error:reply.error},reply.status);};
+          const before=await availability();if(before instanceof Response)return before;if(before.status==='deleted')return repositoryReadJson({number,deleted:true},410);
           const context=await project.repositoryReadContext(userId,null,null);
           const issue = await project.getIssue(Number(issueRoute[1]));
           const currentState=await project.getState();
           const linked = issue?Object.values(currentState.tasks).filter((t) => t.issue === issue.number).map((t) => ({ id: t.id, goal: t.goal, status: t.status })):[];
-          const comments=issue?await project.listComments(`issue:${issue.number}`):[];
+          let comments:Awaited<ReturnType<typeof project.listComments>>=[];try{comments=issue?await project.listComments(`issue:${issue.number}`):[];}catch{const changed=await availability();if(changed instanceof Response)return changed;if(changed.status==='deleted')return repositoryReadJson({number,deleted:true},410);return repositoryReadText('Issue conversation access is unavailable',503);}
           const currentAccess=await project.repositoryAccess(userId);
           const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;
           if(fresh.id!==userId||Boolean(fresh.viaToken)!==Boolean(auth.viaToken)||fresh.oauthClientId!==auth.oauthClientId||await account.accountLifecycle()!=='active'||fresh.expiresAt!==undefined&&fresh.expiresAt<=Date.now())return repositoryReadText('Issue access changed; reload before continuing',403);
           const hash=fresh.viaToken?await gitParentTokenHash(request):undefined;
+          const after=await availability();if(after instanceof Response)return after;if(after.status==='deleted')return repositoryReadJson({number,deleted:true},410);
           if(!await project.assertRepositoryReadContext(context,userId,null,hash))return repositoryReadText('Issue access changed; reload before continuing',403);
           if(fresh.expiresAt!==undefined&&fresh.expiresAt<=Date.now())return repositoryReadText('Your session expired; sign in again',403);
           const canStateWrite=currentAccess!==null&&currentAccess.role!=='read'&&currentState.lifecycle?.state!=='archived'&&(fresh.oauthClientId?fresh.oauthScopes?.includes('issues:write')===true:!(fresh.viaToken&&fresh.tokenScope==='read'));
-          return issue?repositoryReadJson({ ...issue, linked: auth.oauthClientId ? [] : linked, comments,canStateWrite }):repositoryReadText('Unknown issue',404);
+          const canDeleteIssue=currentAccess?.role==='admin'&&currentState.lifecycle?.state!=='archived'&&!fresh.oauthClientId&&(!fresh.viaToken||fresh.tokenScope==='full');
+          return issue?repositoryReadJson({ ...issue, linked: auth.oauthClientId ? [] : linked, comments,canStateWrite,canDeleteIssue }):repositoryReadText('Unknown issue',404);
+        }
+        if(issueRoute&&method==='DELETE'){
+          if(auth.oauthClientId)return repositoryReadText('App scope does not permit issue removal',403);
+          const input=await body<unknown>(4096),current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||current.viaToken!==auth.viaToken||current.oauthClientId||current.tokenRepo&&current.tokenRepo!==projectId)return repositoryReadText('Issue removal authentication changed',403);
+          const actor={userId,displayName:'Issue administrator',viaToken:current.viaToken===true},credential=current.viaToken?{personalTokenHash:await gitParentTokenHash(request)}:{sessionExpiresAt:current.expiresAt};const reply=await project.deleteIssueMutation(Number(issueRoute[1]),input,actor,credential);if(!reply.ok)return repositoryReadJson({error:reply.error},reply.status);const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;if(fresh.id!==userId||fresh.viaToken!==current.viaToken||fresh.oauthClientId)return repositoryReadText('Issue removal response access changed',403);return repositoryReadJson(reply.value);
         }
         if (issueRoute && method === "PATCH") {
           const input=await body<unknown>(4096),current=await authenticate(request,env);if(current instanceof Response)return current;
@@ -2652,6 +2664,7 @@ export default {
           if(!await authorizeCommentAccess())return text("Comment access was revoked",403);
           let page;try{page=await project.listMemberCommentsPage(userId,subject,url.searchParams.get("cursor") ?? undefined);}catch(error){return text(String(error).includes("Invalid comment cursor")?"Invalid comment cursor":"Comment access unavailable",String(error).includes("Invalid comment cursor")?400:403);}
           if(!await authorizeCommentAccess())return text("Comment access was revoked",403);
+          if(subject.startsWith('issue:')&&!await subjectExists(subject))return repositoryReadJson({error:'Issue is unavailable'},410);
           return Response.json(url.searchParams.get("page")==="1"?page:page.comments,{headers:{"Cache-Control":"no-store","X-FlareGit-Comments-Has-More":String(page.nextCursor!==null),...(page.nextCursor?{"X-FlareGit-Comments-Cursor":page.nextCursor}:{})}});
         }
         if (sub === "/comments" && method === "POST") {
