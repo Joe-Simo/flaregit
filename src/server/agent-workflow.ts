@@ -3,7 +3,8 @@ import type { Env } from "./env.js";
 import { ledgerOf } from "./scenario-workflow.js";
 import { runAgentTask } from "./agent-run.js";
 import {restrictedAgentRuntimeOptions} from './restricted-agent-runtime';
-import { globalOf } from "./projects.js";
+import { globalOf, managedAgentEnvelope } from "./projects.js";
+import { agentLoopRounds, fundedAgentRounds, runAgentLoop } from "./agent-loop.js";
 
 export interface AgentParams {
   projectId: string;
@@ -33,10 +34,19 @@ export class FlareGitAgentWorkflow extends WorkflowEntrypoint<Env, AgentParams> 
     const { projectId, taskId, resumeFrom, accountKey } = event.payload;
     const ledger = ledgerOf(this.env, projectId);
     try {
-      const proposal = await step.do("plan-agent-proposal", { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "10 minutes" }, async () => {
-        const task = (await ledger.getState()).tasks[taskId];
-        if (!task || ["accepted", "cancelled", "integrating", "verifying"].includes(task.status)) return { commit: "" };
-        return runAgentTask(this.env, ledger, task, event.instanceId, { stopAfterProposal: true, accountKey, parentWorkflowId: event.instanceId, ...restrictedAgentRuntimeOptions(this.env), ...(resumeFrom ? { resumeFrom } : {}) });
+      // Plan -> edit -> test rounds. Each round is its own durable step, so an
+      // interrupted run resumes after the last completed round without
+      // repeating its model call, container work or spend.
+      const maxRounds = fundedAgentRounds(agentLoopRounds(this.env.AGENT_MAX_ROUNDS), managedAgentEnvelope("rounds", "rounds"), 300);
+      const proposal = await runAgentLoop({
+        maxRounds,
+        step: (name, run) => step.do(name, { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "10 minutes" }, run),
+        runRound: async (round) => {
+          const task = (await ledger.getState()).tasks[taskId];
+          if (!task || ["accepted", "cancelled", "integrating", "verifying"].includes(task.status)) return { kind: "result", result: { commit: "" } };
+          const { round: outcome, ...result } = await runAgentTask(this.env, ledger, task, event.instanceId, { stopAfterProposal: true, round, accountKey, parentWorkflowId: event.instanceId, ...restrictedAgentRuntimeOptions(this.env), ...(resumeFrom ? { resumeFrom } : {}) });
+          return outcome ?? { kind: "result", result };
+        },
       });
       if (proposal.commit || !("proposalId" in proposal)) return proposal;
       return await step.do("apply-saved-proposal", { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "10 minutes" }, async () => {

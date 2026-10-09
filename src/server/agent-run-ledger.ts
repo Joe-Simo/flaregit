@@ -2,6 +2,7 @@ import {acceptedTargetSchema,assertCompatibleAcceptedTargetBatch,type FrozenAcce
 import { z } from "zod";
 import { assertAgentWrites, redactSecrets } from "../agents/prompt.js";
 import { isSafeRef } from "../core/sanitize.js";
+import { agentExplanationSchema, type AgentChangeExplanation } from "./agent-loop.js";
 
 export type AgentRunPhase = "claimed" | "proposed" | "pushed" | "checkpointed" | "failed";
 export interface AgentRunInput {
@@ -14,6 +15,8 @@ export interface AgentRunInput {
 export interface AgentRunRecord extends AgentRunInput {
   generation: number; phase: AgentRunPhase; proposal?: { files: Record<string, string>; digest: string; commitDate?: string };
   resumedFrom?: string;
+  /** Plain-language account of the agent's rounds, updated after each completed round. */
+  explanation?: AgentChangeExplanation;
   pushedCommit?: string; checkpointEventId?: string; failure?: string; createdAt: string; updatedAt: string;
 }
 export type AgentRunClaim = { kind: "claimed" | "existing" | "busy"; run: AgentRunRecord };
@@ -124,6 +127,17 @@ export class AgentRunLedger {
       if (run.phase === "checkpointed") return run.checkpointEventId === eventId;
       if (run.phase !== "pushed") return false;
       this.save({ ...run, phase: "checkpointed", checkpointEventId: eventId }); return true;
+    });
+  }
+  /** Upserts the run explanation. Rounds only grow, so a retried round step cannot erase later progress. */
+  explain(runId: string, taskId: string, explanation: AgentChangeExplanation): boolean {
+    const value = agentExplanationSchema.parse(explanation);
+    const redacted: AgentChangeExplanation = agentExplanationSchema.parse(JSON.parse(redactSecrets(JSON.stringify(value))));
+    return this.storage.transactionSync(() => {
+      const run = this.current(runId, taskId);
+      if (!run || run.phase === "failed" || run.phase === "checkpointed") return false;
+      if (run.explanation && run.explanation.rounds.length > redacted.rounds.length) return true;
+      this.save({ ...run, explanation: redacted }); return true;
     });
   }
   fail(runId: string, taskId: string, reason = "Agent execution failed; saved context, proposals and pushed commits remain recoverable"): boolean {
