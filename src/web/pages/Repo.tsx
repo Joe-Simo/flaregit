@@ -4,7 +4,9 @@ import { StorageReconciliation } from "../components/StorageReconciliation";
 import { repositoryRefreshFailure } from "../repository-refresh-error";
 import { repositoryDeletionNotice } from "../repository-deletion-notice";
 import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { Copy, Lock, Globe } from "lucide-react";
+import { Copy, Lock, Globe, ChevronDown } from "lucide-react";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { glossary } from "../lib/glossary";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
@@ -35,21 +37,26 @@ interface Meta { id: string; role: "owner" | "member"; permission?: "read" | "wr
 type State = FlareGitProjectState & { role: string; permission?: "read" | "write" | "admin"; inheritedAccess?: boolean; writableTaskIds?: string[]; cancellableTaskIds?: string[]; forkPermissions?: Record<string,{enabled:boolean;revision:number;canConfigure:boolean}> };
 
 
-const TABS = [
-  ["code", "Code", "Files at the accepted version."],
-  ["commits", "Commits", "History of accepted versions."],
+/** At most five primary sections; everything else lives in the keyboard-operable More menu. */
+const PRIMARY_TABS = [
+  ["code", "Code", "Files at the merged version."],
+  ["changes", "Changes", "Work by people and agents, each in its own isolated copy. Every change shows where it is and the one next step."],
+  ["review", "Review", `Ready changes ${glossary.combine}d into a ${glossary.preview}, checked, and waiting for your decision to ${glossary.merge}.`],
+  ["issues", "Issues", "Problems and requests; a change can resolve one."],
+  ["settings", "Settings", "Repository configuration."],
+] as const;
+const MORE_TABS = [
+  ["commits", "Commits", "History of merged versions."],
   ["releases", "Releases", "Saved version notes and exact Git tag identities."],
   ["planning", "Planning", "Issue-linked work, custom fields, and iterations."],
   ["security", "Security", "Private scanner findings and triage history."],
   ["wiki", "Wiki", "Shared repository documentation with revision history."],
   ["discussions", "Discussions", "Repository-member questions and decisions; separate from public conversations."],
-  ["issues", "Issues", "Problems and requests; a change can resolve one."],
-  ["changes", "Changes", "Work in progress by people and agents, each in its own isolated copy. Mark one ready, then integrate."],
-  ["integration", "Integration", "Ready changes being combined and verified: what needs your review, what is running, what landed, what failed."],
+  ["integration", "Merge queue", "Every combine run: what is running, what landed, what failed."],
   ["people", "People", "Who can see and contribute to this repository."],
   ["activity", "Activity", "Everything that happened, newest first."],
-  ["settings", "Settings", "Repository configuration."],
 ] as const;
+const TABS = [...PRIMARY_TABS, ...MORE_TABS];
 
 type RepoProps = { projectId: string; tab: string; params: URLSearchParams };
 export function Repo(props: RepoProps) { return <RepositoryView key={props.projectId} {...props} />; }
@@ -122,7 +129,10 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
       if (generation === lifetime.current) setCloning(false);
     }
   };
-  const current = TABS.find(([key]) => key === (tab==="tags"?"releases":tab));
+  const currentKey = tab==="tags" ? "releases" : tab==="commit" ? "commits" : tab;
+  const current = TABS.find(([key]) => key === currentKey);
+  const moreCurrent = MORE_TABS.find(([key]) => key === currentKey);
+  const reviewTarget = ["task", "commit", "candidate", "input"].some(name => params.has(name));
   const ownerActionsAvailable = !stateError && state.role === "owner";
   const canContribute = !stateError && state.lifecycle?.state !== "archived" && (state.permission ?? meta.permission) !== "read";
   const managedActions = canContribute && !(state.inheritedAccess ?? meta.inheritedAccess ?? false);
@@ -138,7 +148,7 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
           {meta.role === "member" && <Badge variant="secondary">collaborator</Badge>}
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground hidden sm:inline"><code>{state.acceptedState.currentCommit?`accepted ${acceptedCommitLabel(state.acceptedState.currentCommit)}`:acceptedCommitLabel(null)}</code></span>
+          <span className="text-xs text-muted-foreground hidden sm:inline"><code>{state.acceptedState.currentCommit?`merged ${acceptedCommitLabel(state.acceptedState.currentCommit)}`:acceptedCommitLabel(null)}</code></span>
           <Button size="sm" variant="outline" disabled={cloning} onClick={getClone}>{cloning ? "Preparing…" : "Clone"}</Button>
         </div>
       </div>
@@ -147,18 +157,35 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
 
       <nav aria-label="Repository sections" className="-mx-4 sm:mx-0 mb-2">
       <div className="flex gap-1 border-b border-border overflow-x-auto px-4 sm:px-0" >
-        {TABS.map(([key, label]) => (
+        {PRIMARY_TABS.map(([key, label]) => (
           <button
             key={key}
-            aria-current={(tab===key||(key==="releases"&&tab==="tags")) ? "page" : undefined}
+            aria-current={currentKey===key ? "page" : undefined}
             id={`tab-${key}`}
             aria-controls="repo-tabpanel"
             onClick={() => navigate(`/p/${projectId}/${key}`)}
-            className={`px-3 py-2 text-sm whitespace-nowrap border-b-2 -mb-px rounded-t focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${(tab===key||(key==="releases"&&tab==="tags")) ? "border-primary font-semibold" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+            className={`px-3 py-2 text-sm whitespace-nowrap border-b-2 -mb-px rounded-t focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${currentKey===key ? "border-primary font-semibold" : "border-transparent text-muted-foreground hover:text-foreground"}`}
           >
             {label}
           </button>
         ))}
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            id={moreCurrent ? `tab-${moreCurrent[0]}` : "tab-more"}
+            aria-current={moreCurrent ? "page" : undefined}
+            className={`ml-auto sm:ml-0 inline-flex items-center gap-1 px-3 py-2 text-sm whitespace-nowrap border-b-2 -mb-px rounded-t focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${moreCurrent ? "border-primary font-semibold" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+          >
+            {moreCurrent ? <><span className="sr-only">More sections, current: </span>{moreCurrent[1]}</> : "More"}
+            <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            {MORE_TABS.map(([key, label]) => (
+              <DropdownMenuItem key={key} aria-current={currentKey===key ? "page" : undefined} className={currentKey===key ? "font-semibold" : undefined} onSelect={() => navigate(`/p/${projectId}/${key}`)}>
+                {label}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
       </nav>
       {current && <p className="text-xs text-muted-foreground mb-5">{current[2]}</p>}
@@ -178,7 +205,7 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
       {tab === "wiki" && <Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading wiki…</p>}><WikiTab key={`${projectId}:${params.get("page") ?? "list"}`} projectId={projectId} slug={params.get("page") ?? undefined} readOnly={!canContribute} /></Suspense>}
       {tab === "issues" && <IssuesTab projectId={projectId} issue={params.get("n") ? Number(params.get("n")) : undefined} />}
       {tab === "people" && <PeopleTab projectId={projectId} />}
-      {tab === "review" && <ReviewTab isOwner={ownerActionsAvailable} projectId={projectId} task={params.get("task") ?? undefined} commit={params.get("commit") ?? undefined} baseCommit={params.get("base") ?? undefined} returnTo={params.get("from") === "recovery" ? "integration" : undefined} input={params.get("input") ?? undefined} candidate={params.get("candidate") ? state.candidates[params.get("candidate")!] : undefined} evidence={state} reload={reload} />}
+      {tab === "review" && (reviewTarget ? <ReviewTab isOwner={ownerActionsAvailable} projectId={projectId} task={params.get("task") ?? undefined} commit={params.get("commit") ?? undefined} baseCommit={params.get("base") ?? undefined} returnTo={params.get("from") === "recovery" ? "integration" : undefined} input={params.get("input") ?? undefined} candidate={params.get("candidate") ? state.candidates[params.get("candidate")!] : undefined} evidence={state} reload={reload} /> : <IntegrationTab decisionId={params.get("decision")} isOwner={ownerActionsAvailable} projectId={projectId} state={state} reload={reload} kind={meta.kind} />)}
       {tab === "commit" && <ReviewTab isOwner={ownerActionsAvailable} projectId={projectId} commit={params.get("hash") ?? undefined} />}
       {tab === "settings" && <div className="space-y-4"><SettingsTab meta={currentMeta} reload={reload} /><Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading acceptance policy…</p>}><AcceptancePolicyPanel key={projectId} projectId={projectId} isOwner={ownerActionsAvailable}/></Suspense><Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading preview setup…</p>}><PreviewOnboardingPanel key={`preview:${projectId}`} projectId={projectId} isOwner={ownerActionsAvailable}/></Suspense></div>}
       </div>

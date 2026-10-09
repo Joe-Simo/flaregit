@@ -1,3 +1,7 @@
+import { ChangeStepper } from "../components/ChangeStepper";
+import { changeProgress } from "../change-progress";
+import { toast } from "@/components/ui/sonner";
+import { NeedsAttention } from "../components/NeedsAttention";
 import {changeInspectionStatus} from '../change-inspection-status';
 import {acceptedCommitLabel} from "../accepted-commit-display";
 import {PendingTaskCreations} from "../components/PendingTaskCreations";
@@ -32,9 +36,9 @@ const STATUS: Record<TaskStatus, { label: string; variant: "secondary" | "info" 
   working: { label: "Working", variant: "secondary" },
   checkpointed: { label: "Working · pushed", variant: "secondary" },
   ready: { label: "Ready", variant: "info" },
-  integrating: { label: "Integrating", variant: "warning" },
+  integrating: { label: "Combining", variant: "warning" },
   verifying: { label: "Verifying", variant: "warning" },
-  accepted: { label: "Accepted", variant: "success" },
+  accepted: { label: "Merged", variant: "success" },
   needs_decision: { label: "Needs decision", variant: "purple" },
   blocked: { label: "Blocked", variant: "destructive" },
   cancelled: { label: "Cancelled", variant: "outline" },
@@ -221,7 +225,6 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
   const [useAgent, setUseAgent] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
   const [savedIntegrations,setSavedIntegrations]=useState<IntegrationIntent[]>([]),[integrationRecoveryError,setIntegrationRecoveryError]=useState<string|null>(null);
   const integrationLock=useRef(false);
@@ -248,17 +251,16 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
     const generation = lifetime.current;
     setBusy(label);
     setError(null);
-    setNotice(null);
     try {
       await fn();
     } catch (e) {
-      if (generation === lifetime.current) setError(e instanceof Error ? e.message : "Something went wrong");
+      if (generation === lifetime.current) { const failure = e instanceof Error ? e.message : "Something went wrong"; setError(failure); toast.error(failure); }
     } finally {
       if (generation === lifetime.current) { setBusy(null); reload(); }
     }
   };
 
-  const restoreCreation=(record:PendingTaskCreation)=>{if(!canContribute)return;const authoritative=creations.find(item=>item.taskId===record.taskId);if(!authoritative?.canRestore||!authoritative.canRetryOriginal)return;const restored=restoreTaskCreationRequest(authoritative.taskId,authoritative.input);creationIntent.current=restored.intent;setGoal(restored.goal);setDependsOn(restored.dependsOn);setIssue(restored.issue===null?null:{number:restored.issue,title:""});setSelectedTarget(restored.target);setUseAgent(false);setRelationships(restored.dependsOn!==null||restored.issue!==null);setError(null);setNotice("Original creation request restored. Submit unchanged fields to retry the same identity; no replacement fork is requested.");};
+  const restoreCreation=(record:PendingTaskCreation)=>{if(!canContribute)return;const authoritative=creations.find(item=>item.taskId===record.taskId);if(!authoritative?.canRestore||!authoritative.canRetryOriginal)return;const restored=restoreTaskCreationRequest(authoritative.taskId,authoritative.input);creationIntent.current=restored.intent;setGoal(restored.goal);setDependsOn(restored.dependsOn);setIssue(restored.issue===null?null:{number:restored.issue,title:""});setSelectedTarget(restored.target);setUseAgent(false);setRelationships(restored.dependsOn!==null||restored.issue!==null);setError(null);toast.success("Original creation request restored. Submit unchanged fields to retry the same identity; no replacement fork is requested.");};
   const create = () =>
     run("create", async () => {
       if (!canContribute) throw new Error("Write permission is required to create a change.");
@@ -277,14 +279,14 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
       creationIntent.current = null;
       setInstructions(null);
       if (followup === "terminal") {
-        setNotice(`Change already ${created.status === "accepted" ? "accepted" : "cancelled"}. Its saved history is preserved; no new agent run was started.`);
+        toast.success(`Change already ${created.status === "accepted" ? "accepted" : "cancelled"}. Its saved history is preserved; no new agent run was started.`);
       } else if (followup === "existing-agent") {
-        setNotice("Change saved. Its existing agent run and checkpoints are available below; no new run was started.");
+        toast.success("Change saved. Its existing agent run and checkpoints are available below; no new run was started.");
       } else if (followup === "start-agent") {
         try {
           await apiJson(`/p/${projectId}/tasks/${taskId}/agent`, { method: "POST" });
           if (generation !== lifetime.current) return;
-          setNotice("Agent run started. Its checkpoints and progress will appear on the change.");
+          toast.success("Agent run started. Its checkpoints and progress will appear on the change.");
         } catch (cause) {
           if (generation !== lifetime.current) return;
           setInstructions({ ...separateGitCommands(created.commands,created.token), task: taskId });
@@ -300,7 +302,7 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
     run(`${action}-${task.id}`, async () => {
       if (!(action === "cancel" ? canCancelTask(task) : canChangeTask(task)) || action === "agent" && !managedActions) throw new Error("This change action is unavailable with your current repository permission.");
       await apiJson(`/p/${projectId}/tasks/${task.id}/${action}`, { method: "POST" });
-      if (action === "agent") setNotice("Agent run requested. Check its durable run status below.");
+      if (action === "agent") toast.success("Agent run requested. Check its durable run status below.");
     });
 
   const requestGitAccess = (task: Task) => run(`token-${task.id}`, async () => {
@@ -318,25 +320,26 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
     if(!canContribute||!permission?.canConfigure)throw new Error("Only this change's creator can configure maintainer edits.");
     const receipt=z.object({enabled:z.boolean(),revision:z.number().int().nonnegative(),canConfigure:z.boolean(),creatorId:z.string().nullable()}).parse(await apiJson<unknown>(`/p/${projectId}/tasks/${task.id}/fork-permission`,{method:"PUT",json:{enabled,expectedRevision:permission.revision}}));
     if(receipt.enabled!==enabled||receipt.revision<permission.revision)throw new Error("Maintainer edit permission could not be confirmed. Refresh this change before trying again.");
-    setNotice(enabled?"Maintainer edits enabled for this change.":"Maintainer edits disabled for this change.");
+    toast.success(enabled?"Maintainer edits enabled for this change.":"Maintainer edits disabled for this change.");
   });
 
-  const integrate = (saved?:IntegrationIntent) => {
+  const integrate = (saved?:IntegrationIntent, only?:string[]) => {
     if(integrationLock.current)return;
     integrationLock.current=true;
     const generation=lifetime.current;
     void run("integrate",async()=>{
       const identity=apiSessionIdentity();if(!identity)throw Error("Your verified session is unavailable. Sign in before preparing an integration request.");
       const scope={identity,projectId};
-      let intent=saved ?? savedIntegrations.find(record=>JSON.stringify(record.request.taskIds)===JSON.stringify(integrationSelection));
-      if(!intent)intent=prepareIntegrationIntent(state,integrationSelection);
+      const chosen=only??integrationSelection;
+      let intent=saved ?? savedIntegrations.find(record=>JSON.stringify(record.request.taskIds)===JSON.stringify(chosen));
+      if(!intent)intent=prepareIntegrationIntent(state,chosen);
       try{setSavedIntegrations(saveIntegrationIntent(sessionStorage,scope,intent));setIntegrationRecoveryError(null);}catch{setIntegrationRecoveryError("The original integration request could not be saved for recovery. No request was sent.");throw Error("Integration recovery storage is unavailable. Your selection is unchanged; no integration was sent.");}
       try{
         const response=await apiJson<{queued:string;replayed:boolean;dispatch:'unknown'|'observed'}>(`/p/${projectId}/integrations`,{method:"POST",json:intent.request});
         if(generation!==lifetime.current||apiSessionIdentity()!==identity)return;
         if(typeof response.queued!=="string"||!response.queued||typeof response.replayed!=="boolean"||!["unknown","observed"].includes(response.dispatch))throw Error("The integration acknowledgement could not be verified.");
-        if(response.dispatch==="unknown"){const retained={...intent,phase:'unknown' as const};setSavedIntegrations(saveIntegrationIntent(sessionStorage,scope,retained));setNotice(`Request ${response.queued} is recorded, but delivery is unconfirmed. Retrying its saved request keeps the same identity and revisions.`);}
-        else{try{setSavedIntegrations(acknowledgeIntegrationIntent(sessionStorage,scope,intent.request.idempotencyKey));}catch{setIntegrationRecoveryError("Delivery was confirmed, but the browser could not clear its recovery copy. Retrying that copy remains idempotent.");}setSelected([]);setNotice(`Integration delivery confirmed: ${response.queued}. Review its candidate and checks in Integration before accepting repository history.`);}
+        if(response.dispatch==="unknown"){const retained={...intent,phase:'unknown' as const};setSavedIntegrations(saveIntegrationIntent(sessionStorage,scope,retained));toast.warning(`Request ${response.queued} is recorded, but delivery is unconfirmed. Retrying its saved request keeps the same identity and revisions.`);}
+        else{try{setSavedIntegrations(acknowledgeIntegrationIntent(sessionStorage,scope,intent.request.idempotencyKey));}catch{setIntegrationRecoveryError("Delivery was confirmed, but the browser could not clear its recovery copy. Retrying that copy remains idempotent.");}setSelected([]);toast.success(`Integration delivery confirmed: ${response.queued}. Review its combined preview and checks in Review before merging repository history.`);}
       }catch(cause){if(generation!==lifetime.current||apiSessionIdentity()!==identity)return;try{setSavedIntegrations(saveIntegrationIntent(sessionStorage,scope,{...intent,phase:'unknown'}));}catch{setIntegrationRecoveryError("The original request was saved before dispatch, but its browser recovery status could not be updated.");}throw Error(`${cause instanceof Error?cause.message:"Integration result is unknown"} The original request and revisions are retained; retrying it does not create a replacement integration.`);}
     }).finally(()=>{integrationLock.current=false;});
   };
@@ -395,20 +398,19 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
               <Plus className="h-4 w-4 mr-1.5" aria-hidden="true" /> {busy === "create" ? "Creating…" : managedActions && useAgent ? "Start with an agent" : "Create and get git commands"}
             </Button>
           </div>
-          <p className="text-xs text-muted-foreground">Each change gets its own isolated copy of the repository. Contributors can push with plain Git; saved commits stay separate until a candidate passes checks and receives human acceptance.</p>
+          <p className="text-xs text-muted-foreground">Each change gets its own isolated copy of the repository. Contributors can push with plain Git; saved commits stay separate until a combined preview passes checks and receives human acceptance.</p>
         </CardContent>
       </Card>
 
       {error && <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>}
-      {notice && <div role="status" className="rounded-md border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-sm text-sky-200">{notice}</div>}
 
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div>
           <h2 className="text-sm font-semibold">Changes ({tasks.length})</h2>
-          <p className="text-xs text-muted-foreground">Select up to 8 ready or blocked changes to prepare a review candidate.</p>
+          <p className="text-xs text-muted-foreground">Select up to 8 ready or blocked changes to prepare a review combined preview.</p>
         </div>
         <Button variant="outline" size="sm" disabled={integrationSelection.length < 1 || integrationSelection.length > 8 || busy !== null} onClick={()=>integrate()}>
-          <GitPullRequestArrow className="h-4 w-4 mr-1.5" aria-hidden="true" /> {busy === "integrate" ? "Starting…" : savedIntegrations.some(record=>JSON.stringify(record.request.taskIds)===JSON.stringify(integrationSelection)) ? "Retry original integration" : savedIntegrations.length>0 ? "Start separate integration" : integrationSelection.length <= 1 ? "Integrate" : `Integrate ${integrationSelection.length} together`}
+          <GitPullRequestArrow className="h-4 w-4 mr-1.5" aria-hidden="true" /> {busy === "integrate" ? "Starting…" : savedIntegrations.some(record=>JSON.stringify(record.request.taskIds)===JSON.stringify(integrationSelection)) ? "Retry original integration" : savedIntegrations.length>0 ? "Start separate integration" : integrationSelection.length <= 1 ? "Combine and check" : `Combine ${integrationSelection.length} together`}
         </Button>
       </div>
 
@@ -423,6 +425,19 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
             const st = STATUS[t.status];
             const latestCheckpoint = t.checkpoints.at(-1);
             const canSelect = t.status === "ready" || t.status === "blocked";
+            const progress = changeProgress(t, state.candidates);
+            const reviewHref = `/p/${projectId}/review${progress.previewId ? `?candidate=${encodeURIComponent(progress.previewId)}` : ""}`;
+            const primaryAction = progress.step === "contribution" && canChangeTask(t) && (t.status === "working" || t.status === "checkpointed")
+              ? <Button size="sm" disabled={busy !== null} title="Verify the pushed Git branch and mark this change ready" onClick={() => act(t, "ready")}><Check className="h-3.5 w-3.5 mr-1" aria-hidden="true" />{busy === `ready-${t.id}` ? "Verifying…" : "Mark ready"}</Button>
+              : progress.step === "ready" && t.status === "ready" && canContribute
+                ? <Button size="sm" disabled={busy !== null} title="Combine this change with the latest merged version and run checks" onClick={() => integrate(undefined, [t.id])}><GitPullRequestArrow className="h-3.5 w-3.5 mr-1" aria-hidden="true" />{busy === "integrate" ? "Combining…" : "Combine and check"}</Button>
+                : progress.step === "verifying"
+                  ? <Button size="sm" variant="secondary" onClick={() => navigate(reviewHref)}>Watch checks</Button>
+                  : progress.step === "review"
+                    ? <Button size="sm" onClick={() => navigate(reviewHref)}>{t.status === "needs_decision" ? "Decide" : "Review"}</Button>
+                    : progress.step === "merged" && t.checkpoints.length > 0
+                      ? <Button size="sm" variant="secondary" onClick={() => navigate(`/p/${projectId}/review?task=${t.id}`)}>View merged diff</Button>
+                      : undefined;
             return (
               <div key={t.id} ref={t.id===linkedTask?.id?linkedTaskElement:undefined} tabIndex={t.id===linkedTask?.id?-1:undefined} role={t.id===linkedTask?.id?"group":undefined} aria-label={t.id===linkedTask?.id?`Linked change: ${t.goal}`:undefined} className={`px-4 py-4 flex items-start gap-3 flex-wrap sm:flex-nowrap ${t.id===linkedTask?.id?"bg-primary/5 ring-2 ring-inset ring-primary outline-none scroll-mt-24":""}`}>
                 <Checkbox className="mt-1.5" disabled={!canSelect||busy!==null} checked={integrationSelection.includes(t.id)} onCheckedChange={() => toggle(t.id)} aria-label={canSelect ? `Select “${t.goal}” for integration` : `“${t.goal}” is not ready to integrate`} />
@@ -454,8 +469,9 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
                   <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
                     <span className="inline-flex items-center gap-1"><GitBranch className="h-3 w-3" aria-hidden="true" />Base <code>{t.baseCommit?acceptedCommitLabel(t.baseCommit,8):"Empty accepted history"}</code></span>
                     {t.currentCommit&&t.checkpoints.some(checkpoint=>checkpoint.commitHash===t.currentCommit) ? <span>Saved <code>{t.currentCommit?.slice(0, 8)}</code> · {t.checkpoints.length} checkpoint{t.checkpoints.length === 1 ? "" : "s"}</span> : <span>Checkpoint not verified yet</span>}
-                    {stale.some((task) => task.id === t.id) && <span className="text-amber-200">Accepted history advanced · candidate must use the latest base</span>}
+                    {stale.some((task) => task.id === t.id) && <span className="text-amber-200">Accepted history advanced · combined preview must use the latest base</span>}
                   </div>
+                  <ChangeStepper className="mt-3" step={progress.step} halted={progress.halted} action={primaryAction} />
                   {latestCheckpoint && <p className="mt-1 text-xs text-muted-foreground break-words">Latest checkpoint: {latestCheckpoint.message} · {timeAgo(latestCheckpoint.timestamp)}</p>}
                   {forkPermissions?.[t.id]?.canConfigure && t.status !== "accepted" && t.status !== "cancelled" && <div className="mt-3 flex items-center gap-2"><Checkbox id={`maintainer-edits-${t.id}`} checked={forkPermissions[t.id]?.enabled??false} disabled={!canContribute||busy!==null} onCheckedChange={checked=>{if(typeof checked==="boolean")void configureForkPermission(t,checked);}}/><label htmlFor={`maintainer-edits-${t.id}`} className="text-sm">Allow maintainer edits</label></div>}
                   {t.checkpoints.some((checkpoint) => checkpoint.filesChanged.length > 0) && <details className="mt-2 text-xs text-muted-foreground">
@@ -463,7 +479,7 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
                     <ul className="mt-2 space-y-1">{[...new Set(t.checkpoints.flatMap((checkpoint) => checkpoint.filesChanged))].map((file) => <li key={file}><code className="break-all">{file}</code>{(paths.get(file)?.length ?? 0) > 1 && <span className="ml-2 text-amber-200">shared with another active change</span>}</li>)}</ul>
                   </details>}
                   {t.agentRunId && <AgentChangeSummary key={`summary:${projectId}:${t.id}:${t.agentRunId}`} projectId={projectId} taskId={t.id} runId={t.agentRunId} revision={t.updatedAt} />}
-                  {managedActions && t.agentRunId && <AgentRecoveryPanel key={`${projectId}:${t.id}:${t.agentRunId}`} projectId={projectId} taskId={t.id} runId={t.agentRunId} canResume={["working", "checkpointed", "blocked", "needs_decision"].includes(t.status)} busy={busy !== null} onStarted={reload} />}
+                  {managedActions && t.agentRunId && <NeedsAttention className="mt-3" label="Agent run needs attention"><AgentRecoveryPanel key={`${projectId}:${t.id}:${t.agentRunId}`} projectId={projectId} taskId={t.id} runId={t.agentRunId} canResume={["working", "checkpointed", "blocked", "needs_decision"].includes(t.status)} busy={busy !== null} onStarted={reload} /></NeedsAttention>}
                   {managedActions && t.agentWorkflowInstanceId && <AgentRunControls key={t.agentWorkflowInstanceId} projectId={projectId} instanceId={t.agentWorkflowInstanceId} canRetry={["working", "checkpointed", "blocked", "needs_decision"].includes(t.status)} retrying={busy !== null} onRetry={() => void act(t, "agent")} onChange={reload} />}
                   {t.status === "blocked" && (
                     <p className="mt-1.5 text-xs text-destructive">Blocked: {t.blockedReason ?? "no reason was recorded"}</p>
@@ -472,15 +488,10 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
                 <div className="flex gap-1.5 shrink-0 flex-wrap justify-end ml-auto">
                   {isOwner&&canChangeTask(t)&&t.contributor.type==="human"&&t.currentCommit&&!["accepted","cancelled","integrating","verifying"].includes(t.status)&&<Button size="sm" variant="outline" disabled={busy!==null} onClick={()=>setRetargetTaskId(t.id)}>Retarget</Button>}
                   {canChangeTask(t) && t.status !== "accepted" && t.status !== "cancelled" && <Button size="sm" variant="outline" disabled={busy !== null} onClick={()=>void requestGitAccess(t)}>{busy===`token-${t.id}`?"Requesting…":"Git commands"}</Button>}
-                  {t.checkpoints.length > 0 && (
+                  {t.checkpoints.length > 0 && progress.step !== "merged" && (
                     <Button size="sm" variant="outline" onClick={() => navigate(`/p/${projectId}/review?task=${t.id}`)} aria-label={`View diff of “${t.goal}”`}>Diff</Button>
                   )}
-                  {canChangeTask(t) && (t.status === "working" || t.status === "checkpointed") && (
-                    <>
-                      <Button size="sm" variant="outline" disabled={busy !== null} title="Verify the pushed Git branch and mark this change ready" onClick={() => act(t, "ready")}><Check className="h-3.5 w-3.5 mr-1" aria-hidden="true" />{busy === `ready-${t.id}` ? "Verifying…" : "Mark ready"}</Button>
-                      {managedActions && !t.agentWorkflowInstanceId && <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => act(t, "agent")}><Bot className="h-3.5 w-3.5 mr-1" aria-hidden="true" />{busy === `agent-${t.id}` ? "Starting…" : "Hand to agent"}</Button>}
-                    </>
-                  )}
+                  {canChangeTask(t) && managedActions && !t.agentWorkflowInstanceId && (t.status === "working" || t.status === "checkpointed") && <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => act(t, "agent")}><Bot className="h-3.5 w-3.5 mr-1" aria-hidden="true" />{busy === `agent-${t.id}` ? "Starting…" : "Hand to agent"}</Button>}
                   {canCancelTask(t) && t.status !== "accepted" && t.status !== "cancelled" && t.status !== "integrating" && t.status !== "verifying" && (
                     <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => act(t, "cancel")} aria-label={`Cancel “${t.goal}”`} title="Cancel change"><X className="h-3.5 w-3.5" aria-hidden="true" /></Button>
                   )}

@@ -1,3 +1,4 @@
+import { NeedsAttention } from "../components/NeedsAttention";
 import {SigningKeys} from '../components/SigningKeys';
 import {GitCredential} from '../components/GitCredential';
 import { ProfileDiscoverySettings } from "./CommunityPeople";
@@ -243,7 +244,7 @@ export function Account() {
       </Card>
       </fieldset>
       <SigningKeys disabled={deletionStarted||busy!==null}/>
-      <StorageReconciliation />
+      <NeedsAttention><StorageReconciliation /></NeedsAttention>
       <Card>
         <CardHeader><CardTitle className="text-base text-destructive">Delete account</CardTitle></CardHeader>
         <CardContent className="space-y-3">

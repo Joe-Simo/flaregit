@@ -31,12 +31,12 @@ test("initial review fails closed for unknown delegated evidence while preservin
   expect(reviewButtonDisabled("Approve commit", true)).toBe(true);
   expect(reviewButtonDisabled("Reject", true)).toBe(false);
   const html=renderToStaticMarkup(createElement(CandidateReview,{projectId:"synthetic-repository",candidate,onDone:()=>{},isOwner:true,reviewReady:true}));
-  expect(html).toContain("Checking reviewer evidence");
+  expect(html).toContain("Checking review status");
 });
 test("legacy review remains inspectable but cannot accept without a fresh protected candidate",()=>{
  expect(reviewButtonDisabled("Approve commit",true,true,{...candidate,preservationProtocolVersion:undefined})).toBe(true);
  const html=renderToStaticMarkup(createElement(CandidateReview,{projectId:"synthetic-repository",candidate:{...candidate,preservationProtocolVersion:undefined},onDone:()=>{},isOwner:true,reviewReady:true}));
- expect(html).toContain("Rebuild candidate");
+ expect(html).toContain("Rebuild combined preview");
 });
 test("approval waits for current diff while rejection remains available on the exact commit", () => {
   expect(reviewButtonDisabled("Approve commit", true, false)).toBe(true);
