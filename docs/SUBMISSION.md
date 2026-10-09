@@ -1,8 +1,8 @@
 # Cloudflare competition entry draft — FlareGit
 
-Draft only. Nothing has been sent through the competition form. Eligibility and entrant details require the human entrant's confirmation. The required video is unfinished.
+Draft only. Nothing has been sent through the competition form. Entrant details and the final eligibility confirmation are the human entrant's to make in the form. The required video is unfinished.
 
-This document maps to the [actual Cloudflare entry form](https://www.cloudflare.com/git-competition/submit/), inspected October 2, 2026. The event uses Cloudflare's own form; it is not a Devpost entry.
+This document maps to the [actual Cloudflare entry form](https://www.cloudflare.com/git-competition/submit/), inspected October 2 and re-checked October 9, 2026: the same 14 fields (team, project, demo and source) plus two declaration checkboxes, no stated character limits, and a 2 GiB MP4/WebM/MOV video upload. The form notes that submission details and video are retained for up to 180 days. The event uses Cloudflare's own form; it is not a Devpost entry.
 
 ## Required team fields — human to complete
 
@@ -38,6 +38,18 @@ Cloudflare Workers serves the application and authenticated API. Artifacts store
 
 Containers perform managed Git work and isolated application verification when that mode is selected. External-only CI runs native object, ancestry, scope, and protected-path checks without executing customer install/build/test commands or previews. Workers AI powers the built-in coding agents and explicitly surfaced repair attempts; bring-your-own agents remain supported. R2 stores immutable evidence and permitted preview assets. Integration callbacks use signed, repository-scoped requests and stable event identities; webhook delivery has retries and replay. Durable state and Git refs outlive the ephemeral execution containers.
 
+## Judging criteria map — for planning, not form copy
+
+The rules score three criteria from 1 to 5. Weight the video and form copy accordingly:
+
+| Criterion | Weight | What to show |
+|---|---|---|
+| Originality and quality of the agent-oriented collaboration prototype (also the tiebreaker) | 50% | Humans and agents contributing through isolated real Git workspaces, with goals, saved context and review attached to each contribution. |
+| Multi-agent concurrency, coordination, context, review and conflicts | 25% | Two or more agents on one repository at once, a real overlapping edit, stale-base handling, an interruption that resumes from saved context, and exact human acceptance. |
+| Ease of use and product experience | 25% | The contribution-centered review screen, clear saved/waiting/failed states, and a fresh clone showing the accepted history. |
+
+Keep the video and copy about FlareGit; the rules prohibit disparaging other people or products.
+
 ## Demo video — required, unfinished
 
 **TODO: attach the actual final 5–10 minute MP4, WebM, or MOV, at most 2 GiB.** No video URL or file is claimed in this draft.
@@ -48,9 +60,9 @@ Use the [seven-minute recording runbook](DEMO.md). Capture real overlapping agen
 
 [https://github.com/Joe-Simo/flaregit](https://github.com/Joe-Simo/flaregit) — public, Apache-2.0, with a LICENSE file; visibility and GitHub's detected license were checked October 2.
 
-Verified implementation snapshot: [`ab695a3a1227443e9a02f96df180301afa00dbb1`](https://github.com/Joe-Simo/flaregit/tree/ab695a3a1227443e9a02f96df180301afa00dbb1). The commands below pin the implementation independently of later documentation updates. Refresh this reference if the final implementation changes.
+Verified implementation snapshot: [`a309fa0`](https://github.com/Joe-Simo/flaregit/commit/a309fa0) (`main`, October 9). On that code `bun run typecheck` and `bun run lint` are clean, and `bun test` passed 2466 tests with 9 pre-existing skips and 0 failures on both Bun 1.3.4 and Bun 1.4.2; GitHub CI (`verify`, `native-boundary`) passed on the same tree. The commands below pin the implementation independently of later documentation updates. Refresh this reference if the final implementation changes.
 
-Public application: [https://flaregit.com](https://flaregit.com), HTTP 200 checked October 2. This confirms the URL responds, not every authenticated workflow. A browser session is required for owned repository work; private exercise repositories are not public demo data.
+Public application: [https://flaregit.com](https://flaregit.com), running the snapshot above as Worker version `458e1a65`; `/` and `/health` returned HTTP 200 and an unauthenticated `/api/account` returned 401 on October 9. This confirms the deployment responds and refuses anonymous API access, not every authenticated workflow. A browser session is required for owned repository work; private exercise repositories are not public demo data.
 
 ## Instructions to run your project — proposed form copy
 
@@ -61,7 +73,7 @@ For the reproducible source snapshot, install Bun and Git, then:
 ```bash
 git clone https://github.com/Joe-Simo/flaregit.git
 cd flaregit
-git checkout ab695a3a1227443e9a02f96df180301afa00dbb1
+git checkout a309fa0
 bun install --frozen-lockfile
 bun run lint
 bun run typecheck
@@ -93,12 +105,12 @@ This audit separates implementation and local verification from observations of 
 | Migration and GitHub independence | Public HTTPS imports, safe ownership-verified legacy reference migration, durable pending import recovery; optional non-forcing GitHub mirror failures do not block canonical work. | No forced shallow depth is requested; imported full-history/other-ref completeness is **unverified**. Long-history import and hosted mirror outage/retry need receipts. Source and original remote references remain distinct. |
 | Polished accessible interface | Inter/JetBrains Mono, light/dark semantic colors, focused review surfaces, keyboard diff navigation and responsive source/public screens; build checks. | Verify current authenticated UI across key sizes, keyboard/focus/error states and both themes. Source checks do not establish a complete accessibility audit. |
 | License and reproducibility | Apache-2.0 `LICENSE`, pinned implementation checkout, Bun commands, Cloudflare setup and labelled local test/proof runners. | Published source/application URLs are listed above. Reproduce the selected checkout before final entry; hosted setup requires its actual bindings and credentials. |
-| Competition delivery | Seven-minute recording runbook and candid submission draft. | **Pending:** actual 5–10 minute recording, entrant eligibility/rights confirmation and required human form submission before the stated deadline. |
+| Competition delivery | Seven-minute recording runbook, candid submission draft, pinned snapshot verified October 9. | **Pending:** actual 5–10 minute recording, the entrant's rights confirmation and the required human form submission before the stated deadline. |
 
 Avoid unsupported throughput, scale, uptime or universal conflict-repair claims. A native integrity pass does not mean application CI passed. A provider name is attribution metadata, not evidence of an authorized vendor connection. Merge queues, squash handling, profiles, issues, comments and optional mirroring remain implemented. Imported history completeness and public contribution entry remain subject to the gaps above.
 
 ## Human declarations and deadline
 
-The human entrant must separately review [sections 2–4 of the official rules](https://www.cloudflare.com/documents/build-next-gen-git-platform-competition-terms.pdf), confirm eligibility and rights to the material, and personally make the required Workers/Artifacts and terms confirmations in the form. Eligibility includes legal US/Canada residence, age 18 or older at the start, and the stated exclusions. No eligibility claim is made here.
+The human entrant must separately review [sections 2–4 of the official rules](https://www.cloudflare.com/documents/build-next-gen-git-platform-competition-terms.pdf), confirm eligibility and rights to the material, and personally make the required Workers/Artifacts and terms confirmations in the form. Eligibility includes legal US/Canada residence, age 18 or older at the start, and the stated exclusions. The entrant has stated they are a US citizen; residence, age and the exclusions are still confirmed only by the entrant in the form.
 
-Deadline: **October 14, 2026 at 11:59 p.m. PDT.** Automated entry is prohibited. This draft prepares materials only; it does not enter, register, upload a video, agree to terms, or approve repository history.
+Deadline: **October 14, 2026 at 11:59 p.m. PDT** (the form shows only "October 14"; the PDT time comes from the official rules). Winners are announced October 16; finalists present at Cloudflare Connect, San Francisco, October 21. Automated entry is prohibited. This draft prepares materials only; it does not enter, register, upload a video, agree to terms, or approve repository history.
