@@ -30,7 +30,8 @@ const proposalSchema = z.record(z.string(), z.string()).refine((files) => Object
  * exact task/run generation, so a late callback cannot affect a replacement.
  */
 export class AgentRunLedger {
-  constructor(private readonly storage: DurableObjectStorage) {
+  /** `onChange` runs after every recorded run write; the repository controller uses it to refresh the live agent board. */
+  constructor(private readonly storage: DurableObjectStorage, private readonly onChange?: () => void) {
     storage.sql.exec(`CREATE TABLE IF NOT EXISTS agent_runs(id TEXT PRIMARY KEY,doc TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS agent_run_heads(task_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,generation INTEGER NOT NULL);`);
   }
@@ -40,7 +41,7 @@ export class AgentRunLedger {
     const run = this.get(runId), head = this.head(taskId);
     return run?.taskId === taskId && head?.run_id === runId && head.generation === run.generation ? run : null;
   }
-  private save(run: AgentRunRecord) { this.storage.sql.exec("UPDATE agent_runs SET doc=? WHERE id=?", JSON.stringify({ ...run, updatedAt: new Date().toISOString() }), run.runId); }
+  private save(run: AgentRunRecord) { this.storage.sql.exec("UPDATE agent_runs SET doc=? WHERE id=?", JSON.stringify({ ...run, updatedAt: new Date().toISOString() }), run.runId); this.onChange?.(); }
   claim(input: AgentRunInput): AgentRunClaim {
     const value = inputSchema.parse(input);
     return this.storage.transactionSync(() => {
@@ -64,6 +65,7 @@ export class AgentRunLedger {
       const run: AgentRunRecord = { ...value, goal: redactSecrets(value.goal), context: { ...(value.context.issue ? { issue: { ...value.context.issue, title: redactSecrets(value.context.issue.title), summary: redactSecrets(value.context.issue.summary) } } : {}), comments: value.context.comments.map((comment) => ({ ...comment, summary: redactSecrets(comment.summary) })) }, generation: (head?.generation ?? 0) + 1, phase: "claimed", createdAt: now, updatedAt: now };
       this.storage.sql.exec("INSERT INTO agent_runs VALUES (?,?)", run.runId, JSON.stringify(run));
       this.storage.sql.exec("INSERT INTO agent_run_heads VALUES (?,?,?) ON CONFLICT(task_id) DO UPDATE SET run_id=excluded.run_id,generation=excluded.generation", run.taskId, run.runId, run.generation);
+      this.onChange?.();
       return { kind: "claimed", run };
     });
   }
@@ -85,6 +87,7 @@ export class AgentRunLedger {
       const run: AgentRunRecord = { ...input, generation: previous.generation + 1, phase: "proposed", proposal: { ...previous.proposal, files, commitDate: previous.proposal.commitDate ?? previous.createdAt }, resumedFrom: previousRunId, createdAt: now, updatedAt: now };
       this.storage.sql.exec("INSERT INTO agent_runs VALUES (?,?)", run.runId, JSON.stringify(run));
       this.storage.sql.exec("UPDATE agent_run_heads SET run_id=?,generation=? WHERE task_id=?", run.runId, run.generation, taskId);
+      this.onChange?.();
       return { kind: "claimed", run };
     });
   }

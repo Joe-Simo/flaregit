@@ -82,6 +82,7 @@ import { FlareGitAgentWorkflow } from "./agent-workflow.js";
 import { FlareGitImportHistoryWorkflow, importHistoryReceiptKey } from "./import-history-workflow.js";
 import { handleQueueBatch } from "./queue.js";
 import { authenticate } from "./access.js";
+import { AGENT_BOARD_SOCKET, agentBoardSocket, agentBoardTicket } from "./agent-board-http.js";
 import { AUTHORITY_MAX_BODY_BYTES } from "./authority-api.js";
 import { handleGitGateway } from "./git-gateway-handler.js";
 import { admitGitOperation,configuredGitCap } from "./core-git-budget.js";
@@ -469,6 +470,8 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
       if(!(await env.API_LIMITER.limit({key:`people:${ip}`})).success)return Response.json({error:"Too many requests"},{status:429,headers:{"Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
       return publicPeople(env,url);
     }
+    const agentBoardSocketRoute = AGENT_BOARD_SOCKET.exec(url.pathname);
+    if (agentBoardSocketRoute) return agentBoardSocket(request, env, agentBoardSocketRoute[1]!);
     const auth = await authenticate(request, env);
     if (auth instanceof Response) return auth;
     const userId = auth.id;
@@ -1187,6 +1190,7 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
         }
         const effectiveAccess=await project.repositoryAccess(userId);
         if(!effectiveAccess)return text('Not found',404);
+        if(sub==='/agents/board/ticket')return agentBoardTicket(request,project,projectId,auth);
         if(method!=='GET'&&!effectiveAccess.direct&&sub!=='/issue-filters'){
           if(effectiveAccess.role==='read'&&sub!=='/clone')return text('Repository access is read-only',403);
           if(sub!=='/clone'&&!sub.startsWith('/wiki/')&&sub!=='/planning'&&sub!=='/issues'&&!(effectiveAccess.role==='admin'&&method==='POST'&&/^\/issues\/\d{1,7}\/transfer-mapping$/.test(sub))&&!(effectiveAccess.role==='admin'&&method==='POST'&&/^\/issues\/\d{1,7}\/transfer(?:\/[a-f0-9-]{36}\/(?:cancel|finalize))?$/.test(sub))&&!((method==='PATCH'||method==='DELETE'&&effectiveAccess.role==='admin')&&/^\/issues\/\d{1,7}$/.test(sub))&&!/^\/issues\/\d{1,7}\/attachments(?:\/(?:[a-f0-9-]{36})(?:\/(?:content|reconcile))?)?$/.test(sub)&&sub!=='/comments'&&sub!=='/tasks'&&!/^\/tasks\/[a-z0-9-]+\/(token|ready|cancel|browser-edit|fork-permission)$/.test(sub))return text('This operation requires direct repository membership',403);

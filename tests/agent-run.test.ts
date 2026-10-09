@@ -51,6 +51,7 @@ async function fixture(options: { unborn?:boolean; lostPush?: boolean; lostCheck
     logActivity: async () => {},
     getState: async () => ({ projectId: "project1",canonicalRepoName:"repo",policyVersion,verificationPolicy:options.primaryPolicy, tasks: { [task.id]: task.targetGeneration?{...task,targetGeneration:{...task.targetGeneration,baseCommit:task.baseCommit,currentCommit:task.currentCommit}}:task } }), listComments: async () => [{ id: 1, author: "Maintainer", body: "Preserve customer behavior" }],
     getAgentRun: async (id: string) => runs.get(id) ?? null,
+    agentCoordinationContext: async (runId: string, taskId: string) => [`Overlap warning: agent for change other-change ("Adjust pricing") is also editing src/pricing.ts; coordinate with ${taskId}/${runId}.`],
     claimAgentRun: async (input: AgentRunInput) => {
       if (active && active !== input.runId) return { kind: "busy", run: runs.get(active)! };
       if (runs.has(input.runId)) return { kind: "existing", run: runs.get(input.runId)! };
@@ -117,6 +118,7 @@ test.each(["lostPush", "lostCheckpoint"] as const)("%s retry recovers the same p
     expect(resumed.commit).toBe(pushed); expect(f.counts().modelCalls).toBe(1);
     expect(f.runs.get("run-one")?.phase).toBe("checkpointed");
     expect(f.runs.get("run-one")?.context.comments[0]?.summary).toContain("Preserve customer behavior");
+    expect(f.prompts.join("\n")).toContain(`Overlap warning: agent for change other-change ("Adjust pricing") is also editing src/pricing.ts; coordinate with change1/run-one.`);
     expect(f.order.indexOf("proposal-saved")).toBeLessThan(f.order.indexOf("materialize"));
     expect(f.order.indexOf("pushed-recorded")).toBeLessThan(f.order.indexOf("checkpoint"));
     expect((await runAgentTask(f.env, f.ledger, f.task, "run-one", f.funding)).commit).toBe(pushed);

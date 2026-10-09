@@ -178,6 +178,8 @@ import type { PublicProfileState } from "./public-profile.js";
 import type { ImportJob } from "./import-job.js";
 import type { PublicRepositoryGrant } from "./public-repositories.js";
 import { AgentRunLedger, type AgentRunInput, type AgentRunRecord, type AgentRunClaim } from "./agent-run-ledger.js";
+import { AgentBoard } from "./agent-board.js";
+import type { AgentBoardTicket } from "../core/agent-board.js";
 import { actorName, RepositoryPublicCommunity, type PublicCommunityActor, type PublicCommunityPolicy, type PublicPost, type ContributionRequest } from "./public-community.js";
 export interface RepositoryReadContext { projectId:string; incarnation:string|null; canonicalRepoName:string; repoName:string; ownerId:string; accountKey:string; publicationVersion?:number; acceptedCommit?:string; taskBase?:string|null; taskCommit?:string|null; taskBranch?:string;taskContributorId?:string;taskInitiatorId?:string; candidateId?:string; candidateCommit?:string; candidateBase?:string|null; candidateInputCommit?:string; candidateInputBase?:string|null;retainedInputReceiptId?:string;organizationSource?:{id:string;revision:number};maintainerWriteSource?:ForkPermissionSource }
 export type OwnerRebaseRecoveryResult={ok:true;receipt:RebaseRecoveryReceipt}|{ok:false;status:409|503|429;error:string;report?:RebaseRecoveryReport};
@@ -591,6 +593,10 @@ export interface Ledger {
   markAgentPushed(runId: string, taskId: string, commit: string): Promise<boolean>;
   checkpointAgentRun(runId: string, taskId: string, eventId: string, commit: string): Promise<boolean>;
   failAgentRun(runId: string, taskId: string): Promise<boolean>;
+  /** Live multi-agent board and cross-agent coordination context (see agent-board.ts). */
+  issueAgentBoardTicket(userId: string, sessionExpiresAt: number | null): Promise<AgentBoardTicket>;
+  agentCoordinationContext(runId: string, taskId: string): Promise<string[]>;
+  fetch(request: Request): Promise<Response>;
   repositoryModerationState(): Promise<PublicationModerationState>;
   profileModerationState(ownerId: string): Promise<PublicationModerationState>;
   moderateRepository(input: unknown, operatorAccountKey: string): Promise<PublicationModerationDecision>;
@@ -1835,6 +1841,7 @@ export class RepositoryController extends DurableObject<Env> {
     if(await this.roleOf(userId)==="owner")throw new Error("The owner cannot be removed");
     this.registrationTable();
     this.ctx.storage.transactionSync(()=>{this.ctx.storage.sql.exec("UPDATE member_registrations SET status='revoked' WHERE user_id=?",userId);this.ctx.storage.sql.exec("DELETE FROM members WHERE user_id=?",userId);});
+    this.agentBoard().revalidate();
   }
   private accountLifecycleState():"active"|"deleting"|"deleted" {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS account_lifecycle(id INTEGER PRIMARY KEY,status TEXT NOT NULL)");
@@ -2291,7 +2298,17 @@ export class RepositoryController extends DurableObject<Env> {
     const remaining=this.ctx.storage.sql.exec("SELECT id FROM agent_credential_incidents WHERE json_extract(payload,'$.attemptId')=? AND status!='revoked' LIMIT 1",attemptId).toArray().length>0;return{stopped,credentialsComplete:!remaining};
   }
   private async retryAgentCredentialIncidents():Promise<void>{const ledger=new AgentCredentialIncidents(this.ctx.storage);for(const pending of ledger.pendingBatch())if(ledger.markAutomaticSweep(pending.id))await this.revokeAgentCredential(pending.id);const wake=ledger.nextAlarm();if(wake!==null)await this.ensureRecoveryAlarm(Math.max(1,wake-Date.now()));}
-  private agentRuns() { return new AgentRunLedger(this.ctx.storage); }
+  private agentRuns() { return new AgentRunLedger(this.ctx.storage, () => this.scheduleAgentBoardRefresh()); }
+  private agentBoardInstance?: AgentBoard;
+  private agentBoardRefreshPending = false;
+  private agentBoard() { return this.agentBoardInstance ??= new AgentBoard(this.ctx, { tasks: () => this.load().tasks, deleting: () => this.repositoryDeleting(), canRead: async userId => (await this.repositoryAccess(userId)) !== null }); }
+  /** Coalesced: run and task writes happen inside transactions; the board reconciles once they have settled. */
+  private scheduleAgentBoardRefresh() { if (this.agentBoardRefreshPending) return; this.agentBoardRefreshPending = true; queueMicrotask(() => { this.agentBoardRefreshPending = false; this.agentBoard().refresh(); }); }
+  async issueAgentBoardTicket(userId: string, sessionExpiresAt: number | null): Promise<AgentBoardTicket> { return this.agentBoard().issueTicket(userId, sessionExpiresAt); }
+  async agentCoordinationContext(runId: string, taskId: string): Promise<string[]> { return this.agentBoard().coordinationContext(runId, taskId); }
+  override async fetch(request: Request): Promise<Response> { return new URL(request.url).pathname === "/agent-board" ? this.agentBoard().accept(request) : new Response("Not found", { status: 404 }); }
+  override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> { await this.agentBoard().webSocketMessage(ws, message); }
+  override async webSocketClose(ws: WebSocket, code: number): Promise<void> { await this.agentBoard().webSocketClose(ws, code); }
   private agentScope(task: Task, projectScope: string[]): string[] {
     const scope = [...new Set((task.allowedScope ?? projectScope).flatMap((requested) => projectScope.flatMap((allowed) => requested === "*" ? [allowed] : allowed === "*" ? [requested] : requested.startsWith(allowed) ? [requested] : allowed.startsWith(requested) ? [allowed] : [])))];
     if (!scope.length) throw new Error("Change has no permitted agent scope");
@@ -2673,6 +2690,7 @@ export class RepositoryController extends DurableObject<Env> {
   private save(): void {
     if (this.repositoryDeleting()) throw new Error("Repository deletion is in progress");
     this.ctx.storage.sql.exec("INSERT INTO project (id, doc) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET doc = excluded.doc", JSON.stringify(this.state));
+    this.scheduleAgentBoardRefresh();
   }
 
   /** First-time setup with the real head of the canonical Artifacts repository. */
@@ -3269,6 +3287,7 @@ export class RepositoryController extends DurableObject<Env> {
       if(old&&old.revision>doc.revision)throw Error('Organization source revision was superseded');
       this.ctx.storage.sql.exec('INSERT INTO repository_organization_sources VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,doc=excluded.doc',doc.id,doc.revision,JSON.stringify(doc));
     });
+    this.agentBoard().revalidate();
   }
   private inheritedRole(doc:OrganizationAccessSnapshot,userId:string):OrganizationRepositoryRole|null {
     if(!doc.repositories.includes(this.load().projectId))return null;
@@ -3336,6 +3355,7 @@ export class RepositoryController extends DurableObject<Env> {
   async addMember(userId: string, role: "owner" | "member", label?: string): Promise<void> {
     if (this.repositoryDeleting()) throw new Error("Repository deletion is in progress");
     this.ctx.storage.sql.exec("INSERT OR REPLACE INTO members (user_id, role, label, added_at) VALUES (?, ?, ?, ?)", userId, role, label ?? null, new Date().toISOString());
+    this.agentBoard().revalidate();
   }
   async removeMember(userId: string): Promise<void> {
     const role = await this.roleOf(userId);
@@ -3348,6 +3368,7 @@ export class RepositoryController extends DurableObject<Env> {
     if(actor.viaToken){const account=accountOf(this.env,await accountKeyFor(actor.userId));if(!credentialHash||!await account.apiTokenHashCanAdminister(credentialHash,actor.userId,this.load().projectId))throw Error("Member removal token authority changed");authorize();}
     this.registrationTable();
     this.ctx.storage.transactionSync(()=>{authorize();if(this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",userId).toArray()[0]?.role==="owner")throw Error("The owner cannot be removed");this.ctx.storage.sql.exec("UPDATE member_registrations SET status='revoked' WHERE user_id=?",userId);this.ctx.storage.sql.exec("DELETE FROM members WHERE user_id=?",userId);});
+    this.agentBoard().revalidate();
   }
   async peopleAttributionSnapshot(userId:string){
     if(this.repositoryDeleting()||!this.ctx.storage.sql.exec("SELECT 1 FROM members WHERE user_id=?",userId).toArray().length)throw Error("Private people access unavailable");

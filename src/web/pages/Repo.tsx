@@ -29,6 +29,7 @@ const SecurityTab=lazy(async()=>({default:(await import("../tabs/Security")).Sec
 const WikiTab=lazy(async()=>({default:(await import("../tabs/Wiki")).WikiTab}));
 const RepoReleases=lazy(async()=>({default:(await import("../components/RepoReleases")).RepoReleases}));
 const PreviewOnboardingPanel=lazy(async()=>({default:(await import("../components/PreviewOnboardingPanel")).PreviewOnboardingPanel}));
+const AgentBoard=lazy(async()=>({default:(await import("../components/AgentBoard")).AgentBoard}));
 
 interface Meta { id: string; role: "owner" | "member"; permission?: "read" | "write" | "admin"; inheritedAccess?: boolean; kind: string; name: string; source: string | null; verification: Record<string, unknown>; protectedPaths: string[]; visibility?: "private" | "public" }
 type State = FlareGitProjectState & { role: string; permission?: "read" | "write" | "admin"; inheritedAccess?: boolean; writableTaskIds?: string[]; cancellableTaskIds?: string[]; forkPermissions?: Record<string,{enabled:boolean;revision:number;canConfigure:boolean}> };
@@ -166,6 +167,8 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
       {tab === "code" && <CodeTab projectId={projectId} params={params} acceptedCommit={state.acceptedState.currentCommit} isOwner={ownerActionsAvailable} />}
       {tab === "commits" && <CommitsTab projectId={projectId} />}
       {(tab==="releases"||tab==="tags")&&<Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading tags and releases…</p>}><RepoReleases key={`releases:${projectId}`} projectId={projectId} isOwner={ownerActionsAvailable} tab={tab}/></Suspense>}
+      {tab === "changes" && <p className="mb-3 text-sm"><a href={`/p/${projectId}/agents`} onClick={(event)=>{event.preventDefault();navigate(`/p/${projectId}/agents`);}} className="underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded">Open the live agent board</a> to see every running agent and overlap warnings.</p>}
+      {tab === "agents" && <Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading agent board…</p>}><AgentBoard key={projectId} projectId={projectId} /></Suspense>}
       {tab === "changes" && <ChangesTab projectId={projectId} state={state} reload={reload} taskId={params.get("task")} canContribute={canContribute} managedActions={managedActions} writableTaskIds={state.writableTaskIds} cancellableTaskIds={state.cancellableTaskIds} forkPermissions={state.forkPermissions} isOwner={ownerActionsAvailable} />}
       {tab === "integration" && <IntegrationTab decisionId={params.get("decision")} isOwner={ownerActionsAvailable} projectId={projectId} state={state} reload={reload} kind={meta.kind} />}
       {tab === "activity" && <ActivityTab projectId={projectId} />}
