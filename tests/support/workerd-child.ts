@@ -18,12 +18,17 @@ export async function workerdChild(file: string, testName?: string): Promise<boo
   }
   const ownedDirectory = await mkdtemp(join(tmpdir(), "flaregit-workerd-child-"));
   let stdout = "", stderr = "";
+  let ownedChild:ReturnType<typeof Bun.spawn>|undefined;
+  const interrupt=()=>ownedChild?.kill("SIGTERM");
+  process.on("SIGINT",interrupt);process.on("SIGTERM",interrupt);
   try {
     const pattern = testName?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const child = Bun.spawn([process.execPath, "test", file, ...(pattern !== undefined ? ["--test-name-pattern", `^${pattern}$`] : [])], {
+    const child = Bun.spawn([process.execPath, ...(process.env.FLAREGIT_TEST_SMOL === "1" ? ["--smol"] : []), "test", file, ...(pattern !== undefined ? ["--test-name-pattern", `^${pattern}$`] : [])], {
       env: { ...process.env, TMPDIR: ownedDirectory, FLAREGIT_WORKERD_TEST_FILE: file, FLAREGIT_WORKERD_TEST_CASE: testName }, stdout: "pipe", stderr: "pipe",
     });
+    ownedChild=child;
     const result = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+    ownedChild=undefined;
     [stdout, stderr] = result;
     if (result[2] !== 0) throw new Error("Child exit was unsuccessful");
     expect(result[2]).toBe(0);
@@ -37,5 +42,7 @@ export async function workerdChild(file: string, testName?: string): Promise<boo
     return true;
   } catch {
     throw new Error(`Owned workerd fixture failed or cleanup is unconfirmed. Retained artifacts: ${ownedDirectory}\n${stdout}\n${stderr}`);
+  } finally {
+    process.removeListener("SIGINT",interrupt);process.removeListener("SIGTERM",interrupt);
   }
 }

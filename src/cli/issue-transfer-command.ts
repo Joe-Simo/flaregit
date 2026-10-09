@@ -1,6 +1,6 @@
 import {z} from 'zod';
 import {parseIssueNumber} from './issue-state-command';
-import {checkedTransferPreview,transferRequest,checkedTransferReceipt,transferCancellation,type IssueTransferRequest} from '../web/issue-transfer-intent';
+import {issueTransferPendingSchema,transferFinalization,checkedTransferPreview,transferRequest,checkedTransferReceipt,transferCancellation,type IssueTransferRequest} from '../web/issue-transfer-intent';
 const destination=z.string().regex(/^[a-z0-9]{12,16}$/);
 /** Preview is read-only. Confirmation consumes the exact saved preview, never a
  * replacement snapshot. Original UUID replay never fetches another manifest. */
@@ -20,4 +20,12 @@ export async function prepareIssueTransferCancellation(input:{repositoryId:strin
  const command=await prepareIssueTransferCommand(input,async()=>{throw Error('Cancellation cannot read a replacement preview');});if(command.kind!=='dispatch')throw Error('Original transfer binding required');
  const request=transferCancellation(command.request,typeof input.cancelRequest==='string'?input.cancelRequest:crypto.randomUUID());
  return{route:`${command.route}/${command.request.requestId}/cancel`,request,metadata:{repositoryId:input.repositoryId,issueNumber:parseIssueNumber(input.issue),action:'cancel-transfer',requestId:request.requestId,cancelId:request.cancelId,originalCancellation:request,retry:`Reuse issue transfer cancel for this source and --to ${input.destination} --confirm --manifest the original preview --request ${request.requestId} --cancel-request ${request.cancelId}.`}};
+}
+export function prepareIssueTransferFinalization(input:{repositoryId:string;issue:string|undefined;confirmed:boolean;request?:string|true;finalizeRequest?:string|true;pending:unknown}){
+ if(!input.confirmed)throw Error('Active transfer finalization requires explicit --confirm');const number=parseIssueNumber(input.issue),pending=issueTransferPendingSchema.parse(input.pending);
+ if(!pending.canFinalizeActive||pending.activeDestinationNumber===undefined)throw Error('A fresh administrator active-destination descriptor is required');
+ if(typeof input.request!=='string'||!z.uuid().safeParse(input.request).success||input.request!==pending.originalRequest.requestId)throw Error('--request must identify the exact original transfer');
+ if(input.finalizeRequest!==undefined&&(typeof input.finalizeRequest!=='string'||!z.uuid().safeParse(input.finalizeRequest).success))throw Error('--finalize-request requires the full original finalization UUID');
+ const request=transferFinalization(pending.originalRequest,pending.activeDestinationNumber,typeof input.finalizeRequest==='string'?input.finalizeRequest:crypto.randomUUID());
+ return{route:`/p/${input.repositoryId}/issues/${number}/transfer/${request.requestId}/finalize`,request,original:pending.originalRequest,metadata:{repositoryId:input.repositoryId,issueNumber:number,action:'finalize-active-transfer',requestId:request.requestId,finalizeId:request.finalizeId,originalFinalization:request,retry:`Reuse issue transfer finalize for this issue --confirm --pending the original descriptor file --request ${request.requestId} --finalize-request ${request.finalizeId}.`}};
 }

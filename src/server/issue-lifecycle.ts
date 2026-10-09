@@ -5,7 +5,7 @@ export const issueDeletionSchema=z.object({expectedRevision:z.number().int().non
 export type IssueDeletion=z.infer<typeof issueDeletionSchema>;
 export const portableIssueTombstoneSchema=z.object({number:z.number().int().positive().safe(),deletedAt:z.string().datetime(),sourceActorId:z.string().min(1).max(256),sourceIdentity:z.string().min(1).max(2000)}).strict();
 export type PortableIssueTombstone=z.infer<typeof portableIssueTombstoneSchema>;
-export interface IssueTombstone {version:1;number:number;identity:string;actorId:string;requestId:string;expectedRevision:number;deletedAt:string;provenance?:PortableIssueTombstone;transfer?:{projectId:string;incarnation:string;number:number;requestId:string}}
+export interface IssueTombstone {version:1;number:number;identity:string;actorId:string;requestId:string;expectedRevision:number;deletedAt:string;provenance?:PortableIssueTombstone;finalization?:{actorId:string;finalizeId:string};transfer?:{projectId:string;incarnation:string;number:number;requestId:string}}
 export interface IssueDeletionResult {number:number;deleted:true;requestId:string;replayed:boolean}
 export class IssueLifecycleError extends Error{constructor(message:string,readonly status:number){super(message);}}
 export function ensureIssueLifecycleSchema(storage:Pick<DurableObjectStorage,'sql'>){ensureIssueTransferSchema(storage);storage.sql.exec('CREATE TABLE IF NOT EXISTS issue_tombstones(issue_number INTEGER PRIMARY KEY,identity TEXT NOT NULL,document TEXT NOT NULL)');storage.sql.exec('CREATE TABLE IF NOT EXISTS issue_tombstone_requests(actor_id TEXT NOT NULL,request_id TEXT NOT NULL,issue_number INTEGER NOT NULL,scope TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(actor_id,request_id))');}

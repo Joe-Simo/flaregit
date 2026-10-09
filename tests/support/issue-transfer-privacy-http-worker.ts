@@ -6,6 +6,7 @@ import type {Env} from '../../src/server/env';
 
 const transferSourceId='p111111111111',transferDestinationId='p222222222222';
 export class IssueTransferPrivacyFixture extends RepositoryController{
+ private lostActiveCancellationAck=false;private recoveryArmed=false;private recoveryPaused=false;private recoveryRelease:(()=>void)|undefined;private recoveryAck:'source'|'recovery'|null=null;
  private hookStage:'freeze'|'reservation'|'activation'|null=null;private hookPaused:string|null=null;private releaseHook:(()=>void)|undefined;private lostAck:'reservation'|'activation'|'finalization'|null=null;private loseFinalizationDispatch=false;private lostCancellationAck:'destination'|'source'|null=null;
  private unexpectedTransferError:{name:string;stackFrames:string[];sqlMessage?:string}|null=null;private attachmentDeleteCount=0;private attachmentPutCount=0;private pauseWrite=false;private writePaused=false;private writeCompleted=false;private releaseWrite:(()=>void)|undefined;
  private pauseRead=false;private readPaused=false;private releaseRead:(()=>void)|undefined;
@@ -48,6 +49,18 @@ export class IssueTransferPrivacyFixture extends RepositoryController{
   return null;
  }
  protected override issueTransferUnexpectedError(error:unknown):void{this.unexpectedTransferError={name:error instanceof Error?error.name:'Unknown',...(error instanceof Error&&(error.stack??'').includes('IssueTransferLedger.usedCapacity')?{sqlMessage:error.message.slice(0,300)}:{}),stackFrames:error instanceof Error?(error.stack??'').split('\n').filter(line=>/^\s*at /.test(line)).slice(0,8).map(line=>line.slice(0,500)):[]};}
+ async dropActiveCancellationAcknowledgement(){this.lostActiveCancellationAck=true;}
+ override async issueTransferCancelDestination(...args:Parameters<RepositoryController['issueTransferCancelDestination']>):ReturnType<RepositoryController['issueTransferCancelDestination']>{const result=await super.issueTransferCancelDestination(...args);if(this.lostActiveCancellationAck&&result.ok&&!result.value.cancelled){this.lostActiveCancellationAck=false;return{ok:false,status:503,error:'Synthetic already-active destination response was lost before source cancellation could reconcile'};}return result;}
+ async armFinalizationRecovery(){this.recoveryArmed=true;this.recoveryPaused=false;}
+ async finalizationRecoveryStatus(){return{paused:this.recoveryPaused};}
+ async resumeFinalizationRecovery(){this.recoveryRelease?.();this.recoveryRelease=undefined;}
+ async dropFinalizationRecoveryAck(stage:'source'|'recovery'){this.recoveryAck=stage;}
+ protected override async beforeIssueTransferFinalizationRecovery(){if(!this.recoveryArmed)return;this.recoveryArmed=false;this.recoveryPaused=true;await new Promise<void>(resolve=>{this.recoveryRelease=resolve;});this.recoveryPaused=false;}
+ protected override async afterIssueTransferFinalizationSource(){if(this.recoveryAck==='source'){this.recoveryAck=null;throw Error('Synthetic recovered source completion acknowledgement lost after durable commit');}}
+ protected override async afterIssueTransferFinalizationRecovery(){if(this.recoveryAck==='recovery'){this.recoveryAck=null;throw Error('Synthetic recovered destination completion acknowledgement lost after durable commit');}}
+ async revokeReplacementAdmin(){this.ctx.storage.sql.exec('DELETE FROM members WHERE user_id=?','replacement-admin');}
+ async actualFinalizationActors(requestId:string,number:number){const source=this.ctx.storage.sql.exec<{document:string}>('SELECT document FROM issue_tombstones WHERE issue_number=?',number).toArray()[0],destination=this.ctx.storage.sql.exec<{document:string}>('SELECT document FROM issue_transfer_receipts WHERE request_id=?',requestId).toArray()[0];const tombstone=source?JSON.parse(source.document) as {actorId:string;finalization?:{actorId:string;finalizeId:string}}:null,receipt=destination?JSON.parse(destination.document) as {destinationFinalization?:{actorId:string;requestId:string;finalizeId?:string}}:null;return{sourceActorId:tombstone?.actorId??null,sourceRecovery:tombstone?.finalization??null,destinationFinalization:receipt?.destinationFinalization??null};}
+ async finalizationAudit(requestId:string){const rows=this.ctx.storage.sql.exec<{document:string}>('SELECT document FROM issue_transfer_finalizations WHERE request_id=? ORDER BY actor_id,finalize_id',requestId).toArray(),source=this.ctx.storage.sql.exec<{document:string}>('SELECT document FROM issue_transfer_receipts WHERE request_id=?',requestId).toArray()[0];const original=source?JSON.parse(source.document) as {manifest:{actorId:string}}:null;return rows.map(row=>{const value=JSON.parse(row.document) as {actorId:string;finalizeId:string;phase:string};return{actorId:value.actorId,finalizeId:value.finalizeId,phase:value.phase,originalActorId:original?.manifest.actorId};});}
  async freshSourceIssue(){const issue=await this.createIssue({title:'Private transferable issue secret',body:'Private transferable body secret',author:'Original contributor'});await this.addComment({subject:`issue:${issue.number}`,author:'Original commenter',body:'Private transferable comment secret'});const current=await this.getIssue(issue.number);return {number:issue.number,revision:current!.stateRevision!};}
  async armHook(stage:'freeze'|'reservation'|'activation'){this.hookStage=stage;this.hookPaused=null;}
  async hookStatus(){return{paused:this.hookPaused};}
@@ -113,6 +126,17 @@ export default{
    await source.addMember('replacement-admin','owner');await destination.addMember('replacement-admin','owner');const account=accountOf(env,await accountKeyFor('replacement-admin'));await account.setProfile({handle:'replacement-admin',displayName:'Replacement administrator',bio:'',joinedAt:new Date().toISOString()});for(const id of [transferSourceId,transferDestinationId])await account.addProject({id,name:'Transfer recovery fixture',role:'owner',kind:'repository'});return Response.json({granted:true});
   }
   if(url.pathname==='/fixture/cancellation-audit')return Response.json(await target.cancellationAudit(url.searchParams.get('request')!));
+  if(url.pathname==='/fixture/active-cancel-ack'){await target.dropActiveCancellationAcknowledgement();return Response.json({armed:true});}
+  if(url.pathname==='/fixture/finalization-arm'){await target.armFinalizationRecovery();return Response.json({armed:true});}
+  if(url.pathname==='/fixture/finalization-status')return Response.json(await target.finalizationRecoveryStatus());
+  if(url.pathname==='/fixture/finalization-resume'){await target.resumeFinalizationRecovery();return Response.json({resumed:true});}
+  if(url.pathname==='/fixture/finalization-ack'){const stage=url.searchParams.get('stage');if(stage!=='source'&&stage!=='recovery')return Response.json({error:'Invalid finalization acknowledgement'},{status:400});await target.dropFinalizationRecoveryAck(stage);return Response.json({armed:true});}
+  if(url.pathname==='/fixture/actual-finalization-actors')return Response.json(await target.actualFinalizationActors(url.searchParams.get('request')!,Number(url.searchParams.get('number'))));
+  if(url.pathname==='/fixture/finalization-audit')return Response.json(await target.finalizationAudit(url.searchParams.get('request')!));
+  if(url.pathname==='/fixture/revoke-replacement'){await target.revokeReplacementAdmin();return Response.json({revoked:true});}
+  if(url.pathname==='/fixture/delete-original-account'){const account=accountOf(env,await accountKeyFor('transfer-admin'));await account.beginAccountDeletion();await account.finishAccountDeletion();return Response.json({deleted:true});}
+  if(url.pathname==='/fixture/replacement-token'){const key=await accountKeyFor('replacement-admin'),secret=`fgt_${key}_${'z'.repeat(32)}`,saved=await accountOf(env,key).createApiToken('replacement-admin','Synthetic finalization operator',secret,{scope:'full'});return Response.json({secret,id:saved.id});}
+  if(url.pathname==='/fixture/finisher-admin'){await source.addMember('finisher-admin','owner');await destination.addMember('finisher-admin','owner');return Response.json({granted:true});}
   if(url.pathname==='/fixture/read-arm'){await target.armAttachmentRead();return Response.json({armed:true});}
   if(url.pathname==='/fixture/read-status')return Response.json(await target.attachmentReadStatus());
   if(url.pathname==='/fixture/read-resume'){await target.resumeAttachmentRead();return Response.json({resumed:true});}

@@ -153,6 +153,57 @@ test('frozen cancellation normalizes omitted and included authoritative confirma
  }finally{db.close();}
 });
 
+test('administrator finalization retains original transfer attribution and requires positive completion without redispatch',()=>{
+ const db=new Database(':memory:');
+ const storage={sql:{exec(query:string,...bindings:Array<string|number|null>){const rows=db.query(query).all(...bindings);return{toArray:()=>rows};}},transactionSync<T>(operation:()=>T){return db.transaction(operation)();}} as unknown as DurableObjectStorage;
+ try{
+  const ledger=new IssueTransferLedger(storage),value=manifest();ledger.freeze(value,()=>{});
+  const input={requestId:value.requestId,finalizeId:crypto.randomUUID(),expectedManifestDigest:value.previewDigest,expectedDestinationIncarnation:value.destination.incarnation,destinationNumber:8,confirmed:true as const};
+  const first=ledger.beginFinalization(value.requestId,input,'rescue-owner',()=>{});expect(first.phase).toBe('prepared');expect(first.actorId).toBe('rescue-owner');expect(first.manifest.actorId).toBe('owner');
+  expect(ledger.beginFinalization(value.requestId,input,'rescue-owner',()=>{})).toEqual(first);
+  expect(()=>ledger.beginFinalization(value.requestId,{...input,destinationNumber:9},'rescue-owner',()=>{})).toThrow('payload cannot change');
+  expect(()=>ledger.markFinalizationSourceCompleted(value.requestId,input.finalizeId,'rescue-owner',()=>{})).toThrow('source completion');
+  expect(ledger.readFinalization(value.requestId,input.finalizeId,'rescue-owner')?.phase).toBe('prepared');
+  ledger.bindDestination(value.requestId,8,()=>{});ledger.complete(value.requestId,()=>{});
+  expect(ledger.markFinalizationSourceCompleted(value.requestId,input.finalizeId,'rescue-owner',()=>{}).phase).toBe('source-completed');
+  expect(()=>ledger.completeFinalization(value.requestId,input.finalizeId,'rescue-owner',()=>{throw Error('Destination finalization is unconfirmed');})).toThrow('unconfirmed');
+  expect(ledger.readFinalization(value.requestId,input.finalizeId,'rescue-owner')?.phase).toBe('source-completed');
+  expect(ledger.completeFinalization(value.requestId,input.finalizeId,'rescue-owner',()=>{}).phase).toBe('completed');
+  expect(ledger.completeFinalization(value.requestId,input.finalizeId,'rescue-owner',()=>{}).manifest.actorId).toBe('owner');
+  expect(db.query('SELECT request_id FROM issue_transfer_incoming').all()).toEqual([]);expect(db.query('SELECT request_id FROM issue_transfer_copy_attempts').all()).toEqual([]);
+  expect(db.query('SELECT COUNT(*) AS count FROM issue_transfer_finalizations').get()).toEqual({count:1});
+ }finally{db.close();}
+});
+
+test('finalization cannot bypass pending cancellation or consume an unreserved recovery budget',()=>{
+ const db=new Database(':memory:');
+ const storage={sql:{exec(query:string,...bindings:Array<string|number|null>){const rows=db.query(query).all(...bindings);return{toArray:()=>rows};}},transactionSync<T>(operation:()=>T){return db.transaction(operation)();}} as unknown as DurableObjectStorage;
+ try{
+  const ledger=new IssueTransferLedger(storage),value=manifest();ledger.freeze(value,()=>{});
+  const input={requestId:value.requestId,finalizeId:crypto.randomUUID(),expectedManifestDigest:value.previewDigest,expectedDestinationIncarnation:value.destination.incarnation,destinationNumber:8,confirmed:true as const};
+  const cancellation={requestId:value.requestId,cancelId:crypto.randomUUID(),expectedManifestDigest:value.previewDigest,expectedDestinationIncarnation:value.destination.incarnation,confirmed:true as const};ledger.beginCancellation(value.requestId,cancellation,'owner',()=>{});
+  expect(()=>ledger.beginFinalization(value.requestId,input,'rescue-owner',()=>{})).toThrow('pending');expect(ledger.readFinalization(value.requestId,input.finalizeId,'rescue-owner')).toBeUndefined();
+  ledger.denyCancellationActive(value.requestId,cancellation.cancelId,()=>{});
+  db.query('INSERT INTO issue_transfer_capacity VALUES(?,?)').run(crypto.randomUUID(),128*1024*1024);
+  expect(()=>ledger.beginFinalization(value.requestId,input,'rescue-owner',()=>{})).toThrow('audit capacity');
+  expect(ledger.read(value.requestId)?.phase).toBe('frozen');expect(db.query('SELECT finalize_id FROM issue_transfer_finalizations').all()).toEqual([]);
+ }finally{db.close();}
+});
+
+test('destination provenance records its actual first finisher and never relabels a finalized replay',()=>{
+ for(const recovery of [false,true]){
+  const db=new Database(':memory:');
+  const storage={sql:{exec(query:string,...bindings:Array<string|number|null>){const rows=db.query(query).all(...bindings);return{toArray:()=>rows};}},transactionSync<T>(operation:()=>T){return db.transaction(operation)();}} as unknown as DurableObjectStorage;
+  try{
+   const ledger=new IssueTransferLedger(storage),value={...manifest(),attachments:[]};ledger.reserve(value,()=>8,()=>{});ledger.markReady(value.requestId,()=>true,()=>{});ledger.activate(value.requestId,()=>true,()=>{});
+   const finalizeId=crypto.randomUUID(),first=ledger.finishDestination(value.requestId,()=>{},recovery?{actorId:'first-rescue-owner',finalizeId}:undefined);
+   expect(first.destinationFinalization).toEqual(recovery?{actorId:'first-rescue-owner',requestId:value.requestId,finalizeId}:{actorId:value.actorId,requestId:value.requestId});
+   const replay=ledger.finishDestination(value.requestId,()=>{},{actorId:'later-rescue-owner',finalizeId:crypto.randomUUID()});expect(replay.destinationFinalization).toEqual(first.destinationFinalization);
+   expect(replay.manifest.actorId).toBe(value.actorId);expect(()=>ledger.assertWritable(8)).not.toThrow();
+  }finally{db.close();}
+ }
+});
+
 test('hidden destination cancellation wins late readiness and copy attempts without deleting retained rows',()=>{
  const db=new Database(':memory:');
  const storage={sql:{exec(query:string,...bindings:Array<string|number|null>){const rows=db.query(query).all(...bindings);return{toArray:()=>rows};}},transactionSync<T>(operation:()=>T){return db.transaction(operation)();}} as unknown as DurableObjectStorage;

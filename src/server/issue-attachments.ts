@@ -1,3 +1,4 @@
+import {createHash} from 'node:crypto';
 import {z} from 'zod';
 import {DurableLfsStore,LfsStorageError,type LfsScope} from './lfs-store';
 export const ISSUE_ATTACHMENT_BYTES=5*1024*1024;
@@ -36,6 +37,14 @@ export class IssueAttachments {
   await authorize();const original=this.transferSource(scope,id);if(original.producerIdentity!==producerIdentity)throw new LfsStorageError('Original attachment producer identity changed',409);
   const check=async()=>{await authorize();if(this.transferSource(scope,id).producerIdentity!==producerIdentity)throw new LfsStorageError('Original attachment producer proof changed',409);};
   const result=await this.download(scope,id,bucket,check);await check();return{attachment:this.transferSource(scope,id),body:result.body};
+ }
+ /** Finalization observes an already-verified generation without storage repair. */
+ async readbackForFinalization(scope:IssueAttachmentScope,id:string,bucket:R2Bucket,authorize:()=>Promise<void>){
+  await authorize();const original=this.transferSource(scope,id),identity=original.producerIdentity;
+  const check=async()=>{await authorize();const current=this.transferSource(scope,id);if(current.producerIdentity!==identity||current.name!==original.name||current.createdAt!==original.createdAt)throw new LfsStorageError('Original finalization attachment changed',409);};
+  const result=await this.downloadForTransfer(scope,id,identity,bucket,check),reader=result.body.getReader(),hash=createHash('sha256');let size=0;
+  try{for(;;){await check();const next=await reader.read();await check();if(next.done)break;size+=next.value.byteLength;if(size>original.size||size>ISSUE_ATTACHMENT_BYTES)throw new LfsStorageError('Finalization attachment exceeds its frozen bound',413);hash.update(next.value);}if(size!==original.size||hash.digest('hex')!==original.sha256)throw new LfsStorageError('Finalization attachment hash or size differs',422);await check();return{attachment:this.transferSource(scope,id)};}
+  finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
  }
  async confirmForTransfer(scope:IssueAttachmentScope,id:string,bucket:R2Bucket,authorize:()=>Promise<void>){
   await authorize();const original=this.current(scope,id);if(!this.hasInputProof(original))throw new LfsStorageError('Original transfer bytes have not been validated',409);

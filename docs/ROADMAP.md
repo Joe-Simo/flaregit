@@ -3499,8 +3499,19 @@ CLI and rendered 1280/390 recovery flows pass. Aggregate verification was stoppe
 free disk fell to 1.4 GiB and system swap reached approximately 8.3 GiB. The run recorded one existing native
 Git first-root test reaching Bun's default five-second timeout; that case and the uncompleted files require
 verification once resource headroom returns. This checkpoint does not claim an aggregate green run.
-Still open: active-transfer finalization by a replacement administrator, unresolved physical storage outcomes,
-explicit destination catalog mapping and hosted multi-repository acceptance.
+Replacement-administrator finalization now has its own immutable recovery UUID and audit identity. It requires
+current administrator authority in both repositories and an exact already-active destination; it cannot allocate,
+copy or activate content. GET-only SHA/size readback precedes source completion, with both authority generations
+fenced across awaits. Lost acknowledgements reconcile immutable completion receipts without reverting later edits.
+The original creator, actual source tombstone creator and first destination finisher remain separate. Minimal
+source tombstones expose this administrative recovery only after fresh authority in both repositories. Nine native
+HTTP cases, 23 CLI/ledger/intent checks, lint/typecheck and rendered 1280/390 recovery pass; aggregate verification
+remains open after the storage interruption.
+The isolated verifier now supports low-memory child processes, exact inventories, resource preflight and resumable
+hashed log receipts. Resume binds source/configuration/runtime inputs and refuses changed code rather than carrying
+old green results forward. No test deadlines, assertions or existing skips are removed.
+Still open: unresolved physical storage outcomes, explicit destination catalog mapping and hosted multi-repository
+acceptance.
 
 Complete labels, assignees, milestones, templates/forms, attachment handling, linking/closing through accepted work, duplicate/transfer workflows, relationships/subissues, saved filtering, bulk actions, and moderation. Preserve discussion context when tasks are assigned to agents.
 
