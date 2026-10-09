@@ -52,6 +52,8 @@ export async function deliverWebhook(env: Env, projectId: string, deliveryId: st
   const started = Date.now();
   try {
     validateWebhookUrl(webhook.url);
+    const signature=`v1,${await sign(webhook.secret, deliveryId, timestamp, delivery.payload)}`;
+    if(delivery.event==="deployment.requested"&&!await ledger.deploymentDispatchAllowed(deliveryId,delivery.generation,webhook)){await ledger.markDelivery(deliveryId,{generation:delivery.generation,ok:false,error:"Deployment approval or environment policy changed",final:true});return null;}
     const res = await fetch(webhook.url, {
       method: "POST",
       redirect: "manual",
@@ -62,7 +64,7 @@ export async function deliverWebhook(env: Env, projectId: string, deliveryId: st
         "webhook-sequence": String(delivery.seq),
         "webhook-id": deliveryId, // stable across retries: receivers de-duplicate on it
         "webhook-timestamp": String(timestamp),
-        "webhook-signature": `v1,${await sign(webhook.secret, deliveryId, timestamp, delivery.payload)}`,
+        "webhook-signature": signature,
       },
       body: delivery.payload,
     });

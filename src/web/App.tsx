@@ -33,6 +33,12 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const menuButton = useRef<HTMLButtonElement>(null);
+  const openWorkspaceSection = (path: string) => {
+    navigate(path);
+    setSidebarOpen(false);
+    // Closing mobile navigation must not leave focus inside its hidden subtree.
+    document.getElementById("workspace-content")?.focus({ preventScroll: true });
+  };
   useEffect(() => {
     const shortcuts = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); setSearchOpen((value) => !value); }
@@ -62,8 +68,8 @@ export function App() {
         <Button variant="ghost" size="sm" className="ml-auto gap-2 text-muted-foreground" onClick={() => setSearchOpen(true)} aria-label="Search repositories, changes and issues, Command or Control K"><Search className="h-4 w-4" aria-hidden="true" /><span className="hidden sm:inline">Quick search</span><kbd className="hidden sm:inline text-[10px] border border-border rounded px-1.5 py-0.5">⌘ K</kbd></Button>
       </header>
       <aside id="workspace-navigation" className={`dashboard-sidebar border-r border-border lg:fixed lg:inset-y-0 lg:left-0 lg:w-[240px] lg:flex flex-col ${sidebarOpen ? "flex border-b" : "hidden"}`}>
-        <button className="h-14 px-5 flex items-center gap-2.5 border-b border-border font-semibold text-lg tracking-tight focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" onClick={() => { navigate("/"); setSidebarOpen(false); }} aria-label="FlareGit repositories"><FlareGitBrand /></button>
-        <nav aria-label="Workspace" className="p-3 space-y-1">{nav.map(({ name, path, current, Icon }) => <Button key={path} variant="ghost" className="dashboard-nav w-full justify-start h-9 text-[13px] font-normal rounded-md" aria-current={current ? "page" : undefined} onClick={() => { navigate(path); setSidebarOpen(false); }}><Icon className="h-4 w-4 mr-2.5 text-muted-foreground" aria-hidden="true" />{name}{name === "Inbox" && unread > 0 && <span className="ml-auto text-[11px] rounded bg-primary/10 text-primary px-1.5">{unread}</span>}</Button>)}{route.name !== "home" && <Button variant="ghost" className="w-full justify-start h-9 text-[13px] font-normal text-muted-foreground" onClick={() => { navigate("/new"); setSidebarOpen(false); }}><Plus className="h-4 w-4 mr-2.5" aria-hidden="true" />New repository</Button>}</nav>
+        <button className="h-14 px-5 flex items-center gap-2.5 border-b border-border font-semibold text-lg tracking-tight focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" onClick={() => openWorkspaceSection("/")} aria-label="FlareGit repositories"><FlareGitBrand /></button>
+        <nav aria-label="Workspace" className="p-3 space-y-1">{nav.map(({ name, path, current, Icon }) => <Button key={path} variant="ghost" className="dashboard-nav w-full justify-start h-9 text-[13px] font-normal rounded-md" aria-current={current ? "page" : undefined} onClick={() => openWorkspaceSection(path)}><Icon className="h-4 w-4 mr-2.5 text-muted-foreground" aria-hidden="true" />{name}{name === "Inbox" && unread > 0 && <span className="ml-auto text-[11px] rounded bg-primary/10 text-primary px-1.5">{unread}</span>}</Button>)}{route.name !== "home" && <Button variant="ghost" className="w-full justify-start h-9 text-[13px] font-normal text-muted-foreground" onClick={() => openWorkspaceSection("/new")}><Plus className="h-4 w-4 mr-2.5" aria-hidden="true" />New repository</Button>}</nav>
         <div className="lg:mt-auto p-4 border-t border-border space-y-4"><div className="flex flex-wrap gap-x-3 gap-y-2 text-[11px] text-muted-foreground"><a href="/docs" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Docs</a><a href="/status" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Status</a><a href="#/report" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Report abuse</a><a href="mailto:support@flaregit.com" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Support</a></div></div>
       </aside>
       <div className="lg:ml-[240px] min-w-0 flex flex-col min-h-[calc(100vh-3.5rem)]">

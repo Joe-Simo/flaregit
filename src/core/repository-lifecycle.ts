@@ -28,8 +28,10 @@ export function applyLifecycleAction(
   action: LifecycleAction,
   actor: LifecycleActor,
   now: string,
+  expectedVersion?: number,
 ): LifecycleResult {
   if (!actor.canAdmin) return { ok: false, status: 403, error: "Only repository administrators can change archive state" };
+  if(expectedVersion!==undefined&&current.version!==expectedVersion)return {ok:false,status:409,error:"Repository archive state changed; inspect the current state before retrying"};
   if (action === "archive") {
     if (current.state === "archived") return { ok: false, status: 409, error: "Repository is already archived" };
     return { ok: true, next: { state: "archived", archivedAt: now, version: current.version + 1 } };

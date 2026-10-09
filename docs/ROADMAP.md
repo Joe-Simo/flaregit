@@ -3333,6 +3333,10 @@ event callbacks, public participation, public discussion changes, and invitation
 HTTP tests for those four families now exist: `tests/archived-nonproject-http.test.ts` (1 pass; 10 assertions in child
 mode; authenticated member requests get 409 with the read-only message, and a public read is not refused). Still open for F01: rename, forks, ownership transfer, and deletion
 with recovery, which are blocked as listed above.
+Archive/unarchive now additionally has an owner Settings control and required lifecycle version checks. Fresh
+session/full-PAT and durable owner authorization replace the earlier cached administrator boolean. Unconfirmed
+UI mutations require current-state inspection before another action. Six pure lifecycle checks pass, including
+stale-version rejection; current signed HTTP and rendered acceptance of this correction remain pending.
 
 Cover repository visibility, README/license/gitignore initialization, template creation, independent forks, fork relationships, default branch changes, topics, archive/unarchive, rename, ownership transfer, deletion and recovery. Preserve source identity and permission boundaries during every transition. Imported data stays attributed and source repos are never mutated by an import.
 
@@ -3379,6 +3383,10 @@ and is idempotent by fingerprint; `tests/gpg-keys-http.test.ts` (1 pass; 13 asse
 revocation. Commit signature views use exact raw bytes and current viewer trust. Hosted Git/LFS acceptance,
 SSH transport parity, wider signing-key formats and provider transport changes remain outside this continuation. Branch/tag/signature and
 submodule behavior have focused local coverage; the non-project guard HTTP tests from F01 already exist.
+An additional LFS recovery correction is prepared in source: incomplete uploads rejected by consent fences,
+source failures or timeouts can release their pending marker only after both producer and storage SDK settle.
+Full-body uncertain outcomes retain their hold. Same-object retry coverage is added for session and PAT consent
+changes; this correction still requires runtime verification under the resource guard.
 
 Complete normal Git branch/tag behavior, signatures and verification status, clone/fetch/push/pull, submodule references, and an interoperable Git LFS batch/object service on R2 where needed. Check actual object hashes, not pointer files alone. Evaluate an ordinary SSH Git path separately; a custom tunneling client is not transparent SSH parity. Cloudflare's documented Wrangler SSH access is account-authenticated and does not expose public container ports; do not confuse it with a public Git SSH service.
 
@@ -3510,8 +3518,16 @@ remains open after the storage interruption.
 The isolated verifier now supports low-memory child processes, exact inventories, resource preflight and resumable
 hashed log receipts. Resume binds source/configuration/runtime inputs and refuses changed code rather than carrying
 old green results forward. No test deadlines, assertions or existing skips are removed.
-Still open: unresolved physical storage outcomes, explicit destination catalog mapping and hosted multi-repository
-acceptance.
+Destination catalog mapping is now prepared in source: a destination administrator explicitly selects labels,
+current eligible members and milestones while retaining immutable source context. Confirmed requests bind the
+origin, feature revision and principal generation; receipt replay preserves later edits. Member catalogs are paged
+and mapping storage is bounded. Six local SQLite domain checks pass, including remapping, historical receipts and
+quota rejection. Five intent/CLI preparation checks also pass, including later member pages, stale proof rejection
+and frozen replay. The actual CLI later-page selection and lost-acknowledgement retry test also passes (nine
+assertions). Current signed HTTP and rendered-flow verification remains pending under the disk resource guard;
+this source checkpoint does not establish release readiness.
+Still open: unresolved physical storage outcomes, complete destination mapping verification and hosted
+multi-repository acceptance.
 
 Complete labels, assignees, milestones, templates/forms, attachment handling, linking/closing through accepted work, duplicate/transfer workflows, relationships/subissues, saved filtering, bulk actions, and moderation. Preserve discussion context when tasks are assigned to agents.
 
@@ -3527,6 +3543,9 @@ progress counts come from stored items. `planning-store.ts` now persists those r
 `/planning/export`; the Planning tab provides board/table/timeline, typed fields, complete saved-view semantics,
 iterations, bulk editing and export. Actual signed Worker HTTP, reopen/CAS and synthetic rendered flows pass.
 Accepted-change-driven owner automation now has frozen exact-once receipts and version-bound retries.
+The Planning view additionally shows an accessible status-distribution chart from active stored items, preserving
+owner-defined status names without inferring completion. Two focused derivation/rendered-markup checks pass
+(ten assertions); actual browser chart verification remains pending under the resource guard.
 Complete project parity and hosted acceptance remain open.
 
 Implement project boards, tables, timeline/roadmap views, custom fields, saved filters/sorts, iterations, item status automation, bulk editing, and useful progress charts. Projects must reference issues/changes rather than duplicate them into unrelated state.
@@ -3542,6 +3561,14 @@ pin) is maintainer-only and audited; locked discussions refuse replies; only the
 questions. Polls, snippets and wiki rules exist as tested core modules. This continuation wires wiki revisions into
 member-authorized SQLite/API/UI flows. Git-backed wiki interoperability, subscriptions, issue conversion and
 production integration of the other core modules remain open.
+Repository discussion moderation is additionally wired in source for separate public/private ledgers, reporting,
+independent review, author appeals and reversal. Suppressed threads exclude replies, polls, search, subscriptions
+and notifications; portable archives retain restrictions without exporting private reports. Local originals remain
+available to the authorized appeal workflow. Focused native/SQLite cases are added but not yet executed under the
+resource guard. Previously converted issues remain independently governed; hidden discussions cannot be converted.
+Archive suppression now also binds both discussion namespaces across asynchronous hashing and redacts restricted
+native author IDs. Three real SQLite archive checks pass, including moderation during hashing. Parent-aware
+projections block known reply edit/report paths under a suppressed thread; native HTTP checks remain pending.
 
 Implement discussion categories, question/answer marking, polls, threading, subscriptions, pin/lock/moderation, and issue conversion; versioned wikis with Git access; shareable revisioned snippets with explicit visibility. Do not call issue comments a full discussion system.
 
@@ -3591,7 +3618,11 @@ References: `https://docs.github.com/en/organizations` and `https://docs.github.
 **Progress (source-tested only, October 8):** `src/core/ci-gate.ts` (`tests/ci-gate.test.ts`, 2 pass). A required check passes only with
 a successful latest run on the exact commit; missing checks block. `workflow-parser.ts` and `ci-engine.ts` provide
 a local dependency scheduler with timeouts, abort requests and unconfirmed-termination reporting. Executable
-steps, trusted runtime integration, persistence, matrix/secret/cache compatibility and actual cleanup remain open.
+steps and persistent claims now also have source implementations in `customer-ci.ts`, `ci-ledger.ts` and
+`ci-workflow.ts`: bounded environment matrices, exact-tree/workflow caches and customer-owned Linux execution.
+The declared dialect grants no workflow secrets and refuses replay of interrupted running claims. Actual Linux
+isolation and cleanup acceptance, Cloudflare-hosted execution, workload identity and broader dialect compatibility
+remain open; these source mechanisms do not establish hosted runner parity.
 
 Implement triggers, job dependencies, matrices, conditions, reusable workflows, logs, artifacts/caches, timeouts, cancellation/retry, secret scopes, environment approval, workload identity, resource quotas and billable usage. Publish a precise workflow dialect/compatibility matrix. Test imported workflows through actual execution; an Actions YAML parser alone is not compatibility.
 
@@ -3604,6 +3635,13 @@ References: `https://docs.github.com/en/actions`, `https://github.com/features`,
 ### F11 — releases, static sites and deployments (R2; after C07/F10)
 
 **Progress (source-tested only, October 8):** `src/core/release-rules.ts` (2 tests): semantic tags, one release per tag, unique assets, SHA-256 digests. Open: static sites, deployments.
+Deployment approval revocation is additionally prepared in source: approvals and queued intents bind their original
+owner membership epochs; removal and regrant cannot revive the old approval or requester intent. Dispatch checks current account lifecycles, policy revision,
+repository identity, delivery generation and service authority immediately before webhook delivery. Legacy approvals
+without epoch fences fail closed. One real SQLite epoch check passes (22 assertions), covering distinct approver
+and requester revocation/regrant, fresh approval/intent and unchanged historical receipt. Signed HTTP/webhook cases remain pending
+under the resource guard. A receiver
+still needs execution authorization before irreversible deployment work; delivery is not deployment acceptance.
 
 Extend release support to assets, draft/prerelease state, changelog/provenance, immutable downloads, and permission-safe publication. Provide static-site publishing, custom domain validation, deployment environments, approval, statuses and rollback. Distinguish source accepted, artifact built, deployment requested, and deployment observed.
 
@@ -3677,6 +3715,9 @@ References: `https://docs.github.com/en/codespaces`, `https://docs.github.com/en
 ### F17 — clients and accessibility (R3; after F03–F09/F14)
 
 **Progress (source-tested only, October 8):** `src/core/accessible-names.ts` (1 test): interactive elements without a name are reported. Open: clients, full audit.
+Mobile workspace navigation now moves keyboard focus from the closing sidebar to the existing main content
+region. This source correction preserves the current layout and needs rendered keyboard verification once the
+resource guard allows it; it does not close full screen-reader or client acceptance.
 
 Finish the CLI's supported workflows and credentials on macOS/Windows/Linux. Provide the agreed desktop and mobile/tablet client experiences, including review, notifications and authentication. Record whether these are native clients or responsive web; do not call a mobile webpage native app parity. Preserve normal editor/Git compatibility.
 

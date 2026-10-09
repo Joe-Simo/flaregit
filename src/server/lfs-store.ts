@@ -67,7 +67,10 @@ export class DurableLfsStore {
   this.storage.sql.exec(`INSERT INTO ${this.writesTable} VALUES(?,?)`,key,JSON.stringify(record));
   const fixed=entry.size===0?undefined:new FixedLengthStream(entry.size),abort=new AbortController();let producerRejected=false,pumpSettled=entry.size===0,writeSettled=false,refused=false,timer:ReturnType<typeof setTimeout>|undefined;
   const update=()=>{record.producerClosed=pumpSettled;record.writeSettled=writeSettled;record.phase=producerRejected&&pumpSettled&&writeSettled&&(record.emittedBytes??entry.size)<entry.size?'rejected':writeSettled&&record.result?'settled':'unknown';this.saveWrite(record);};
-  const validated=fixed?this.checkedStream(body,entry,authorize,error=>{producerRejected=error instanceof LfsStorageError&&[401,403,404,413,422].includes(error.status);},bytes=>{record.emittedBytes=(record.emittedBytes??0)+bytes;},onInputValidated):undefined;
+  // The causal proof depends on incomplete emission and settled producer/SDK,
+  // not the exception class: consent fences can throw ordinary Errors, and
+  // timeouts or source failures also withhold the final required bytes.
+  const validated=fixed?this.checkedStream(body,entry,authorize,()=>{producerRejected=true;},bytes=>{record.emittedBytes=(record.emittedBytes??0)+bytes;},onInputValidated):undefined;
   const pumping=(fixed&&validated?validated.pipeTo(fixed.writable,{signal:abort.signal}):Promise.resolve()).then(()=>{pumpSettled=true;},error=>{pumpSettled=true;if(writeSettled)update();throw error;});
   const writing=bucket.put(key,fixed?fixed.readable:new Uint8Array(0),{...options,customMetadata:{...options.customMetadata,oid:entry.oid,lfsWriteId:record.writeId}}).then(object=>{writeSettled=true;record.result=object===null?'refused':'stored';if(object===null){refused=true;abort.abort();}update();return object;},error=>{writeSettled=true;update();throw error;});
   const finished=Promise.all([writing,pumping.catch(error=>{if(!refused)throw error;})]);

@@ -38,3 +38,8 @@ test("archived repositories refuse writes and active repositories accept them", 
   if (!archived.ok) throw new Error("setup failed");
   expect(() => assertWritable(archived.next)).toThrow("Repository is archived and read-only");
 });
+
+test('versioned lifecycle transition refuses a stale snapshot after archive/unarchive cycle',()=>{
+ const first=applyLifecycleAction(initialLifecycle(),'archive',admin,at,1);if(!first.ok)throw Error('Setup failed');const restored=applyLifecycleAction(first.next,'unarchive',admin,at,2);if(!restored.ok)throw Error('Setup failed');
+ expect(applyLifecycleAction(restored.next,'archive',admin,at,1)).toMatchObject({ok:false,status:409});expect(restored.next).toEqual({state:'active',archivedAt:null,version:3});
+});

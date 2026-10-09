@@ -41,7 +41,9 @@ test('production LFS HTTP verifies bytes, immutable size, private membership, pu
   const batch=await fetch(task+'batch',{method:'POST',headers:{...auth,'Content-Type':'application/vnd.git-lfs+json'},body:JSON.stringify({operation:'upload',transfers:['basic'],objects:[{oid,size:bytes.length}]})});expect(batch.status).toBe(200);
   const payload=await batch.json() as {objects:{actions:{upload:{href:string}}}[]};expect(payload.objects[0]!.actions.upload.href).toBe(task+oid);expect(payload.objects[0]!.actions.upload.href).not.toContain('?');
   const chunked=()=>new ReadableStream<Uint8Array>({start(controller){controller.enqueue(bytes);controller.close();}});
-  expect((await fetch(task+'f'.repeat(64),{method:'PUT',headers:auth,body:chunked()})).status).not.toBe(200);
+  // Bun's fetch can miss an early refusal of an unread streamed body, so the
+  // unadmitted-oid refusal uses a fixed-length body; chunked upload is proven below.
+  expect((await fetch(task+'f'.repeat(64),{method:'PUT',headers:auth,body:bytes})).status).not.toBe(200);
   // The admitted oid/size bounds a stock chunked transfer without Content-Length.
   await expectLfsStatus(await fetch(task+oid,{method:'PUT',headers:auth,body:chunked()}),200,token.secret);
   expect((await fetch(task+oid,{method:'PUT',headers:{...auth,'Content-Length':String(bytes.length)},body:bytes})).status).toBe(200);
@@ -97,6 +99,12 @@ for(const mode of ['session','pat'] as const){
    expect(waiting).toBe(true);expect((await worker.fetch('http://fixture/fixture/regrant')).status).toBe(200);release();
    expect((await upload).status).not.toBe(200);
    expect((await worker.fetch('http://fixture/git/p123456789abc/canonical.git/info/lfs/objects/'+oid,{headers})).status).not.toBe(200);
+   // A plain consent-fence Error must release only the positively settled,
+   // incomplete producer hold, allowing this same object under fresh consent.
+   expect((await worker.fetch(base+oid+'/reconcile',{method:'POST',headers})).status).toBe(200);
+   const retryBatch=await worker.fetch(base+'batch',{method:'POST',headers,body:JSON.stringify({operation:'upload',objects:[{oid,size:bytes.length}]})});
+   expect(retryBatch.status).toBe(200);expect((await retryBatch.json() as {objects:{error?:unknown}[]}).objects[0]?.error).toBeUndefined();
+   expect((await worker.fetch(mode==='pat'?base+oid:'http://fixture/fixture/session-upload?oid='+oid,{method:'PUT',...(mode==='pat'?{headers}:{}),body:bytes})).status).toBe(200);
    const nextBytes=new Uint8Array([7,9,255]),nextOid=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',nextBytes)),value=>value.toString(16).padStart(2,'0')).join('');
    expect((await worker.fetch(base+'batch',{method:'POST',headers,body:JSON.stringify({operation:'upload',objects:[{oid:nextOid,size:nextBytes.length}]})})).status).toBe(200);
    // A fresh request under the new epoch succeeds; the old stream alone is refused.

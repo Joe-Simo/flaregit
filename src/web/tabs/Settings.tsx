@@ -22,6 +22,7 @@ import { navigate } from "../router";
 
 const RepositoryApplications=lazy(async()=>({default:(await import("../components/RepositoryApplications")).RepositoryApplications}));
 const MetadataArchiveCard=lazy(async()=>({default:(await import("../components/MetadataArchiveCard")).MetadataArchiveCard}));
+const RepositoryArchiveCard=lazy(async()=>({default:(await import("../components/RepositoryArchiveCard")).RepositoryArchiveCard}));
 const ConversationMigrationCard=lazy(async()=>({default:(await import("../components/ConversationMigrationCard")).ConversationMigrationCard}));
 const ReviewPolicySettings=lazy(async()=>({default:(await import("../components/ReviewPolicySettings")).ReviewPolicySettings}));
 const AgentCleanupRecovery=lazy(async()=>({default:(await import("../components/AgentCleanupRecovery")).AgentCleanupRecovery}));
@@ -82,6 +83,7 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
       <div className="flex items-center justify-between gap-3"><p className="text-sm text-muted-foreground">Your repository notifications</p><RepositoryNotifications key={meta.id} projectId={meta.id} projectName={meta.name}/></div>
       <Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Loading app access…</p>}><RepositoryApplications key={`apps:${meta.id}`} projectId={meta.id}/></Suspense>
       <Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Loading metadata archive…</p>}><MetadataArchiveCard key={`metadata-archive:${meta.id}`} projectId={meta.id} isOwner={isOwner}/></Suspense>
+      {isOwner&&<Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Loading repository archive…</p>}><RepositoryArchiveCard key={`repository-archive:${meta.id}`} projectId={meta.id} onChange={reload}/></Suspense>}
       <GitCredentialRevocation key={`git-credentials:${meta.id}`} projectId={meta.id}/>
       {isOwner&&<Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Loading review settings…</p>}><ReviewPolicySettings key={`review-policy:${meta.id}`} projectId={meta.id}/></Suspense>}
       {isOwner&&<Suspense fallback={null}><AgentCleanupRecovery key={`agent-cleanup:${meta.id}`} projectId={meta.id}/></Suspense>}

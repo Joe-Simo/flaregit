@@ -6,7 +6,7 @@ export class ArchivedNonprojectFixture extends RepositoryController {
   async seed() {
     await this.initialize({projectId:'p123456789abc',projectName:'Archived non-project fixture',canonicalRepoName:'synthetic-only',head:'a'.repeat(40),verificationPolicy:{kind:'git-integrity'},ownerId:'owner'});
     await this.addMember('member','member');
-    await this.repositoryLifecycleTransition('archive', {canAdmin: true});
+    await this.repositoryLifecycleTransition('archive',1,{userId:'owner',displayName:'Owner',viaToken:false},undefined,Date.now()+60000);
   }
 }
 

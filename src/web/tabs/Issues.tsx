@@ -1,4 +1,5 @@
 import {issueTransferPendingSchema,type IssueTransferPendingRecovery} from '../issue-transfer-intent';
+import {IssueTransferMappingPanel} from '../components/IssueTransferMapping';
 import {IssueTransfer} from '../components/IssueTransfer';
 import {Dialog,DialogHeader,DialogTitle,DialogDescription,DialogFooter} from '@/components/ui/dialog';
 import {z} from 'zod';
@@ -26,7 +27,7 @@ import { changeCreationFollowup, type ChangeCreationResponse } from "../change-c
 import { Conversation } from "../components/Conversation";
 
 interface Issue { discussionOrigin?:{discussionId:string;scope:'public'|'members';author:string;createdAt:string;convertedBy:string}; number: number; title: string; body: string; state: "open" | "closed"; author: string; created_at: string; updated_at: string; closed_by: string | null; comments: number; importedOrigin?:ImportedConversationOrigin|null }
-interface IssueDetail extends Omit<Issue, "comments"> { stateRevision:number;canStateWrite?:boolean;canDeleteIssue?:boolean;transferPending?:boolean;pendingTransfer?:IssueTransferPendingRecovery; linked: Array<{ id: string; goal: string; status: string }> }
+interface IssueDetail extends Omit<Issue, "comments"> { stateRevision:number;canStateWrite?:boolean;canDeleteIssue?:boolean;transferPending?:boolean;pendingTransfer?:IssueTransferPendingRecovery;canMapTransferContext?:boolean;transferContext?:unknown; linked: Array<{ id: string; goal: string; status: string }> }
 const stateChangeSchema=z.object({state:z.enum(['open','closed']),expectedRevision:z.number().int().nonnegative().safe(),requestId:z.uuid()}).strict();
 type StateChangeIntent=z.infer<typeof stateChangeSchema>;
 type StateChangeReceipt={issue:{number:number;state:'open'|'closed';stateRevision:number;updated_at:string;closed_by:string|null};requestId:string;replayed:boolean;changedSince:boolean;originalState:'open'|'closed';originalRevision:number};
@@ -324,6 +325,7 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
           <ul className="space-y-1">{issue.linked.map((t) => <li key={t.id} className="break-words"><Button size="sm" variant="link" className="h-auto max-w-full p-0 text-left whitespace-normal" onClick={() => navigate(`/p/${projectId}/review?task=${t.id}`)}>{t.goal}</Button> <span className="text-xs text-muted-foreground">{t.status}</span></li>)}</ul>
         </div>
       )}
+      <IssueTransferMappingPanel projectId={projectId} number={number} canMap={issue.canMapTransferContext===true} sourceContext={issue.transferContext} disabled={busy!==null||transferLocked||issue.transferPending===true} onChanged={()=>void load()}/>
       <IssueTransfer projectId={projectId} number={number} pendingTransfer={issue.pendingTransfer} canTransfer={issue.canDeleteIssue===true&&!issue.transferPending} disabled={busy!==null||stateIntent!==null||deleteIntent!==null} onLock={value=>{transferLock.current=value;setTransferLocked(value);}} onChanged={()=>void load()}/>
       {issue.transferPending&&!transferLocked&&<p role="status" className="text-sm text-muted-foreground">This issue is being transferred. Changes are paused until the transfer completes.</p>}
       <fieldset disabled={transferLocked||issue.transferPending} className="space-y-5 min-w-0">

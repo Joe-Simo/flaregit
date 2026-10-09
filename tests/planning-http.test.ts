@@ -24,11 +24,14 @@ test('planning HTTP links real issues with persisted views, iterations, automati
     const owner = await sign('owner');
     const member = await sign('member');
     const life = '/api/p/p123456789abc/lifecycle';
-    const call = (token: string | null, path: string, method = 'GET', value?: unknown) => worker.fetch('http://fixture' + path, {
+    const call = async(token: string | null, path: string, method = 'GET', value?: unknown) => {
+      if(token&&path===life&&method==='POST'&&value&&typeof value==='object'&&!('expectedVersion' in value)){const current=await worker.fetch('http://fixture'+life,{headers:{Authorization:'Bearer '+token}});if(current.ok)value={...value,expectedVersion:(await current.json() as {version:number}).version};}
+      return worker.fetch('http://fixture' + path, {
       method,
       headers: {'CF-Connecting-IP': '198.51.100.99', ...(token ? {Authorization: 'Bearer ' + token} : {}), 'content-type': 'application/json'},
       ...(value === undefined ? {} : {body: JSON.stringify(value)}),
     });
+    };
 
     expect((await worker.fetch('http://fixture/fixture/seed')).status).toBe(200);
 

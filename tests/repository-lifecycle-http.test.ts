@@ -24,11 +24,14 @@ test('signed HTTP archive state is owner-only, read-only while archived, and res
     const owner = await sign('owner');
     const member = await sign('member');
     const life = '/api/p/p123456789abc/lifecycle';
-    const call = (token: string | null, path: string, method = 'GET', value?: unknown) => worker.fetch('http://fixture' + path, {
+    const call = async(token: string | null, path: string, method = 'GET', value?: unknown) => {
+      if(token&&path===life&&method==='POST'&&value&&typeof value==='object'&&!('expectedVersion' in value)){const current=await worker.fetch('http://fixture'+life,{headers:{Authorization:'Bearer '+token}});if(current.ok)value={...value,expectedVersion:(await current.json() as {version:number}).version};}
+      return worker.fetch('http://fixture' + path, {
       method,
       headers: {'CF-Connecting-IP': '198.51.100.99', ...(token ? {Authorization: 'Bearer ' + token} : {}), 'content-type': 'application/json'},
       ...(value === undefined ? {} : {body: JSON.stringify(value)}),
     });
+    };
 
     expect((await worker.fetch('http://fixture/fixture/seed')).status).toBe(200);
 
@@ -58,6 +61,8 @@ test('signed HTTP archive state is owner-only, read-only while archived, and res
     expect(typeof archivedBody.archivedAt).toBe('string');
     expect((await call(owner, life)).status).toBe(200);
     expect(await (await call(owner, life)).json()).toEqual(archivedBody);
+    const cleanup=await call(owner,'/api/p/p123456789abc/agent-runtime/recovery','POST',{attemptId:crypto.randomUUID()});expect(await cleanup.text()).not.toContain('Repository is archived and read-only');
+    const revoke=await call(member,'/api/p/p123456789abc/git-credentials','DELETE',{});expect(await revoke.text()).not.toContain('Repository is archived and read-only');
 
     // Negative: archiving an already archived repository is refused and changes nothing.
     const twice = await call(owner, life, 'POST', {action: 'archive'});
@@ -73,6 +78,7 @@ test('signed HTTP archive state is owner-only, read-only while archived, and res
     const restored = await call(owner, life, 'POST', {action: 'unarchive'});
     expect(restored.status).toBe(200);
     expect(await restored.json()).toEqual({state: 'active', archivedAt: null, version: 3});
+    expect((await call(owner,life,'POST',{action:'archive',expectedVersion:1})).status).toBe(409);expect(await(await call(owner,life)).json()).toEqual({state:'active',archivedAt:null,version:3});
     const afterRestore = await call(owner, '/api/p/p123456789abc/candidates/candidate/verification-closure', 'POST', {workflowId: 'workflow', commit: 'b'.repeat(40), evidenceId: 'evidence'});
     expect(await afterRestore.text()).not.toBe('Repository is archived and read-only; unarchive it to change anything');
 

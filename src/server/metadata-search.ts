@@ -32,7 +32,7 @@ export async function searchAccountMetadata(input: {
   const resultRepositories = new Map<string, SearchRepository>();
   const seen = new Set<string>();
   for (const reference of input.references.slice(0, 10)) {
-    if (!/^p?[0-9a-f]{12}$/.test(reference.id) || seen.has(reference.id)) continue;
+    if (!/^[a-z0-9]{12,16}$/.test(reference.id) || seen.has(reference.id)) continue;
     seen.add(reference.id);
     const repository = input.repository(reference.id);
     try {

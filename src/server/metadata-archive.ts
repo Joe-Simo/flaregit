@@ -1,3 +1,4 @@
+import {createHash} from 'node:crypto';
 import {IssueLifecycleStore,ensureIssueLifecycleSchema,activeIssueSql,portableIssueTombstoneSchema} from './issue-lifecycle';
 import {planningStateSchema,validatePlanningArchive} from "./planning-store";
 import {z} from 'zod';
@@ -7,7 +8,7 @@ import {METADATA_ARCHIVE_TABLES as tables,archiveIdentitySchema as identity,arch
 export {MAX_METADATA_ARCHIVE_BYTES} from '../core/metadata-archive';
 export type {ArchiveIdentity,MetadataArchive} from '../core/metadata-archive';
 import type {ArchiveIdentity,MetadataArchive} from '../core/metadata-archive';
-const discussionDocument=z.object({id:z.string().min(1),topicId:z.string().min(1),category:z.enum(['question','general','ideas','announcements']),title:z.string().max(200),body:z.string().max(8000),author:z.string().max(256),version:z.number().int().positive().safe(),createdAt:z.string().datetime(),updatedAt:z.string().datetime(),removed:z.boolean(),locked:z.boolean(),resolved:z.boolean(),moderationReason:z.string().max(500).optional(),pinned:z.boolean().optional(),answerId:z.string().regex(/^discussion_[a-f0-9-]{36}$/).optional(),convertedIssue:z.number().int().positive().safe().optional()}).strict();
+const discussionDocument=z.object({id:z.string().min(1),topicId:z.string().min(1),category:z.enum(['question','general','ideas','announcements']),title:z.string().max(200),body:z.string().max(8000),author:z.string().max(256),version:z.number().int().positive().safe(),createdAt:z.string().datetime(),updatedAt:z.string().datetime(),removed:z.boolean(),locked:z.boolean(),resolved:z.boolean(),moderationReason:z.string().max(500).optional(),moderationState:z.enum(["visible","hidden","removed"]).optional(),pinned:z.boolean().optional(),answerId:z.string().regex(/^discussion_[a-f0-9-]{36}$/).optional(),convertedIssue:z.number().int().positive().safe().optional()}).strict();
 function validateRow(table:string,value:z.infer<typeof row>){
  if(table==='issues')z.object({number:z.number().int().positive().safe(),title:z.string().min(1).max(200),body:text,state:z.enum(['open','closed']),author:z.string().min(1).max(256),created_at:text,updated_at:text,closed_by:text.nullable()}).strict().parse(value);
  if(table==='comments')z.object({id:z.number().int().positive().safe(),subject:z.string().min(1).max(200),author:z.string().min(1).max(256),body:text,path:text.nullable(),line:integer.nullable(),commit:text.nullable(),created_at:text}).strict().parse(value);
@@ -23,9 +24,29 @@ export class MetadataArchives{
  constructor(private readonly storage:DurableObjectStorage){ensureIssueLifecycleSchema(storage);storage.sql.exec('CREATE TABLE IF NOT EXISTS metadata_archive_restores(request_id TEXT PRIMARY KEY,payload_hash TEXT NOT NULL,doc TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metadata_archive_history(table_name TEXT NOT NULL,source_id TEXT NOT NULL,doc TEXT NOT NULL,PRIMARY KEY(table_name,source_id)); CREATE TABLE IF NOT EXISTS metadata_archive_origins(table_name TEXT NOT NULL,resource_id TEXT NOT NULL,doc TEXT NOT NULL,PRIMARY KEY(table_name,resource_id))');}
  private exists(table:string){return this.storage.sql.exec('SELECT name FROM sqlite_master WHERE type=\'table\' AND name=?',table).toArray().length>0;}
  private columns(table:string){return this.storage.sql.exec<{name:string}>(`PRAGMA table_info("${table}")`).toArray().map(column=>column.name);}
+ private sourceSnapshot(names:readonly string[]){
+  const inventories=names.map(table=>{
+   if(!this.exists(table))return {table,columns:[] as string[],count:0,bytes:0};
+   const columns=this.columns(table),quoted=columns.map(column=>`"${column.replaceAll('"','""')}"`),size=quoted.map(column=>`coalesce(length(CAST(${column} AS BLOB)),0)`).join('+')||'0';
+   const row=this.storage.sql.exec<{count:number;bytes:number}>(`SELECT COUNT(*) AS count,coalesce(SUM(${size}),0) AS bytes FROM "${table}"`).toArray()[0]!;
+   return {table,columns,count:row.count,bytes:row.bytes};
+  });
+  if(inventories.some(table=>table.count>10000)||inventories.reduce((sum,table)=>sum+table.bytes,0)>MAX_METADATA_ARCHIVE_BYTES)throw new MetadataArchiveError('Canonical archive visibility inventory exceeds bounded capacity',413);
+  const hash=createHash('sha256');
+  for(const inventory of inventories){
+   hash.update(JSON.stringify(inventory));if(!inventory.columns.length)continue;
+   const quoted=inventory.columns.map(column=>`"${column.replaceAll('"','""')}"`),cursor=this.storage.sql.exec(`SELECT ${quoted.join(',')} FROM "${inventory.table}" ORDER BY ${quoted.join(',')} LIMIT 10001`);
+   const rows=typeof cursor[Symbol.iterator]==='function'?cursor:cursor.toArray();let count=0;
+   for(const value of rows){if(++count>10000)throw new MetadataArchiveError('Canonical archive visibility inventory changed beyond capacity',413);hash.update(JSON.stringify(value));}
+  }
+  return hash.digest('hex');
+ }
+ private discussionSnapshot(){return this.sourceSnapshot(['repository_private_discussion_entries','repository_public_discussion_entries','repository_private_discussion_polls','repository_public_discussion_polls']);}
+ releaseSnapshot(){return this.sourceSnapshot(['repository_private_discussion_entries','repository_public_discussion_entries','repository_private_discussion_polls','repository_public_discussion_polls','metadata_archive_history','issue_tombstones','issue_transfer_incoming']);}
  async export(source:ArchiveIdentity,includeIssueHistory=false):Promise<{archive:MetadataArchive;sha256:string}>{
-  identity.parse(source);let lifecycleSnapshot='';
+  identity.parse(source);let lifecycleSnapshot='',discussionSnapshot='';
   const archive=this.storage.transactionSync(()=>{
+   discussionSnapshot=this.discussionSnapshot();
    const lifecycle=new IssueLifecycleStore(this.storage),markers=this.storage.sql.exec<{issue_number:number;document:string}>('SELECT issue_number,document FROM issue_tombstones ORDER BY issue_number LIMIT 10001').toArray();
    if(markers.length>10000)throw new MetadataArchiveError('Issue deletion inventory exceeds archive capacity',413);const incomingRows=this.exists('issue_transfer_incoming')?this.storage.sql.exec<{issue_number:number;request_id:string;active:number}>('SELECT issue_number,request_id,active FROM issue_transfer_incoming ORDER BY issue_number LIMIT 10001').toArray():[];if(incomingRows.length>10000)throw new MetadataArchiveError('Incoming transfer inventory exceeds archive capacity',413);const incoming=new Set(incomingRows.filter(row=>row.active===0).map(row=>row.issue_number));lifecycleSnapshot=JSON.stringify([markers,incomingRows]);
    const inactive=new Set(markers.map(marker=>marker.issue_number)),activeNumbers=this.exists('issues')?this.storage.sql.exec<{number:number}>(`SELECT i.number FROM issues i WHERE ${activeIssueSql('i')} ORDER BY i.number LIMIT 10001`).toArray().map(issue=>issue.number):[];
@@ -57,8 +78,13 @@ export class MetadataArchives{
      const issueNumber=name==='migration_native_issue_origins'?nativeId:comment&&/^issue:[1-9][0-9]*$/.test(comment.subject)?Number(comment.subject.slice(6)):null;
      if(issueNumber===null||!activeNumbers.includes(issueNumber))parsed.source_doc=JSON.stringify({restricted:true,historicalOrigin:true});
     }
+    if(name==='metadata_archive_history'&&typeof parsed.table_name==='string'&&typeof parsed.source_id==='string'&&typeof parsed.doc==='string')parsed.doc=this.historyProjection({table_name:parsed.table_name,source_id:parsed.source_id,doc:parsed.doc},includeIssueHistory).doc;
     if(name==='metadata_archive_history'&&(incoming.size>0||inactive.size>0&&!includeIssueHistory))parsed.doc=JSON.stringify({restricted:true,historicalRecord:parsed.source_id});
-    if(name.endsWith('_discussion_entries')&&typeof parsed.doc==='string'){const doc=discussionDocument.parse(JSON.parse(parsed.doc));if(doc.removed)parsed.doc=JSON.stringify({...doc,title:'Removed',body:'',author:'Contributor'});}
+    if(name.endsWith('_discussion_entries')&&typeof parsed.doc==='string'){
+     const doc=discussionDocument.parse(JSON.parse(parsed.doc)),parentRow=doc.topicId!==doc.id?this.storage.sql.exec<{doc:string}>(`SELECT doc FROM "${name}" WHERE id=?`,doc.topicId).toArray()[0]:undefined,parent=parentRow?discussionDocument.parse(JSON.parse(parentRow.doc)):undefined;
+     const restricted=doc.removed||doc.moderationState&&doc.moderationState!=='visible'||parent?.removed||parent?.moderationState&&parent.moderationState!=='visible';
+     if(restricted){parsed.author_id='historical-unknown';parsed.doc=JSON.stringify({...doc,removed:true,moderationState:doc.moderationState&&doc.moderationState!=='visible'?doc.moderationState:parent?.moderationState??'removed',title:'Removed',body:'',author:'Contributor',answerId:undefined,convertedIssue:undefined});}
+    }
     return [parsed];
    })}));
    if(historical.length){const history=exported.find(table=>table.name==='metadata_archive_history');if(history)history.rows.push(...historical);else exported.push({name:'metadata_archive_history',columns:['table_name','source_id','doc'],rows:historical});}
@@ -67,7 +93,7 @@ export class MetadataArchives{
    if(archive.tables.some(table=>table.rows.length>10000)||new TextEncoder().encode(JSON.stringify(archive)).length>MAX_METADATA_ARCHIVE_BYTES)throw new MetadataArchiveError('Metadata archive exceeds bounded capacity; nothing was truncated',413);
    return archive;
   });
-  const sha256=await digest(archive);if(JSON.stringify([this.storage.sql.exec('SELECT issue_number,document FROM issue_tombstones ORDER BY issue_number LIMIT 10001').toArray(),this.exists('issue_transfer_incoming')?this.storage.sql.exec('SELECT issue_number,request_id,active FROM issue_transfer_incoming ORDER BY issue_number LIMIT 10001').toArray():[]])!==lifecycleSnapshot)throw new MetadataArchiveError('Issue lifecycle changed during export; retry the current snapshot');
+  const sha256=await digest(archive);if(this.discussionSnapshot()!==discussionSnapshot)throw new MetadataArchiveError('Discussion visibility changed during export; retry the current snapshot');if(JSON.stringify([this.storage.sql.exec('SELECT issue_number,document FROM issue_tombstones ORDER BY issue_number LIMIT 10001').toArray(),this.exists('issue_transfer_incoming')?this.storage.sql.exec('SELECT issue_number,request_id,active FROM issue_transfer_incoming ORDER BY issue_number LIMIT 10001').toArray():[]])!==lifecycleSnapshot)throw new MetadataArchiveError('Issue lifecycle changed during export; retry the current snapshot');
   return {archive,sha256};
  }
  async restore(value:unknown,target:ArchiveIdentity,requestId:string,expectedDigest:string,authorize:()=>void,prepareAuthority?:()=>Promise<()=>void>,importerActorId?:string){
@@ -124,5 +150,14 @@ export class MetadataArchives{
   });
  }
  origin(table:string,resourceId:string){const value=this.storage.sql.exec<{doc:string}>('SELECT doc FROM metadata_archive_origins WHERE table_name=? AND resource_id=?',table,resourceId).toArray()[0];return value?JSON.parse(value.doc) as {source:ArchiveIdentity;archiveDigest:string;sourceResourceId:string;sourceAuthor:string|null;identity:'external-unverified';nativeUserId:null}:null;}
- history(includeIssueHistory=false){const rows=this.storage.sql.exec<{table_name:string;source_id:string;doc:string}>('SELECT table_name,source_id,doc FROM metadata_archive_history ORDER BY table_name,source_id LIMIT 10000').toArray(),pending=this.storage.sql.exec('SELECT issue_number FROM issue_transfer_incoming WHERE active=0 LIMIT 1').toArray().length>0;return pending||!includeIssueHistory&&this.storage.sql.exec('SELECT issue_number FROM issue_tombstones LIMIT 1').toArray().length?rows.map(row=>({...row,doc:JSON.stringify({restricted:true})})):rows;}
+ private historyProjection(row:{table_name:string;source_id:string;doc:string},includeIssueHistory:boolean){
+   if(includeIssueHistory||!['repository_private_discussion_entries','repository_public_discussion_entries'].includes(row.table_name))return row;
+   try{const archived=z.object({id:z.string(),topic_id:z.string(),doc:z.string()}).passthrough().parse(JSON.parse(row.doc)),doc=discussionDocument.parse(JSON.parse(archived.doc));
+    if(doc.removed||doc.moderationState&&doc.moderationState!=='visible')return {...row,doc:JSON.stringify({restricted:true})};
+    if(!this.exists(row.table_name))return row;
+    const canonical=this.storage.sql.exec<{doc:string}>(`SELECT doc FROM "${row.table_name}" WHERE id IN (?,?)`,archived.id,archived.topic_id).toArray().map(value=>discussionDocument.parse(JSON.parse(value.doc)));
+    return canonical.some(value=>value.removed||value.moderationState&&value.moderationState!=='visible')?{...row,doc:JSON.stringify({restricted:true})}:row;
+   }catch{return {...row,doc:JSON.stringify({restricted:true})};}
+ }
+ history(includeIssueHistory=false){this.sourceSnapshot(['metadata_archive_history']);const rows=this.storage.sql.exec<{table_name:string;source_id:string;doc:string}>('SELECT table_name,source_id,doc FROM metadata_archive_history ORDER BY table_name,source_id LIMIT 10001').toArray(),pending=this.storage.sql.exec('SELECT issue_number FROM issue_transfer_incoming WHERE active=0 LIMIT 1').toArray().length>0;if(rows.length>10000)throw new MetadataArchiveError('Archive history exceeds bounded capacity',413);if(pending||!includeIssueHistory&&this.storage.sql.exec('SELECT issue_number FROM issue_tombstones LIMIT 1').toArray().length)return rows.map(row=>({...row,doc:JSON.stringify({restricted:true})}));return rows.map(row=>this.historyProjection(row,includeIssueHistory));}
 }

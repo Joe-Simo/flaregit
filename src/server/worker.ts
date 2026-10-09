@@ -1,3 +1,4 @@
+import {WorkspaceDiscoveryLimited,discoverAccountRepositories} from './account-repository-discovery';
 import {attachmentDisposition,type IssueAttachmentReply} from './issue-attachments';
 import type {IssueTransferPendingRecovery} from './issue-transfer-api';
 import {LfsStorageError} from './lfs-store';
@@ -316,6 +317,7 @@ export default {
       return respond({ profile: projection, contributions: contributions.sort((a,b) => b.acceptedAt.localeCompare(a.acceptedAt)).slice(0,100), contributionScope: "Accepted FlareGit contributions from up to 10 currently accessible public member repositories and their latest 100 acceptance records; not a complete lifetime history" });
     }
 
+    const publicDiscussionModeration=/^\/api\/public\/(p?[0-9a-f]{12})\/discussions\/(?!discussion_[a-f0-9-]{36}$)(moderation|discussion_[a-f0-9-]{36})(?:\/([a-f0-9-]{36})\/(resolve|appeal|decide)|\/(report))?$/.exec(url.pathname);
     const discussionRoute=/^\/api\/public\/(p?[0-9a-f]{12})\/discussions(?:\/(permissions|subscriptions|discussion_[a-f0-9-]{36})(?:\/(replies|control|poll|subscription|convert))?)?$/.exec(url.pathname);
     if(discussionRoute&&request.method==="GET"&&discussionRoute[2]!=="permissions"&&discussionRoute[2]!=="subscriptions"&&!discussionRoute[3]){
       const respond=(data:unknown,status=200)=>Response.json(data,{status,headers:{"Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
@@ -339,7 +341,7 @@ export default {
     }
     const publicRoute = /^\/api\/public\/(p?[0-9a-f]{12})\/(meta|history|tree|file|diff|community)$/.exec(url.pathname);
     const publicParticipationRoute = /^\/api\/public\/(p?[0-9a-f]{12})\/community\/(posts|requests)(?:\/(post_[a-f0-9-]{36}))?$/.exec(url.pathname);
-    if (url.pathname.startsWith("/api/public/") && !publicParticipationRoute && !discussionRoute) {
+    if (url.pathname.startsWith("/api/public/") && !publicParticipationRoute && !discussionRoute && !publicDiscussionModeration) {
       const publicResponse = (data: unknown, status = 200) => Response.json(data, { status, headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
       if (!publicRoute || request.method !== "GET") return publicResponse({ error: "Not found" }, 404);
       const projectId = publicRoute[1]!;
@@ -487,6 +489,9 @@ export default {
       if (auth.tokenScope === "read" && method !== "GET" && !/^\/p\/[a-z0-9]+\/clone$/.test(path)) return text("This token is read-only", 403);
     }
     const body = <T>(maxBytes=131_072) => readRequestJson<T>(request,maxBytes);
+    // Discovery fans out to every readable repository, so it has its own tighter budget.
+    const workspaceRepositories=async()=>{if(!(await env.API_LIMITER.limit({key:`workspace-discovery:${accountKey}`})).success)throw new WorkspaceDiscoveryLimited();return discoverAccountRepositories({userId,credential:auth.viaToken?{personalTokenHash:await gitParentTokenHash(request)}:{sessionExpiresAt:auth.expiresAt},registered:()=>account.listProjects(),inherited:()=>globalOf(env).inheritedRepositoryDiscovery(userId),repository:id=>projectOf(env,id),authorize:async()=>{const fresh=await authenticate(request,env);if(fresh instanceof Response||fresh.id!==userId||fresh.viaToken!==auth.viaToken||fresh.viaToken&&fresh.tokenRepo||fresh.expiresAt!==undefined&&fresh.expiresAt<=Date.now()||await account.accountLifecycle()!=='active')throw Error('Workspace account authority changed');}});};
+
 
     try {
       if(path==="/profile/discovery"||path.startsWith("/following")||path==="/community/following-activity"){
@@ -518,6 +523,23 @@ export default {
           if(entry && method === "DELETE")return json(await globalOf(env).forumRemove(actor,entry[1]!,await body<unknown>(),!auth.viaToken&&(env.OPERATOR_ACCOUNTS??"").split(",").map(x=>x.trim()).includes(accountKey)));
           return text("Not found",404);
         }catch(error){if(error instanceof RequestBodyError)throw error;return text("Community change was not saved; check confirmation, content, ownership and version before retrying",409);}
+      }
+      if(publicDiscussionModeration){
+        if(auth.viaToken)return repositoryReadText("Discussion moderation requires an account session",403);
+        const project=projectOf(env,publicDiscussionModeration[1]!);
+        try{
+          const grant=await project.publicGrant();if(!grant)return repositoryReadText("Repository unavailable",404);
+          const operation=publicDiscussionModeration[2]==="moderation"?(publicDiscussionModeration[4]??"inbox"):publicDiscussionModeration[5]==="report"?"report":null;
+          if(!operation||operation==="inbox"&&method!=="GET"||operation!=="inbox"&&method!=="POST")return repositoryReadText("Method not allowed",405);
+          const input=operation==="inbox"?null:await body<unknown>();
+          const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;if(fresh.id!==userId||fresh.viaToken||await account.accountLifecycle()!=="active")return repositoryReadText("Moderation session changed",403);
+          const actor={userId,accountKey,displayName:"Contributor"};
+          await project.discussionModeration(actor,true,operation,operation==="report"?publicDiscussionModeration[2]!:publicDiscussionModeration[3]??"",input);
+          const current=await project.publicGrant();if(!current||current.version!==grant.version)return repositoryReadText("Repository publication changed",409);
+          const finalAuth=await authenticate(request,env);if(finalAuth instanceof Response)return finalAuth;if(finalAuth.id!==userId||finalAuth.viaToken||await account.accountLifecycle()!=="active")return repositoryReadText("Moderation session changed",403);
+          // Recompute the private inbox after the final authentication await.
+          return repositoryReadJson(operation==="inbox"?await project.discussionModeration(actor,true,"inbox","",null):{saved:true});
+        }catch(error){if(error instanceof RequestBodyError)throw error;return repositoryReadText("Moderation access or version changed; refresh before retrying",409);}
       }
       if(discussionRoute){
         const project=projectOf(env,discussionRoute[1]!);{const refusal=await archivedWriteRefusal(project,request.method);if(refusal)return refusal;}if(!await project.publicGrant())return text("Not found",404);
@@ -573,7 +595,7 @@ export default {
       if (path === "/search" && method === "GET") {
         const query = url.searchParams.get("q") ?? "";
         if (query.length > 200) return json({ error: "Search is limited to 200 characters" }, 400);
-        return Response.json(await searchAccountMetadata({ query, userId, references: await account.listProjects(), repository: (id) => projectOf(env, id), lifecycle: () => account.accountLifecycle() }), { headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
+        return Response.json(await searchAccountMetadata({ query, userId, references: await workspaceRepositories(), repository: (id) => projectOf(env, id), lifecycle: () => account.accountLifecycle() }), { headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
       }
 
       // ---------- account level ----------
@@ -581,7 +603,7 @@ export default {
 
       if(path==="/account/work-overview"&&method==="GET"){
         if([...url.searchParams.keys()].some(key=>key!=="cursor")||url.searchParams.getAll("cursor").length>1||(url.searchParams.get("cursor")?.length??0)>100)return repositoryReadJson({error:"Invalid workspace attention cursor"},400);
-        const references=await account.listProjects(),selected=[...new Map(references.map(row=>[row.id,row])).values()].sort((a,b)=>a.id.localeCompare(b.id)).slice(0,10);
+        const references=await workspaceRepositories(),selected=[...new Map(references.map(row=>[row.id,row])).values()].sort((a,b)=>a.id.localeCompare(b.id)).slice(0,10);
         const currentActor=async()=>{const fresh=await authenticate(request,env);if(fresh instanceof Response||fresh.id!==userId||(fresh.viaToken===true)!==(auth.viaToken===true)||fresh.viaToken&&fresh.tokenRepo||await account.accountLifecycle()!=="active")throw Error("Workspace account authority changed");return{actor:{userId,displayName:"Workspace contributor",viaToken:fresh.viaToken===true},hash:fresh.viaToken?await gitParentTokenHash(request):undefined,expiry:fresh.expiresAt};};
         try{
           let authority=await currentActor();
@@ -591,7 +613,7 @@ export default {
           const latest=await Promise.allSettled(selected.map((row,index)=>first[index]!.status==="fulfilled"?readCurrent(row.id):Promise.reject(Error("Repository attention unavailable"))));
           const snapshots:WorkspaceAttentionSnapshot[]=[];let incompleteRepositories=Math.max(0,references.length-selected.length);
           latest.forEach((result,index)=>{if(result.status==="fulfilled"){if(result.value===null)return;if(result.value.projectId===selected[index]!.id){snapshots.push(result.value);return;}}incompleteRepositories++;});
-          await currentActor();const freshReferences=await account.listProjects();if(JSON.stringify(freshReferences.map(row=>row.id).sort())!==JSON.stringify(references.map(row=>row.id).sort()))return repositoryReadJson({error:"Workspace repositories changed; refresh attention"},409);
+          await currentActor();const freshReferences=await workspaceRepositories();if(JSON.stringify(freshReferences.map(row=>row.id).sort())!==JSON.stringify(references.map(row=>row.id).sort()))return repositoryReadJson({error:"Workspace repositories changed; refresh attention"},409);
           await currentActor();return repositoryReadJson(workspaceAttentionPage(snapshots,incompleteRepositories,url.searchParams.get("cursor")));
         }catch{return repositoryReadJson({error:"Workspace attention is unavailable or changed. Refresh current work; inbox history remains preserved."},409);}
       }
@@ -606,20 +628,13 @@ export default {
       if (path === "/account" && method === "GET") {
         let projects = await account.listProjects();
         if (projects.length === 0) projects = await adoptLegacyProject(env, account, accountKey, userId);
-        // Hide repositories this user no longer belongs to (deleted, or removed as a member).
-        const visible = [];
-        for (const p of projects) {
-          const role = await projectOf(env, p.id).roleOf(userId).catch(() => null);
-          if (role) visible.push({ ...p, role });
-          // Hide pending/revoked/unavailable membership from navigation, but retain
-          // its durable reference for account cleanup. Reading must not delete it.
-        }
-        const billing = await account.getBilling();
+        const billing=await account.getBilling(),runsToday=await account.usageToday();
+        const visible=await workspaceRepositories();
         return json({
           userId: accountKey,
           projects: visible,
           plan: billing.plan,
-          runsToday: await account.usageToday(),
+          runsToday,
           runsPerDay: planLimits(env)[billing.plan],
           checkoutConfigured: env.PAID_CHECKOUT_ENABLED === "true" && Boolean(env.POLAR_PRODUCT_ID && env.POLAR_ACCESS_TOKEN),
         });
@@ -1174,7 +1189,7 @@ export default {
         if(!effectiveAccess)return text('Not found',404);
         if(method!=='GET'&&!effectiveAccess.direct&&sub!=='/issue-filters'){
           if(effectiveAccess.role==='read'&&sub!=='/clone')return text('Repository access is read-only',403);
-          if(sub!=='/clone'&&!sub.startsWith('/wiki/')&&sub!=='/planning'&&sub!=='/issues'&&!(effectiveAccess.role==='admin'&&method==='POST'&&/^\/issues\/\d{1,7}\/transfer(?:\/[a-f0-9-]{36}\/(?:cancel|finalize))?$/.test(sub))&&!((method==='PATCH'||method==='DELETE'&&effectiveAccess.role==='admin')&&/^\/issues\/\d{1,7}$/.test(sub))&&!/^\/issues\/\d{1,7}\/attachments(?:\/(?:[a-f0-9-]{36})(?:\/(?:content|reconcile))?)?$/.test(sub)&&sub!=='/comments'&&sub!=='/tasks'&&!/^\/tasks\/[a-z0-9-]+\/(token|ready|cancel|browser-edit|fork-permission)$/.test(sub))return text('This operation requires direct repository membership',403);
+          if(sub!=='/clone'&&!sub.startsWith('/wiki/')&&sub!=='/planning'&&sub!=='/issues'&&!(effectiveAccess.role==='admin'&&method==='POST'&&/^\/issues\/\d{1,7}\/transfer-mapping$/.test(sub))&&!(effectiveAccess.role==='admin'&&method==='POST'&&/^\/issues\/\d{1,7}\/transfer(?:\/[a-f0-9-]{36}\/(?:cancel|finalize))?$/.test(sub))&&!((method==='PATCH'||method==='DELETE'&&effectiveAccess.role==='admin')&&/^\/issues\/\d{1,7}$/.test(sub))&&!/^\/issues\/\d{1,7}\/attachments(?:\/(?:[a-f0-9-]{36})(?:\/(?:content|reconcile))?)?$/.test(sub)&&sub!=='/comments'&&sub!=='/tasks'&&!/^\/tasks\/[a-z0-9-]+\/(token|ready|cancel|browser-edit|fork-permission)$/.test(sub))return text('This operation requires direct repository membership',403);
         }
         const state = await project.getState().catch(() => null);
         if (!state) return text("Not found", 404);
@@ -1215,13 +1230,13 @@ export default {
           if (method === "GET") return repositoryReadJson(await project.repositoryLifecycle());
           if (method !== "POST") return text("Repository lifecycle requires GET or POST", 405);
           if (!isOwner) return text("Only the current repository owner can change archive state", 403);
-          const input = await body<{ action?: unknown }>();
-          if (Object.keys(input).some((key) => key !== "action") || (input.action !== "archive" && input.action !== "unarchive")) return text("Archive state requires action archive or unarchive", 400);
-          const result = await project.repositoryLifecycleTransition(input.action, { canAdmin: isOwner });
-          if (!result.ok) return text(result.error, result.status);
-          return repositoryReadJson(result.next);
+          const parsed=z.object({action:z.enum(['archive','unarchive']),expectedVersion:z.number().int().positive().safe()}).strict().safeParse(await body<unknown>());
+          if(!parsed.success)return text('Exact archive action and current version required',400);
+          const current=await freshMetadataActor(true);if(!current?.isOwner)return text('Current repository owner authority changed',403);
+          const actor={userId,displayName:(await account.getProfile()).displayName||'Repository owner',viaToken:current.identity.viaToken===true};
+          try{const result=await project.repositoryLifecycleTransition(parsed.data.action,parsed.data.expectedVersion,actor,current.identity.viaToken?await gitParentTokenHash(request):undefined,current.identity.expiresAt);return result.ok?repositoryReadJson(result.next):text(result.error,result.status);}catch{return text('Current repository owner/session authority changed; archive state was not changed',403);}
         }
-        if (state.lifecycle?.state === "archived" && method !== "GET" && !(sub === "" && method === "DELETE")) return text("Repository is archived and read-only; unarchive it to change anything", 409);
+        if (state.lifecycle?.state === "archived" && method !== "GET" && !(sub === "" && method === "DELETE") && !(sub==="/git-credentials"&&method==="DELETE") && !(isOwner&&method==="POST"&&(sub==="/agent-runtime/recovery"||sub==="/branch-runtime/recovery"||/^\/tasks\/[a-z0-9-]+\/retargets\/[a-f0-9-]{36}\/recover$/.test(sub)))) return text("Repository is archived and read-only; unarchive it to change anything", 409);
         const securityAlertRoute=/^\/security\/alerts\/([a-zA-Z0-9-]{1,80})$/.exec(sub);
         if(sub==='/security/reports'||securityAlertRoute){
           if([...url.searchParams.keys()].length)return text('Security reports do not accept query parameters',400);
@@ -1253,7 +1268,18 @@ export default {
           if(auth.oauthClientId||auth.viaToken&&method!=='GET')return text('Metadata restore requires a signed-in owner; archive reads require a current personal credential or session',403);
           if([...url.searchParams.keys()].length)return text('Metadata archive routes do not accept query parameters',400);
           try{
-            if(method==='GET'){const current=await freshMetadataActor(false);if(!current)return text('Metadata archive access changed',403);const credential={viaToken:current.identity.viaToken===true,credentialHash:current.identity.viaToken?await gitParentTokenHash(request):undefined,sessionExpiresAt:current.identity.viaToken?undefined:current.identity.expiresAt,includeHistory:current.isOwner};const result=sub.endsWith('/history')?{records:await project.metadataArchiveHistory(userId,credential)}:await project.metadataArchiveExport(userId,credential);const released=await freshMetadataActor(false);if(!released||current.isOwner&&!released.isOwner)return text('Metadata archive access changed',403);return repositoryReadJson(result);}
+            if(method==='GET'){
+              const current=await freshMetadataActor(false);if(!current)return text('Metadata archive access changed',403);
+              const credentialHash=current.identity.viaToken?await gitParentTokenHash(request):undefined,credential={viaToken:current.identity.viaToken===true,credentialHash,sessionExpiresAt:current.identity.viaToken?undefined:current.identity.expiresAt,includeHistory:current.isOwner};
+              if(sub.endsWith('/history')){const result=await project.metadataArchiveHistory(userId,credential),released=await freshMetadataActor(false);if(!released||current.isOwner&&!released.isOwner)return text('Metadata archive access changed',403);await project.metadataArchiveRelease(userId,{viaToken:released.identity.viaToken===true,credentialHash,sessionExpiresAt:released.identity.viaToken?undefined:released.identity.expiresAt,includeHistory:credential.includeHistory},result.releaseProof);return repositoryReadJson({records:result.records});}
+              const result=await project.metadataArchiveExport(userId,credential),released=await freshMetadataActor(false);
+              if(!released||current.isOwner&&!released.isOwner)return text('Metadata archive access changed',403);
+              const releaseCredential={viaToken:released.identity.viaToken===true,credentialHash,sessionExpiresAt:released.identity.viaToken?undefined:released.identity.expiresAt,includeHistory:credential.includeHistory};
+              await project.metadataArchiveRelease(userId,releaseCredential,result.releaseProof);
+              // The authenticated RPC performs its final source/visibility checks
+              // synchronously; no further await can reopen that release window.
+              return repositoryReadJson({archive:result.archive,sha256:result.sha256});
+            }
             if(method==='POST'&&sub==='/metadata-archive'){
               if(!isOwner)return text('Only the owner can restore metadata',403);
               const input=await body<{archive?:unknown;requestId?:unknown;sha256?:unknown;confirmed?:unknown}>(MAX_METADATA_ARCHIVE_BYTES+1024);
@@ -1507,6 +1533,20 @@ export default {
         if (sub === "/activity" && method === "GET") {
           try{await project.listActivity(60,userId,auth.viaToken?await gitParentTokenHash(request):undefined,auth.expiresAt);const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;if(fresh.id!==userId||fresh.viaToken!==auth.viaToken)return repositoryReadText('Activity access changed',403);return repositoryReadJson(await project.listActivity(60,userId,fresh.viaToken?await gitParentTokenHash(request):undefined,fresh.expiresAt));}catch{return repositoryReadText('Activity access unavailable',403);}
         }
+        const memberDiscussionModeration=/^\/discussions\/(?!discussion_[a-f0-9-]{36}$)(moderation|discussion_[a-f0-9-]{36})(?:\/([a-f0-9-]{36})\/(resolve|appeal|decide)|\/(report))?$/.exec(sub);
+        if(memberDiscussionModeration){
+          if(auth.viaToken)return repositoryReadText("Discussion moderation requires an account session",403);
+          try{
+            const operation=memberDiscussionModeration[1]==="moderation"?(memberDiscussionModeration[3]??"inbox"):memberDiscussionModeration[4]==="report"?"report":null;
+            if(!operation||operation==="inbox"&&method!=="GET"||operation!=="inbox"&&method!=="POST")return repositoryReadText("Method not allowed",405);
+            const input=operation==="inbox"?null:await body<unknown>();
+            const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;if(fresh.id!==userId||fresh.viaToken||await account.accountLifecycle()!=="active")return repositoryReadText("Moderation session changed",403);
+            const actor={userId,accountKey,displayName:"Contributor"};
+            await project.discussionModeration(actor,false,operation,operation==="report"?memberDiscussionModeration[1]!:memberDiscussionModeration[2]??"",input);
+            const finalAuth=await authenticate(request,env);if(finalAuth instanceof Response)return finalAuth;if(finalAuth.id!==userId||finalAuth.viaToken||await account.accountLifecycle()!=="active")return repositoryReadText("Moderation session changed",403);
+            return repositoryReadJson(operation==="inbox"?await project.discussionModeration(actor,false,"inbox","",null):{saved:true});
+          }catch(error){if(error instanceof RequestBodyError)throw error;return repositoryReadText("Moderation membership or version changed; refresh before retrying",409);}
+        }
         const privateDiscussion=/^\/discussions(?:\/(settings|permissions|subscriptions|discussion_[a-f0-9-]{36})(?:\/(replies|control|poll|subscription|convert))?)?$/.exec(sub);
         if(privateDiscussion){
           const profile=await account.getProfile(),actor={userId,accountKey,displayName:profile.displayName||"Contributor"};
@@ -1624,16 +1664,19 @@ export default {
           try{return json(await recoverNativeCompute(env,operationKey));}
           catch{return text("Deployment workspace stop remains unconfirmed; retained Git state is preserved and retry remains locked",409);}
         }
+        const freshDeploymentOwner=async()=>{const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true)||(current.viaToken&&(current.tokenScope!=="full"||(current.tokenRepo&&current.tokenRepo!==projectId))))return text("Deployment owner authentication changed",403);if(await project.roleOf(userId)!=="owner")return text("Deployment owner access changed",403);if(!current.viaToken&&(!current.expiresAt||current.expiresAt<=Date.now()))return text("Deployment owner session expired",401);return current;};
         if(sub==="/deployment-environments"&&method==="GET")return json({environments:await project.deploymentEnvironments()});
         if(sub==="/deployment-environments"&&method==="POST"){
           if(!isOwner||(auth.viaToken&&auth.tokenScope!=="full"))return text("Owner required",403);
           const input=z.object({id:z.string().min(1).max(200),name:z.string().min(1).max(100),requireApproval:z.boolean(),revision:z.number().int().nonnegative()}).strict().parse(await body<unknown>());
-          return json(await project.configureDeploymentEnvironment({id:input.id,name:input.name,requireApproval:input.requireApproval},input.revision,userId));
+          const current=await freshDeploymentOwner();if(current instanceof Response)return current;
+          return json(await project.configureDeploymentEnvironment({id:input.id,name:input.name,requireApproval:input.requireApproval},input.revision,{userId,displayName:"Repository owner",viaToken:current.viaToken===true},current.viaToken?await gitParentTokenHash(request):undefined,current.expiresAt));
         }
         if(sub==="/deployment-approvals"&&method==="POST"){
           if(!isOwner||(auth.viaToken&&auth.tokenScope!=="full"))return text("Owner required",403);
           const input=z.object({journalId:z.string().min(1),artifact:deploymentArtifactParametersSchema}).strict().parse(await body<unknown>());
-          return json(await project.approveDeploymentArtifact(input.journalId,input.artifact,userId));
+          const current=await freshDeploymentOwner();if(current instanceof Response)return current;
+          return json(await project.approveDeploymentArtifact(input.journalId,input.artifact,{userId,displayName:"Repository owner",viaToken:current.viaToken===true},current.viaToken?await gitParentTokenHash(request):undefined,current.expiresAt));
         }
         if(sub==="/deployments"&&method==="GET")return json({deployments:await project.listDeployments()});
         if(sub==="/deployment-targets"&&method==="GET"){
@@ -2609,6 +2652,17 @@ export default {
           try{await freshRelationActor();const outcome=await project.issueRelationships(userId,Number(issueRelationsRoute[1]),cursor);await freshRelationActor();return repositoryReadJson(outcome.ok?{...outcome.value,canRemove:outcome.value.canRemove&&!(auth.viaToken&&auth.tokenScope==='read')}:{error:outcome.error},outcome.ok?200:outcome.status);}catch{return repositoryReadJson({error:'Issue relationship access is unavailable'},403);}
         }
 
+        const issueTransferMappingRoute=/^\/issues\/(\d{1,7})\/transfer-mapping$/.exec(sub);
+        if(issueTransferMappingRoute){
+          if(auth.oauthClientId)return repositoryReadText('App scope does not permit transferred context mapping',403);
+          if(method!=='GET'&&method!=='POST')return repositoryReadText('Method not allowed',405);
+          if([...url.searchParams.keys()].some(key=>key!=='principalCursor')||method==='POST'&&[...url.searchParams.keys()].length)return repositoryReadText('Unsupported mapping query',400);
+          const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||Boolean(current.viaToken)!==Boolean(auth.viaToken)||current.oauthClientId)return repositoryReadText('Mapping authentication changed',403);
+          const actor={userId,displayName:'Destination context administrator',viaToken:current.viaToken===true},credential=current.viaToken?{personalTokenHash:await gitParentTokenHash(request)}:{sessionExpiresAt:current.expiresAt},number=Number(issueTransferMappingRoute[1]);
+          const reply=method==='GET'?await project.issueTransferMappingPreview(number,actor,credential,url.searchParams.get('principalCursor')??undefined):await project.issueTransferMappingMutation(number,await body<unknown>(128*1024),actor,credential);if(!reply.ok)return repositoryReadJson({error:reply.error},reply.status);
+          const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;if(fresh.id!==userId||Boolean(fresh.viaToken)!==Boolean(current.viaToken)||fresh.oauthClientId)return repositoryReadText('Mapping response authentication changed',403);
+          const released=await project.issueTransferMappingRelease(number,{userId,displayName:'Destination mapping reader',viaToken:fresh.viaToken===true},fresh.viaToken?{personalTokenHash:await gitParentTokenHash(request)}:{sessionExpiresAt:fresh.expiresAt},method==='GET'&&'principalGeneration' in reply.value&&typeof reply.value.principalGeneration==='string'?reply.value.principalGeneration:undefined);if(!released.ok)return repositoryReadJson({error:released.error},released.status);return repositoryReadJson(reply.value);
+        }
         const issueTransferCancelRoute=/^\/issues\/(\d{1,7})\/transfer\/([a-f0-9-]{36})\/cancel$/.exec(sub);
         if(issueTransferCancelRoute&&method==='POST'){
           if(auth.oauthClientId)return repositoryReadText('App scope does not permit issue transfer cancellation',403);
@@ -2652,7 +2706,8 @@ export default {
           if(issue?.transferPending&&currentAccess?.role==='admin'&&!fresh.oauthClientId&&(!fresh.viaToken||fresh.tokenScope==='full')){const recovery=await project.issueTransferPendingRecovery(number,{userId,displayName:'Issue administrator',viaToken:fresh.viaToken===true},fresh.viaToken?{personalTokenHash:hash}:{sessionExpiresAt:fresh.expiresAt},context);if(!recovery.ok){if(recovery.status===410)return repositoryReadJson({number,deleted:true},410);return repositoryReadText('Issue recovery read scope changed',403);}if(recovery.value)pendingTransfer=recovery.value;}
           const canStateWrite=!issue?.transferPending&&currentAccess!==null&&currentAccess.role!=='read'&&currentState.lifecycle?.state!=='archived'&&(fresh.oauthClientId?fresh.oauthScopes?.includes('issues:write')===true:!(fresh.viaToken&&fresh.tokenScope==='read'));
           const canDeleteIssue=!issue?.transferPending&&currentAccess?.role==='admin'&&currentState.lifecycle?.state!=='archived'&&!fresh.oauthClientId&&(!fresh.viaToken||fresh.tokenScope==='full');
-          return issue?repositoryReadJson({ ...issue, linked: auth.oauthClientId ? [] : linked, comments,canStateWrite,canDeleteIssue,...(pendingTransfer?{pendingTransfer}:{}) }):repositoryReadText('Unknown issue',404);
+          const canMapTransferContext=issue?.transferMappingAvailable===true&&currentAccess?.role==='admin'&&currentState.lifecycle?.state!=='archived'&&!fresh.oauthClientId&&(!fresh.viaToken||fresh.tokenScope==='full');
+          return issue?repositoryReadJson({ ...issue, linked: auth.oauthClientId ? [] : linked, comments,canStateWrite,canDeleteIssue,canMapTransferContext,...(pendingTransfer?{pendingTransfer}:{}) }):repositoryReadText('Unknown issue',404);
         }
         if(issueRoute&&method==='DELETE'){
           if(auth.oauthClientId)return repositoryReadText('App scope does not permit issue removal',403);
@@ -2993,6 +3048,7 @@ export default {
       return text("Not found", 404);
     } catch (err) {
       if (err instanceof RequestBodyError) return text(err.message, 400);
+      if (err instanceof WorkspaceDiscoveryLimited) return json({ error: err.message }, 429);
       const message = redactSecrets(err instanceof Error ? err.message : "Internal error");
       console.error("api error", method, path, message);
       return text(message, 500);

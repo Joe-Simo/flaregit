@@ -4,6 +4,14 @@ export class DiscussionFixture extends DurableObject {
     override async fetch(request: Request) { const url = new URL(request.url), forum = new RepositoryDiscussions(this.ctx.storage,url.searchParams.get("private")!=="true"), actor = { userId: url.searchParams.get("actor") ?? "human-subject", accountKey: "private-account-key", displayName: "Human" }; try {
         const input = request.method === "GET" ? {} : await request.json();
         const id = url.searchParams.get("id") ?? "";
+        const moderation=forum.moderation(),canModerate=url.searchParams.get("moderator")==="true";
+        if(url.pathname==="/report")return Response.json(moderation.report(id,actor.userId,input));
+        if(url.pathname==="/moderation-inbox")return Response.json(moderation.inbox(actor.userId,canModerate));
+        if(url.pathname==="/moderation-audit")return Response.json(moderation.history(actor.userId,canModerate));
+        if(url.pathname==="/moderation-resolve")return Response.json(moderation.resolve(id,actor.userId,canModerate,input));
+        if(url.pathname==="/moderation-appeal")return Response.json(moderation.appeal(id,actor.userId,input));
+        if(url.pathname==="/moderation-decide")return Response.json(moderation.decide(id,actor.userId,canModerate,input));
+        if(url.pathname==="/activity")return Response.json(forum.activity(url.searchParams.get("q")??""));
         if (url.pathname === "/pending") return Response.json(forum.pendingNotifications());
         if (url.pathname === "/notification-available") return Response.json(forum.notificationAvailable(id,url.searchParams.get('entry')??'',actor.userId));
         if (url.pathname === "/acknowledge") {forum.acknowledgeNotification(url.searchParams.get('event')??'',actor.userId);return Response.json({ok:true});}

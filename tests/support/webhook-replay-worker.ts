@@ -12,8 +12,8 @@ export class WebhookReplayFixture extends RepositoryController {
     if (route === '/seed') {
       await this.initialize({ projectId: 'p123456789abc', projectName: 'Local replay fixture', canonicalRepoName: 'fixture', head: 'a'.repeat(40), verificationPolicy: {} });
       const { secret } = await request.json() as { secret: string };
-      this.ctx.storage.sql.exec("INSERT INTO webhooks VALUES('wh_local','https://receiver.fixture.example/webhook',?,'deployment.requested',1,?)", secret, new Date().toISOString());
-      this.ctx.storage.sql.exec("INSERT INTO deliveries(id,webhook_id,event,status,attempts,payload,created_at,updated_at) VALUES('dlv_local','wh_local','deployment.requested','pending',5,'{\"id\":\"evt_local\",\"data\":{\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}',?,?)", new Date().toISOString(), new Date().toISOString());
+      this.ctx.storage.sql.exec("INSERT INTO webhooks VALUES('wh_local','https://receiver.fixture.example/webhook',?,'change.accepted',1,?)", secret, new Date().toISOString());
+      this.ctx.storage.sql.exec("INSERT INTO deliveries(id,webhook_id,event,status,attempts,payload,created_at,updated_at) VALUES('dlv_local','wh_local','change.accepted','pending',5,'{\"id\":\"evt_local\",\"data\":{\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}',?,?)", new Date().toISOString(), new Date().toISOString());
       return Response.json({ seeded: true });
     }
     if (route === '/legacy') return Response.json(this.ctx.storage.sql.exec("SELECT generation,attempts,payload FROM deliveries WHERE id='dlv_legacy'").toArray()[0]);

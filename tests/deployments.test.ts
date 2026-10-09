@@ -26,11 +26,16 @@ test("deployment SQL binds accepted state and atomically stages stable events wi
     expect((await(await call("/report",{report:{...success,eventId:"late-failure",sequence:2,status:"failed"},service:input.service})).json() as{kind:string}).kind).toBe("rejected");
     expect((await(await call("/report?namespace=other",{report:success,service:input.service})).json() as{kind:string}).kind).toBe("rejected");
     await call("/environment",{id:"production-id",name:"production",requireApproval:true,revision:0});
-    const artifact={artifactId:"release-asset",digest:"d".repeat(64),environmentId:"production-id"};
+    const artifact={artifactId:"11111111-1111-4111-8111-111111111111",digest:"d".repeat(64),environmentId:"production-id"};
     expect((await call("/request",{...input,key:"artifact-deploy"})).status).toBe(409);
     const approval=await(await call("/approve",{target,artifact,actor:input.actor})).json() as{approvalId:string};
     const bound={...input,key:"artifact-deploy",artifact:{...artifact,...approval}};
     const deployment=await(await call("/request",bound)).json() as typeof created;
+    const selector={releaseId:"22222222-2222-4222-8222-222222222222",assetId:artifact.artifactId,environmentId:artifact.environmentId,approvalId:approval.approvalId};
+    const historical={...bound,key:"immutable-selector",artifactSelector:selector};
+    expect((await call("/request",historical)).status).toBe(200);
+    expect((await(await call("/request",historical)).json() as typeof created).kind).toBe("duplicate");
+    expect((await call("/request",{...historical,artifactSelector:{...selector,releaseId:"33333333-3333-4333-8333-333333333333"}})).status).toBe(409);
     expect(deployment.kind).toBe("created");expect((await(await call("/request",bound)).json() as typeof created).kind).toBe("duplicate");
     expect((await call("/request",{...bound,artifact:{...bound.artifact,digest:"e".repeat(64)}})).status).toBe(409);
     const observed={...success,deploymentId:deployment.deployment.id,eventId:"bound-observed",artifactId:artifact.artifactId,digest:artifact.digest,environmentId:artifact.environmentId};
@@ -39,6 +44,21 @@ test("deployment SQL binds accepted state and atomically stages stable events wi
     const rollback={...artifact,rollbackOf:deployment.deployment.id};
     const rollbackApproval=await(await call("/approve",{target,artifact:rollback,actor:input.actor})).json() as{approvalId:string};
     expect((await call("/request",{...bound,key:"rollback-1",artifact:{...rollback,...rollbackApproval}})).status).toBe(200);
+    const dispatch=await call("/dispatch",{deploymentId:deployment.deployment.id,eventId:deployment.deployment.requestEventId});expect(dispatch.status).toBe(200);expect((await dispatch.json() as{actors:string[]}).actors).toEqual([input.actor]);
+    await call("/revoke");
+    expect((await call("/dispatch",{deploymentId:deployment.deployment.id,eventId:deployment.deployment.requestEventId})).status).toBe(409);
+    expect((await call("/request",{...bound,key:"revoked-owner-approval"})).status).toBe(409);
+    expect((await call("/approve",{target,artifact,actor:input.actor})).status).toBe(409);
+    // Revocation does not rewrite historical receipts or break exact request recovery.
+    expect((await(await call("/request",bound)).json() as typeof created).kind).toBe("duplicate");
+    expect((await(await call("/request",historical)).json() as typeof created).kind).toBe("duplicate");
+    await call("/regrant");
+    expect((await call("/dispatch",{deploymentId:deployment.deployment.id,eventId:deployment.deployment.requestEventId})).status).toBe(409);
+    expect((await call("/request",{...bound,key:"revived-old-approval"})).status).toBe(409);
+    const refreshed=await(await call("/approve",{target,artifact,actor:input.actor})).json() as{approvalId:string};
+    expect((await call("/request",{...bound,key:"fresh-owner-approval",artifact:{...artifact,...refreshed}})).status).toBe(200);
+    await call("/legacy-approval",refreshed);
+    expect((await call("/request",{...bound,key:"legacy-without-epoch",artifact:{...artifact,...refreshed}})).status).toBe(409);
     await call("/environment",{id:"production-id",name:"production",requireApproval:true,revision:1});
     expect((await call("/request",{...bound,key:"stale-approval"})).status).toBe(409);
   }finally{await mf.dispose();}

@@ -85,6 +85,39 @@ test("repository discussions keep private conversations separate and preserve re
         const tombstone = await (await call(`/topic?id=${entry.id}`)).text();
         expect(tombstone).not.toContain("Revised explanation");
         expect(tombstone).toContain("Reported abusive content");
+        // Canonical private records are retained for an independent appeal, while
+        // every normal descendant projection follows the moderation restriction.
+        const moderated=await(await call("/create?private=true",{...input,title:"Private moderation original",body:"Private body for reversible review",idempotencyKey:"private-moderation-original"})).json() as DiscussionEntry;
+        const moderatedReply=await(await call(`/create?private=true&id=${moderated.id}&actor=reply-author`,{body:"Private descendant reply",confirmed:true,idempotencyKey:"private-moderation-reply"})).json() as DiscussionEntry;
+        await call(`/poll?private=true&id=${moderated.id}`,{operation:"create",options:["Private first option","Private second option"],expectedVersion:1,confirmed:true});
+        await call(`/subscribe?private=true&id=${moderated.id}&actor=subscriber`,{subscribed:true});
+        const report=await(await call(`/report?private=true&id=${moderated.id}&actor=reporter`,{reason:"spam",note:"Reporter-only private context"})).json() as {id:string};
+        expect(await(await call("/moderation-inbox?actor=operator&moderator=true")).json()).toEqual([]);
+        expect(await(await call("/moderation-inbox?private=true&actor=unrelated")).json()).toEqual([]);
+        expect((await call(`/moderation-resolve?private=true&id=${report.id}&actor=reporter&moderator=true`,{action:"hide",reason:"Initial review",expectedVersion:1})).status).toBe(409);
+        expect((await call(`/moderation-resolve?private=true&id=${report.id}&actor=moderator-one&moderator=true`,{action:"hide",reason:"Initial review",expectedVersion:1})).status).toBe(200);
+        const authorInbox=await(await call("/moderation-inbox?private=true")).text();expect(authorInbox).not.toContain("Reporter-only private context");expect(authorInbox).not.toContain('"reporterId"');
+        const hidden=await(await call(`/topic?private=true&id=${moderated.id}`)).text();expect(hidden).not.toContain("Private body for reversible review");expect(hidden).not.toContain("Private descendant reply");expect(hidden).not.toContain("Private first option");
+        expect(await(await call("/list?private=true&q=Private%20moderation%20original")).text()).not.toContain(moderated.id);
+        expect(await(await call("/activity?private=true&q=Private%20moderation%20original")).json()).toEqual([]);
+        expect(await(await call("/subscriptions?private=true&actor=subscriber")).text()).not.toContain(moderated.id);
+        expect(await(await call(`/notification-available?private=true&id=${moderated.id}&entry=${moderatedReply.id}&actor=subscriber`)).json()).toBe(false);
+        expect((await call(`/poll?private=true&id=${moderated.id}&actor=subscriber`,{operation:"vote",option:"Private first option"})).status).toBe(409);
+        expect((await call(`/convert?private=true&id=${moderated.id}`,{expectedVersion:2,idempotencyKey:"suppressed-convert",confirmed:true})).status).toBe(409);
+        expect((await call(`/edit?private=true&id=${moderated.id}`,{body:"Bypass restriction",expectedVersion:2,confirmed:true})).status).toBe(409);
+        expect((await call(`/edit?private=true&id=${moderatedReply.id}&actor=reply-author`,{body:"Expose hidden descendant",expectedVersion:1,confirmed:true})).status).toBe(409);
+        expect((await call(`/report?private=true&id=${moderatedReply.id}&actor=another-reporter`,{reason:"spam",note:"Known hidden reply"})).status).toBe(409);
+        const hiddenRights=await(await call(`/permissions?private=true&id=${moderated.id}&actor=reply-author`)).json() as {entries:Array<{id:string;canEdit:boolean;canRemove:boolean}>};expect(hiddenRights.entries.find(row=>row.id===moderatedReply.id)).toMatchObject({canEdit:false,canRemove:false});
+
+        expect((await call(`/moderation-appeal?private=true&id=${report.id}&actor=unrelated`,{reason:"Reconsider"})).status).toBe(409);
+        expect((await call(`/moderation-appeal?private=true&id=${report.id}`,{reason:"Legitimate conversation"})).status).toBe(200);
+        expect((await call(`/moderation-decide?private=true&id=${report.id}&actor=moderator-one&moderator=true`,{decision:"overturned",reason:"Reconsidered",expectedVersion:3})).status).toBe(409);
+        expect((await call(`/moderation-decide?private=true&id=${report.id}&actor=moderator-two&moderator=true`,{decision:"overturned",reason:"Independent review",expectedVersion:3})).status).toBe(200);
+        const restored=await(await call(`/topic?private=true&id=${moderated.id}`)).json() as {topic:DiscussionEntry;replies:DiscussionEntry[];poll:unknown};expect(restored.topic.body).toBe("Private body for reversible review");expect(restored.topic.author).toBe("Human");expect(restored.topic.removed).toBe(false);expect(restored.replies[0]?.body).toBe("Private descendant reply");expect(restored.poll).not.toBeNull();
+        expect(await(await call(`/notification-available?private=true&id=${moderated.id}&entry=${moderatedReply.id}&actor=subscriber`)).json()).toBe(true);
+        expect((await call("/moderation-audit?private=true&actor=unrelated")).status).toBe(409);
+        expect((await(await call("/moderation-audit?private=true&actor=moderator-two&moderator=true")).json() as unknown[]).length).toBe(2);
+
     }
     finally {
         await mf.dispose();
