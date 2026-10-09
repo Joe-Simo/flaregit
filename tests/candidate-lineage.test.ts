@@ -8,7 +8,7 @@ test('recorded successor preserves original immutable status but excludes it fro
  const candidates={original:structuredClone(original),successor:structuredClone(successor)};const before=JSON.stringify(candidates);
  expect(preservedCandidateSuccessors(candidates).get('original')?.id).toBe('successor');
  const state:FlareGitProjectState={projectId:'synthetic',projectName:'Synthetic',canonicalRepoName:'synthetic',acceptedState:{currentCommit:'b'.repeat(40),acceptedAt:'2026-10-03',buildDigest:'synthetic',activeRequirements:[],history:[]},tasks:{},candidates,evidence:{},decisions:{},journal:[],policyVersion:1,verificationPolicy:{}};
- expect(summarizeIntegration(state).message).toBe('Candidate waiting for your review');
+ expect(summarizeIntegration(state).message).toBe('Combined preview waiting for your review');
  expect(summarizeIntegration({...state,candidates:{original:candidates.original,successor:{...successor,status:'failed',failureBlocker:'Checks failed'}}}).message).toBe('Integration failed');
  expect(JSON.stringify(candidates)).toBe(before);expect(candidates.original.status).toBe('composing');
 });

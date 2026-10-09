@@ -73,6 +73,8 @@ import { allocateArtifact } from "./storage-allocation.js";
 import { gitRemote, gitParentTokenHash } from "./git-gateway-handler.js";
 import { scenarioAgentRunIds } from "./scenario-workflow.js";
 import { reserveManagedAgents } from "./projects.js";
+import { coordinationHttp } from "./coordination-http.js";
+import { afterRequirementDecision } from "./coordination-dispatch.js";
 import { searchAccountMetadata } from "./metadata-search.js";
 import { communityQuerySchema } from "./platform-community.js";
 import { RepositoryController, WEBHOOK_EVENTS } from "./durable-object.js";
@@ -82,6 +84,7 @@ import { FlareGitAgentWorkflow } from "./agent-workflow.js";
 import { FlareGitImportHistoryWorkflow, importHistoryReceiptKey } from "./import-history-workflow.js";
 import { handleQueueBatch } from "./queue.js";
 import { authenticate } from "./access.js";
+import { AGENT_BOARD_SOCKET, agentBoardSocket, agentBoardTicket } from "./agent-board-http.js";
 import { AUTHORITY_MAX_BODY_BYTES } from "./authority-api.js";
 import { handleGitGateway } from "./git-gateway-handler.js";
 import { admitGitOperation,configuredGitCap } from "./core-git-budget.js";
@@ -469,6 +472,8 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
       if(!(await env.API_LIMITER.limit({key:`people:${ip}`})).success)return Response.json({error:"Too many requests"},{status:429,headers:{"Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
       return publicPeople(env,url);
     }
+    const agentBoardSocketRoute = AGENT_BOARD_SOCKET.exec(url.pathname);
+    if (agentBoardSocketRoute) return agentBoardSocket(request, env, agentBoardSocketRoute[1]!);
     const auth = await authenticate(request, env);
     if (auth instanceof Response) return auth;
     const userId = auth.id;
@@ -1187,6 +1192,7 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
         }
         const effectiveAccess=await project.repositoryAccess(userId);
         if(!effectiveAccess)return text('Not found',404);
+        if(sub==='/agents/board/ticket')return agentBoardTicket(request,project,projectId,auth);
         if(method!=='GET'&&!effectiveAccess.direct&&sub!=='/issue-filters'){
           if(effectiveAccess.role==='read'&&sub!=='/clone')return text('Repository access is read-only',403);
           if(sub!=='/clone'&&!sub.startsWith('/wiki/')&&sub!=='/planning'&&sub!=='/issues'&&!(effectiveAccess.role==='admin'&&method==='POST'&&/^\/issues\/\d{1,7}\/transfer-mapping$/.test(sub))&&!(effectiveAccess.role==='admin'&&method==='POST'&&/^\/issues\/\d{1,7}\/transfer(?:\/[a-f0-9-]{36}\/(?:cancel|finalize))?$/.test(sub))&&!((method==='PATCH'||method==='DELETE'&&effectiveAccess.role==='admin')&&/^\/issues\/\d{1,7}$/.test(sub))&&!/^\/issues\/\d{1,7}\/attachments(?:\/(?:[a-f0-9-]{36})(?:\/(?:content|reconcile))?)?$/.test(sub)&&sub!=='/comments'&&sub!=='/tasks'&&!/^\/tasks\/[a-z0-9-]+\/(token|ready|cancel|browser-edit|fork-permission)$/.test(sub))return text('This operation requires direct repository membership',403);
@@ -1205,6 +1211,7 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
           if(!currentRole||currentLifecycle!=='active'||!fresh.viaToken&&(!Number.isFinite(fresh.expiresAt)||Date.now()>=fresh.expiresAt!))return null;
           return {identity:fresh,isOwner:currentRole==='owner'&&(!fresh.viaToken||fresh.tokenScope==='full')};
         };
+        const coordination=await coordinationHttp({sub,method,request,env,ctx,project,projectId,userId,displayName:async()=>clean((await account.getProfile()).displayName,120),freshActor:freshMetadataActor});if(coordination)return coordination;
         if(sub==='/operations/backups'||sub.startsWith('/operations/backups/')){
           if(auth.viaToken||!isOwner||!(env.OPERATOR_ACCOUNTS??'').split(',').map(value=>value.trim()).includes(accountKey))return text('Not found',404);
           const current=await freshMetadataActor(method!=='GET');if(!current?.isOwner||current.identity.viaToken)return text('Current signed-in operator owner required',403);
@@ -2408,13 +2415,9 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
           let result;
           try { result = await project.resolveDecision(b.decisionId, b.selectedOptionId, actor, credentialHash,currentAuth.expiresAt); }
           catch (cause) { return text(cause instanceof Error ? cause.message : "Decision was not saved", 409); }
-          const { taskIds } = result;
-          if (taskIds.length > 0) {
-            const eventId = result.continuationWorkflowId??`decision-${projectId}-${b.decisionId}`;
-            await project.registerWorkflow(eventId, "integration", undefined, userId,1);
-            await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds, eventId } satisfies QueueMessage);
-          }
-          return json({ resolved: true });
+          // The losing agent revises its change against the winner; resolved changes then land through the merge queue.
+          // A failed follow-up surfaces as before; choosing the same option again resends it.
+          return json({ resolved: true, ...(await afterRequirementDecision(env, project, { projectId, decisionId: b.decisionId, result, actor, credentialHash, sessionExpiresAt: currentAuth.expiresAt })) });
         }
 
         if(sub==="/scenarios"&&method==="GET"){

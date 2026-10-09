@@ -33,7 +33,7 @@ export function CandidateJournal({
           <div className="flex items-center gap-2">
             <GitMerge className="h-4 w-4 text-primary" aria-hidden />
             <CardTitle className="text-sm font-bold uppercase tracking-wider text-muted-foreground">
-              Candidate Generations & CAS Journal
+              Combined previews and publication log
             </CardTitle>
           </div>
           <span className="text-xs text-muted-foreground">
@@ -46,8 +46,8 @@ export function CandidateJournal({
         {candidateList.length === 0 ? (
           <div className="py-12 text-center text-muted-foreground text-xs">
             <GitMerge className="h-8 w-8 mx-auto mb-2 opacity-30" aria-hidden />
-            <p>No candidate compositions yet.</p>
-            <p className="mt-1">No candidate has been prepared yet.</p>
+            <p>No combined previews yet.</p>
+            <p className="mt-1">No combined preview has been prepared yet.</p>
           </div>
         ) : (
           <ul className="space-y-3">
@@ -80,7 +80,7 @@ export function CandidateJournal({
                     )}
                   </span>
 
-                  {preserved.has(cand.id)&&<span className="block mb-2 text-xs text-muted-foreground">Successor {preserved.get(cand.id)!.id}. Original status and evidence retained.</span>}
+                  {preserved.has(cand.id)&&<span className="block mb-2 text-xs text-muted-foreground">Successor {preserved.get(cand.id)!.id}. Original status and checks retained.</span>}
                   {cand.predecessorCandidateId&&<span className="block mb-2 text-xs text-muted-foreground break-all">Original attempt {cand.predecessorCandidateId}</span>}
                   <span className="flex flex-wrap items-center gap-x-2 text-xs mb-2">
                     <span className="text-muted-foreground">Method:</span>

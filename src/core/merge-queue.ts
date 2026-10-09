@@ -10,13 +10,27 @@ export type QueueStep =
   | {readonly action: "requeue"; readonly change: string; readonly reason: string}
   | {readonly action: "idle"};
 
-/** Decides the next step for the head of the queue. A change built on an older base must be re-checked, never merged silently. */
-export function nextStep(queue: readonly QueueEntry[], currentBase: string, checksPass: (change: string) => boolean, produceMerge: (change: string) => string): QueueStep {
+export type QueueDecision =
+  | {readonly action: "merge"; readonly change: string}
+  | {readonly action: "requeue"; readonly change: string; readonly reason: string}
+  | {readonly action: "idle"};
+
+export const STALE_BASE_REASON = "The base changed since this change was checked";
+export const CHECKS_NOT_PASSING_REASON = "Required checks are not passing";
+
+/** Decides what the head of the queue may do. A change built on an older base must be re-checked, never merged silently. */
+export function headDecision(queue: readonly QueueEntry[], currentBase: string, checksPass: (change: string) => boolean): QueueDecision {
   const head = queue[0];
   if (!head) return {action: "idle"};
-  if (head.baseCommit !== currentBase) return {action: "requeue", change: head.change, reason: "The base changed since this change was checked"};
-  if (!checksPass(head.change)) return {action: "requeue", change: head.change, reason: "Required checks are not passing"};
-  return {action: "merge", change: head.change, newBase: produceMerge(head.change)};
+  if (head.baseCommit !== currentBase) return {action: "requeue", change: head.change, reason: STALE_BASE_REASON};
+  if (!checksPass(head.change)) return {action: "requeue", change: head.change, reason: CHECKS_NOT_PASSING_REASON};
+  return {action: "merge", change: head.change};
+}
+
+/** Decides the next step for the head of the queue and, when it may merge, produces the merge. */
+export function nextStep(queue: readonly QueueEntry[], currentBase: string, checksPass: (change: string) => boolean, produceMerge: (change: string) => string): QueueStep {
+  const decision = headDecision(queue, currentBase, checksPass);
+  return decision.action === "merge" ? {action: "merge", change: decision.change, newBase: produceMerge(decision.change)} : decision;
 }
 
 export interface RevertIntent {

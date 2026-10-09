@@ -68,8 +68,9 @@ export async function reserveManagedAgent(env: Env, accountKey: string | undefin
   return result.reservation;
 }
 
+/** Up to five agent rounds (one container slice and one model call each) plus one publishing step. */
 export function managedAgentEnvelope(accountKey: string, runId: string):ManagedEnvelope {
-  const maxInputBytes = 120_000, maxOutputTokens = 8192, maxCalls = 8, maxContainerSeconds = 1200;
+  const maxInputBytes = 120_000, maxOutputTokens = 8192, maxCalls = 12, maxContainerSeconds = 1800;
   const modelMicros = Math.ceil(((maxInputBytes + 4096) * 0.35 + maxOutputTokens * 0.75) * maxCalls);
   const containerMicros = Math.ceil(maxContainerSeconds * 129_024 / 3600);
   return { resourceKind:"managed-agent",runId, accountKey, usdMicros: modelMicros + containerMicros, maxInputBytes, maxOutputTokens, maxCalls, maxContainerSeconds };

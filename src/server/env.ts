@@ -44,6 +44,8 @@ export interface Env {
   BROWSER_SESSION_RESERVATION_USD_MICROS?: string;
   /** Restricted agent rollout requires installed relay and public CA trust. */
   AGENT_RESTRICTED_EGRESS_ENABLED?: string;
+  /** Agent plan-edit-test rounds per run: 1-5, default 3. */
+  AGENT_MAX_ROUNDS?: string;
   ISOLATED_AGENT_IMAGE?: string;
   /** Retained optional preview assets only; unset disables new storage reservations. */
   EVIDENCE_STORAGE_GLOBAL_BYTES?: string;

@@ -98,6 +98,10 @@ import {inspectGitGatewayRecovery} from "./git-gateway-recovery";
 import {GitGatewayLedger,type GitGatewayScope} from "./git-gateway-ledger";
 import {TaskTargetGenerations,type TaskTargetGenerationIntent,type TaskTargetGenerationSettlement} from "./task-target-generations";
 import {freezeProductDecisionScope,planProductDecisionResolution} from "./product-decision-scope";
+import {CoordinationController} from "./coordination-controller";
+import type {ContradictionProof} from "../core/decision/contradiction-proof";
+import type {LandingOutcome} from "./merge-queue-runner";
+import type {RebaseExecution} from "./post-land-rebase";
 import { WebhookBlockedDeferrals, MAX_WEBHOOK_BLOCKED_DEFERRALS } from "./webhook-blocked-deferrals.js";
 import type {ImportReadScope} from "./import-read-lifecycle.js";
 import type {ImportNativeSnapshot} from "./import-native-readiness.js";
@@ -178,6 +182,8 @@ import type { PublicProfileState } from "./public-profile.js";
 import type { ImportJob } from "./import-job.js";
 import type { PublicRepositoryGrant } from "./public-repositories.js";
 import { AgentRunLedger, type AgentRunInput, type AgentRunRecord, type AgentRunClaim } from "./agent-run-ledger.js";
+import { AgentBoard } from "./agent-board.js";
+import type { AgentBoardTicket } from "../core/agent-board.js";
 import { actorName, RepositoryPublicCommunity, type PublicCommunityActor, type PublicCommunityPolicy, type PublicPost, type ContributionRequest } from "./public-community.js";
 export interface RepositoryReadContext { projectId:string; incarnation:string|null; canonicalRepoName:string; repoName:string; ownerId:string; accountKey:string; publicationVersion?:number; acceptedCommit?:string; taskBase?:string|null; taskCommit?:string|null; taskBranch?:string;taskContributorId?:string;taskInitiatorId?:string; candidateId?:string; candidateCommit?:string; candidateBase?:string|null; candidateInputCommit?:string; candidateInputBase?:string|null;retainedInputReceiptId?:string;organizationSource?:{id:string;revision:number};maintainerWriteSource?:ForkPermissionSource }
 export type OwnerRebaseRecoveryResult={ok:true;receipt:RebaseRecoveryReceipt}|{ok:false;status:409|503|429;error:string;report?:RebaseRecoveryReport};
@@ -588,9 +594,14 @@ export interface Ledger {
   claimAgentRun(input: AgentRunInput): Promise<AgentRunClaim>;
   resumeAgentRun(runId: string, taskId: string, previousRunId: string): Promise<AgentRunClaim>;
   saveAgentProposal(runId: string, taskId: string, files: Record<string, string>): Promise<boolean>;
+  saveAgentExplanation(runId: string, taskId: string, explanation: import("./agent-loop").AgentChangeExplanation): Promise<boolean>;
   markAgentPushed(runId: string, taskId: string, commit: string): Promise<boolean>;
   checkpointAgentRun(runId: string, taskId: string, eventId: string, commit: string): Promise<boolean>;
   failAgentRun(runId: string, taskId: string): Promise<boolean>;
+  /** Live multi-agent board and cross-agent coordination context (see agent-board.ts). */
+  issueAgentBoardTicket(userId: string, sessionExpiresAt: number | null): Promise<AgentBoardTicket>;
+  agentCoordinationContext(runId: string, taskId: string): Promise<string[]>;
+  fetch(request: Request): Promise<Response>;
   repositoryModerationState(): Promise<PublicationModerationState>;
   profileModerationState(ownerId: string): Promise<PublicationModerationState>;
   moderateRepository(input: unknown, operatorAccountKey: string): Promise<PublicationModerationDecision>;
@@ -1057,6 +1068,18 @@ export interface Ledger {
   observeTaskReadyGitHead(taskId:string,userId:string,context:RepositoryReadContext,credentialHash?:string,sessionExpiresAt?:number,expectedHead?:string):Promise<string|null>;
   ingestMemberCheckpoint(ev:{eventId:string;taskId:string;commit:string;ready:boolean;filesChanged?:string[]},userId:string,context:RepositoryReadContext,credentialHash?:string,sessionExpiresAt?:number):Promise<{applied:boolean}>;
   ingestCheckpoint(ev: { eventId: string; taskId: string; commit: string; ready: boolean; filesChanged?: string[] }): Promise<{ applied: boolean }>;
+  requirementDecisionSources(decisionId:string):Promise<Awaited<ReturnType<CoordinationController["decisionSources"]>>>;
+  recordRequirementProof(proof:ContradictionProof):Promise<ContradictionProof>;
+  prepareRequirementRevisions(decisionId:string):Promise<Awaited<ReturnType<CoordinationController["prepareRevisions"]>>>;
+  markRequirementRevision(decisionId:string,taskId:string,outcome:{dispatched:true}|{dispatched:false;reason:string}):Promise<Awaited<ReturnType<CoordinationController["markRevision"]>>>;
+  coordinationView(userId:string):Promise<Awaited<ReturnType<CoordinationController["view"]>>>;
+  mergeQueueEnqueue(input:unknown,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<Awaited<ReturnType<CoordinationController["enqueue"]>>>;
+  mergeQueueRemove(taskId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<Awaited<ReturnType<CoordinationController["remove"]>>>;
+  mergeQueueAdvance():Promise<Awaited<ReturnType<CoordinationController["advance"]>>>;
+  mergeQueueSettle(eventId:string,outcome:LandingOutcome,reason?:string):Promise<Awaited<ReturnType<CoordinationController["settle"]>>>;
+  postLandRebasePlan(landedCommit:string,workflowId:string):Promise<Awaited<ReturnType<CoordinationController["planRebase"]>>>;
+  recordPostLandRebase(input:{taskId:string;landedCommit:string;fromCommit:string;execution:RebaseExecution}):Promise<Awaited<ReturnType<CoordinationController["recordRebase"]>>>;
+  markPostLandRevision(taskId:string,landedCommit:string,workflowId:string,outcome:{ok:true}|{ok:false;reason:string}):Promise<Awaited<ReturnType<CoordinationController["markRebaseRevision"]>>>;
 }
 
 const LEASE_MS = 20 * 60_000;
@@ -1835,6 +1858,7 @@ export class RepositoryController extends DurableObject<Env> {
     if(await this.roleOf(userId)==="owner")throw new Error("The owner cannot be removed");
     this.registrationTable();
     this.ctx.storage.transactionSync(()=>{this.ctx.storage.sql.exec("UPDATE member_registrations SET status='revoked' WHERE user_id=?",userId);this.ctx.storage.sql.exec("DELETE FROM members WHERE user_id=?",userId);});
+    this.agentBoard().revalidate();
   }
   private accountLifecycleState():"active"|"deleting"|"deleted" {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS account_lifecycle(id INTEGER PRIMARY KEY,status TEXT NOT NULL)");
@@ -2291,7 +2315,17 @@ export class RepositoryController extends DurableObject<Env> {
     const remaining=this.ctx.storage.sql.exec("SELECT id FROM agent_credential_incidents WHERE json_extract(payload,'$.attemptId')=? AND status!='revoked' LIMIT 1",attemptId).toArray().length>0;return{stopped,credentialsComplete:!remaining};
   }
   private async retryAgentCredentialIncidents():Promise<void>{const ledger=new AgentCredentialIncidents(this.ctx.storage);for(const pending of ledger.pendingBatch())if(ledger.markAutomaticSweep(pending.id))await this.revokeAgentCredential(pending.id);const wake=ledger.nextAlarm();if(wake!==null)await this.ensureRecoveryAlarm(Math.max(1,wake-Date.now()));}
-  private agentRuns() { return new AgentRunLedger(this.ctx.storage); }
+  private agentRuns() { return new AgentRunLedger(this.ctx.storage, () => this.scheduleAgentBoardRefresh()); }
+  private agentBoardInstance?: AgentBoard;
+  private agentBoardRefreshPending = false;
+  private agentBoard() { return this.agentBoardInstance ??= new AgentBoard(this.ctx, { tasks: () => this.load().tasks, deleting: () => this.repositoryDeleting(), canRead: async userId => (await this.repositoryAccess(userId)) !== null }); }
+  /** Coalesced: run and task writes happen inside transactions; the board reconciles once they have settled. */
+  private scheduleAgentBoardRefresh() { if (this.agentBoardRefreshPending) return; this.agentBoardRefreshPending = true; queueMicrotask(() => { this.agentBoardRefreshPending = false; this.agentBoard().refresh(); }); }
+  async issueAgentBoardTicket(userId: string, sessionExpiresAt: number | null): Promise<AgentBoardTicket> { return this.agentBoard().issueTicket(userId, sessionExpiresAt); }
+  async agentCoordinationContext(runId: string, taskId: string): Promise<string[]> { return this.agentBoard().coordinationContext(runId, taskId); }
+  override async fetch(request: Request): Promise<Response> { return new URL(request.url).pathname === "/agent-board" ? this.agentBoard().accept(request) : new Response("Not found", { status: 404 }); }
+  override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> { await this.agentBoard().webSocketMessage(ws, message); }
+  override async webSocketClose(ws: WebSocket, code: number): Promise<void> { await this.agentBoard().webSocketClose(ws, code); }
   private agentScope(task: Task, projectScope: string[]): string[] {
     const scope = [...new Set((task.allowedScope ?? projectScope).flatMap((requested) => projectScope.flatMap((allowed) => requested === "*" ? [allowed] : allowed === "*" ? [requested] : requested.startsWith(allowed) ? [requested] : allowed.startsWith(requested) ? [allowed] : [])))];
     if (!scope.length) throw new Error("Change has no permitted agent scope");
@@ -2343,6 +2377,7 @@ export class RepositoryController extends DurableObject<Env> {
     validate();const selectedTask=this.load().tasks[taskId],selectedTarget=selectedTask?effectiveTaskAcceptedTarget(this.projectedTask(selectedTask)):undefined;if(Boolean(selectedTarget)!==Boolean(run.acceptedTarget))throw Error("Agent run accepted target binding changed");if(selectedTarget&&run.acceptedTarget)assertCompatibleAcceptedTargetBatch([selectedTarget,run.acceptedTarget]);if(await accountOf(this.env,attempt.accountKey).accountLifecycle()!=="active"||!await this.canGitAccess(attempt.actorId,taskId,true))throw Error("Agent mutation writer unavailable");validate();return validate;
   }
   async saveAgentProposal(runId: string, taskId: string, files: Record<string, string>): Promise<boolean> { const validate=await this.authorizeAgentMutation(runId,taskId);return this.ctx.storage.transactionSync(()=>{validate();return this.agentRuns().propose(runId, taskId, files);}); }
+  async saveAgentExplanation(runId: string, taskId: string, explanation: import("./agent-loop").AgentChangeExplanation): Promise<boolean> { const validate=await this.authorizeAgentMutation(runId,taskId);return this.ctx.storage.transactionSync(()=>{validate();return this.agentRuns().explain(runId, taskId, explanation);}); }
   async markAgentPushed(runId: string, taskId: string, commit: string): Promise<boolean> {
     const validate=await this.authorizeAgentMutation(runId,taskId);new AgentRuntimeLedger(this.ctx.storage);const rows=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM agent_native_attempts WHERE run_id=? AND task_id=? ORDER BY rowid DESC LIMIT 1",runId,taskId).toArray();const runtime=rows[0]?JSON.parse(rows[0].doc) as import("./agent-runtime-ledger").AgentNativeAttempt:null;
     if(runtime){const {state:_state,createdAt:_created,stoppedAt:_stopped,...identity}=runtime;const original=new RestrictedAgentAuthority(this.ctx.storage,{current:async()=>{throw Error("No transfer authority from history");},assertLocal:()=>{}}).originalOwnership(identity);
@@ -2673,6 +2708,7 @@ export class RepositoryController extends DurableObject<Env> {
   private save(): void {
     if (this.repositoryDeleting()) throw new Error("Repository deletion is in progress");
     this.ctx.storage.sql.exec("INSERT INTO project (id, doc) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET doc = excluded.doc", JSON.stringify(this.state));
+    this.scheduleAgentBoardRefresh();
   }
 
   /** First-time setup with the real head of the canonical Artifacts repository. */
@@ -3269,6 +3305,7 @@ export class RepositoryController extends DurableObject<Env> {
       if(old&&old.revision>doc.revision)throw Error('Organization source revision was superseded');
       this.ctx.storage.sql.exec('INSERT INTO repository_organization_sources VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,doc=excluded.doc',doc.id,doc.revision,JSON.stringify(doc));
     });
+    this.agentBoard().revalidate();
   }
   private inheritedRole(doc:OrganizationAccessSnapshot,userId:string):OrganizationRepositoryRole|null {
     if(!doc.repositories.includes(this.load().projectId))return null;
@@ -3336,6 +3373,7 @@ export class RepositoryController extends DurableObject<Env> {
   async addMember(userId: string, role: "owner" | "member", label?: string): Promise<void> {
     if (this.repositoryDeleting()) throw new Error("Repository deletion is in progress");
     this.ctx.storage.sql.exec("INSERT OR REPLACE INTO members (user_id, role, label, added_at) VALUES (?, ?, ?, ?)", userId, role, label ?? null, new Date().toISOString());
+    this.agentBoard().revalidate();
   }
   async removeMember(userId: string): Promise<void> {
     const role = await this.roleOf(userId);
@@ -3348,6 +3386,7 @@ export class RepositoryController extends DurableObject<Env> {
     if(actor.viaToken){const account=accountOf(this.env,await accountKeyFor(actor.userId));if(!credentialHash||!await account.apiTokenHashCanAdminister(credentialHash,actor.userId,this.load().projectId))throw Error("Member removal token authority changed");authorize();}
     this.registrationTable();
     this.ctx.storage.transactionSync(()=>{authorize();if(this.ctx.storage.sql.exec<{role:string}>("SELECT role FROM members WHERE user_id=?",userId).toArray()[0]?.role==="owner")throw Error("The owner cannot be removed");this.ctx.storage.sql.exec("UPDATE member_registrations SET status='revoked' WHERE user_id=?",userId);this.ctx.storage.sql.exec("DELETE FROM members WHERE user_id=?",userId);});
+    this.agentBoard().revalidate();
   }
   async peopleAttributionSnapshot(userId:string){
     if(this.repositoryDeleting()||!this.ctx.storage.sql.exec("SELECT 1 FROM members WHERE user_id=?",userId).toArray().length)throw Error("Private people access unavailable");
@@ -6503,6 +6542,21 @@ export class RepositoryController extends DurableObject<Env> {
     for (const deliveryId of deliveries) await this.enqueueWebhookDelivery(deliveryId);
     await this.logActivity("FlareGit", outcome === "stale" ? "integration.stale" : "integration.blocked", outcome === "stale" ? "Base moved; will recompose" : `Blocked: ${reason}`.slice(0, 280));
   }
+
+  // Coordination (requirement decisions, merge queue, post-land updates); logic lives in ./coordination-controller.
+  private coordination(){return new CoordinationController({storage:this.ctx.storage,load:()=>this.load(),save:()=>this.save(),reset:()=>{this.state=null;},activity:(type,summary)=>this.logActivity("FlareGit",type,summary),comment:async(subject,body)=>{await this.addComment({subject,author:"FlareGit",body});}});}
+  async requirementDecisionSources(decisionId:string){return this.coordination().decisionSources(decisionId);}
+  async recordRequirementProof(proof:ContradictionProof){return this.coordination().recordProof(proof);}
+  async prepareRequirementRevisions(decisionId:string){return this.coordination().prepareRevisions(decisionId);}
+  async markRequirementRevision(decisionId:string,taskId:string,outcome:{dispatched:true}|{dispatched:false;reason:string}){return this.coordination().markRevision(decisionId,taskId,outcome);}
+  async coordinationView(userId:string){if(!await this.roleOf(userId))throw new Error("Repository access required");return this.coordination().view();}
+  async mergeQueueEnqueue(input:unknown,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const assertCurrent=await this.integrationRequestAuthority(actor,credentialHash,sessionExpiresAt);assertCurrent();return this.coordination().enqueue(input,actor.userId);}
+  async mergeQueueRemove(taskId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const assertCurrent=await this.integrationRequestAuthority(actor,credentialHash,sessionExpiresAt);assertCurrent();return this.coordination().remove(taskId,actor.userId,await this.roleOf(actor.userId)==="owner");}
+  async mergeQueueAdvance(){return this.coordination().advance();}
+  async mergeQueueSettle(eventId:string,outcome:LandingOutcome,reason?:string){return this.coordination().settle(eventId,outcome,reason);}
+  async postLandRebasePlan(landedCommit:string,workflowId:string){return this.coordination().planRebase(landedCommit,workflowId);}
+  async recordPostLandRebase(input:{taskId:string;landedCommit:string;fromCommit:string;execution:RebaseExecution}){return this.coordination().recordRebase(input);}
+  async markPostLandRevision(taskId:string,landedCommit:string,workflowId:string,outcome:{ok:true}|{ok:false;reason:string}){return this.coordination().markRebaseRevision(taskId,landedCommit,workflowId,outcome);}
 
   async resolveDecision(decisionId: string, selectedOptionId: string, actor: HumanDecisionActor, credentialHash?: string, sessionExpiresAt?:number): Promise<{ taskIds: string[];legacyRerunId?:string;continuationWorkflowId?:string }> {
     let assertCurrent = await this.authorizeHumanDecision(actor, credentialHash, true);

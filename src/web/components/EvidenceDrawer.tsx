@@ -48,7 +48,7 @@ export function EvidenceDrawer({
               <TabsTrigger value="verification">Verification</TabsTrigger>
               <TabsTrigger value="requirements">Requirements</TabsTrigger>
               <TabsTrigger value="repairs">AI Repair</TabsTrigger>
-              <TabsTrigger value="journal">CAS Journal</TabsTrigger>
+              <TabsTrigger value="journal">Publication log</TabsTrigger>
             </TabsList>
 
             {/* TAB 1: VERIFICATION EVIDENCE */}
@@ -59,7 +59,7 @@ export function EvidenceDrawer({
                   <div className="p-3.5 rounded-lg border border-border/80 bg-muted/20 space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-semibold text-foreground">
-                        Evidence Record: {latestEvidence.id}
+                        Checks record: {latestEvidence.id}
                       </span>
                       <Badge variant="success">5/5 Passed</Badge>
                     </div>
@@ -98,7 +98,7 @@ export function EvidenceDrawer({
                 </div>
               ) : (
                 <div className="py-12 text-center text-xs text-muted-foreground">
-                  No verification evidence recorded yet.
+                  No verification checks recorded yet.
                 </div>
               )}
             </TabsContent>

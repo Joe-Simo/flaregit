@@ -4,7 +4,9 @@ import {readHealthObservation,type HealthObservation} from "./health-observation
 import { FlareGitBrand } from "./components/Brand";
 import { CloudflareBadgeFooter } from "./components/CloudflareBadge";
 import React, { useEffect, useRef, useState } from "react";
-import { Search, Menu, X, Inbox as InboxIcon, Settings, FolderGit2, Plus, MessageSquare } from "lucide-react";
+import { Search, Menu, X, Inbox as InboxIcon, Settings, FolderGit2, Plus, MessageSquare, FileCode, Building2 } from "lucide-react";
+import { Toaster } from "@/components/ui/sonner";
+import { useTheme } from "./ThemeProvider";
 import { Button } from "@/components/ui/button";
 import { SearchDialog, type SearchLoader } from "./components/SearchDialog";
 import { BillingBar } from "./components/BillingBar";
@@ -28,6 +30,7 @@ const loadSearch: SearchLoader = async (query, signal) => {
 
 export function App() {
   const route = useRoute();
+  const { resolvedTheme } = useTheme();
   const [health, setHealth] = useState<HealthObservation>({degraded:[],unknown:true});
   const [unread, setUnread] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -58,7 +61,7 @@ export function App() {
     void check(); const timer = setInterval(check, 60_000); return () => {lifetime.abort();sequence++;clearInterval(timer);};
   }, []);
   const section = route.name === "home" ? "Repositories" : route.name === "repo" ? "Repository" : route.name === "new" ? "New repository" : route.name === "inbox" ? "Inbox" : route.name === "account" ? "Account" : route.name === "organizations" ? "Organizations" : (route.name === "community" || route.name === "community-post") ? "Community" : route.name === "participate" ? "Public participation" : "Workspace";
-  const nav = [{name:"Snippets",path:"/snippets",current:route.name==="snippets",Icon:FolderGit2},{ name: "Repositories", path: "/", current: route.name === "home" || route.name === "repo", Icon: FolderGit2 }, { name: "Community", path: "/community", current: route.name === "community" || route.name === "community-post", Icon: MessageSquare }, { name: "Inbox", path: "/inbox", current: route.name === "inbox", Icon: InboxIcon }, { name: "Organizations", path: "/organizations", current: route.name === "organizations", Icon: FolderGit2 }, { name: "Account", path: "/account", current: route.name === "account", Icon: Settings }];
+  const nav = [{ name: "Repositories", path: "/", current: route.name === "home" || route.name === "repo", Icon: FolderGit2 }, {name:"Snippets",path:"/snippets",current:route.name==="snippets",Icon:FileCode}, { name: "Organizations", path: "/organizations", current: route.name === "organizations", Icon: Building2 },{ name: "Community", path: "/community", current: route.name === "community" || route.name === "community-post", Icon: MessageSquare }, { name: "Inbox", path: "/inbox", current: route.name === "inbox", Icon: InboxIcon }, { name: "Account", path: "/account", current: route.name === "account", Icon: Settings }];
   return (
     <div className="dashboard-shell min-h-screen bg-background text-foreground">
       <a href="#workspace-content" onClick={(event) => { event.preventDefault(); document.getElementById("workspace-content")?.focus(); }} className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[100] focus:bg-card focus:px-4 focus:py-2">Skip to content</a>
@@ -73,9 +76,9 @@ export function App() {
         <div className="lg:mt-auto p-4 border-t border-border space-y-4"><div className="flex flex-wrap gap-x-3 gap-y-2 text-[11px] text-muted-foreground"><a href="/docs" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Docs</a><a href="/status" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Status</a><a href="#/report" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Report abuse</a><a href="mailto:support@flaregit.com" className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Support</a></div></div>
       </aside>
       <div className="lg:ml-[240px] min-w-0 flex flex-col min-h-[calc(100vh-3.5rem)]">
-      {(health.degraded.length > 0 || health.unknown) && (
+      {health.degraded.length > 0 && (
         <div role="status" className="px-4 sm:px-6 py-2 text-sm bg-amber-500/15 border-b border-amber-500/30 text-amber-950 dark:text-amber-200">
-          {health.degraded.length>0&&<>Degraded right now: {health.degraded.join(", ")}. Integrations may be delayed. </>}{health.unknown&&<>Current health could not be verified. </>}<a className="underline" href="/status">Details</a>
+          Degraded right now: {health.degraded.join(", ")}. Merges and checks may be delayed. <a className="underline" href="/status">Details</a>
         </div>
       )}
       <BillingBar refreshKey={0} />
@@ -101,6 +104,7 @@ export function App() {
         <CloudflareBadgeFooter />
       </footer>
       </div>
+      <Toaster theme={resolvedTheme} position="bottom-right" closeButton />
       <SearchDialog open={searchOpen} onOpenChange={setSearchOpen} load={loadSearch} onNavigate={href => { setSidebarOpen(false); if (href.startsWith("/#/")) navigate(href.slice(2)); else window.location.assign(href); }} />
     </div>
   );

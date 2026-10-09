@@ -1,3 +1,5 @@
+import { NeedsAttention } from "../components/NeedsAttention";
+import { toast } from "@/components/ui/sonner";
 import {RepositoryNotifications} from "../components/RepositoryNotifications";
 import {InviteManagement} from "../components/InviteManagement";
 import {GitCredentialRevocation} from "../components/GitCredentialRevocation";
@@ -29,7 +31,6 @@ const AgentCleanupRecovery=lazy(async()=>({default:(await import("../components/
 
 const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm";
 const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive";
-const okCls = "rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200";
 const errText = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback);
 
 interface Meta { id: string; role: "owner" | "member"; kind: string; name: string; source: string | null; verification: Record<string, unknown>; protectedPaths: string[]; visibility?: "private" | "public"; moderation?: { suppressed: boolean; reason: string; reportId: string; version: number } }
@@ -47,7 +48,6 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
   const [paths, setPaths] = useState(meta.protectedPaths.join("\n"));
   const [members, setMembers] = useState<Member[] | null>(null);
   const [membersError, setMembersError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmName, setConfirmName] = useState("");
   const [busy, setBusy] = useState<Busy>(null);
@@ -67,11 +67,12 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
   const guard = async (label: Exclude<Busy, null>, fn: () => Promise<void>) => {
     setBusy(label);
     setError(null);
-    setMessage(null);
     try {
       await fn();
     } catch (e) {
-      setError(errText(e, "Something went wrong"));
+      const failure = errText(e, "Something went wrong");
+      setError(failure);
+      toast.error(failure);
     } finally {
       setBusy(null);
     }
@@ -88,14 +89,13 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
       {isOwner&&<Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Loading review settings…</p>}><ReviewPolicySettings key={`review-policy:${meta.id}`} projectId={meta.id}/></Suspense>}
       {isOwner&&<Suspense fallback={null}><AgentCleanupRecovery key={`agent-cleanup:${meta.id}`} projectId={meta.id}/></Suspense>}
       {error && <div role="alert" className={alertCls}>{error}</div>}
-      {message && <div role="status" className={okCls}>{message}</div>}
 
       <Card>
         <CardHeader className="pb-2"><CardTitle className="text-sm">Protected checks</CardTitle></CardHeader>
         <CardContent className="space-y-3">
           {editable ? (
             <>
-              <p className="text-xs text-muted-foreground">Every candidate must pass these before it is accepted. Contributors cannot change them, or the protected paths below.</p>
+              <p className="text-xs text-muted-foreground">Every combined preview must pass these before it is accepted. Contributors cannot change them, or the protected paths below.</p>
               <label className="block text-sm"><span className="font-medium">Install</span><input className={field} disabled={!isOwner} value={install} onChange={(e) => setInstall(e.target.value)} /></label>
               <label className="block text-sm"><span className="font-medium">Build</span><input className={field} disabled={!isOwner} value={build} onChange={(e) => setBuild(e.target.value)} /></label>
               <label className="block text-sm"><span className="font-medium">Test</span><input className={field} disabled={!isOwner} value={test} onChange={(e) => setTest(e.target.value)} /></label>
@@ -109,7 +109,7 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
               {isOwner && (
                 <Button variant="orange" disabled={busy !== null || !test.trim()} onClick={() => guard("save", async () => {
                   await apiJson(`/p/${meta.id}/config`, { method: "PATCH", json: { install, build, test, landing, protectedPaths: paths.split("\n").map((x) => x.trim()).filter(Boolean) } });
-                  setMessage("Settings saved. They apply to the next integration.");
+                  toast.success("Settings saved. They apply to the next integration.");
                   reload();
                 })}>{busy === "save" ? "Saving…" : "Save checks"}</Button>
               )}
@@ -142,7 +142,7 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
                     {isOwner && m.role !== "owner" && (
                       <Button size="sm" variant="ghost" aria-label={`Remove ${m.label ?? "member"}`} disabled={busy !== null} onClick={() => guard(`remove:${m.user_id}`, async () => {
                         await apiJson(`/p/${meta.id}/members/${m.user_id}`, { method: "DELETE" });
-                        setMessage("Collaborator removed.");
+                        toast.success("Collaborator removed.");
                         await loadMembers();
                       })}>
                         {busy === `remove:${m.user_id}` ? "Removing…" : <Trash2 className="h-3.5 w-3.5" />}
@@ -164,8 +164,7 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
       {isOwner && <ConnectionsCard key={`connections:${meta.id}`} projectId={meta.id} isOwner={isOwner} isCustom={meta.kind === "import" && isCommandPolicy(meta.verification)} />}
       {isOwner && <DeploymentCard key={`deployments:${meta.id}`} projectId={meta.id} />}
       <div id="deployment-deliveries"><WebhooksCard projectId={meta.id} isOwner={isOwner} /></div>
-      <PrivateGitRecovery projectId={meta.id} isOwner={isOwner} />
-      {isOwner && <StorageReconciliation projectId={meta.id} />}
+      <NeedsAttention><PrivateGitRecovery projectId={meta.id} isOwner={isOwner} />{isOwner && <StorageReconciliation projectId={meta.id} />}</NeedsAttention>
       <DomainsCard projectId={meta.id} isOwner={isOwner} />
       {isOwner&&meta.kind==="import"&&meta.source?.startsWith("https://github.com/")&&<Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Loading saved conversation migration…</p>}><ConversationMigrationCard key={`conversation-migration:${meta.id}`} projectId={meta.id}/></Suspense>}
       {isOwner && meta.kind === "import" && <ImportHistoryCard key={`import-history:${meta.id}`} projectId={meta.id} />}

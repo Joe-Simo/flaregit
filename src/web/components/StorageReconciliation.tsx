@@ -8,7 +8,7 @@ import { apiJson } from "../api";
 import { storageRepositoryId } from "../storage-repository-input";
 
 type Report = Awaited<ReturnType<typeof storageReconciliationReport>>;
-const kindLabel = { preview: "Previews", evidence: "Check evidence", "private-recovery": "Git recovery bundles" } as const;
+const kindLabel = { preview: "Previews", evidence: "Checks", "private-recovery": "Git recovery bundles" } as const;
 const bytes = (value: number) => value < 1024 ? `${value} B` : value < 1024 ** 2 ? `${(value / 1024).toFixed(1)} KiB` : `${(value / 1024 ** 2).toFixed(1)} MiB`;
 
 /** Read-only observations remain available while deletion is pending. */
@@ -64,7 +64,7 @@ function StorageReportPanel({ projectId }: { projectId?: string }) {
           <div><dt className="text-muted-foreground">Unknown observations</dt><dd className="mt-1">{unknown} object checks{report.inventory.some(item => item.status === "unknown" || item.status === "incomplete") ? " · inventory checks incomplete" : ""}</dd></div>
         </dl>
         <div className="divide-y divide-border border-y border-border">{report.inventory.map(item => <div key={item.kind} className="flex flex-wrap justify-between gap-2 py-2 text-sm"><span>{kindLabel[item.kind]}</span><span className="text-muted-foreground">{item.status === "empty" ? "No objects observed" : item.status === "nonempty" ? "Objects remain" : item.status === "incomplete" ? "Inventory incomplete" : "Provider check unavailable"}</span></div>)}</div>
-        {(report.legacyInventory || report.legacyEvidence) && <p className="text-sm text-muted-foreground">Older {report.legacyInventory && report.legacyEvidence ? "storage and check evidence" : report.legacyInventory ? "storage" : "check evidence"} may not have complete tracking. Provider reconciliation is still required.</p>}
+        {(report.legacyInventory || report.legacyEvidence) && <p className="text-sm text-muted-foreground">Older {report.legacyInventory && report.legacyEvidence ? "storage and checks" : report.legacyInventory ? "storage" : "checks"} may not have complete tracking. Provider reconciliation is still required.</p>}
         <p className="text-xs leading-5 text-muted-foreground">Missing objects do not prove that an upload stopped. Capacity stays reserved until cleanup is confirmed. Retry an existing deletion request to continue its saved work; unresolved uploads or older untracked copies require provider reconciliation. Refresh retries observations only.</p>
         {(report.cursor || report.plansNextCursor) && <div className="flex flex-wrap gap-2">{report.cursor && <Button size="sm" variant="outline" disabled={busy} onClick={() => void load("objects")}>Next object page</Button>}{report.plansNextCursor && !report.cursor && <Button size="sm" variant="outline" disabled={busy} onClick={() => void load("plans")}>Next saved-copy page</Button>}<span className="self-center text-xs text-muted-foreground">Each page replaces the current observations.</span></div>}
       </div>}
