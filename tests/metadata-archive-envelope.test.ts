@@ -12,7 +12,7 @@ test('browser archive reader accepts every table in a real durable-store export 
     for(const table of METADATA_ARCHIVE_TABLES)db.exec(table==='issues'?'CREATE TABLE issues(number INTEGER PRIMARY KEY,title TEXT,body TEXT,state TEXT,author TEXT,created_at TEXT,updated_at TEXT,closed_by TEXT)':`CREATE TABLE "${table}"(id INTEGER PRIMARY KEY)`);
     const archives=new MetadataArchives(storage as unknown as DurableObjectStorage);
     const exported=await archives.export({projectId:'actual-export',incarnation:'test-incarnation',head:'a'.repeat(40)});
-    expect(exported.archive.tables).toHaveLength(13);
+    expect(exported.archive.tables).toHaveLength(METADATA_ARCHIVE_TABLES.length-1);
     const downloaded=JSON.parse(JSON.stringify(exported));
     expect(await checkedEnvelope(downloaded)).toEqual(exported);
     const unknown=structuredClone(downloaded);unknown.archive.tables[0].name='members';

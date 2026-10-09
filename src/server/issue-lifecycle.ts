@@ -1,14 +1,15 @@
 import {z} from 'zod';
 import {IssueStateLedger,type IssueStateScope} from './issue-state';
+import {ensureIssueTransferSchema,assertIssueWritable} from './issue-transfer';
 export const issueDeletionSchema=z.object({expectedRevision:z.number().int().nonnegative().safe(),requestId:z.uuid(),confirmed:z.literal(true)}).strict();
 export type IssueDeletion=z.infer<typeof issueDeletionSchema>;
 export const portableIssueTombstoneSchema=z.object({number:z.number().int().positive().safe(),deletedAt:z.string().datetime(),sourceActorId:z.string().min(1).max(256),sourceIdentity:z.string().min(1).max(2000)}).strict();
 export type PortableIssueTombstone=z.infer<typeof portableIssueTombstoneSchema>;
-export interface IssueTombstone {version:1;number:number;identity:string;actorId:string;requestId:string;expectedRevision:number;deletedAt:string;provenance?:PortableIssueTombstone}
+export interface IssueTombstone {version:1;number:number;identity:string;actorId:string;requestId:string;expectedRevision:number;deletedAt:string;provenance?:PortableIssueTombstone;transfer?:{projectId:string;incarnation:string;number:number;requestId:string}}
 export interface IssueDeletionResult {number:number;deleted:true;requestId:string;replayed:boolean}
 export class IssueLifecycleError extends Error{constructor(message:string,readonly status:number){super(message);}}
-export function ensureIssueLifecycleSchema(storage:Pick<DurableObjectStorage,'sql'>){storage.sql.exec('CREATE TABLE IF NOT EXISTS issue_tombstones(issue_number INTEGER PRIMARY KEY,identity TEXT NOT NULL,document TEXT NOT NULL)');storage.sql.exec('CREATE TABLE IF NOT EXISTS issue_tombstone_requests(actor_id TEXT NOT NULL,request_id TEXT NOT NULL,issue_number INTEGER NOT NULL,scope TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(actor_id,request_id))');}
-export function activeIssueSql(alias='i'){if(!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias))throw new IssueLifecycleError('Invalid issue query alias',400);return `NOT EXISTS(SELECT 1 FROM issue_tombstones __issue_deleted WHERE __issue_deleted.issue_number=${alias}.number)`;}
+export function ensureIssueLifecycleSchema(storage:Pick<DurableObjectStorage,'sql'>){ensureIssueTransferSchema(storage);storage.sql.exec('CREATE TABLE IF NOT EXISTS issue_tombstones(issue_number INTEGER PRIMARY KEY,identity TEXT NOT NULL,document TEXT NOT NULL)');storage.sql.exec('CREATE TABLE IF NOT EXISTS issue_tombstone_requests(actor_id TEXT NOT NULL,request_id TEXT NOT NULL,issue_number INTEGER NOT NULL,scope TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(actor_id,request_id))');}
+export function activeIssueSql(alias='i'){if(!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias))throw new IssueLifecycleError('Invalid issue query alias',400);return `NOT EXISTS(SELECT 1 FROM issue_tombstones __issue_deleted WHERE __issue_deleted.issue_number=${alias}.number) AND NOT EXISTS(SELECT 1 FROM issue_transfer_incoming __issue_incoming WHERE __issue_incoming.issue_number=${alias}.number AND __issue_incoming.active=0)`;}
 export function isIssueActive(storage:Pick<DurableObjectStorage,'sql'>,number:number){ensureIssueLifecycleSchema(storage);return Number.isSafeInteger(number)&&number>0&&storage.sql.exec(`SELECT number FROM issues i WHERE number=? AND ${activeIssueSql('i')}`,number).toArray().length===1;}
 /** Canonical rows remain for audit. Every live reference resolves through this
  * tombstone, and replay requires the current actor's administrator authority. */
@@ -21,7 +22,7 @@ export class IssueLifecycleStore {
  delete(scope:IssueStateScope,input:IssueDeletion,actorId:string,assert:()=>void):IssueDeletionResult{return this.storage.transactionSync(()=>{
   assert();const identity=JSON.stringify(scope),payload=JSON.stringify(input),prior=this.storage.sql.exec<{issue_number:number;scope:string;payload:string}>('SELECT issue_number,scope,payload FROM issue_tombstone_requests WHERE actor_id=? AND request_id=?',actorId,input.requestId).toArray()[0];
   if(prior){if(prior.issue_number!==scope.number||prior.scope!==identity||prior.payload!==payload)throw new IssueLifecycleError('The original issue removal request cannot change',409);if(!this.tombstone(scope.number))throw new IssueLifecycleError('Original issue removal marker is unavailable',503);assert();return{number:scope.number,deleted:true,requestId:input.requestId,replayed:true};}
-  if(this.tombstone(scope.number))throw new IssueLifecycleError('Issue removed',410);
+  if(this.tombstone(scope.number))throw new IssueLifecycleError('Issue removed',410);assertIssueWritable(this.storage,scope.number);
   const current=new IssueStateLedger(this.storage).snapshot(scope);if(current.stateRevision!==input.expectedRevision)throw new IssueLifecycleError('Issue changed. Refresh before confirming removal.',409);
   if(this.storage.sql.exec<{count:number}>('SELECT COUNT(*) AS count FROM issue_tombstones').toArray()[0]!.count>=10000)throw new IssueLifecycleError('Issue removal audit capacity reached; original issues remain preserved',413);
   assert();const saved:IssueTombstone={version:1,number:scope.number,identity,actorId,requestId:input.requestId,expectedRevision:input.expectedRevision,deletedAt:new Date().toISOString()};this.storage.sql.exec('INSERT INTO issue_tombstones VALUES(?,?,?)',scope.number,identity,JSON.stringify(saved));this.storage.sql.exec('INSERT INTO issue_tombstone_requests VALUES(?,?,?,?,?)',actorId,input.requestId,scope.number,identity,payload);return{number:scope.number,deleted:true,requestId:input.requestId,replayed:false};

@@ -12,6 +12,6 @@ export async function prepareIssueDeletionCommand(input:{repositoryId:string;iss
 /** 410 is a minimal authorized tombstone. Extra private fields and redirect-like
  * fields are discarded; this helper never fetches another repository. */
 export async function readIssueViewResponse(response:Response,issueNumber:number){
- if(response.status===410){let value:unknown;try{value=await response.json();}catch{throw Error('Issue removal status was not confirmed');}const tombstone=z.object({number:z.literal(issueNumber),deleted:z.literal(true)}).safeParse(value);if(!tombstone.success)throw Error('Issue removal status was not confirmed');return tombstone.data;}
+ if(response.status===410){let value:unknown;try{value=await response.json();}catch{throw Error('Issue removal status was not confirmed');}const tombstone=z.object({number:z.literal(issueNumber),deleted:z.literal(true),transferred:z.literal(true).optional(),transfer:z.object({projectId:z.string().regex(/^[a-z0-9]{12,16}$/),number:z.number().int().positive().max(9999999)}).optional()}).refine(value=>value.transfer===undefined||value.transferred===true).safeParse(value);if(!tombstone.success)throw Error('Issue removal status was not confirmed');return tombstone.data;}
  if(!response.ok)throw Error(`Issue view answered ${response.status}`);return response.json() as Promise<unknown>;
 }

@@ -3461,7 +3461,7 @@ and explicit per-issue reference manifests that do not pretend to restore bytes.
 retry, quota, token revocation and inherited team-access checks pass. Removal during reconciliation, overlapping
 retention ownership, same-hash admission holds and late deletion of an old physical generation are also verified.
 Desktop/mobile actual-component fixtures pass.
-Still open: complete duplicate/sub-issue workflows, broader moderation and cross-repository transfer; this does not close the full ticket.
+Still open: complete duplicate/sub-issue workflows, broader moderation and hosted transfer acceptance; this does not close the full ticket.
 Issue-state PATCH now checks the current actor, credential/session, lifecycle and direct/inherited writer authority
 at the canonical transaction. Durable revisions observe internal and raw SQL updates; original UUID/CAS receipts
 reconcile lost responses without repeating a status change. Signed HTTP withdrawal/conflict/replay and actual CLI
@@ -3476,6 +3476,17 @@ verified caller bytes for that exact attachment UUID; hash-only reconciliation c
 Activity and inbox events now carry structured issue references; current availability checks hide retired titles
 and paths, including late deletion. Unbound legacy issue events expose generic descriptions rather than guessed
 source authority. Raw audit records remain separate from these reader projections.
+Cross-repository transfer now freezes a bounded issue/conversation/attachment manifest under administrator
+authority in both repositories. Confirmation binds the reviewed content, destination incarnation and current
+direct/inherited reader audience. Destination reservations remain hidden until real R2 bytes, content and
+source-origin attribution are verified. New attachment UUIDs and durable once-only copy attempts reconcile
+uncertain responses without allocating another destination or dispatching another copy. Source tombstones
+expose destination navigation only with fresh destination read access. Unmapped planning/triage context remains
+explicit source history; memberships, subscriptions, task authority and accepted Git state are not transplanted.
+Signed local HTTP/R2, CLI recovery, SQLite and rendered 1280/390 interaction checks pass. Destination finalization
+recovery retains the original retry until positive destination proof, and revoke/regrant rejects the old admission
+epoch. The aggregate suite passes 2,392 tests with nine explicit skips. Cancellation of a positively unlanded frozen transfer,
+explicit destination catalog mapping and hosted multi-repository acceptance remain open.
 
 Complete labels, assignees, milestones, templates/forms, attachment handling, linking/closing through accepted work, duplicate/transfer workflows, relationships/subissues, saved filtering, bulk actions, and moderation. Preserve discussion context when tasks are assigned to agents.
 

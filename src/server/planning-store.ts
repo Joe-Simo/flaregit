@@ -1,3 +1,4 @@
+import {assertIssueWritable} from './issue-transfer';
 import {activeIssueSql,ensureIssueLifecycleSchema,isIssueActive,IssueLifecycleStore} from './issue-lifecycle';
 import {z} from 'zod';
 import {progress} from '../core/project-planning';
@@ -71,6 +72,7 @@ export class PlanningStore{
   });}
   private applyAccepted(receipt:AcceptedPlanningReceipt,expectedItemVersion:number|undefined){
     try{this.storage.transactionSync(()=>{
+      assertIssueWritable(this.storage,receipt.issueNumber);
       const state=this.state();if(!receipt.acceptedIssueStatus||expectedItemVersion===undefined)throw new PlanningError('Link this issue to planning before retrying');
       const exists=isIssueActive(this.storage,receipt.issueNumber);if(!exists)throw new PlanningError('Linked issue is unavailable');
       const frozen=setAutomation(state.plan,receipt.rules);if(!frozen.ok)throw new PlanningError(frozen.error);
@@ -85,6 +87,7 @@ export class PlanningStore{
     if((['configure','setAutomation','setAcceptedStatus','retryAccepted'].includes(input.operation))&&!owner)throw new PlanningError('Only the repository owner can configure fields, statuses or automation',403);
     if(input.operation==='retryAccepted'){this.retryAccepted(input.journalId,input.issueNumber,input.expectedItemVersion);return this.snapshot();}
     const inactive=state.plan.project.items.filter(item=>!isIssueActive(this.storage,item.issueNumber)),inactiveNumbers=new Set(inactive.map(item=>item.issueNumber));
+    const affected='issueNumber'in input?[input.issueNumber]:input.operation==='bulkStatus'?input.issueNumbers:['configure','setAcceptedStatus','setAutomation'].includes(input.operation)?state.plan.project.items.filter(item=>isIssueActive(this.storage,item.issueNumber)).map(item=>item.issueNumber):[];for(const number of affected)try{assertIssueWritable(this.storage,number);}catch{throw new PlanningError('Issue transfer freezes the copied planning context',409);}
     if(('issueNumber'in input&&new IssueLifecycleStore(this.storage).availability(input.issueNumber).status==='deleted')||(input.operation==='bulkStatus'&&input.issueNumbers.some(number=>new IssueLifecycleStore(this.storage).availability(number).status==='deleted')))throw new PlanningError('An inactive issue cannot be changed through planning',410);
     let plan=this.activePlan(state.plan),views=state.views,acceptedIssueStatus=state.acceptedIssueStatus;
     const accept=(result:{ok:true;value:ProjectPlan}|{ok:false;error:string})=>{if(!result.ok)throw new PlanningError(result.error,result.error.includes('changed since')?409:400);plan=result.value;};

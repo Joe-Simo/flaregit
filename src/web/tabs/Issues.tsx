@@ -1,3 +1,4 @@
+import {IssueTransfer} from '../components/IssueTransfer';
 import {Dialog,DialogHeader,DialogTitle,DialogDescription,DialogFooter} from '@/components/ui/dialog';
 import {z} from 'zod';
 import {IssueFilters} from '../components/IssueFilters';
@@ -16,7 +17,7 @@ import {Input} from "@/components/ui/input";
 import {Textarea} from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { ApiError, apiJson, apiSessionIdentity } from "../api";
+import { ApiError, apiFetch, apiJson, apiSessionIdentity } from "../api";
 import {readIssueDraft,saveIssueDraft,clearIssueDraft,type IssueDraftScope} from "../issue-draft-recovery";
 import {recoverIssueChange,persistIssueChange,type IssueChangeIntent} from "../issue-change-recovery";
 import { navigate, timeAgo } from "../router";
@@ -24,7 +25,7 @@ import { changeCreationFollowup, type ChangeCreationResponse } from "../change-c
 import { Conversation } from "../components/Conversation";
 
 interface Issue { discussionOrigin?:{discussionId:string;scope:'public'|'members';author:string;createdAt:string;convertedBy:string}; number: number; title: string; body: string; state: "open" | "closed"; author: string; created_at: string; updated_at: string; closed_by: string | null; comments: number; importedOrigin?:ImportedConversationOrigin|null }
-interface IssueDetail extends Omit<Issue, "comments"> { stateRevision:number;canStateWrite?:boolean;canDeleteIssue?:boolean; linked: Array<{ id: string; goal: string; status: string }> }
+interface IssueDetail extends Omit<Issue, "comments"> { stateRevision:number;canStateWrite?:boolean;canDeleteIssue?:boolean;transferPending?:boolean; linked: Array<{ id: string; goal: string; status: string }> }
 const stateChangeSchema=z.object({state:z.enum(['open','closed']),expectedRevision:z.number().int().nonnegative().safe(),requestId:z.uuid()}).strict();
 type StateChangeIntent=z.infer<typeof stateChangeSchema>;
 type StateChangeReceipt={issue:{number:number;state:'open'|'closed';stateRevision:number;updated_at:string;closed_by:string|null};requestId:string;replayed:boolean;changedSince:boolean;originalState:'open'|'closed';originalRevision:number};
@@ -171,6 +172,7 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<null | "toggle" | "change" | "agent" | "delete">(null);
+  const [transferLocked,setTransferLocked]=useState(false),[transferred,setTransferred]=useState(false),[transferDestination,setTransferDestination]=useState<{projectId:string;number:number}|null>(null);const transferLock=useRef(false);
 
   const lifetime=useRef(0), readSequence=useRef(0), readController=useRef<AbortController | null>(null), actionLock=useRef(false);
   const [deleteIntent,setDeleteIntent]=useState<DeleteIssueIntent|null>(null),[deleteDialog,setDeleteDialog]=useState(false),[removedIdentity,setRemovedIdentity]=useState<string|null>(null);
@@ -184,11 +186,21 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
   const load = useCallback(async () => {
     const identity=apiSessionIdentity();
     const generation=lifetime.current,sequence=++readSequence.current;readController.current?.abort();const controller=new AbortController();readController.current=controller;
-    setLoadError(null);
+    setLoadError(null);setTransferDestination(null);
     if(identity)try{const raw=sessionStorage.getItem(deleteIssueKey(identity,projectId,number));if(raw&&raw.length>1000)throw Error();const saved=raw?deleteIssueSchema.parse(JSON.parse(raw)):null;deleteIntentRef.current=saved?{identity,intent:saved}:null;setDeleteIntent(saved);}catch{setError('Saved issue removal could not be read. Restore browser storage before continuing.');}
     else{deleteIntentRef.current=null;setDeleteIntent(null);}
     try {
-      const next=await apiJson<IssueDetail>(`/p/${projectId}/issues/${number}`,{signal:controller.signal});
+      const response=await apiFetch(`/api/p/${projectId}/issues/${number}`,{signal:controller.signal,redirect:'error'});
+      if(response.status===410){
+        if(generation!==lifetime.current||sequence!==readSequence.current||apiSessionIdentity()!==identity)return;
+        detailIdentity.current=null;setIssue(null);setRemovedIdentity(identity);setTransferDestination(null);setTransferred(false);
+        let raw:unknown;try{raw=await response.json();}catch{return;}
+        if(generation!==lifetime.current||sequence!==readSequence.current||apiSessionIdentity()!==identity)return;
+        const tombstone=z.object({number:z.literal(number),deleted:z.literal(true),transferred:z.literal(true).optional(),transfer:z.object({projectId:z.string().regex(/^[a-z0-9]{12,16}$/),number:z.number().int().positive().max(9999999)}).optional()}).safeParse(raw);
+        if(tombstone.success&&tombstone.data.transferred){setTransferred(true);if(tombstone.data.transfer&&tombstone.data.transfer.projectId!==projectId)setTransferDestination(tombstone.data.transfer);}return;
+      }
+      if(!response.ok)throw new ApiError('Issue is unavailable',response.status,null);
+      const next=await response.json() as IssueDetail;
       if(generation===lifetime.current && sequence===readSequence.current&&apiSessionIdentity()===identity){
         detailIdentity.current=identity;setRemovedIdentity(null);setIssue(next);setSavedChange(null);setOriginalChange(null);
         if(identity)try{const raw=sessionStorage.getItem(stateChangeKey(identity,projectId,number));if(raw&&raw.length>1000)throw Error('Saved status change is invalid.');const saved=raw?stateChangeSchema.parse(JSON.parse(raw)):null;stateIntentRef.current=saved?{identity,intent:saved}:null;setStateIntent(saved);}catch{setError('Your saved status change could not be read. Restore browser storage before changing this issue.');}
@@ -199,17 +211,17 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
         }catch{/* Recovery errors must not block reading the issue. Dispatch validates again. */}
       }
     } catch (e) {
-      if(generation===lifetime.current && sequence===readSequence.current && apiSessionIdentity()===identity && !controller.signal.aborted){if(e instanceof ApiError&&[401,403,404,410].includes(e.status)){detailIdentity.current=null;setIssue(null);if(e.status===410)setRemovedIdentity(identity);}setLoadError(errText(e, "Could not load the issue"));}
+      if(generation===lifetime.current && sequence===readSequence.current && apiSessionIdentity()===identity && !controller.signal.aborted){if(e instanceof ApiError&&[401,403,404,410].includes(e.status)){detailIdentity.current=null;setIssue(null);if(e.status===410)setRemovedIdentity(identity);else{setRemovedIdentity(null);setTransferred(false);setTransferDestination(null);}}setLoadError(errText(e, "Could not load the issue"));}
     }
   }, [projectId, number]);
-  useEffect(() => { detailIdentity.current=null;setIssue(null);setRemovedIdentity(null);setDeleteDialog(false);void load(); }, [load,activeIdentity]);
+  useEffect(() => { detailIdentity.current=null;setIssue(null);setRemovedIdentity(null);setTransferred(false);setTransferDestination(null);setDeleteDialog(false);void load(); }, [load,activeIdentity]);
 
   const discardStateIntent=()=>{
     const identity=apiSessionIdentity();if(actionLock.current||!identity||detailIdentity.current!==identity)return;
     try{const key=stateChangeKey(identity,projectId,number);sessionStorage.removeItem(key);if(sessionStorage.getItem(key)!==null)throw Error();stateIntentRef.current=null;setStateIntent(null);setError(null);setNotice('Saved status change cleared.');detailIdentity.current=null;void load();}catch{setError('The saved status change could not be cleared.');}
   };
   const toggle = async () => {
-    const identity=apiSessionIdentity();if(!issue||actionLock.current||!identity||detailIdentity.current!==identity||issue.canStateWrite===false||deleteIntentRef.current!==null)return;
+    const identity=apiSessionIdentity();if(!issue||actionLock.current||!identity||detailIdentity.current!==identity||issue.canStateWrite===false||issue.transferPending||transferLock.current||deleteIntentRef.current!==null)return;
     const generation=lifetime.current;const current=()=>generation===lifetime.current&&apiSessionIdentity()===identity;
     try{
       let original=stateIntentRef.current;if(original&&original.identity!==identity)return;
@@ -227,7 +239,7 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
   };
   const clearRemoval=()=>{const identity=apiSessionIdentity();if(actionLock.current||!identity||deleteIntentRef.current?.identity!==identity)return;try{const key=deleteIssueKey(identity,projectId,number);sessionStorage.removeItem(key);if(sessionStorage.getItem(key)!==null)throw Error();deleteIntentRef.current=null;setDeleteIntent(null);detailIdentity.current=null;setIssue(null);setError(null);void load();}catch{setError('Saved removal could not be cleared.');}};
   const removeIssue=async()=>{
-    const identity=apiSessionIdentity();if(actionLock.current||!identity||stateIntentRef.current||(!deleteIntentRef.current&&(!issue?.canDeleteIssue||detailIdentity.current!==identity)))return;
+    const identity=apiSessionIdentity();if(actionLock.current||!identity||transferLock.current||issue?.transferPending||stateIntentRef.current||(!deleteIntentRef.current&&(!issue?.canDeleteIssue||detailIdentity.current!==identity)))return;
     const generation=lifetime.current,current=()=>generation===lifetime.current&&apiSessionIdentity()===identity;
     try{
       if(sessionStorage.getItem(stateChangeKey(identity,projectId,number)))throw Error('Clear the saved status change and refresh before removing this issue.');
@@ -241,7 +253,7 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
     finally{actionLock.current=false;if(current())setBusy(null);}
   };
   const startChange = async (agent: boolean) => {
-    if (!issue || actionLock.current || deleteIntentRef.current) return;
+    if (!issue || actionLock.current || deleteIntentRef.current||transferLock.current||issue.transferPending) return;
     actionLock.current=true;const generation=lifetime.current;
     setBusy(agent ? "agent" : "change");
     setError(null);
@@ -277,7 +289,7 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
     } finally { actionLock.current=false;if(generation===lifetime.current)setBusy(null); }
   };
 
-  if(removedIdentity&&removedIdentity===activeIdentity)return <div className="space-y-3"><h2 className="text-lg font-semibold">Issue removed</h2><Button size="sm" variant="ghost" onClick={()=>navigate(`/p/${projectId}/issues`)}>All issues</Button>{deleteIntent&&<Button size="sm" variant="outline" disabled={busy!==null} onClick={()=>void removeIssue()}>Retry original removal</Button>}{error&&<p role="alert" className={alertCls}>{error}</p>}</div>;
+  if(removedIdentity&&removedIdentity===activeIdentity)return <div className="space-y-3"><h2 className="text-lg font-semibold">{transferred?"Issue transferred":"Issue removed"}</h2>{transferDestination&&<a className="text-sm font-medium hover:underline" href={`#/p/${transferDestination.projectId}/issues?n=${transferDestination.number}`}>Open transferred issue</a>}<IssueTransfer projectId={projectId} number={number} canTransfer={false} onLock={value=>{transferLock.current=value;setTransferLocked(value);}} onChanged={()=>void load()}/><Button size="sm" variant="ghost" onClick={()=>navigate(`/p/${projectId}/issues`)}>All issues</Button>{deleteIntent&&<Button size="sm" variant="outline" disabled={busy!==null} onClick={()=>void removeIssue()}>Retry original removal</Button>}{error&&<p role="alert" className={alertCls}>{error}</p>}</div>;
   if (loadError && !issue) return <LoadError message={loadError} onRetry={() => void load()} />;
   if (!issue||detailIdentity.current!==activeIdentity) return loadError?<LoadError message={loadError} onRetry={()=>void load()}/>:<p role="status" className="text-sm text-muted-foreground">Loading issue…</p>;
   return (
@@ -298,22 +310,26 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
       {error && <div role="alert" className={alertCls}>{error}</div>}
       {notice && <div role="status" className={okCls}>{notice}</div>}
       <div className="flex flex-wrap gap-2">
-        {issue.state === "open" && <Button size="sm" variant="orange" disabled={busy !== null||deleteIntent!==null} onClick={() => void startChange(false)}>{busy === "change" ? "Checking…" : savedChange ? "Check saved change" : "Start a change"}</Button>}
-        {issue.state === "open" && <Button size="sm" variant="outline" disabled={busy !== null||deleteIntent!==null} onClick={() => void startChange(true)}>{busy === "agent" ? "Checking…" : savedChange ? "Check or request agent" : "Ask an agent"}</Button>}
-        <Button size="sm" variant="ghost" disabled={busy !== null||deleteIntent!==null||issue.canStateWrite===false||!apiSessionIdentity()} onClick={() => void toggle()}>{busy === "toggle" ? 'Saving…' : stateIntent ? 'Retry original status change' : issue.state === "open" ? "Close issue" : "Reopen"}</Button>
+        {issue.state === "open" && <Button size="sm" variant="orange" disabled={busy !== null||transferLocked||issue.transferPending||deleteIntent!==null} onClick={() => void startChange(false)}>{busy === "change" ? "Checking…" : savedChange ? "Check saved change" : "Start a change"}</Button>}
+        {issue.state === "open" && <Button size="sm" variant="outline" disabled={busy !== null||transferLocked||issue.transferPending||deleteIntent!==null} onClick={() => void startChange(true)}>{busy === "agent" ? "Checking…" : savedChange ? "Check or request agent" : "Ask an agent"}</Button>}
+        <Button size="sm" variant="ghost" disabled={busy !== null||transferLocked||issue.transferPending||deleteIntent!==null||issue.canStateWrite===false||!apiSessionIdentity()} onClick={() => void toggle()}>{busy === "toggle" ? 'Saving…' : stateIntent ? 'Retry original status change' : issue.state === "open" ? "Close issue" : "Reopen"}</Button>
         {stateIntent&&<><Button size="sm" variant="ghost" disabled={busy!==null} onClick={()=>void load()}>Refresh issue</Button><Button size="sm" variant="ghost" disabled={busy!==null} onClick={discardStateIntent}>Clear saved status change</Button></>}
       </div>
-      {(issue.canDeleteIssue||deleteIntent)&&<div className="flex flex-wrap gap-2"><Button size="sm" variant="destructive" disabled={busy!==null||stateIntent!==null} onClick={()=>deleteIntent?void removeIssue():setDeleteDialog(true)}>{busy==='delete'?'Removing…':deleteIntent?'Retry original removal':'Remove issue'}</Button>{deleteIntent&&<><Button size="sm" variant="ghost" disabled={busy!==null} onClick={()=>void load()}>Refresh issue</Button><Button size="sm" variant="ghost" disabled={busy!==null} onClick={clearRemoval}>Clear saved removal</Button></>}</div>}
-      <Dialog open={deleteDialog} onOpenChange={open=>{if(busy===null)setDeleteDialog(open);}}><DialogHeader><DialogTitle>Remove issue #{number}?</DialogTitle><DialogDescription>This removes the issue from active workflows. Its audit history is retained.</DialogDescription></DialogHeader><DialogFooter><Button size="sm" variant="ghost" disabled={busy!==null} onClick={()=>setDeleteDialog(false)}>Cancel</Button><Button size="sm" variant="destructive" disabled={busy!==null||stateIntent!==null} onClick={()=>void removeIssue()}>Remove issue</Button></DialogFooter></Dialog>
+      {(issue.canDeleteIssue||deleteIntent)&&<div className="flex flex-wrap gap-2"><Button size="sm" variant="destructive" disabled={busy!==null||transferLocked||issue.transferPending||stateIntent!==null} onClick={()=>deleteIntent?void removeIssue():setDeleteDialog(true)}>{busy==='delete'?'Removing…':deleteIntent?'Retry original removal':'Remove issue'}</Button>{deleteIntent&&<><Button size="sm" variant="ghost" disabled={busy!==null} onClick={()=>void load()}>Refresh issue</Button><Button size="sm" variant="ghost" disabled={busy!==null} onClick={clearRemoval}>Clear saved removal</Button></>}</div>}
+      <Dialog open={deleteDialog} onOpenChange={open=>{if(busy===null)setDeleteDialog(open);}}><DialogHeader><DialogTitle>Remove issue #{number}?</DialogTitle><DialogDescription>This removes the issue from active workflows. Its audit history is retained.</DialogDescription></DialogHeader><DialogFooter><Button size="sm" variant="ghost" disabled={busy!==null} onClick={()=>setDeleteDialog(false)}>Cancel</Button><Button size="sm" variant="destructive" disabled={busy!==null||transferLocked||issue.transferPending||stateIntent!==null} onClick={()=>void removeIssue()}>Remove issue</Button></DialogFooter></Dialog>
       {issue.linked.length > 0 && (
         <div className="text-sm">
           <h3 className="font-semibold mb-1">Changes for this issue</h3>
           <ul className="space-y-1">{issue.linked.map((t) => <li key={t.id} className="break-words"><Button size="sm" variant="link" className="h-auto max-w-full p-0 text-left whitespace-normal" onClick={() => navigate(`/p/${projectId}/review?task=${t.id}`)}>{t.goal}</Button> <span className="text-xs text-muted-foreground">{t.status}</span></li>)}</ul>
         </div>
       )}
+      <IssueTransfer projectId={projectId} number={number} canTransfer={issue.canDeleteIssue===true&&!issue.transferPending} disabled={busy!==null||stateIntent!==null||deleteIntent!==null} onLock={value=>{transferLock.current=value;setTransferLocked(value);}} onChanged={()=>void load()}/>
+      {issue.transferPending&&!transferLocked&&<p role="status" className="text-sm text-muted-foreground">This issue is being transferred. Changes are paused until the transfer completes.</p>}
+      <fieldset disabled={transferLocked||issue.transferPending} className="space-y-5 min-w-0">
       <IssuePlanning key={`${projectId}:${number}`} projectId={projectId} number={number}/>
       <IssueAttachments key={`${projectId}:attachments:${number}`} projectId={projectId} number={number}/>
       <Conversation key={`${projectId}:issue:${number}`} projectId={projectId} subject={`issue:${number}`} title="Conversation" />
+      </fieldset>
     </div>
   );
 }

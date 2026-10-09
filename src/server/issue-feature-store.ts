@@ -1,3 +1,4 @@
+import {assertIssueWritable} from './issue-transfer';
 import {activeIssueSql,ensureIssueLifecycleSchema,isIssueActive} from './issue-lifecycle';
 import {z} from 'zod';
 import {applyBulk} from '../core/issue-bulk';
@@ -38,10 +39,12 @@ export const savedIssueFilterWrite=z.discriminatedUnion('action',[
 export type SavedIssueFilterWrite=z.infer<typeof savedIssueFilterWrite>;
 const savedFilterSchema=z.object({id:z.uuid(),name:z.string().trim().min(1).max(80),version:z.number().int().positive().safe(),filter:issueFilterSchema}).strict();
 export type SavedIssueFilter=z.infer<typeof savedFilterSchema>;
+const transferFeatureSchema=z.object({version:z.literal(1),labels:z.array(z.string().max(50)).max(50),assignees:z.array(z.string().max(256)).max(20),milestone:z.object({id,title:z.string().max(100),dueDate:z.string().optional()}).strict().nullable(),relations:z.array(z.object({kind:z.enum(['duplicate-of','sub-issue-of']),from:id,to:id}).strict()).max(10000)}).strict();
+export type IssueTransferFeatures=z.infer<typeof transferFeatureSchema>;
 export class IssueFilterError extends Error{constructor(message:string,readonly status:400|404|409|410|413){super(message);}}
 type IssueFilterRow={number:number;title:string;author:string;state:'open'|'closed';created_at:string;updated_at:string;closed_by:string|null;comments:number;text_match:number};
 export class IssueFeatureStore{
- constructor(private readonly storage:DurableObjectStorage){ensureIssueLifecycleSchema(storage);storage.sql.exec('CREATE TABLE IF NOT EXISTS issue_features(id INTEGER PRIMARY KEY CHECK(id=1),document TEXT NOT NULL)');storage.sql.exec('CREATE TABLE IF NOT EXISTS issue_saved_filters(scope TEXT NOT NULL,actor_id TEXT NOT NULL,id TEXT NOT NULL,version INTEGER NOT NULL,document TEXT NOT NULL,removed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(scope,actor_id,id))');}
+ constructor(private readonly storage:DurableObjectStorage){ensureIssueLifecycleSchema(storage);storage.sql.exec('CREATE TABLE IF NOT EXISTS issue_features(id INTEGER PRIMARY KEY CHECK(id=1),document TEXT NOT NULL)');storage.sql.exec('CREATE TABLE IF NOT EXISTS issue_transfer_feature_origins(issue_number INTEGER PRIMARY KEY,document TEXT NOT NULL)');storage.sql.exec('CREATE TABLE IF NOT EXISTS issue_saved_filters(scope TEXT NOT NULL,actor_id TEXT NOT NULL,id TEXT NOT NULL,version INTEGER NOT NULL,document TEXT NOT NULL,removed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(scope,actor_id,id))');}
  read():IssueFeatures{const row=this.storage.sql.exec<{document:string}>('SELECT document FROM issue_features WHERE id=1').toArray()[0];return row?JSON.parse(row.document) as IssueFeatures:empty();}
  private issues(state:IssueFeatures){return this.storage.sql.exec<{number:number;state:'open'|'closed'}>(`SELECT i.number,i.state FROM issues i WHERE ${activeIssueSql('i')} ORDER BY i.number LIMIT 10001`).toArray().map(row=>({...state.triage[row.number],number:row.number,state:row.state,labels:state.triage[row.number]?.labels??[],assignees:state.triage[row.number]?.assignees??[]}));}
  view(){const state=this.read(),issues=this.issues(state),active=new Set(issues.map(issue=>issue.number)),unavailableIssueNumbers=[...new Set([...Object.keys(state.triage).map(Number),...state.links.flatMap(link=>[link.from,link.to])])].filter(number=>!active.has(number));return {...state,triage:Object.fromEntries(Object.entries(state.triage).filter(([number])=>active.has(Number(number)))),links:state.links.filter(link=>active.has(link.from)&&active.has(link.to)),unavailableIssueNumbers,issuesComplete:issues.length<=10000,progress:issues.length>10000?[]:state.milestones.map(m=>({id:m.id,...milestoneProgress(m.id,issues)}))};}
@@ -50,6 +53,7 @@ export class IssueFeatureStore{
  const issues=this.issues(state);if(issues.length>10000)return {ok:false as const,status:413,error:'Issue planning capacity reached'};
  const byNumber=new Map(issues.map(i=>[i.number,i]));const a=input.action;
  const fail=(error:string)=>({ok:false as const,status:400,error});
+ try{const affected=a.kind==='bulk-label'||a.kind==='bulk-assign'?a.numbers:'number'in a?[a.number]:a.kind==='relation-add'||a.kind==='relation-remove'?[a.from,a.to]:a.kind==='milestone-delete'?issues.filter(issue=>issue.milestone===a.id).map(issue=>issue.number):[];for(const number of affected)assertIssueWritable(this.storage,number);}catch{return {ok:false as const,status:409,error:'Issue transfer freezes this copied issue context; retry after its original outcome is settled'};}
  if((a.kind==='templates'||a.kind.startsWith('milestone-'))&&!owner)return {ok:false as const,status:403,error:'Only repository owners can manage milestones and templates'};
  switch(a.kind){
  case 'bulk-label':case 'bulk-assign':{
@@ -128,5 +132,9 @@ export class IssueFeatureStore{
   const next=offset+50<snapshot.items.length?offset+50:null,nextCursor=next===null?null:btoa(JSON.stringify({version,offset:next})).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
   return {sourceFingerprint:snapshot.source,issue:snapshot.subject,items:snapshot.items.slice(offset,offset+50),counts:snapshot.counts,featureRevision:snapshot.featureRevision,version,total:snapshot.items.length,offset,limit:50,nextCursor,complete:next===null};
  }
+
+ transferSnapshot(number:number):IssueTransferFeatures{if(!isIssueActive(this.storage,number))throw new IssueFilterError('Issue unavailable for transfer',410);const state=this.read(),triage=state.triage[number],milestone=state.milestones.find(value=>value.id===triage?.milestone);return transferFeatureSchema.parse({version:1,labels:[...(triage?.labels??[])],assignees:[...(triage?.assignees??[])],milestone:milestone?{id:milestone.id,title:milestone.title,...(milestone.dueDate?{dueDate:milestone.dueDate}:{})}:null,relations:state.links.filter(link=>link.from===number||link.to===number)});}
+ transferOrigin(number:number,snapshot:unknown,assert:()=>void){id.parse(number);const context=transferFeatureSchema.parse(snapshot);return this.storage.transactionSync(()=>{assert();if(!this.storage.sql.exec('SELECT number FROM issues WHERE number=?',number).toArray().length)throw new IssueFilterError('Reserved transfer issue unavailable',404);const document=JSON.stringify(context),old=this.storage.sql.exec<{document:string}>('SELECT document FROM issue_transfer_feature_origins WHERE issue_number=?',number).toArray()[0];if(old){if(old.document!==document)throw new IssueFilterError('Original unmapped transfer context cannot change',409);return {context,mapped:false as const};}this.storage.sql.exec('INSERT INTO issue_transfer_feature_origins VALUES(?,?)',number,document);return {context,mapped:false as const};});}
+ transferContext(number:number){if(!isIssueActive(this.storage,number))return null;const row=this.storage.sql.exec<{document:string}>('SELECT document FROM issue_transfer_feature_origins WHERE issue_number=?',number).toArray()[0];return row?{context:transferFeatureSchema.parse(JSON.parse(row.document)),mapped:false as const}:null;}
 
 }

@@ -3,6 +3,7 @@
  * flaregit — scriptable CLI. Output is JSON by default (add --pretty for humans); errors go to stderr as
  * JSON with a non-zero exit code. No interactive prompts anywhere.
  */
+import {prepareIssueTransferCommand,issueTransferCommandReceipt} from "../src/cli/issue-transfer-command";
 import {prepareIssueDeletionCommand,readIssueViewResponse} from "../src/cli/issue-delete-command";
 import {prepareIssueStateCommand,parseIssueNumber} from "../src/cli/issue-state-command";
 import { isSafePushOption } from "../src/core/sanitize.js";
@@ -40,7 +41,7 @@ for(let i=0;i<argv.length&&confirmationCommand.length<2;i++){
   if(argument.startsWith("--")){const key=argument.slice(2),next=argv[i+1];if(key!=="confirm"&&!["pretty","agent","help"].includes(key)&&next!==undefined&&!next.startsWith("--"))i++;}
   else confirmationCommand.push(argument);
 }
-const issueDeletionConfirmation=confirmationCommand[0]==="issue"&&confirmationCommand[1]==="delete";
+const issueDeletionConfirmation=confirmationCommand[0]==="issue"&&["delete","transfer"].includes(confirmationCommand[1]??"");
 const flags = new Map<string, string | true>();
 const pos: string[] = [];
 for (let i = 0; i < argv.length; i++) {
@@ -134,7 +135,7 @@ const HELP = `flaregit — JSON by default (--pretty for humans)
   integrate <repo> <change> [<change> ...]       compose, verify and queue 1-8 changes for review
   workflow status|pause|resume <repo> <instance>  inspect or preserve/resume a running workflow
   log <repo> [--limit N] | tree <repo> [path] | cat <repo> <path>
-  issues <repo> [--state closed] | issue new <repo> "<title>" [--body T] | issue view <repo> <n> | issue close|reopen <repo> <n> [--request UUID --revision N] | issue delete <repo> <n> --confirm [--request UUID --revision N]
+  issues <repo> [--state closed] | issue new <repo> "<title>" [--body T] | issue view <repo> <n> | issue close|reopen <repo> <n> [--request UUID --revision N] | issue delete <repo> <n> --confirm [--request UUID --revision N] | issue transfer <repo> <n> --to ID [--confirm --manifest FILE --request UUID]
   comment <repo> "<text>" (--issue N | --change ID | --candidate ID) [--path P --line N] [--request UUID]
   candidates <repo> [--all]                      verified candidates waiting for review
   accept|reject <repo> <candidate> [--note T]    decide what becomes history
@@ -289,6 +290,14 @@ async function main() {
       const issueNumber=parseIssueNumber(rest[1]);if(!TOKEN)fail("Not signed in. Run flaregit auth login with a current token.");
       return out(await readIssueViewResponse(await fetch(`${API}/api/p/${id}/issues/${issueNumber}`,{method:"GET",redirect:"error",headers:{Authorization:`Bearer ${TOKEN}`}}),issueNumber));
     }
+    if(sub==="transfer"){
+      const manifestPath=flag("manifest");let manifest:unknown;
+      if(manifestPath){const file=Bun.file(manifestPath);if(file.size>2*1024*1024)fail("Transfer preview file exceeds capacity");manifest=await file.json();}
+      const command=await prepareIssueTransferCommand({repositoryId:id,issue:rest[1],destination:flag("to"),confirmed:flags.get("confirm")===true,request:flags.get("request"),manifest},route=>api("GET",route));
+      if(command.kind==="preview")return out(command.preview);
+      console.error(JSON.stringify(command.metadata));
+      return out(issueTransferCommandReceipt(await api("POST",command.route,command.request),id,rest[1]!,command.request));
+    }
     if(sub==="delete"){
       const command=await prepareIssueDeletionCommand({repositoryId:id,issue:rest[1],confirmed:flags.get("confirm")===true,request:flags.get("request"),revision:flags.get("revision")},()=>api("GET",`/p/${id}/issues/${rest[1]}`));
       console.error(JSON.stringify(command.metadata));return out(await api("DELETE",command.route,command.body));
@@ -298,7 +307,7 @@ async function main() {
       console.error(JSON.stringify(command.metadata));
       return out(await api("PATCH",command.route,command.body));
     }
-    fail("Usage: flaregit issue new|view|close|reopen|delete <repo> ...");
+    fail("Usage: flaregit issue new|view|close|reopen|delete|transfer <repo> ...");
   }
   if (cmd === "comment") {
     const subject = flag("issue") ? `issue:${flag("issue")}` : flag("change") ? `change:${flag("change")}` : flag("candidate") ? `candidate:${flag("candidate")}` : fail("Pass --issue N, --change ID or --candidate ID");

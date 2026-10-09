@@ -2,7 +2,7 @@ import {Database} from 'bun:sqlite';
 import {test,expect} from 'bun:test';
 import {IssueLifecycleStore,isIssueActive} from '../src/server/issue-lifecycle';
 import {IssueStateLedger} from '../src/server/issue-state';
-import {IssueFeatureStore,issueFilterSchema} from '../src/server/issue-feature-store';
+import {IssueFeatureStore,issueFilterSchema,issueFeatureAction} from '../src/server/issue-feature-store';
 import {PlanningStore,planningMutationSchema} from '../src/server/planning-store';
 import {MetadataArchives} from '../src/server/metadata-archive';
 import {checkedEnvelope} from '../src/web/metadata-archive-envelope';
@@ -12,6 +12,27 @@ function storage(db:Database){return {sql:{exec(query:string,...bindings:Array<s
 function database(){const db=new Database(':memory:');db.exec(`CREATE TABLE issues(number INTEGER PRIMARY KEY,title TEXT,body TEXT,state TEXT,author TEXT,created_at TEXT,updated_at TEXT,closed_by TEXT);CREATE TABLE comments(id INTEGER PRIMARY KEY,subject TEXT,author TEXT,body TEXT,path TEXT,line INTEGER,"commit" TEXT,created_at TEXT);`);return db;}
 function seed(db:Database){for(const [number,title] of [[1,'Visible issue'],[2,'Removed private title']] as const)db.query('INSERT INTO issues VALUES(?,?,?,?,?,?,?,?)').run(number,title,number===2?'Removed private body':'Visible body','open',number===2?'Original author':'Visible author','2026-10-08T12:00:00Z','2026-10-08T12:00:00Z',null);db.query('INSERT INTO comments VALUES(?,?,?,?,?,?,?,?)').run(1,'issue:2','Original commenter','Removed private conversation',null,null,null,'2026-10-08T12:00:00Z');}
 function remove(durable:DurableObjectStorage,incarnation:string){const scope={projectId:'source-project',incarnation,number:2,createdAt:'2026-10-08T12:00:00Z',author:'Original author'},revision=new IssueStateLedger(durable).snapshot(scope).stateRevision;new IssueLifecycleStore(durable).delete(scope,{requestId:crypto.randomUUID(),expectedRevision:revision,confirmed:true},'source-owner',()=>{});}
+test('pending incoming transfer never exports content, descendants or opaque history even to an owner',async()=>{const db=database();try{
+ seed(db);const durable=storage(db),features=new IssueFeatureStore(durable),archives=new MetadataArchives(durable),plan=new PlanningStore(durable);
+ features.update({expectedRevision:0,action:{kind:'bulk-label',numbers:[2],label:'PENDING_LABEL_SECRET'}},[],true);
+ plan.mutate(planningMutationSchema.parse({operation:'addItem',issueNumber:2,expectedVersion:0}),true);
+ db.query('INSERT INTO issue_transfer_incoming VALUES(?,?,?,?)').run(2,crypto.randomUUID(),'{}',0);
+ db.query('INSERT INTO metadata_archive_history VALUES(?,?,?)').run('issues','pending-history','PENDING_HISTORY_SECRET');
+ db.query('INSERT INTO metadata_archive_origins VALUES(?,?,?)').run('comments','1','PENDING_ORIGIN_SECRET');
+ features.transferOrigin(2,{version:1,labels:['PENDING_FEATURE_SECRET'],assignees:[],milestone:null,relations:[]},()=>{});
+ expect(features.transferContext(2)).toBeNull();expect((await features.filteredIssues('scope','reader',issueFilterSchema.parse({state:'all'}))).issues.map(issue=>issue.number)).toEqual([1]);expect(plan.snapshot().plan.project.items).toEqual([]);
+ for(const fullHistory of [false,true]){const exported=await archives.export({projectId:'source',incarnation:crypto.randomUUID(),head:'a'.repeat(40)},fullHistory),serialized=JSON.stringify(exported.archive);for(const secret of ['Removed private title','Removed private body','Removed private conversation','PENDING_LABEL_SECRET','PENDING_HISTORY_SECRET','PENDING_ORIGIN_SECRET','PENDING_FEATURE_SECRET'])expect(serialized).not.toContain(secret);expect(exported.archive.tables.find(table=>table.name==='issues')?.rows.map(row=>row.number)).toEqual([1]);expect(exported.archive.tables.find(table=>table.name==='comments')?.rows).toEqual([]);expect(JSON.stringify(archives.history(fullHistory))).not.toContain('PENDING_HISTORY_SECRET');}
+ db.query('UPDATE issue_transfer_incoming SET active=1 WHERE issue_number=2').run();expect(features.transferContext(2)).toMatchObject({mapped:false,context:{labels:['PENDING_FEATURE_SECRET']}});expect(features.view().triage['2']?.assignees??[]).toEqual([]);
+ }finally{db.close();}});
+test('transfer freezes copied feature context while unrelated changes remain possible',()=>{const db=database();try{
+ seed(db);const durable=storage(db),features=new IssueFeatureStore(durable);
+ expect(features.update({expectedRevision:0,action:{kind:'milestone-create',title:'Original milestone'}},[],true).ok).toBe(true);
+ expect(features.update({expectedRevision:1,action:{kind:'milestone-assign',number:2,milestone:1}},[],true).ok).toBe(true);
+ const original=features.transferSnapshot(2);db.query('INSERT INTO issue_transfer_locks VALUES(?,?,?)').run(2,crypto.randomUUID(),'{}');
+ for(const action of [{kind:'bulk-label',numbers:[2],label:'changed'},{kind:'milestone-delete',id:1},{kind:'relation-add',relation:'duplicate-of',from:1,to:2}])expect(features.update({expectedRevision:2,action:issueFeatureAction.parse(action)},[],true)).toMatchObject({ok:false,status:409});
+ expect(features.update({expectedRevision:2,action:{kind:'bulk-label',numbers:[1],label:'unrelated'}},[],true).ok).toBe(true);expect(features.transferSnapshot(2)).toEqual(original);
+ features.transferOrigin(2,original,()=>{});expect(()=>features.transferOrigin(2,{...original,labels:['changed']},()=>{})).toThrow();
+ }finally{db.close();}});
 test('real tombstone excludes native filter/triage/relationships/planning and cannot execute accepted automation',async()=>{const db=database();try{
  seed(db);const durable=storage(db),features=new IssueFeatureStore(durable),plan=new PlanningStore(durable),incarnation=crypto.randomUUID();
  features.update({expectedRevision:0,action:{kind:'bulk-label',numbers:[2],label:'private-label'}},[],true);features.update({expectedRevision:1,action:{kind:'relation-add',relation:'duplicate-of',from:1,to:2}},[],true);
