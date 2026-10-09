@@ -588,6 +588,7 @@ export interface Ledger {
   claimAgentRun(input: AgentRunInput): Promise<AgentRunClaim>;
   resumeAgentRun(runId: string, taskId: string, previousRunId: string): Promise<AgentRunClaim>;
   saveAgentProposal(runId: string, taskId: string, files: Record<string, string>): Promise<boolean>;
+  saveAgentExplanation(runId: string, taskId: string, explanation: import("./agent-loop").AgentChangeExplanation): Promise<boolean>;
   markAgentPushed(runId: string, taskId: string, commit: string): Promise<boolean>;
   checkpointAgentRun(runId: string, taskId: string, eventId: string, commit: string): Promise<boolean>;
   failAgentRun(runId: string, taskId: string): Promise<boolean>;
@@ -2343,6 +2344,7 @@ export class RepositoryController extends DurableObject<Env> {
     validate();const selectedTask=this.load().tasks[taskId],selectedTarget=selectedTask?effectiveTaskAcceptedTarget(this.projectedTask(selectedTask)):undefined;if(Boolean(selectedTarget)!==Boolean(run.acceptedTarget))throw Error("Agent run accepted target binding changed");if(selectedTarget&&run.acceptedTarget)assertCompatibleAcceptedTargetBatch([selectedTarget,run.acceptedTarget]);if(await accountOf(this.env,attempt.accountKey).accountLifecycle()!=="active"||!await this.canGitAccess(attempt.actorId,taskId,true))throw Error("Agent mutation writer unavailable");validate();return validate;
   }
   async saveAgentProposal(runId: string, taskId: string, files: Record<string, string>): Promise<boolean> { const validate=await this.authorizeAgentMutation(runId,taskId);return this.ctx.storage.transactionSync(()=>{validate();return this.agentRuns().propose(runId, taskId, files);}); }
+  async saveAgentExplanation(runId: string, taskId: string, explanation: import("./agent-loop").AgentChangeExplanation): Promise<boolean> { const validate=await this.authorizeAgentMutation(runId,taskId);return this.ctx.storage.transactionSync(()=>{validate();return this.agentRuns().explain(runId, taskId, explanation);}); }
   async markAgentPushed(runId: string, taskId: string, commit: string): Promise<boolean> {
     const validate=await this.authorizeAgentMutation(runId,taskId);new AgentRuntimeLedger(this.ctx.storage);const rows=this.ctx.storage.sql.exec<{doc:string}>("SELECT doc FROM agent_native_attempts WHERE run_id=? AND task_id=? ORDER BY rowid DESC LIMIT 1",runId,taskId).toArray();const runtime=rows[0]?JSON.parse(rows[0].doc) as import("./agent-runtime-ledger").AgentNativeAttempt:null;
     if(runtime){const {state:_state,createdAt:_created,stoppedAt:_stopped,...identity}=runtime;const original=new RestrictedAgentAuthority(this.ctx.storage,{current:async()=>{throw Error("No transfer authority from history");},assertLocal:()=>{}}).originalOwnership(identity);

@@ -22,6 +22,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { AgentRecoveryPanel } from "../components/AgentRecoveryPanel";
+import { AgentChangeSummary } from "../components/AgentChangeSummary";
 import {prepareIntegrationIntent,readIntegrationIntents,saveIntegrationIntent,acknowledgeIntegrationIntent,type IntegrationIntent} from "../integration-intent-recovery";
 import { apiFetch, apiJson, apiSessionIdentity } from "../api";
 import { navigate, timeAgo } from "../router";
@@ -461,6 +462,7 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
                     <summary className="cursor-pointer rounded w-fit focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Files touched in saved checkpoints</summary>
                     <ul className="mt-2 space-y-1">{[...new Set(t.checkpoints.flatMap((checkpoint) => checkpoint.filesChanged))].map((file) => <li key={file}><code className="break-all">{file}</code>{(paths.get(file)?.length ?? 0) > 1 && <span className="ml-2 text-amber-200">shared with another active change</span>}</li>)}</ul>
                   </details>}
+                  {t.agentRunId && <AgentChangeSummary key={`summary:${projectId}:${t.id}:${t.agentRunId}`} projectId={projectId} taskId={t.id} runId={t.agentRunId} revision={t.updatedAt} />}
                   {managedActions && t.agentRunId && <AgentRecoveryPanel key={`${projectId}:${t.id}:${t.agentRunId}`} projectId={projectId} taskId={t.id} runId={t.agentRunId} canResume={["working", "checkpointed", "blocked", "needs_decision"].includes(t.status)} busy={busy !== null} onStarted={reload} />}
                   {managedActions && t.agentWorkflowInstanceId && <AgentRunControls key={t.agentWorkflowInstanceId} projectId={projectId} instanceId={t.agentWorkflowInstanceId} canRetry={["working", "checkpointed", "blocked", "needs_decision"].includes(t.status)} retrying={busy !== null} onRetry={() => void act(t, "agent")} onChange={reload} />}
                   {t.status === "blocked" && (

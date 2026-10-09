@@ -6,7 +6,8 @@ import { DEFAULT_CODE_MODEL } from "../ai/workers-ai.js";
 import { WorkersAIClient } from "../ai/workers-ai.js";
 import { assertAgentWrites, buildAgentPrompt, inAgentScope, isProtectedPath, redactSecrets } from "../agents/prompt.js";
 import { parseRepairResponse } from "../core/pipeline/repair.js";
-import { settingsFor } from "../core/command-policy.js";
+import { isCommandPolicy, settingsFor } from "../core/command-policy.js";
+import { executeAgentRound, explainAgentRun, interpretCheckRun, repositoryCheckScript, ROUND_CONTAINER_SECONDS, type AgentChecks, type AgentRoundInput, type AgentRoundStep } from "./agent-loop.js";
 import type { Task } from "../core/types.js";
 import type { Ledger } from "./durable-object.js";
 import type { Env } from "./env.js";
@@ -33,7 +34,8 @@ export interface RestrictedAgentRuntime {
   cleanup(attempt: AgentNativeAttemptIdentity): Promise<{ credentialsRevoked: boolean }>;
 }
 
-export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task: Task, runId = task.agentWorkflowInstanceId, options?: { stopAfterProposal?: boolean; resumeFrom?: string; accountKey?: string; parentWorkflowId?: string; restrictedEgress?: boolean; restrictedRuntime?: RestrictedAgentRuntime }): Promise<{ commit: string; recovered?: boolean; proposalId?: string }> {
+export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task: Task, runId = task.agentWorkflowInstanceId, options?: { stopAfterProposal?: boolean; resumeFrom?: string; accountKey?: string; parentWorkflowId?: string; restrictedEgress?: boolean; restrictedRuntime?: RestrictedAgentRuntime; round?: AgentRoundInput }): Promise<{ commit: string; recovered?: boolean; proposalId?: string; round?: Extract<AgentRoundStep, { kind: "round" }> }> {
+  if (options?.round && !options.stopAfterProposal) throw new Error("Agent rounds only produce proposals");
   const restricted = options?.restrictedEgress === true || options?.restrictedRuntime !== undefined;
   if (!runId || !/^[A-Za-z0-9_-]{1,200}$/.test(runId)) throw new Error("A durable agent workflow identity is required");
   let durable = await ledger.getAgentRun(runId);
@@ -63,11 +65,13 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
   }
   if (restricted && !options?.restrictedRuntime) throw new Error("Restricted agent execution is unavailable; no Internet or VM credential fallback is permitted");
   if (stopped(state.tasks[task.id])) throw new Error("Change is no longer available for agent work");
-  const settings = settingsFor(selectedTarget?acceptedTargetSchema.parse(selectedTarget).policy:state.verificationPolicy);
+  const selectedPolicy = selectedTarget?acceptedTargetSchema.parse(selectedTarget).policy:state.verificationPolicy;
+  const settings = settingsFor(selectedPolicy);
   await assertManagedInitiator(env, ledger, options?.parentWorkflowId, options?.accountKey, task.id);
   const spending = await reserveManagedAgent(env, options?.accountKey, runId);
-  await globalOf(env).consumeManagedSpend(runId, 0, 0, 300);
-  const deadline = Date.now() + 300_000;
+  const containerSeconds = options?.round ? ROUND_CONTAINER_SECONDS : 300;
+  await globalOf(env).consumeManagedSpend(runId, 0, 0, containerSeconds);
+  const deadline = Date.now() + containerSeconds * 1000;
   const attempt=await ledger.beginAgentNativeAttempt({workflowId:options?.parentWorkflowId??runId,runId,taskId:task.id,phase:options?.stopAfterProposal?"proposal":"apply",attemptId:crypto.randomUUID(),nativeId:crypto.randomUUID()});
   const sb = env.AGENT.getByName(`agent-${attempt.nativeId}`);
   let restrictedScope: AgentExecutionEgressScope | undefined;
@@ -154,6 +158,18 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
     r = await run(durable.startingCommit===null ? `git -C ${WORK} checkout --quiet --orphan ${q(task.workspace.branch)} && git -C ${WORK} rm --quiet -rf --ignore-unmatch .` : `git -C ${WORK} checkout --quiet -B ${q(task.workspace.branch)} ${q(durable.startingCommit)}`);
     if (!r.success) throw new Error("Agent could not restore its branch; no changes were made");
     const frozenTask = { ...task, goal: durable.goal, allowedScope: durable.allowedScope };
+    const materialize = async (changes: Readonly<Record<string, string>>) => {
+      for (const [file, content] of Object.entries(changes)) {
+        const original = await run(`test -f ${q(`${WORK}/${file}`)} && test ! -L ${q(`${WORK}/${file}`)}`);
+        if (original.success) { await authorize();await assertRestricted();const contentBefore = await sb.readFile(`${WORK}/${file}`);await assertRestricted();await authorize(); if (redactSecrets(contentBefore) !== contentBefore) throw new Error("Agent cannot replace a credential-bearing file"); }
+        const dir = file.split("/").slice(0, -1).join("/");
+        for (const prefix of file.split("/").slice(0, -1).map((_, i, parts) => parts.slice(0, i + 1).join("/"))) if ((await run(`test -L ${q(`${WORK}/${prefix}`)}`)).success) throw new Error("Agent write would traverse a repository symlink");
+        if ((await run(`test -L ${q(`${WORK}/${file}`)}`)).success) throw new Error("Agent cannot replace a repository symlink");
+        if (dir && !(await run(`mkdir -p ${q(`${WORK}/${dir}`)}`)).success) throw new Error("Agent directory could not be created");
+        await authorize();await assertRestricted();await sb.writeFile(`${WORK}/${file}`,content);await assertRestricted();await authorize();
+      }
+    };
+    let roundOutcome: Extract<AgentRoundStep, { kind: "round" }> | undefined;
     if (!durable.proposal) {
       if (observedHead && observedHead !== durable.startingCommit) throw new Error("Saved branch advanced before proposal; preserve the newer work and restart explicitly");
       const files: Record<string, string> = {}, secretFiles = new Set<string>();
@@ -176,12 +192,40 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
         await globalOf(env).consumeManagedSpend(runId, inputBytes, maxOutputTokens, 0);
         await authorize();
       } });
-      const response=await ai.complete(buildAgentPrompt(frozenTask,task.contributor.name,files,settings.checkCommand,context));
-      await authorize();
-      const proposed=parseRepairResponse(response);
+      const protectedPaths = durable.protectedPaths, startingCommit = durable.startingCommit;
+      const assertWrites = (paths: Iterable<string>) => {
+        assertAgentWrites(frozenTask, paths, protectedPaths);
+        for (const file of paths) if (secretFiles.has(file)) throw new Error("Agent proposed replacing a credential-bearing file; human editing is required");
+      };
+      let proposed: Map<string, string>;
+      if (options?.round) {
+        const round = options.round;
+        assertWrites(Object.keys(round.files));
+        const commandPolicy = isCommandPolicy(selectedPolicy) ? selectedPolicy : undefined;
+        const runChecks = async (changed: Readonly<Record<string, string>>): Promise<AgentChecks> => {
+          if (!commandPolicy) return { kind: "unavailable", reason: "This repository does not define a test command, so the agent could not run tests while working." };
+          r = await run(startingCommit === null ? `git -C ${WORK} clean --quiet -fdx` : `git -C ${WORK} reset --quiet --hard && git -C ${WORK} clean --quiet -fdx`);
+          if (!r.success) throw new Error("Agent workspace could not be reset between checks");
+          await materialize(changed);
+          const seconds = Math.min(commandPolicy.timeoutSec ?? Number.POSITIVE_INFINITY, Math.floor((deadline - Date.now()) / 1000) - 20);
+          if (seconds < 5) return { kind: "unavailable", reason: "Not enough of this round's time allowance remained to run the repository's tests." };
+          const checked = await run(repositoryCheckScript({ workspace: WORK, ...(commandPolicy.install ? { install: commandPolicy.install } : {}), ...(commandPolicy.build ? { build: commandPolicy.build } : {}), test: commandPolicy.test, timeoutSeconds: seconds, runId }));
+          return interpretCheckRun(checked.exitCode, `${checked.stdout}\n${checked.stderr}`);
+        };
+        const outcome = await executeAgentRound(round, { task: frozenTask, agentName: task.contributor.name, snapshot: { ...files, ...round.files }, ...(settings.checkCommand ? { checkCommand: settings.checkCommand } : {}), shared: context, model: (prompt) => ai.complete(prompt), assertWrites, runChecks });
+        await authorize();
+        const explanation = explainAgentRun(durable.goal, round.maxRounds, [...round.history, outcome.record], outcome.verification);
+        if (!(await ledger.saveAgentExplanation(runId, task.id, explanation))) throw new Error("Agent round explanation was not saved for the active generation");
+        if (!outcome.final) return { commit: "", round: outcome };
+        roundOutcome = outcome;
+        proposed = new Map(Object.entries(outcome.files));
+      } else {
+        const response=await ai.complete(buildAgentPrompt(frozenTask,task.contributor.name,files,settings.checkCommand,context));
+        await authorize();
+        proposed=parseRepairResponse(response);
+      }
       if (!proposed.size) throw new Error("Model returned no file changes");
-      assertAgentWrites(frozenTask, proposed.keys(), durable.protectedPaths);
-      for (const file of proposed.keys()) if (secretFiles.has(file)) throw new Error("Agent proposed replacing a credential-bearing file; human editing is required");
+      assertWrites([...proposed.keys()]);
       const normalized = Object.fromEntries([...proposed].map(([file, content]) => [file, content.endsWith("\n") ? content : `${content}\n`]));
       await authorize();
       if (!(await ledger.saveAgentProposal(runId, task.id, normalized))) throw new Error("Agent proposal was not durably saved for the active generation");
@@ -190,17 +234,9 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
     }
     await authorize();
     if (!(await ledger.saveAgentProposal(runId, task.id, durable.proposal.files))) throw new Error("Another agent generation superseded this run");
-    if (options?.stopAfterProposal) return { commit: "", proposalId: runId };
+    if (options?.stopAfterProposal) return { commit: "", proposalId: runId, ...(roundOutcome ? { round: { ...roundOutcome, proposalId: runId } } : {}) };
     assertAgentWrites({ allowedScope: durable.allowedScope }, Object.keys(durable.proposal.files), durable.protectedPaths);
-    for (const [file, content] of Object.entries(durable.proposal.files)) {
-      const original = await run(`test -f ${q(`${WORK}/${file}`)} && test ! -L ${q(`${WORK}/${file}`)}`);
-      if (original.success) { await authorize();await assertRestricted();const contentBefore = await sb.readFile(`${WORK}/${file}`);await assertRestricted();await authorize(); if (redactSecrets(contentBefore) !== contentBefore) throw new Error("Agent cannot replace a credential-bearing file"); }
-      const dir = file.split("/").slice(0, -1).join("/");
-      for (const prefix of file.split("/").slice(0, -1).map((_, i, parts) => parts.slice(0, i + 1).join("/"))) if ((await run(`test -L ${q(`${WORK}/${prefix}`)}`)).success) throw new Error("Agent write would traverse a repository symlink");
-      if ((await run(`test -L ${q(`${WORK}/${file}`)}`)).success) throw new Error("Agent cannot replace a repository symlink");
-      if (dir && !(await run(`mkdir -p ${q(`${WORK}/${dir}`)}`)).success) throw new Error("Agent directory could not be created");
-      await authorize();await assertRestricted();await sb.writeFile(`${WORK}/${file}`,content);await assertRestricted();await authorize();
-    }
+    await materialize(durable.proposal.files);
     const date = `${Math.floor(Date.parse(durable.proposal.commitDate ?? durable.createdAt) / 1000)} +0000`;
     r = await run(`git -C ${WORK} add -A && git -C ${WORK} -c user.name=${q(`FlareGit agent ${task.id}`)} -c user.email=${q(`${task.id}@agents.flaregit.com`)} commit --quiet -m ${q(durable.goal)}`, { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
     if (!r.success) throw new Error("Agent could not reconstruct its saved proposal commit");

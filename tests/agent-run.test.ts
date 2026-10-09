@@ -13,10 +13,11 @@ import type {CommittedAcceptedTarget} from "../src/core/accepted-target";
 import type { Task } from "../src/core/types.js";
 import { AgentRunLedger, type AgentRunInput, type AgentRunRecord } from "../src/server/agent-run-ledger.js";
 import type { Env } from "../src/server/env.js";
+import type { AgentChangeExplanation } from "../src/server/agent-loop.js";
 
 // Native Git with a deterministic model double and in-memory durable-store double.
 // These assertions verify recovery orchestration, not hosted provider execution.
-async function fixture(options: { unborn?:boolean; lostPush?: boolean; lostCheckpoint?: boolean; infoFails?: boolean; secret?: boolean; revokeBeforeModel?: "account" | "membership";badTokenScope?:boolean;revokeFails?:boolean;stopFails?:boolean;revokeDuringModel?:"account"|"membership";primaryPolicy?:Record<string,unknown>;changeTargetDuringModel?:boolean;changePolicyDuringModel?:boolean;changeGenerationDuringModel?:boolean } = {}) {
+async function fixture(options: { unborn?:boolean; lostPush?: boolean; lostCheckpoint?: boolean; infoFails?: boolean; secret?: boolean; revokeBeforeModel?: "account" | "membership";badTokenScope?:boolean;revokeFails?:boolean;stopFails?:boolean;revokeDuringModel?:"account"|"membership";primaryPolicy?:Record<string,unknown>;changeTargetDuringModel?:boolean;changePolicyDuringModel?:boolean;changeGenerationDuringModel?:boolean;modelAnswer?:string } = {}) {
   const root = await mkdtemp(join(tmpdir(), "agent-recovery-")), canonical = join(root, "repo.git"), seed = join(root, "seed");
   const git = async (args: string[]) => {
     const child = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@localhost", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@localhost" } });
@@ -64,6 +65,7 @@ async function fixture(options: { unborn?:boolean; lostPush?: boolean; lostCheck
       delete record.failure; delete record.checkpointEventId;
       active = newId; task.agentRunId = newId; runs.set(newId, record); return { kind: "claimed", run: record };
     },
+    saveAgentExplanation: async (id: string, _task: string, explanation: AgentChangeExplanation) => { if (id !== active) return false; runs.get(id)!.explanation = explanation; return true; },
     saveAgentProposal: async (id: string, _task: string, files: Record<string, string>) => { if (id !== active) return false; const record = runs.get(id)!; order.push("proposal-saved"); record.proposal ??= { files, digest: "fixture-digest", commitDate: record.createdAt }; record.phase = record.phase === "claimed" ? "proposed" : record.phase; return true; },
     markAgentPushed: async (id: string, _task: string, commit: string) => { if (id !== active) return false; const record = runs.get(id)!; record.phase = "pushed"; record.pushedCommit = commit; order.push("pushed-recorded"); return true; },
     ingestCheckpoint: async ({ commit }: { commit: string }) => { checkpoints++; order.push("checkpoint"); if (lostCheckpoint) { lostCheckpoint = false; throw new Error("Checkpoint response lost"); } task.currentCommit = commit; task.status = "ready"; return { applied: true }; },
@@ -96,7 +98,7 @@ async function fixture(options: { unborn?:boolean; lostPush?: boolean; lostCheck
       };
     } },
     ARTIFACTS: { get: async () => ({ info: async () => { if (options.infoFails) throw new Error("Info unavailable"); return { remote: canonical }; }, createToken: async (scope:"read"|"write",ttl:number) => {credentialIssues++;return ({ plaintext: "fixture-token",scope:options.badTokenScope?"admin":scope,expiresAt:new Date(Date.now()+ttl*1000).toISOString() });}, revokeToken: async () => { revoked++; return true; }, [Symbol.dispose]: () => {} }) },
-    AI: { run: async (_model:string,input:{messages?:Array<{content:string}>}) => { prompts.push(...(input.messages??[]).map(message=>message.content));if(options.changePolicyDuringModel)policyVersion++;if(options.changeGenerationDuringModel&&task.targetGeneration)Object.assign(task,{targetGeneration:{...task.targetGeneration,eventId:crypto.randomUUID(),generation:task.targetGeneration.generation+1}});if(options.changeTargetDuringModel&&task.acceptedTarget)Object.assign(task,{acceptedTarget:{...task.acceptedTarget,acceptedCommit:"f".repeat(40)}});modelCalls++;if(options.revokeDuringModel==="account")lifecycle="deleted";if(options.revokeDuringModel==="membership")membership=false; return { response: '<file path="src/app.ts">\nexport const value = 2;\n</file>' }; } },
+    AI: { run: async (_model:string,input:{messages?:Array<{content:string}>}) => { prompts.push(...(input.messages??[]).map(message=>message.content));if(options.changePolicyDuringModel)policyVersion++;if(options.changeGenerationDuringModel&&task.targetGeneration)Object.assign(task,{targetGeneration:{...task.targetGeneration,eventId:crypto.randomUUID(),generation:task.targetGeneration.generation+1}});if(options.changeTargetDuringModel&&task.acceptedTarget)Object.assign(task,{acceptedTarget:{...task.acceptedTarget,acceptedCommit:"f".repeat(40)}});modelCalls++;if(options.revokeDuringModel==="account")lifecycle="deleted";if(options.revokeDuringModel==="membership")membership=false; return { response: options.modelAnswer ?? '<file path="src/app.ts">\nexport const value = 2;\n</file>' }; } },
   } as unknown as Env;
   // Synthetic policy port proves orchestration and credential omission only;
   // hosted Internet/HTTP/TLS isolation requires the genuine container canary.
@@ -334,3 +336,23 @@ test("restricted policy withdrawal refuses candidate commands without an unrestr
 test("refused restricted write transition preserves the saved proposal and leaves the fork branch untouched",async()=>{
  const f=await fixture();try{const port:RestrictedAgentRuntime={...f.restrictedRuntime,configure:async(attempt,scope)=>{if(scope.access==="write")throw new Error("Restricted write scope is unavailable");return f.restrictedRuntime.configure(attempt,scope);}};await expect(runAgentTask(f.env,f.ledger,f.task,"restricted-write-refused",{...f.funding,restrictedEgress:true,restrictedRuntime:port})).rejects.toThrow("write scope is unavailable");expect(f.runs.get("restricted-write-refused")?.proposal).toBeDefined();expect(f.counts().modelCalls).toBe(1);expect(f.counts().checkpoints).toBe(0);expect(f.credentialIssues()).toBe(0);expect(f.commands.some(command=>command.includes(" push "))).toBe(false);}finally{await f.cleanup();}
 },20000);
+
+test("a single agent round edits with validated hunks, records its explanation and is applied without another model call", async () => {
+  const answer = '<plan>\n- Bump value\n</plan>\n<edit path="src/app.ts">\n<search>\nexport const value = 1;\n</search>\n<replace>\nexport const value = 3;\n</replace>\n</edit>\n<reasoning>The task asks for a new value.</reasoning>';
+  for (const primaryPolicy of [undefined, { kind: "command", test: "exit 1", allowedScope: ["src/"] }]) {
+    const f = await fixture({ modelAnswer: answer, ...(primaryPolicy ? { primaryPolicy } : {}) });
+    try {
+      const round = await runAgentTask(f.env, f.ledger, f.task, "round-run", { ...f.funding, stopAfterProposal: true, round: { round: 1, maxRounds: 3, history: [], files: {} } });
+      expect(round.proposalId).toBe("round-run");
+      expect(round.round).toMatchObject({ final: true, verification: "standard-verification", files: { "src/app.ts": "export const value = 3;\n" } });
+      const saved = f.runs.get("round-run")!;
+      expect(saved.proposal?.files).toEqual({ "src/app.ts": "export const value = 3;\n" });
+      expect(saved.explanation).toMatchObject({ plan: ["Bump value"], reasoning: "The task asks for a new value.", filesTouched: ["src/app.ts"], verification: "standard-verification" });
+      // Without a test command the run says so; with one, a host lacking the isolated identity refuses to run repository code.
+      expect(saved.explanation?.rounds[0]?.tests.summary).toMatch(primaryPolicy ? /isolated test environment was unavailable/ : /does not define a test command/);
+      const applied = await runAgentTask(f.env, f.ledger, f.task, "round-run", f.funding);
+      expect(await f.git(["--git-dir", f.canonical, "show", `${applied.commit}:src/app.ts`])).toBe("export const value = 3;");
+      expect(f.counts().modelCalls).toBe(1);
+    } finally { await f.cleanup(); }
+  }
+}, 30000);
