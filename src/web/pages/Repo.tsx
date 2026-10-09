@@ -129,7 +129,7 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
       if (generation === lifetime.current) setCloning(false);
     }
   };
-  const currentKey = tab==="tags" ? "releases" : tab==="commit" ? "commits" : tab;
+  const currentKey = tab==="tags" ? "releases" : tab==="commit" ? "commits" : tab==="agents" ? "changes" : tab;
   const current = TABS.find(([key]) => key === currentKey);
   const moreCurrent = MORE_TABS.find(([key]) => key === currentKey);
   const reviewTarget = ["task", "commit", "candidate", "input"].some(name => params.has(name));
@@ -194,8 +194,7 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
       {tab === "code" && <CodeTab projectId={projectId} params={params} acceptedCommit={state.acceptedState.currentCommit} isOwner={ownerActionsAvailable} />}
       {tab === "commits" && <CommitsTab projectId={projectId} />}
       {(tab==="releases"||tab==="tags")&&<Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading tags and releases…</p>}><RepoReleases key={`releases:${projectId}`} projectId={projectId} isOwner={ownerActionsAvailable} tab={tab}/></Suspense>}
-      {tab === "changes" && <p className="mb-3 text-sm"><a href={`/p/${projectId}/agents`} onClick={(event)=>{event.preventDefault();navigate(`/p/${projectId}/agents`);}} className="underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded">Open the live agent board</a> to see every running agent and overlap warnings.</p>}
-      {tab === "agents" && <Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading agent board…</p>}><AgentBoard key={projectId} projectId={projectId} /></Suspense>}
+      {(tab === "changes" || tab === "agents") && <div className="mb-4"><Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading agent board…</p>}><AgentBoard key={projectId} projectId={projectId} /></Suspense></div>}
       {tab === "changes" && <ChangesTab projectId={projectId} state={state} reload={reload} taskId={params.get("task")} canContribute={canContribute} managedActions={managedActions} writableTaskIds={state.writableTaskIds} cancellableTaskIds={state.cancellableTaskIds} forkPermissions={state.forkPermissions} isOwner={ownerActionsAvailable} />}
       {tab === "integration" && <IntegrationTab decisionId={params.get("decision")} isOwner={ownerActionsAvailable} projectId={projectId} state={state} reload={reload} kind={meta.kind} />}
       {tab === "activity" && <ActivityTab projectId={projectId} />}
