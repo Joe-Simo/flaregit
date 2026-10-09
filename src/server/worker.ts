@@ -1,4 +1,5 @@
 import {attachmentDisposition,type IssueAttachmentReply} from './issue-attachments';
+import type {IssueTransferPendingRecovery} from './issue-transfer-api';
 import {LfsStorageError} from './lfs-store';
 import {threadSubjectSchema,threadPreferenceUpdate} from './thread-notifications';
 import {taskRetargetRequestSchema} from './task-retarget';
@@ -1173,7 +1174,7 @@ export default {
         if(!effectiveAccess)return text('Not found',404);
         if(method!=='GET'&&!effectiveAccess.direct&&sub!=='/issue-filters'){
           if(effectiveAccess.role==='read'&&sub!=='/clone')return text('Repository access is read-only',403);
-          if(sub!=='/clone'&&!sub.startsWith('/wiki/')&&sub!=='/planning'&&sub!=='/issues'&&!(effectiveAccess.role==='admin'&&method==='POST'&&/^\/issues\/\d{1,7}\/transfer$/.test(sub))&&!((method==='PATCH'||method==='DELETE'&&effectiveAccess.role==='admin')&&/^\/issues\/\d{1,7}$/.test(sub))&&!/^\/issues\/\d{1,7}\/attachments(?:\/(?:[a-f0-9-]{36})(?:\/(?:content|reconcile))?)?$/.test(sub)&&sub!=='/comments'&&sub!=='/tasks'&&!/^\/tasks\/[a-z0-9-]+\/(token|ready|cancel|browser-edit|fork-permission)$/.test(sub))return text('This operation requires direct repository membership',403);
+          if(sub!=='/clone'&&!sub.startsWith('/wiki/')&&sub!=='/planning'&&sub!=='/issues'&&!(effectiveAccess.role==='admin'&&method==='POST'&&/^\/issues\/\d{1,7}\/transfer(?:\/[a-f0-9-]{36}\/cancel)?$/.test(sub))&&!((method==='PATCH'||method==='DELETE'&&effectiveAccess.role==='admin')&&/^\/issues\/\d{1,7}$/.test(sub))&&!/^\/issues\/\d{1,7}\/attachments(?:\/(?:[a-f0-9-]{36})(?:\/(?:content|reconcile))?)?$/.test(sub)&&sub!=='/comments'&&sub!=='/tasks'&&!/^\/tasks\/[a-z0-9-]+\/(token|ready|cancel|browser-edit|fork-permission)$/.test(sub))return text('This operation requires direct repository membership',403);
         }
         const state = await project.getState().catch(() => null);
         if (!state) return text("Not found", 404);
@@ -2608,6 +2609,13 @@ export default {
           try{await freshRelationActor();const outcome=await project.issueRelationships(userId,Number(issueRelationsRoute[1]),cursor);await freshRelationActor();return repositoryReadJson(outcome.ok?{...outcome.value,canRemove:outcome.value.canRemove&&!(auth.viaToken&&auth.tokenScope==='read')}:{error:outcome.error},outcome.ok?200:outcome.status);}catch{return repositoryReadJson({error:'Issue relationship access is unavailable'},403);}
         }
 
+        const issueTransferCancelRoute=/^\/issues\/(\d{1,7})\/transfer\/([a-f0-9-]{36})\/cancel$/.exec(sub);
+        if(issueTransferCancelRoute&&method==='POST'){
+          if(auth.oauthClientId)return repositoryReadText('App scope does not permit issue transfer cancellation',403);
+          const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||Boolean(current.viaToken)!==Boolean(auth.viaToken)||current.oauthClientId)return repositoryReadText('Issue cancellation authentication changed',403);
+          const input=await body<unknown>(4096);if(!input||typeof input!=='object'||!('requestId' in input)||input.requestId!==issueTransferCancelRoute[2])return repositoryReadText('Original transfer request identity is required',400);
+          const actor={userId,displayName:'Issue administrator',viaToken:current.viaToken===true},credential=current.viaToken?{personalTokenHash:await gitParentTokenHash(request)}:{sessionExpiresAt:current.expiresAt},reply=await project.issueTransferCancel(Number(issueTransferCancelRoute[1]),input,actor,credential);if(!reply.ok)return repositoryReadJson({error:reply.error},reply.status);const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;if(fresh.id!==userId||Boolean(fresh.viaToken)!==Boolean(current.viaToken)||fresh.oauthClientId)return repositoryReadText('Issue cancellation response access changed',403);return repositoryReadJson(reply.value,reply.value.cancelled?200:409);
+        }
         const issueTransferRoute=/^\/issues\/(\d{1,7})\/(transfer|transfer-preview)(?:\/([a-f0-9-]{36}))?$/.exec(sub);
         if(issueTransferRoute){
           if(auth.oauthClientId)return repositoryReadText('App scope does not permit issue transfer',403);
@@ -2629,12 +2637,14 @@ export default {
           const fresh=await authenticate(request,env);if(fresh instanceof Response)return fresh;
           if(fresh.id!==userId||Boolean(fresh.viaToken)!==Boolean(auth.viaToken)||fresh.oauthClientId!==auth.oauthClientId||await account.accountLifecycle()!=='active'||fresh.expiresAt!==undefined&&fresh.expiresAt<=Date.now())return repositoryReadText('Issue access changed; reload before continuing',403);
           const hash=fresh.viaToken?await gitParentTokenHash(request):undefined;
+          let pendingTransfer:IssueTransferPendingRecovery|undefined;
           const after=await availability();if(after instanceof Response)return after;if(after.status==='deleted')return repositoryReadJson({number,deleted:true,...(after.transferred?{transferred:true,...(after.transfer?{transfer:after.transfer}:{})}:{})},410);
           if(!await project.assertRepositoryReadContext(context,userId,null,hash))return repositoryReadText('Issue access changed; reload before continuing',403);
           if(fresh.expiresAt!==undefined&&fresh.expiresAt<=Date.now())return repositoryReadText('Your session expired; sign in again',403);
+          if(issue?.transferPending&&currentAccess?.role==='admin'&&!fresh.oauthClientId&&(!fresh.viaToken||fresh.tokenScope==='full')){const recovery=await project.issueTransferPendingRecovery(number,{userId,displayName:'Issue administrator',viaToken:fresh.viaToken===true},fresh.viaToken?{personalTokenHash:hash}:{sessionExpiresAt:fresh.expiresAt},context);if(!recovery.ok){if(recovery.status===410)return repositoryReadJson({number,deleted:true},410);return repositoryReadText('Issue recovery read scope changed',403);}if(recovery.value)pendingTransfer=recovery.value;}
           const canStateWrite=!issue?.transferPending&&currentAccess!==null&&currentAccess.role!=='read'&&currentState.lifecycle?.state!=='archived'&&(fresh.oauthClientId?fresh.oauthScopes?.includes('issues:write')===true:!(fresh.viaToken&&fresh.tokenScope==='read'));
           const canDeleteIssue=!issue?.transferPending&&currentAccess?.role==='admin'&&currentState.lifecycle?.state!=='archived'&&!fresh.oauthClientId&&(!fresh.viaToken||fresh.tokenScope==='full');
-          return issue?repositoryReadJson({ ...issue, linked: auth.oauthClientId ? [] : linked, comments,canStateWrite,canDeleteIssue }):repositoryReadText('Unknown issue',404);
+          return issue?repositoryReadJson({ ...issue, linked: auth.oauthClientId ? [] : linked, comments,canStateWrite,canDeleteIssue,...(pendingTransfer?{pendingTransfer}:{}) }):repositoryReadText('Unknown issue',404);
         }
         if(issueRoute&&method==='DELETE'){
           if(auth.oauthClientId)return repositoryReadText('App scope does not permit issue removal',403);

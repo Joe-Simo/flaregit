@@ -32,6 +32,10 @@ test('transfer freezes copied feature context while unrelated changes remain pos
  for(const action of [{kind:'bulk-label',numbers:[2],label:'changed'},{kind:'milestone-delete',id:1},{kind:'relation-add',relation:'duplicate-of',from:1,to:2}])expect(features.update({expectedRevision:2,action:issueFeatureAction.parse(action)},[],true)).toMatchObject({ok:false,status:409});
  expect(features.update({expectedRevision:2,action:{kind:'bulk-label',numbers:[1],label:'unrelated'}},[],true).ok).toBe(true);expect(features.transferSnapshot(2)).toEqual(original);
  features.transferOrigin(2,original,()=>{});expect(()=>features.transferOrigin(2,{...original,labels:['changed']},()=>{})).toThrow();
+ expect(()=>features.releaseCancelledSourceOrigin(2,original,()=>{})).toThrow();
+ db.query('DELETE FROM issue_transfer_locks WHERE issue_number=2').run();features.releaseCancelledSourceOrigin(2,original,()=>{});expect(features.transferContext(2)).toBeNull();
+ expect(features.update({expectedRevision:3,action:{kind:'bulk-label',numbers:[2],label:'after-cancellation'}},[],true).ok).toBe(true);const replacement=features.transferSnapshot(2);expect(replacement.labels).toContain('after-cancellation');features.transferOrigin(2,replacement,()=>{});
+ db.query('INSERT INTO issue_transfer_incoming VALUES(?,?,?,?)').run(2,crypto.randomUUID(),JSON.stringify({phase:'cancelled'}),0);expect(features.transferContext(2)).toBeNull();expect(()=>features.releaseCancelledSourceOrigin(2,replacement,()=>{})).toThrow('Incoming');
  }finally{db.close();}});
 test('real tombstone excludes native filter/triage/relationships/planning and cannot execute accepted automation',async()=>{const db=database();try{
  seed(db);const durable=storage(db),features=new IssueFeatureStore(durable),plan=new PlanningStore(durable),incarnation=crypto.randomUUID();

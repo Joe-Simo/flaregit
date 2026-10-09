@@ -3485,8 +3485,22 @@ expose destination navigation only with fresh destination read access. Unmapped 
 explicit source history; memberships, subscriptions, task authority and accepted Git state are not transplanted.
 Signed local HTTP/R2, CLI recovery, SQLite and rendered 1280/390 interaction checks pass. Destination finalization
 recovery retains the original retry until positive destination proof, and revoke/regrant rejects the old admission
-epoch. The aggregate suite passes 2,392 tests with nine explicit skips. Cancellation of a positively unlanded frozen transfer,
-explicit destination catalog mapping and hosted multi-repository acceptance remain open.
+epoch. At `06cad90`, the aggregate suite passed 2,392 tests with nine explicit skips.
+Confirmed cancellation now binds a distinct immutable cancellation UUID to the original transfer proof. A durable
+destination fence wins against delayed reservations, uploads and activation before the source becomes editable.
+Stale requests that never froze receive a permanent source UUID fence without inventing a manifest or destination.
+An already active destination cannot be cancelled; its original operator can finish under current authority even
+after audience changes, without allocating or copying again. A replacement administrator can discover and cancel
+an unactivated transfer only with current administrator authority in both repositories. Source bytes and incoming
+provenance remain intact. Bounded cleanup preserves unknown storage holds and shared files, and reports pending
+physical cleanup separately from logical cancellation. Read-only positive receipts reconcile another administrator's
+cancellation without replaying that actor's mutation or releasing a newer transfer lock. Signed local SQLite/R2,
+CLI and rendered 1280/390 recovery flows pass. Aggregate verification was stopped at the storage guard when
+free disk fell to 1.4 GiB and system swap reached approximately 8.3 GiB. The run recorded one existing native
+Git first-root test reaching Bun's default five-second timeout; that case and the uncompleted files require
+verification once resource headroom returns. This checkpoint does not claim an aggregate green run.
+Still open: active-transfer finalization by a replacement administrator, unresolved physical storage outcomes,
+explicit destination catalog mapping and hosted multi-repository acceptance.
 
 Complete labels, assignees, milestones, templates/forms, attachment handling, linking/closing through accepted work, duplicate/transfer workflows, relationships/subissues, saved filtering, bulk actions, and moderation. Preserve discussion context when tasks are assigned to agents.
 

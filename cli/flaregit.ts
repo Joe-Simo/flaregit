@@ -3,7 +3,8 @@
  * flaregit — scriptable CLI. Output is JSON by default (add --pretty for humans); errors go to stderr as
  * JSON with a non-zero exit code. No interactive prompts anywhere.
  */
-import {prepareIssueTransferCommand,issueTransferCommandReceipt} from "../src/cli/issue-transfer-command";
+import {prepareIssueTransferCommand,prepareIssueTransferCancellation,issueTransferCommandReceipt} from "../src/cli/issue-transfer-command";
+import {checkedTransferCancellation} from "../src/web/issue-transfer-intent";
 import {prepareIssueDeletionCommand,readIssueViewResponse} from "../src/cli/issue-delete-command";
 import {prepareIssueStateCommand,parseIssueNumber} from "../src/cli/issue-state-command";
 import { isSafePushOption } from "../src/core/sanitize.js";
@@ -135,7 +136,7 @@ const HELP = `flaregit — JSON by default (--pretty for humans)
   integrate <repo> <change> [<change> ...]       compose, verify and queue 1-8 changes for review
   workflow status|pause|resume <repo> <instance>  inspect or preserve/resume a running workflow
   log <repo> [--limit N] | tree <repo> [path] | cat <repo> <path>
-  issues <repo> [--state closed] | issue new <repo> "<title>" [--body T] | issue view <repo> <n> | issue close|reopen <repo> <n> [--request UUID --revision N] | issue delete <repo> <n> --confirm [--request UUID --revision N] | issue transfer <repo> <n> --to ID [--confirm --manifest FILE --request UUID]
+  issues <repo> [--state closed] | issue new <repo> "<title>" [--body T] | issue view <repo> <n> | issue close|reopen <repo> <n> [--request UUID --revision N] | issue delete <repo> <n> --confirm [--request UUID --revision N] | issue transfer <repo> <n> --to ID [--confirm --manifest FILE --request UUID] | issue transfer cancel <repo> <n> --to ID --confirm --manifest FILE --request UUID [--cancel-request UUID]
   comment <repo> "<text>" (--issue N | --change ID | --candidate ID) [--path P --line N] [--request UUID]
   candidates <repo> [--all]                      verified candidates waiting for review
   accept|reject <repo> <candidate> [--note T]    decide what becomes history
@@ -284,7 +285,8 @@ async function main() {
   if (cmd === "ready" || cmd === "cancel") return out(await api("POST", `/p/${await repo(sub)}/tasks/${rest[0] ?? fail("Specify a change id")}/${cmd}`));
   if (cmd === "issues") return out(await api("GET", `/p/${await repo(sub)}/issues?state=${flag("state") === "closed" ? "closed" : "open"}`));
   if (cmd === "issue") {
-    const id = await repo(rest[0]);
+    const cancellingTransfer=sub==="transfer"&&rest[0]==="cancel";
+    const id = await repo(rest[cancellingTransfer?1:0]);
     if (sub === "new") return out(await api("POST", `/p/${id}/issues`, { title: rest[1] ?? fail('Usage: flaregit issue new <repo> "<title>" [--body TEXT]'), body: flag("body") ?? "" }));
     if(sub==="view"){
       const issueNumber=parseIssueNumber(rest[1]);if(!TOKEN)fail("Not signed in. Run flaregit auth login with a current token.");
@@ -293,6 +295,13 @@ async function main() {
     if(sub==="transfer"){
       const manifestPath=flag("manifest");let manifest:unknown;
       if(manifestPath){const file=Bun.file(manifestPath);if(file.size>2*1024*1024)fail("Transfer preview file exceeds capacity");manifest=await file.json();}
+      if(cancellingTransfer){
+        const command=await prepareIssueTransferCancellation({repositoryId:id,issue:rest[2],destination:flag("to"),confirmed:flags.get("confirm")===true,request:flags.get("request"),cancelRequest:flags.get("cancel-request"),manifest});
+        console.error(JSON.stringify(command.metadata));if(!TOKEN)fail("Not signed in.");
+        const response=await fetch(`${API}/api${command.route}`,{method:"POST",redirect:"error",headers:{Authorization:`Bearer ${TOKEN}`,"Content-Type":"application/json"},body:JSON.stringify(command.request)});
+        let raw:unknown;try{raw=await response.json();}catch{fail("Cancellation response is unconfirmed. Reuse the original request flags.");}
+        const receipt=checkedTransferCancellation(raw,command.request);if(!receipt.cancelled){out(receipt);fail("Destination is active. Resume the original transfer.");}if(!response.ok)fail("Cancellation response is unconfirmed. Reuse the original request flags.");return out(receipt);
+      }
       const command=await prepareIssueTransferCommand({repositoryId:id,issue:rest[1],destination:flag("to"),confirmed:flags.get("confirm")===true,request:flags.get("request"),manifest},route=>api("GET",route));
       if(command.kind==="preview")return out(command.preview);
       console.error(JSON.stringify(command.metadata));
