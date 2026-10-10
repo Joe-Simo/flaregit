@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { requirementPromptLine } from "../core/requirement-drafts.js";
+import type { Requirement } from "../core/types.js";
 import { applyAgentEdits, EDIT_FORMAT_INSTRUCTIONS, EditRejectedError, parseAgentResponse } from "../agents/edit-format.js";
 import { redactSecrets } from "../agents/prompt.js";
 
@@ -78,11 +80,11 @@ export function failureSummary(output: string, timedOut = false): string {
   return text.length > SUMMARY_CHARS ? `…${text.slice(-(SUMMARY_CHARS - 1))}` : text;
 }
 
-export interface RoundPromptTask { goal: string; requirements: ReadonlyArray<{ title: string; description: string }>; allowedScope: readonly string[] }
+export interface RoundPromptTask { goal: string; requirements: ReadonlyArray<{ title: string; description: string; status?: Requirement["status"]; assertions?: Requirement["assertions"] }>; allowedScope: readonly string[] }
 
 /** Prompt for one round. Earlier rounds' results are fed back so the model revises instead of restarting. */
 export function buildRoundPrompt(task: RoundPromptTask, agentName: string, files: Readonly<Record<string, string>>, input: Pick<AgentRoundInput, "round" | "maxRounds" | "history">, checkCommand?: string, shared?: string): string {
-  const requirements = task.requirements.map((r) => `- ${r.title}: ${r.description}`).join("\n");
+  const requirements = task.requirements.filter((r) => r.status === undefined || r.status === "approved").map(requirementPromptLine).join("\n");
   const feedback = input.history.map((record) => {
     const outcome = record.edits === "rejected" ? "your edits could not be applied" : record.tests.status === "not-run" ? "checks did not run" : `checks ${record.tests.status}${record.tests.passed !== null || record.tests.failed !== null ? ` (${record.tests.passed ?? "?"} passed, ${record.tests.failed ?? "?"} failed)` : ""}`;
     return `Round ${record.round}: ${outcome}.${record.filesChanged.length ? ` Files changed so far: ${record.filesChanged.join(", ")}.` : ""}\n${record.tests.summary}`;

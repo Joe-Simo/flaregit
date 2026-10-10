@@ -48,6 +48,7 @@ import {LegacyRerunError} from "./legacy-candidate-rerun.js";
 export {FlareGitRebaseResumeWorkflow} from "./rebase-resume-workflow.js";
 import { openRepositoryRead, RepositoryReadError } from "./repository-read-budget.js";
 import {taskCreationInputSchema} from "./task-creation.js";
+import {pathInScope,requirementsFromDrafts} from "../core/requirement-drafts.js";
 import {storageReconciliationReport,type StorageReconciliationSnapshot} from "./storage-reconciliation-report.js";
 import {createHash} from "node:crypto";
 import type {PreviewGenerationRecord} from "./preview-generations.js";
@@ -1915,13 +1916,13 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
 
         // ----- changes (tasks) -----
         if (sub === "/tasks" && method === "POST") {
-          const b = await body<{ taskId?: string; goal?: string; name?: string; dependsOn?: string; issue?: number;expectedTarget?:unknown;externalTool?:unknown;browserEdit?:boolean }>();
+          const b = await body<{ taskId?: string; goal?: string; name?: string; dependsOn?: string; issue?: number;expectedTarget?:unknown;externalTool?:unknown;browserEdit?:boolean;requirements?:unknown }>();
           const goal = clean(b.goal, 300);
           if (!b.taskId || !TASK_ID.test(b.taskId) || !goal) return text("taskId (3-101 chars: a-z, 0-9, -) and goal are required", 400);
-          if(Object.keys(b).some(key=>!["taskId","goal","name","dependsOn","issue","expectedTarget","externalTool","browserEdit"].includes(key)))return text("Invalid change creation input",400);
+          if(Object.keys(b).some(key=>!["taskId","goal","name","dependsOn","issue","expectedTarget","externalTool","browserEdit","requirements"].includes(key)))return text("Invalid change creation input",400);
           if(b.browserEdit!==undefined&&typeof b.browserEdit!=="boolean")return text("Invalid browser contribution mode",400);
-          const input=taskCreationInputSchema.safeParse({goal,dependsOn:b.dependsOn??null,issue:b.issue??null,...(b.expectedTarget!==undefined?{expectedTarget:b.expectedTarget}:{}),...(b.externalTool!==undefined?{externalTool:b.externalTool}:{})});
-          if(!input.success)return text("Invalid change goal, dependency or issue",400);
+          const input=taskCreationInputSchema.safeParse({goal,dependsOn:b.dependsOn??null,issue:b.issue??null,...(b.expectedTarget!==undefined?{expectedTarget:b.expectedTarget}:{}),...(b.externalTool!==undefined?{externalTool:b.externalTool}:{}),...(b.requirements!==undefined&&!(Array.isArray(b.requirements)&&b.requirements.length===0)?{requirements:b.requirements}:{})});
+          if(!input.success)return text(input.error.issues.some(issue=>issue.path[0]==="requirements")?"Invalid requirements: each needs a title and statement; an example needs a repo file path, an exported function name and JSON input and output":"Invalid change goal, dependency or issue",400);
           const requestedTarget=input.data.expectedTarget?{acceptedTargetRef:input.data.expectedTarget.ref}:undefined;
           let creationCredential={viaToken:auth.viaToken===true,...(auth.viaToken?{credentialHash:await gitParentTokenHash(request)}:{sessionExpiresAt:auth.expiresAt})};
           let replay;
@@ -1941,6 +1942,7 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
           if (input.data.issue !== null && !(await project.getIssue(input.data.issue))) return text("Unknown issue", 400);
           const parent = b.dependsOn ? state.tasks[b.dependsOn] : undefined;
           if (b.dependsOn && (!parent || parent.status === "cancelled")) return text("dependsOn must name an existing, uncancelled change", 400);
+          if(input.data.requirements?.some(requirement=>requirement.example&&!pathInScope(settings.allowedScope,requirement.example.module)))return text("A requirement example names a file outside this repository's allowed scope",400);
           let intent:Awaited<ReturnType<typeof project.prepareTaskCreationIntent>>;
           try{intent=await project.prepareTaskCreationIntent(b.taskId,userId,input.data,creationCredential);}catch{return text("The accepted creation target or original request changed; inspect the saved change before creating work",409);}
           const selection=intent.selection;
@@ -1987,7 +1989,7 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
             ...(input.data.issue !== null ? { issue: input.data.issue } : {}),
             allowedScope: creationSettings.allowedScope,
             status: "working",
-            requirements: [],
+            requirements: requirementsFromDrafts(b.taskId, input.data.requirements ?? [], now),
             workspace: { repoName, remote: fork.remote, branch: `task/${b.taskId}` },
             checkpoints: [],
             currentCommit: selection.baseCommit,
