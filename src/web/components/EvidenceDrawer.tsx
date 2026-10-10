@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { statusLabel } from "../lib/glossary";
 import { ShieldCheck, CheckCircle2, Cpu } from "lucide-react";
 import { Sheet, SheetHeader, SheetTitle, SheetDescription, SheetClose } from "@/components/ui/sheet";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -167,10 +168,11 @@ export function EvidenceDrawer({
               )}
             </TabsContent>
 
-            {/* TAB 4: CAS JOURNAL */}
+            {/* TAB 4: merge history */}
             <TabsContent value="journal" className="space-y-3">
-              <div className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-2">
-                CAS Ref Lock & Publication Log ({journal.length}):
+              <div className="mb-2 space-y-0.5">
+                <p className="text-xs font-semibold">Merge history ({journal.length})</p>
+                <p className="text-xs text-muted-foreground">Each time the branch was moved to a reviewed commit: where it was before, where it went, and when.</p>
               </div>
 
               {journal.map((entry) => (
@@ -183,17 +185,17 @@ export function EvidenceDrawer({
                       {entry.candidateCommit.slice(0, 7)}
                     </span>
                     <Badge variant={entry.state === "ACCEPTED" ? "success" : "secondary"}>
-                      {entry.state}
+                      {statusLabel(entry.state.toLowerCase())}
                     </Badge>
                   </div>
                   <div className="text-[11px] text-muted-foreground">
-                    Expected Head: {entry.expectedHead?.slice(0, 7)??"empty accepted history"}
+                    Branch was at {entry.expectedHead?.slice(0, 7)??"no commits yet"}
                   </div>
                   <div className="text-[11px] text-muted-foreground">
-                    New Head: {entry.newHead.slice(0, 7)}
+                    Moved to {entry.newHead.slice(0, 7)}
                   </div>
                   <div className="text-[10px] text-muted-foreground pt-1 border-t border-border/40">
-                    Timestamp: {new Date(entry.timestamp).toLocaleTimeString()}
+                    {new Date(entry.timestamp).toLocaleString()}
                   </div>
                 </div>
               ))}

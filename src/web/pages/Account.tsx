@@ -244,7 +244,7 @@ export function Account() {
       </Card>
       </fieldset>
       <SigningKeys disabled={deletionStarted||busy!==null}/>
-      <NeedsAttention><StorageReconciliation /></NeedsAttention>
+      <NeedsAttention label="Storage cleanup needs attention" description="Some uploads or saved copies did not finish cleaning up."><StorageReconciliation /></NeedsAttention>
       <Card>
         <CardHeader><CardTitle className="text-base text-destructive">Delete account</CardTitle></CardHeader>
         <CardContent className="space-y-3">

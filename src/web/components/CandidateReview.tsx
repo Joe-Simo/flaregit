@@ -1,4 +1,6 @@
 import {PreparedPublicationControl} from './PreparedPublicationControl';
+import { TechnicalDetails } from "./TechnicalDetails";
+import { combinedHow } from "../lib/glossary";
 import {CommitSignature} from './CommitSignature';
 import {preparedPublicationRequest} from '../prepared-publication-recovery';
 import {FrozenAttribution} from './FrozenAttribution';
@@ -43,7 +45,7 @@ export function CandidateRepairRecord({repair,open}:{repair:RepairAttempt;open?:
 /** Requirements and input commits are frozen; legacy task descriptions are current context only. */
 export function CandidatePurpose({ projectId, candidate, tasks }: { projectId: string; candidate: CandidateGeneration; tasks?: Record<string, Task> }) {
   return <section aria-label="Contribution purpose" className="space-y-3 text-sm">
-    {candidate.predecessorCandidateId && <a className="text-primary underline-offset-4 hover:underline" href={`#/p/${projectId}/review?candidate=${encodeURIComponent(candidate.predecessorCandidateId)}`}>Original review</a>}
+    {candidate.predecessorCandidateId && <a className="text-primary underline-offset-4 hover:underline" href={`#/p/${projectId}/review?candidate=${encodeURIComponent(candidate.predecessorCandidateId)}`}>Review the earlier attempt</a>}
     {candidate.frozenRequirements.length > 0 && <div><h3 className="font-semibold">Requirements for this combined preview</h3><ul className="mt-2 space-y-1 list-disc pl-5">{candidate.frozenRequirements.map((requirement) => <li key={requirement.id} className="break-words">{requirement.description}</li>)}</ul></div>}
     <div><h3 className="font-semibold">Contributions</h3><p className="mt-1 text-xs text-muted-foreground">Purpose and attribution are captured for these input commits. Older inputs may lack historical attribution.</p>
       <ul className="mt-2 divide-y divide-border">{candidate.participatingTaskIds.map((id) => {
@@ -165,7 +167,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks,journal,
   };
 
   const repairHold=repairAcceptancePending&&candidate.status!=="accepted"?<p role="status" className="text-xs text-amber-800 dark:text-amber-200">Protected repair checks are incomplete or do not match this commit. Merging is paused; rejection and the diff remain available.</p>:null;
-  const targetSummary=targetInvalid||recoveredTargetMismatch?<p role="alert" className="text-xs text-destructive">Frozen branch target metadata is unavailable or inconsistent. Review decisions are paused; read the diff and refresh before deciding.</p>:reviewTarget?<p className="text-xs text-muted-foreground break-words">Frozen target <strong>{reviewTarget.branch}</strong> · base <code title={reviewTarget.acceptedCommit??undefined}>{reviewTarget.acceptedCommit?.slice(0,12)??"empty accepted history"}</code> · version {reviewTarget.acceptedVersion}</p>:null;
+  const targetSummary=targetInvalid||recoveredTargetMismatch?<p role="alert" className="text-xs text-destructive">The branch this preview merges into could not be confirmed. Approving and rejecting are paused; read the diff and refresh before deciding.</p>:reviewTarget?<div className="text-xs text-muted-foreground break-words"><p>Merges into <strong>{reviewTarget.branch}</strong>{reviewTarget.acceptedCommit===null?", which has no commits yet":""}.</p><TechnicalDetails className="mt-1"><p>Built on {reviewTarget.acceptedCommit??"empty history"}</p><p>Branch version {reviewTarget.acceptedVersion}</p></TechnicalDetails></div>:null;
 
   const policyDisplayContext=candidate.policyAuthorization&&candidate.policyAuthorization.identity.projectId===projectId&&candidate.policyAuthorization.identity.candidateId===candidate.id&&candidate.policyAuthorization.identity.commit===candidate.candidateCommit&&candidate.policyAuthorization.identity.tree===evidence?.candidateTree&&!candidate.review?.approved&&["verified","accepted"].includes(candidate.status);
   const delegatedRows=candidate.candidateCommit?<Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Checking review status…</p>}><DelegatedCandidateReviews key={scope} projectId={projectId} candidateId={candidate.id} commit={candidate.candidateCommit} base={candidate.expectedAcceptedBase} tree={evidence?.candidateTree} verificationPolicyVersion={candidate.frozenPolicyVersion} reviewReady={reviewReady} editable={["awaiting_review","verified"].includes(candidate.status)} acceptanceContext={candidate.status==="accepted"?"accepted":policyDisplayContext?"policy-authorized":"manual"} onGate={onDelegatedGate}/></Suspense>:null;
@@ -183,9 +185,9 @@ export function CandidateReview({ projectId, candidate, evidence, tasks,journal,
   const publicationRequest=preparedPublicationRequest(candidate,journal);
   if (candidate.review?.approved && candidate.status === "verified") {
     return (
-      <section aria-label="Saved approval awaiting integration" className="rounded-lg border border-border p-4 space-y-2 text-sm">
+      <section aria-label="Approved, waiting to merge" className="rounded-lg border border-border p-4 space-y-2 text-sm">
         <p><span className="font-semibold">Approved by {candidate.review.by}</span> {candidate.review.note ? `(${candidate.review.note})` : ""}: approval saved for <code>{candidate.candidateCommit?.slice(0, 7)}</code>.</p>
-        <p className="text-muted-foreground">The decision is saved for this exact commit. A paused or unavailable run may still need recovery. Repository history changes only after confirmed acceptance.</p>
+        <p className="text-muted-foreground">The approval is saved for this exact commit. If its run was interrupted, recover it below. The branch changes only once the merge is confirmed.</p>
         {targetSummary}
         {connectedRows}
         {delegatedRows}
@@ -201,12 +203,12 @@ export function CandidateReview({ projectId, candidate, evidence, tasks,journal,
     <section aria-label="Review needed" className="rounded-lg border border-amber-500/40 bg-amber-500/5 p-4 space-y-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="font-semibold">Waiting for your review</h3>
-        <code className="text-xs text-muted-foreground">{candidate.candidateCommit?.slice(0, 7)}{candidate.acceptedTarget===undefined&&<> on {candidate.expectedAcceptedBase?.slice(0, 7)??"empty accepted history"}</>}</code>
+        <code className="text-xs text-muted-foreground" title={candidate.candidateCommit}>{candidate.candidateCommit?.slice(0, 7)}</code>
       </div>
       {targetSummary}
       {showOpen&&candidate.candidateCommit&&<CommitSignature projectId={projectId} commit={candidate.candidateCommit} candidate={candidate.id}/>}
       <p className="text-sm text-muted-foreground">
-        Combines {candidate.participatingTaskIds.join(" and ")}{candidate.compositionMethod ? ` (${candidate.compositionMethod.replace(/_/g, " ")})` : ""}
+        Combines {candidate.participatingTaskIds.map(id => `“${tasks?.[id]?.goal ?? "a saved change"}”`).join(" and ")}{candidate.compositionMethod ? `. ${combinedHow[candidate.compositionMethod]}` : ""}
         {candidate.repairAttempts.length > 0 ? `, with ${candidate.repairAttempts.length} repair record${candidate.repairAttempts.length === 1 ? "" : "s"} to review` : ""}.{" "}
         {nativeOnly ? total > 0 ? `${passed} of ${total} native Git integrity checks passed. Application CI is reported by connected providers below.` : "Read the native Git integrity checks and connected application CI below." : total > 0 ? `${passed} of ${total} protected checks passed.` : "No check totals were recorded; read the verification checks."} Accepting moves the branch to exactly this commit.
       </p>
@@ -219,7 +221,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks,journal,
       {connectedRows}
       {delegatedRows}
       <LegacyCandidateRerun projectId={projectId} candidate={candidate} isOwner={isOwner} onDone={onDone} onReserved={setRerunReserved} />
-      {candidate.preservationProtocolVersion !== 1 && <p role="status" className="text-xs text-muted-foreground">This older combined preview cannot be accepted. Its review remains available; create a protected successor when eligible.</p>}
+      {candidate.preservationProtocolVersion !== 1 && <p role="status" className="text-xs text-muted-foreground">This older combined preview cannot be merged. Its review stays available; rebuild it as a new attempt when eligible.</p>}
       {!reviewReady && <p role="status" className="text-xs text-muted-foreground">Diff files are loading or unavailable. Acceptance from this review is paused; comments and rejection remain available.</p>}
       {checksKnown && !checkError && (identityMismatch || checkGate !== "passed") && <p role="status" className="text-xs text-amber-800 dark:text-amber-200">{identityMismatch ? "Connected checks do not match this combined preview. Reload before merging." : checkGate === "failed" ? "A required connected check failed or was cancelled. Acceptance is blocked." : "Waiting for required connected checks before acceptance."}</p>}
       <Textarea rows={2} maxLength={500} value={note} onChange={(e) => {setNote(e.target.value);const unchanged=ownerIntent.current?.payload.note===e.target.value?ownerIntent.current:null;ownerIntent.current=unchanged;setNoteBrowserSaved(preserveOwnerNote(e.target.value,unchanged));}} placeholder="Review note (optional; required context if you reject)" aria-label="Review note" />
@@ -234,7 +236,14 @@ export function CandidateReview({ projectId, candidate, evidence, tasks,journal,
   );
 }
 
-/** A successor keeps the original review intact and requires its own approval. */
+/** Whether the change branches moved since the preview was built, in one sentence. The rebuild always uses the saved versions. */
+function branchesSummary(observations: LegacyRerunReport["inputObservations"]): string {
+  if (!observations || observations.status === "unavailable" || observations.rows.length === 0) return "Could not check whether the change branches moved since then. The rebuild uses the saved versions either way.";
+  const moved = observations.rows.filter(row => row.observedCommit !== row.expectedCommit).length;
+  return moved === 0 ? "The change branches still match the saved versions." : `${moved} change ${moved === 1 ? "branch has" : "branches have"} new commits since then. The rebuild still uses the saved versions; combine again to include the new work.`;
+}
+
+/** A rebuild creates a new attempt; the original review stays intact and the new attempt needs its own approval. */
 export function LegacyCandidateRerun({ projectId, candidate, isOwner, onDone, onReserved }: { projectId: string; candidate: CandidateGeneration; isOwner: boolean; onDone: () => void; onReserved?: (reserved: boolean) => void }) {
   const scope = `${projectId}:${candidate.id}:${candidate.candidateCommit ?? ""}:${isOwner}`;
   const [loaded, setLoaded] = useState<{ scope: string; report: LegacyRerunReport } | null>(null);
@@ -289,21 +298,32 @@ export function LegacyCandidateRerun({ projectId, candidate, isOwner, onDone, on
   };
   return <section aria-label="Rebuild combined preview" className="space-y-2 border-t border-border pt-3 text-sm">
     <h3 className="font-medium">Rebuild combined preview</h3>
-    <p className="text-xs text-muted-foreground">Keep this combined preview’s reviews and conversation. A successor protects the recorded inputs, runs fresh checks, and needs a new approval.</p>
+    <p className="text-xs text-muted-foreground">Runs the same saved changes again as a new attempt with new checks. This attempt and its review are kept; the new attempt needs its own approval.</p>
     <p role="status" className="text-xs text-muted-foreground">{report?.detail ?? "Checking saved inputs and rerun availability…"}</p>
-    {report && <div className="text-xs text-muted-foreground space-y-1"><p>{report.expectedCommit ? <>Original combined preview <code>{report.expectedCommit.slice(0, 7)}</code></> : "No combined preview commit was recorded. Rebuilding uses only the frozen contribution inputs below."}</p><ul>{Object.entries(report.inputs).map(([id, input]) => <li key={id} className="break-words">{id}: <code title={input.base}>{input.base.slice(0, 7)}</code> → <code title={input.commit}>{input.commit.slice(0, 7)}</code></li>)}</ul></div>}
-    {report&&report.inputObservations===null&&<p role="status" className="text-xs text-muted-foreground">Branch observations are unavailable. No current tip or saved-object availability was confirmed.</p>}
-    {report?.inputObservations&&<section aria-label="Saved branch observations" className="space-y-2 text-xs"><p className="text-muted-foreground">Branch observations {report.inputObservations.status==='unavailable'?'incomplete or unavailable':''} · {timeAgo(report.inputObservations.checkedAt)}. These reads do not authorize replacement or change the frozen inputs.</p>{report.inputObservations.rows.length===0&&<p>Current branch tips and saved-object availability were not confirmed.</p>}{report.inputObservations.rows.map(row=><div key={row.taskId} className="space-y-1 rounded-md border border-border p-2"><p className="font-medium break-all">{row.taskId} · <code>{row.ref}</code></p><p className="break-all">Saved expected commit <code>{row.expectedCommit}</code></p><p className="break-all">Observed full-ref tip {row.observedCommit?<code>{row.observedCommit}</code>:row.status==='unavailable'?<span>Unavailable</span>:<span>No tip returned</span>}</p><p>Saved commit object {row.expectedObjectAvailable===null?'Availability unconfirmed':row.expectedObjectAvailable?'Available':'Not returned by provider'}</p>{row.namedBranchObservedCommit!==null&&row.namedBranchObservedCommit!==row.observedCommit&&<p className="break-all text-muted-foreground">Named-branch diagnostic <code>{row.namedBranchObservedCommit}</code>. This differs from the full-ref read and cannot substitute for it.</p>}</div>)}</section>}
-    {report?.operation && <p className="text-xs text-muted-foreground">{report.operation.phase === "awaiting_decision" ? "A product decision needs your explicit choice before the successor can continue." : report.operation.phase === "abandoned" ? "Saved rerun abandoned. Contributions need normal Ready checks before another attempt." : report.operation.phase === "prepared" ? "Request saved. Replacement is held until the original run and workspace are confirmed stopped." : report.operation.phase === "attached" ? "Successor combined preview created." : "Saved rerun is continuing; new approval is still required."}</p>}
+    {report && <p className="text-xs text-muted-foreground">Uses {Object.keys(report.inputs).length} saved {Object.keys(report.inputs).length === 1 ? "change" : "changes"}, exactly as they were when this preview was built.</p>}
+    {report && <p role="status" className="text-xs text-muted-foreground">{branchesSummary(report.inputObservations)}</p>}
+    {report && <TechnicalDetails>
+      <p>{report.expectedCommit ? `Original preview commit ${report.expectedCommit}` : "No preview commit was recorded"}</p>
+      {Object.entries(report.inputs).map(([id, input]) => <p key={id}>Change {id}: {input.base} → {input.commit}</p>)}
+      {report.inputObservations && <p>Branches checked {timeAgo(report.inputObservations.checkedAt)}{report.inputObservations.status === "unavailable" ? " (incomplete)" : ""}</p>}
+      {report.inputObservations?.rows.map(row => <div key={row.taskId} className="space-y-0.5 border-t border-border pt-1">
+        <p>Change {row.taskId} · {row.ref}</p>
+        <p>Saved commit {row.expectedCommit}</p>
+        <p>Current branch tip {row.observedCommit ?? (row.status === "unavailable" ? "could not be read" : "none")}</p>
+        <p>Saved commit stored {row.expectedObjectAvailable === null ? "not confirmed" : row.expectedObjectAvailable ? "yes" : "no"}</p>
+        {row.namedBranchObservedCommit !== null && row.namedBranchObservedCommit !== row.observedCommit && <p>Lookup by branch name returned a different commit, {row.namedBranchObservedCommit}; the exact branch read above is the one used.</p>}
+      </div>)}
+    </TechnicalDetails>}
+    {report?.operation && <p className="text-xs text-muted-foreground">{report.operation.phase === "awaiting_decision" ? "A product decision needs your choice before the new attempt can continue." : report.operation.phase === "abandoned" ? "Saved rerun abandoned. Contributions need normal Ready checks before another attempt." : report.operation.phase === "prepared" ? "Request saved. Replacement is held until the original run and workspace are confirmed stopped." : report.operation.phase === "attached" ? "New attempt created." : "The rebuild is running; the new attempt will need its own approval."}</p>}
     {failure && <p role="alert" className="text-xs text-destructive">{failure}</p>}
     <div className="flex flex-wrap gap-2">
-      {report?.operation?.phase === "awaiting_decision" ? <Button size="sm" variant="outline" onClick={() => navigate(`/p/${projectId}/integration`)}>Resolve product decision</Button> : report?.operation?.successorCandidateId ? <Button size="sm" variant="outline" onClick={() => navigate(`/p/${projectId}/review?candidate=${report.operation!.successorCandidateId}`)}>Review successor</Button> : <Button size="sm" variant="outline" disabled={busy || !report || (!report.eligible && (!report.operation || report.operation.phase === "abandoned")) || report.operation?.phase === "attached"} onClick={() => void rerun()}>{busy ? "Requesting…" : report?.operation && report.operation.phase !== "abandoned" ? "Continue saved rerun" : "Create successor combined preview"}</Button>}
+      {report?.operation?.phase === "awaiting_decision" ? <Button size="sm" variant="outline" onClick={() => navigate(`/p/${projectId}/integration`)}>Resolve product decision</Button> : report?.operation?.successorCandidateId ? <Button size="sm" variant="outline" onClick={() => navigate(`/p/${projectId}/review?candidate=${report.operation!.successorCandidateId}`)}>Review the new attempt</Button> : <Button size="sm" variant="outline" disabled={busy || !report || (!report.eligible && (!report.operation || report.operation.phase === "abandoned")) || report.operation?.phase === "attached"} onClick={() => void rerun()}>{busy ? "Requesting…" : report?.operation && report.operation.phase !== "abandoned" ? "Continue saved rerun" : "Rebuild as a new attempt"}</Button>}
       <Button size="sm" variant="ghost" disabled={busy} onClick={() => setRevision(value => value + 1)}>Refresh status</Button>
     </div>
     {canAbandon && <div className="space-y-2">
       <label className="flex items-start gap-2 text-xs text-muted-foreground"><input type="checkbox" checked={abandonConfirmed} disabled={busy} onChange={event => setAbandonConfirmed(event.target.checked)} className="mt-0.5" /> <span>Stop the old run and release this saved rerun. Its review and context remain. Unchanged contributions return to checkpointed and require normal Ready checks; newer work stays intact.</span></label>
       <Button size="sm" variant="outline" disabled={busy || !abandonConfirmed} onClick={() => void abandon()}>Abandon saved rerun</Button>
     </div>}
-    {report?.operation && (report.operation.dispatch === "unknown" || report.operation.dispatch === "observed") && <p className="text-xs text-muted-foreground">Replacement dispatch may have started. Abandonment is unavailable until its state is safely reconciled.</p>}
+    {report?.operation && (report.operation.dispatch === "unknown" || report.operation.dispatch === "observed") && <p className="text-xs text-muted-foreground">The new attempt may already have started. Abandoning is unavailable until its state is confirmed.</p>}
   </section>;
 }

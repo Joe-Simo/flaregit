@@ -47,7 +47,7 @@ function LoadError({ message, onRetry }: { message: string; onRetry: () => void 
   return (
     <div role="alert" className={`${alertCls} flex flex-wrap items-center justify-between gap-2`}>
       <span className="break-words min-w-0">{message}</span>
-      <Button size="sm" variant="outline" onClick={onRetry}>Retry</Button>
+      <Button type="button" size="sm" variant="outline" onClick={onRetry}>Retry</Button>
     </div>
   );
 }

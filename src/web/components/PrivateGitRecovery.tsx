@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { apiFetch, apiJson } from "../api";
+import { useReportAttention } from "./NeedsAttention";
 
 interface Snapshot extends RecoveryRevision { cleanupAdvice?: {recoveryAction:"retry"|"provider-reconciliation";detail:string}|null; id: string; commit: string; tree: string | null; cacheState?: "deleting" | "deleted"; canRetry?: boolean; status: "pending" | "ready" | "failed"; createdAt: string; error?: string; size?: number }
 interface Target extends RecoveryRevision { journalId: string; commit: string; tree: string | null; acceptedAt: string }
@@ -41,6 +42,7 @@ function RecoveryPanel({ projectId, isOwner }: { projectId: string; isOwner: boo
   const activeSnapshot = (target: RecoveryRevision) => info?.snapshots.find(snapshot => recoverySnapshotMatches(snapshot,target) && !snapshot.cacheState && (snapshot.status === "ready" || snapshot.status === "pending"));
   const selectedActiveSnapshot = selectedTarget ? activeSnapshot(selectedTarget) : undefined;
   const matchingTargets = (info?.targets ?? []).filter(target => `${target.commit} ${deploymentTargetRefLabel(target)}`.toLowerCase().includes(search.trim().toLowerCase()));
+  useReportAttention(draft !== null || Boolean(info?.snapshots.some(snapshot => (snapshot.status === "failed" && !snapshot.cacheState) || snapshot.cacheState === "deleting")));
   const context = `${projectId}:${isOwner ? "owner" : "member"}`;
   const identity = useRef(context);
   identity.current = context;

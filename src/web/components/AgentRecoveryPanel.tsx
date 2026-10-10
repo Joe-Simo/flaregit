@@ -2,6 +2,7 @@ import React, { useEffect, useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { apiJson } from "../api";
+import { useReportAttention } from "./NeedsAttention";
 import { timeAgo } from "../router";
 import type { AgentRunRecord } from "@/server/agent-run-ledger";
 
@@ -34,6 +35,7 @@ export function AgentRecoveryPanel({ projectId, taskId, runId, canResume = false
   }, [projectId, taskId, runId, open, revision]);
   const files = run?.proposal?.files ?? {};
   const paths = Object.keys(files).sort();
+  useReportAttention(run?.phase === "failed" || resumeError !== null);
   const path = Object.hasOwn(files, selectedPath) ? selectedPath : paths[0];
   return <details className="mt-3 text-xs" onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary className="cursor-pointer rounded w-fit font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Saved agent work</summary>
