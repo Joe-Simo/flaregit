@@ -324,6 +324,20 @@ export function claimManualRevision(ledger: PostLandRebaseLedger, state: FlareGi
   return { kind: "claimed", claim: claim(ledger, record, actorId, now) };
 }
 
+/**
+ * Moves a claimed re-run onto the next request id when a run already saved under its id ended in error or
+ * was terminated: that id can never start again, so the claim takes the next one derived from it.
+ */
+export function advanceRevisionRun(ledger: PostLandRebaseLedger, taskId: string, landedCommit: string, fromWorkflowId: string, toWorkflowId: string, now = new Date()): PostLandRebaseRecord {
+  const saved = ledger.get(taskId, landedCommit);
+  if (!saved) throw new Error("Unknown update");
+  if (saved.revisionWorkflowId === toWorkflowId) return saved;
+  if (saved.revisionWorkflowId !== fromWorkflowId || saved.status !== "agent_waiting" || !WORKFLOW_ID.safeParse(toWorkflowId).success) throw new Error("This update is re-run under a different request");
+  const record: PostLandRebaseRecord = { ...saved, revisionWorkflowId: toWorkflowId, updatedAt: now.toISOString() };
+  ledger.save(record);
+  return record;
+}
+
 /** For the queue: why a change is still waiting, and whether its update for this commit has finished. */
 export function rebaseUpdate(ledger: PostLandRebaseLedger, taskId: string, landedCommit: string): { reason: string; settled: boolean } | null {
   const record = ledger.get(taskId, landedCommit);

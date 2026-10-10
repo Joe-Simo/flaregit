@@ -21,8 +21,9 @@ export function ChangeUpdateStatus({ update, task, projectId, isOwner = false, o
     if (!projectId) return;
     setBusy(true); setMessage(null);
     try {
-      await apiJson(`/p/${encodeURIComponent(projectId)}/changes/run-agent-again`, { method: "POST", json: { taskId: update.taskId } });
-      setMessage({ text: "The agent is running again on the latest version.", error: false });
+      const result = await apiJson<{ dispatched: boolean; replayed: boolean; update: UpdateView }>(`/p/${encodeURIComponent(projectId)}/changes/run-agent-again`, { method: "POST", json: { taskId: update.taskId } });
+      if (result.dispatched) setMessage({ text: result.replayed ? "The agent is already running again on the latest version." : "The agent is running again on the latest version.", error: false });
+      else setMessage({ text: result.update.reason || "The agent was not started. Pressing the button again is safe.", error: true });
     } catch (cause) {
       setMessage({ text: cause instanceof Error ? cause.message : "Running the agent again was not confirmed. Pressing the button again is safe.", error: true });
     } finally { setBusy(false); onChange?.(); }

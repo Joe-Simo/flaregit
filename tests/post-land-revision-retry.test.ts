@@ -3,6 +3,7 @@ import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { workerdChild } from "./support/workerd-child";
 import type { FlareGitProjectState } from "../src/core/types";
 import type { CoordinationView } from "../src/server/coordination-controller";
+import { revisionWorkflowId } from "../src/server/requirement-decisions";
 
 const FILE = "tests/post-land-revision-retry.test.ts";
 const sha = (n: number) => n.toString(16).padStart(40, "0").replace(/^0/, "d");
@@ -126,6 +127,38 @@ test("after the agent's re-run fails, an owner can run it again on the latest ve
     expect(replay.status).toBe(200);
     expect(JSON.parse(replay.body)).toMatchObject({ replayed: true });
     expect(replay.created).toEqual([workflowId, rerun]);
+  } finally { await mf.dispose(); }
+}, 120_000);
+
+test("when the derived next run already exists and ended in error, a press starts one new run and a second press replays it", async () => {
+  if (await workerdChild(FILE, "when the derived next run already exists and ended in error, a press starts one new run and a second press replays it")) return;
+  const { mf, json } = await fixture("errored-next");
+  try {
+    const workflowId = "rev-errored-conflicting";
+    expect((await json<Sent>("/revise-post-land", { taskId: "conflicting", landedCommit: LANDED, workflowId })).dispatch).toMatchObject({ dispatched: true });
+    // The re-run fails and its workflow instance finishes in error.
+    await json("/fail-agent", { taskId: "conflicting", runId: workflowId });
+    await json("/agent-instance", { id: workflowId, status: "errored" });
+    // A run under the id derived from the failed one was already saved and also ended in error.
+    const derived = await revisionWorkflowId("p123456789abc", `rerun-${workflowId}`, "conflicting");
+    expect((await json<{ created: string[] }>("/agent-instance", { id: derived, status: "errored" })).created).toEqual([workflowId, derived]);
+
+    const pressed = await json<Route>("/run-agent-again", { taskId: "conflicting" });
+    expect(pressed.status).toBe(200);
+    const body = JSON.parse(pressed.body) as { dispatched: boolean; replayed: boolean; update: { status: string; reason: string; revisionWorkflowId: string } };
+    const next = await revisionWorkflowId("p123456789abc", `rerun-${derived}`, "conflicting");
+    expect(body).toMatchObject({ dispatched: true, replayed: false, update: { status: "conflict_revising", revisionWorkflowId: next } });
+    expect(body.update.reason).toContain("The agent is redoing its change");
+    expect(pressed.created).toEqual([workflowId, derived, next]);
+    const running = await json<FlareGitProjectState>("/state");
+    expect([running.tasks.conflicting?.status, running.tasks.conflicting?.agentWorkflowInstanceId]).toEqual(["working", next]);
+    expect(await update(json, "conflicting")).toMatchObject({ status: "conflict_revising", revisionWorkflowId: next });
+
+    // A second press replays the new run; nothing else starts.
+    const replay = await json<Route>("/run-agent-again", { taskId: "conflicting" });
+    expect(replay.status).toBe(200);
+    expect(JSON.parse(replay.body)).toMatchObject({ dispatched: true, replayed: true, update: { revisionWorkflowId: next } });
+    expect(replay.created).toEqual([workflowId, derived, next]);
   } finally { await mf.dispose(); }
 }, 120_000);
 
