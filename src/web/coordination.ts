@@ -31,10 +31,11 @@ const revisionSchema = z.object({
 });
 const updateSchema = z.object({
   taskId: z.string(), landedCommit: sha, fromCommit: sha, fromBase: sha,
-  status: z.enum(["pending", "updated", "verification_failed", "conflict_revising", "needs_author", "skipped", "failed"]),
+  status: z.enum(["pending", "updated", "verification_failed", "conflict_revising", "needs_author", "skipped", "failed", "agent_waiting"]),
   overlappingFiles: z.array(z.string()), conflictingFiles: z.array(z.string()), newCommit: sha.nullable(),
   verification: z.object({ status: z.enum(["passed", "failed", "deferred"]), failures: z.array(z.object({ testId: z.string(), description: z.string(), message: z.string().optional() })) }).nullable(),
   reason: z.string(), workflowId: z.string(), revisionWorkflowId: z.string().nullable(), updatedAt: z.string(),
+  retry: z.object({ refusal: z.enum(["budget", "transient", "access"]), refusedReason: z.string(), attempts: z.number().int(), nextAttemptAt: z.string().nullable() }).nullable().optional(),
 });
 export const coordinationViewSchema = z.object({
   queue: z.array(queueEntrySchema),
@@ -66,7 +67,21 @@ export const UPDATE_STATUS: Record<UpdateView["status"], { label: string; varian
   needs_author: { label: "Author update needed", variant: "warning" },
   skipped: { label: "Not updated", variant: "outline" },
   failed: { label: "Update failed", variant: "destructive" },
+  agent_waiting: { label: "Agent waiting to re-run", variant: "warning" },
 };
+
+/** True when the agent's re-run on the latest version was refused and can be sent again. */
+export function canRunAgentAgain(update: UpdateView): boolean {
+  return update.revisionWorkflowId !== null && (update.status === "agent_waiting" || update.status === "failed" && update.reason.startsWith("The agent could not be re-run"));
+}
+
+/** When FlareGit next tries on its own, in words. */
+export function nextTryText(update: UpdateView, now = Date.now()): string | null {
+  const at = update.retry?.nextAttemptAt;
+  if (!at) return update.status === "agent_waiting" ? "FlareGit will not try again on its own." : null;
+  const minutes = Math.max(1, Math.round((Date.parse(at) - now) / 60_000));
+  return minutes >= 90 ? `FlareGit tries again in about ${Math.round(minutes / 60)} hours.` : `FlareGit tries again in about ${minutes} minutes.`;
+}
 
 /** Polls the coordination view while the page is visible. */
 export function useCoordination(projectId: string, enabled = true): { view: CoordinationView | null; error: string | null; refresh: () => Promise<void> } {

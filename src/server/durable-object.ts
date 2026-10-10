@@ -99,6 +99,8 @@ import {GitGatewayLedger,type GitGatewayScope} from "./git-gateway-ledger";
 import {TaskTargetGenerations,type TaskTargetGenerationIntent,type TaskTargetGenerationSettlement} from "./task-target-generations";
 import {freezeProductDecisionScope,planProductDecisionResolution} from "./product-decision-scope";
 import {CoordinationController} from "./coordination-controller";
+import type {ManualRetry,RevisionClaim,RevisionOutcome} from "./post-land-rebase";
+import {retryDueRebaseRevisions} from "./revision-dispatch";
 import type {ContradictionProof} from "../core/decision/contradiction-proof";
 import type {LandingOutcome} from "./merge-queue-runner";
 import type {RebaseExecution} from "./post-land-rebase";
@@ -1080,7 +1082,9 @@ export interface Ledger {
   mergeQueueSettle(eventId:string,outcome:LandingOutcome,reason?:string):Promise<Awaited<ReturnType<CoordinationController["settle"]>>>;
   postLandRebasePlan(landedCommit:string,workflowId:string):Promise<Awaited<ReturnType<CoordinationController["planRebase"]>>>;
   recordPostLandRebase(input:{taskId:string;landedCommit:string;fromCommit:string;execution:RebaseExecution}):Promise<Awaited<ReturnType<CoordinationController["recordRebase"]>>>;
-  markPostLandRevision(taskId:string,landedCommit:string,workflowId:string,outcome:{ok:true}|{ok:false;reason:string}):Promise<Awaited<ReturnType<CoordinationController["markRebaseRevision"]>>>;
+  markPostLandRevision(taskId:string,landedCommit:string,workflowId:string,outcome:RevisionOutcome):Promise<Awaited<ReturnType<CoordinationController["markRebaseRevision"]>>>;
+  claimDueRebaseRevisions():Promise<RevisionClaim[]>;
+  claimManualRebaseRevision(taskId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<ManualRetry>;
 }
 
 const LEASE_MS = 20 * 60_000;
@@ -4369,6 +4373,7 @@ export class RepositoryController extends DurableObject<Env> {
     await this.retryBranchNativeCleanup();
     await this.retryAgentNativeStops();
     await this.retryRebaseResumeCredentials();
+    await this.retryRebaseRevisions();
     await this.retryPreviewCredentialIncidents();
     await this.reconcileDirectoryRegistration();
     await this.reconcileContributorRegistrations();
@@ -6563,7 +6568,13 @@ export class RepositoryController extends DurableObject<Env> {
   async mergeQueueSettle(eventId:string,outcome:LandingOutcome,reason?:string){return this.coordination().settle(eventId,outcome,reason);}
   async postLandRebasePlan(landedCommit:string,workflowId:string){return this.coordination().planRebase(landedCommit,workflowId);}
   async recordPostLandRebase(input:{taskId:string;landedCommit:string;fromCommit:string;execution:RebaseExecution}){return this.coordination().recordRebase(input);}
-  async markPostLandRevision(taskId:string,landedCommit:string,workflowId:string,outcome:{ok:true}|{ok:false;reason:string}){return this.coordination().markRebaseRevision(taskId,landedCommit,workflowId,outcome);}
+  async markPostLandRevision(taskId:string,landedCommit:string,workflowId:string,outcome:RevisionOutcome){const record=await this.coordination().markRebaseRevision(taskId,landedCommit,workflowId,outcome);await this.scheduleRevisionRetry();return record;}
+  async claimDueRebaseRevisions(){return this.coordination().claimDueRevisions();}
+  /** Only a current owner (session or full-access token) may fund and send a re-run of the agent by hand. */
+  async claimManualRebaseRevision(taskId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const assertCurrent=await this.integrationRequestAuthority(actor,credentialHash,sessionExpiresAt);assertCurrent();if(await this.roleOf(actor.userId)!=="owner")throw new Error("Only a repository owner can run the agent again");return this.coordination().claimManualRevision(taskId,actor.userId);}
+  private async scheduleRevisionRetry(){const next=this.coordination().nextRevisionRetryAt();if(next!==null)await this.ensureRecoveryAlarm(Math.max(1_000,next-Date.now()));}
+  /** Repository alarm: sends again the refused post-land re-runs whose backoff elapsed. */
+  private async retryRebaseRevisions(){if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='post_land_rebases'").toArray().length||this.coordination().nextRevisionRetryAt()===null)return;try{const projectId=this.load().projectId;await retryDueRebaseRevisions(this.env,projectOf(this.env,projectId),projectId);}catch{console.warn("Waiting agent re-runs were not sent; the next alarm tries again");}await this.scheduleRevisionRetry();}
 
   async resolveDecision(decisionId: string, selectedOptionId: string, actor: HumanDecisionActor, credentialHash?: string, sessionExpiresAt?:number): Promise<{ taskIds: string[];legacyRerunId?:string;continuationWorkflowId?:string }> {
     let assertCurrent = await this.authorizeHumanDecision(actor, credentialHash, true);

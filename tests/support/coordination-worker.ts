@@ -2,7 +2,9 @@ import { RepositoryController } from "../../src/server/durable-object";
 import { proveRecordedContradiction } from "../../src/server/requirement-decisions";
 import { dispatchDecisionRevisions } from "../../src/server/coordination-dispatch";
 import type { CoordinationRuntime } from "../../src/server/coordination-runtime";
-import type { RebaseExecution } from "../../src/server/post-land-rebase";
+import { claimDueRevisions, PostLandRebaseLedger, type RebaseExecution } from "../../src/server/post-land-rebase";
+import { retryDueRebaseRevisions, sendRebaseRevision } from "../../src/server/revision-dispatch";
+import { coordinationHttp } from "../../src/server/coordination-http";
 import type { LandingOutcome } from "../../src/server/merge-queue-runner";
 import { ACT3 } from "../../src/scenarios/ticket-booking";
 import type { Env } from "../../src/server/env";
@@ -14,6 +16,12 @@ const HEAD = "a".repeat(40);
 const actor = (userId: string) => ({ userId, displayName: userId === "owner" ? "Owner" : "Member", viaToken: false });
 
 export class CoordinationFixture extends RepositoryController {
+  private clockOffsetMs = 0;
+  /** Same claim as production, read at the fixture's clock so backoff can be exercised. */
+  override async claimDueRebaseRevisions() {
+    const state = await this.getState();
+    return this.ctx.storage.transactionSync(() => claimDueRevisions(new PostLandRebaseLedger(this.ctx.storage), state, new Date(Date.now() + this.clockOffsetMs)));
+  }
   private write(mutate: (state: Awaited<ReturnType<RepositoryController["getState"]>>) => void) {
     return this.getState().then((state) => { mutate(state); this.ctx.storage.sql.exec("UPDATE project SET doc=? WHERE id=1", JSON.stringify(state)); return state; });
   }
@@ -73,6 +81,12 @@ export class CoordinationFixture extends RepositoryController {
           return Response.json(await this.postLandRebasePlan(input.landed, input.workflowId));
         }
         case "/record-rebase": return Response.json(await this.recordPostLandRebase(await body<{ taskId: string; landedCommit: string; fromCommit: string; execution: RebaseExecution }>()));
+        case "/clock": {
+          // Moves the fixture's view of "now" forward so a backoff can elapse without waiting.
+          this.clockOffsetMs = (await body<{ advanceMs: number }>()).advanceMs;
+          return Response.json({ offset: this.clockOffsetMs });
+        }
+        case "/alarm-at": return Response.json({ alarm: await this.ctx.storage.getAlarm() });
         case "/comments": return Response.json(await this.listComments(`change:${url.searchParams.get("task")}`));
         case "/state": return Response.json(await this.getState());
         default: return new Response("Missing fixture route", { status: 404 });
@@ -116,12 +130,32 @@ const agentWorkflowDouble = {
   create: async ({ id, params }: { id: string; params: unknown }) => { if (created.has(id)) throw new Error("instance.already_exists"); created.set(id, params); return { id }; },
 };
 
+/** Managed spending at its platform limit ("none") or with room again ("ok"); the real spend ledger decides. */
+const envWith = (env: Env, capacity: string | null) => ({ ...env, AGENT_WORKFLOW: agentWorkflowDouble, ...(capacity === "none" ? { MANAGED_GLOBAL_MONTHLY_USD_MICROS: "2000000" } : {}) }) as unknown as Env;
+
 export default {
-  async fetch(request: Request, env: Env) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
     const name = url.searchParams.get("name") ?? "coordination";
     const stub = env.REPOSITORY_CONTROLLER.getByName(name) as unknown as Ledger & { fetch(request: Request): Promise<Response> };
+    const capacity = url.searchParams.get("capacity");
     try {
+      if (url.pathname === "/revise-post-land") {
+        const input = (await request.json()) as { taskId: string; landedCommit: string; workflowId: string };
+        const sent = await sendRebaseRevision(envWith(env, capacity), stub, PROJECT_ID, { ...input, actorId: "owner" });
+        return Response.json({ ...sent, created: [...created.keys()] });
+      }
+      if (url.pathname === "/retry-due") {
+        const records = await retryDueRebaseRevisions(envWith(env, capacity), stub, PROJECT_ID);
+        return Response.json({ records, created: [...created.keys()] });
+      }
+      if (url.pathname === "/run-agent-again") {
+        // The production route, with the fixture standing in for session authentication.
+        const actorId = url.searchParams.get("actor") ?? "owner";
+        const response = await coordinationHttp({ sub: "/changes/run-agent-again", method: "POST", request, env: envWith(env, capacity), ctx, project: stub, projectId: PROJECT_ID, userId: actorId, displayName: async () => actorId, freshActor: async () => ({ identity: { expiresAt: Date.now() + 60_000 }, isOwner: actorId === "owner" || url.searchParams.has("forge") }) });
+        const bodyText = await response!.text();
+        return Response.json({ status: response!.status, body: bodyText, created: [...created.keys()] });
+      }
       if (url.pathname === "/prove") {
         const { decisionId } = (await request.json()) as { decisionId: string };
         const commands: string[] = [];
