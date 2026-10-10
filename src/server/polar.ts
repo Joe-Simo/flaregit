@@ -53,40 +53,78 @@ export async function verifyPolarWebhook(body: string, headers: Headers, secret:
   throw new Error("Invalid signature");
 }
 
-/** Maps a Polar subscription webhook payload to a project's plan. The customer's external_id is the project id. */
-export function billingFromEvent(event: unknown, productId: string | undefined): { projectId: string; billing: Billing } | null {
+export interface AccountBilling extends Billing { providerUpdatedAt?: string }
+
+/** Maps a Polar subscription webhook payload to an account's plan.
+ * The Polar customer's external_id is `flaregit:<accountKey>` (checkout sets it), so billing is account-level. */
+export function billingFromEvent(event: unknown, productId: string | undefined): { accountKey: string; billing: AccountBilling } | null {
   const e = event as {
     type?: string;
-    data?: { id?: string; status?: string; product_id?: string; product?: { id?: string }; customer?: { external_id?: string | null } };
+    data?: { id?: string; status?: string; modified_at?: string | null; created_at?: string; product_id?: string; product?: { id?: string }; customer?: { external_id?: string | null } };
   };
   if (!e?.type?.startsWith("subscription.")) return null;
   // The Polar organization is shared with other projects: act only on FlareGit's own product and customers.
   if (!productId || (e.data?.product_id ?? e.data?.product?.id) !== productId) return null;
-  const externalId = e.data?.customer?.external_id;
-  if (!externalId?.startsWith(CUSTOMER_PREFIX)) return null;
-  const projectId = externalId.slice(CUSTOMER_PREFIX.length);
-  if (!/^[0-9a-f]{12}$/.test(projectId)) return null;
-  const status = e.data?.status ?? "unknown";
+  const accountKey = accountKeyFromExternalId(e.data?.customer?.external_id);
+  if (!accountKey) return null;
+  const status = e.type === "subscription.revoked" ? "revoked" : e.data?.status ?? "unknown";
   const paid = status === "active" || status === "trialing";
+  const providerUpdatedAt = e.data?.modified_at ?? e.data?.created_at;
   return {
-    projectId,
-    billing: { plan: paid ? "pro" : "free", status, subscriptionId: e.data?.id, updatedAt: new Date().toISOString() },
+    accountKey,
+    billing: { plan: paid ? "pro" : "free", status, subscriptionId: e.data?.id, updatedAt: new Date().toISOString(), ...(providerUpdatedAt && Number.isFinite(Date.parse(providerUpdatedAt)) ? { providerUpdatedAt } : {}) },
   };
 }
 
-const apiBase = (env: Env) => (env.POLAR_SERVER === "sandbox" ? "https://sandbox-api.polar.sh" : "https://api.polar.sh");
+/** Webhooks can arrive out of order; an older provider snapshot never overwrites a newer one. */
+export function newerBilling(current: AccountBilling | null, next: AccountBilling): boolean {
+  if (!current?.providerUpdatedAt || !next.providerUpdatedAt) return true;
+  return Date.parse(next.providerUpdatedAt) >= Date.parse(current.providerUpdatedAt);
+}
 
-export async function createCheckout(env: Env, opts: { projectId: string; email: string; successUrl: string }): Promise<string> {
+function accountKeyFromExternalId(externalId: string | null | undefined): string | null {
+  if (!externalId?.startsWith(CUSTOMER_PREFIX)) return null;
+  const accountKey = externalId.slice(CUSTOMER_PREFIX.length);
+  return /^[0-9a-f]{12}$/.test(accountKey) ? accountKey : null;
+}
+
+/** One USD cent in ledger micros. Polar amounts are integer cents. */
+export const MICROS_PER_CENT = 10_000;
+
+/** A credit change derived from a verified Polar order webhook for FlareGit's credit product.
+ * `paidMicros` is the order's net amount (after discounts, before tax); `refundedMicros` is cumulative. */
+export interface CreditOrderChange { accountKey: string; orderId: string; paidMicros: number; refundedMicros: number; paid: boolean }
+export function creditOrderFromEvent(event: unknown, creditProductId: string | undefined): CreditOrderChange | null {
+  const e = event as {
+    type?: string;
+    data?: { id?: string; status?: string; paid?: boolean; net_amount?: number; subtotal_amount?: number; discount_amount?: number; refunded_amount?: number; product_id?: string | null; product?: { id?: string } | null; customer?: { external_id?: string | null } };
+  };
+  if (!e?.type?.startsWith("order.") || !creditProductId) return null;
+  const data = e.data;
+  if (!data?.id || !/^[A-Za-z0-9_-]{1,100}$/.test(data.id) || (data.product_id ?? data.product?.id) !== creditProductId) return null;
+  const accountKey = accountKeyFromExternalId(data.customer?.external_id);
+  if (!accountKey) return null;
+  const net = data.net_amount ?? (data.subtotal_amount ?? 0) - (data.discount_amount ?? 0);
+  const refunded = data.refunded_amount ?? 0;
+  if (!Number.isSafeInteger(net) || net < 0 || !Number.isSafeInteger(refunded) || refunded < 0) return null;
+  const status = data.status ?? "";
+  const paid = data.paid === true || ["paid", "refunded", "partially_refunded"].includes(status);
+  return { accountKey, orderId: data.id, paidMicros: net * MICROS_PER_CENT, refundedMicros: Math.min(refunded, net) * MICROS_PER_CENT, paid };
+}
+
+const apiBase = (env: Pick<Env, "POLAR_SERVER">) => (env.POLAR_SERVER === "sandbox" ? "https://sandbox-api.polar.sh" : "https://api.polar.sh");
+
+export async function createCheckout(env: Env, opts: { accountKey: string; email: string; successUrl: string }): Promise<string> {
   if (!env.POLAR_ACCESS_TOKEN || !env.POLAR_PRODUCT_ID) throw new Error("Billing is not configured");
   const res = await fetch(`${apiBase(env)}/v1/checkouts/`, {
     method: "POST",
     headers: { Authorization: `Bearer ${env.POLAR_ACCESS_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       products: [env.POLAR_PRODUCT_ID],
-      external_customer_id: `${CUSTOMER_PREFIX}${opts.projectId}`,
+      external_customer_id: `${CUSTOMER_PREFIX}${opts.accountKey}`,
       ...(opts.email ? { customer_email: opts.email } : {}),
       success_url: opts.successUrl,
-      metadata: { app: "flaregit", projectId: opts.projectId },
+      metadata: { app: "flaregit", accountKey: opts.accountKey },
     }),
     signal: AbortSignal.timeout(20_000),
   });
@@ -96,15 +134,29 @@ export async function createCheckout(env: Env, opts: { projectId: string; email:
   return checkout.url;
 }
 
-/** Usage event for metered billing; best-effort and de-duplicated by external_id. */
-export async function reportUsage(env: Env, projectId: string, name: string, externalId: string, metadata: Record<string, string | number>): Promise<void> {
-  if (!env.POLAR_ACCESS_TOKEN) return;
-  await fetch(`${apiBase(env)}/v1/events/ingest`, {
+
+/** One-time checkout that buys prepaid credits. The credit product must have a pay-what-you-want price,
+ * so `amountCents` is the deposit; Polar enforces the product's own minimum. */
+export async function createCreditCheckout(env: Env, opts: { accountKey: string; email: string; amountCents: number; successUrl: string }): Promise<string> {
+  if (!env.POLAR_ACCESS_TOKEN || !env.POLAR_CREDIT_PRODUCT_ID) throw new Error("Credit purchases are not configured");
+  if (!Number.isSafeInteger(opts.amountCents) || opts.amountCents < 100 || opts.amountCents > 1_000_000) throw new Error("Invalid credit amount");
+  const res = await fetch(`${apiBase(env)}/v1/checkouts/`, {
     method: "POST",
     headers: { Authorization: `Bearer ${env.POLAR_ACCESS_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ events: [{ name: `flaregit.${name}`, external_customer_id: `${CUSTOMER_PREFIX}${projectId}`, external_id: `flaregit:${externalId}`, metadata: { app: "flaregit", ...metadata } }] }),
-    signal: AbortSignal.timeout(10_000),
-  }).catch(() => undefined);
+    body: JSON.stringify({
+      products: [env.POLAR_CREDIT_PRODUCT_ID],
+      amount: opts.amountCents,
+      external_customer_id: `${CUSTOMER_PREFIX}${opts.accountKey}`,
+      ...(opts.email ? { customer_email: opts.email } : {}),
+      success_url: opts.successUrl,
+      metadata: { app: "flaregit", accountKey: opts.accountKey, purpose: "credits" },
+    }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) throw new Error(`Polar checkout failed (${res.status})`);
+  const checkout = (await res.json()) as { url?: string };
+  if (!checkout.url) throw new Error("Polar returned no checkout URL");
+  return checkout.url;
 }
 
 export const planLimits = (env: Env): Record<Plan, number> => ({

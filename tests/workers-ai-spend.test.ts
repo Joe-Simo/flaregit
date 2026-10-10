@@ -16,3 +16,11 @@ test("every real retry consults durable admission with UTF8 byte and output boun
   expect(admissions.map((input) => input.inputBytes)).toEqual([2, 2]);
   expect(admissions.map((input) => input.maxOutputTokens)).toEqual([20, 20]);
 });
+test("provider-reported token usage reaches settlement accounting only when the response carries it", async () => {
+  const reported: Array<{ inputTokens: number; outputTokens: number }> = [];
+  const client = new WorkersAIClient({ binding: { run: async () => ({ response: "ok", usage: { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 } }) }, afterDispatch: async (usage) => { reported.push(usage); } });
+  expect(await client.complete("work")).toBe("ok");
+  const silent = new WorkersAIClient({ binding: { run: async () => ({ response: "ok" }) }, afterDispatch: async (usage) => { reported.push(usage); } });
+  expect(await silent.complete("work")).toBe("ok");
+  expect(reported).toEqual([{ inputTokens: 12, outputTokens: 3 }]);
+});

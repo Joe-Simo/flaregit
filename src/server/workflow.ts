@@ -544,7 +544,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       if (!spending || model !== DEFAULT_CODE_MODEL) throw new Error("Managed repair budget unavailable");
       await assertManagedInitiator(this.env, stub, parentWorkflowId, params.accountKey);
       await globalOf(this.env).consumeManagedSpend(spendRunId, inputBytes, maxOutputTokens, 0);
-    } });
+    }, afterDispatch: async ({ inputTokens, outputTokens }) => { await globalOf(this.env).recordManagedUsage(spendRunId, inputTokens, outputTokens); } });
     let round = 0;
     candidate.repairAttempts = structuredClone(state.candidates[candidate.id]?.repairAttempts ?? candidate.repairAttempts);
     round = Math.max(0, ...candidate.repairAttempts.map(attempt => attempt.round));

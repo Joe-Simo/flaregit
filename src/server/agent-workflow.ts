@@ -3,7 +3,7 @@ import type { Env } from "./env.js";
 import { ledgerOf } from "./scenario-workflow.js";
 import { runAgentTask } from "./agent-run.js";
 import {restrictedAgentRuntimeOptions} from './restricted-agent-runtime';
-import { globalOf, managedAgentEnvelope } from "./projects.js";
+import { globalOf, managedAgentEnvelope, settleManagedRun } from "./projects.js";
 import { agentLoopRounds, fundedAgentRounds, runAgentLoop } from "./agent-loop.js";
 import { advanceMergeQueue } from "./coordination-dispatch.js";
 
@@ -22,13 +22,20 @@ export class FlareGitAgentWorkflow extends WorkflowEntrypoint<Env, AgentParams> 
       catch { console.error("Workflow outcome recording unavailable"); }
     };
     await record("started");
+    // Whatever the outcome, the run is settled at its actual cost once it stops consuming.
+    const settle = async () => {
+      try { await step.do("settle-managed-spend", { retries: { limit: 5, delay: "30 seconds", backoff: "exponential" } }, async () => (await settleManagedRun(this.env, event.instanceId))?.usdMicros ?? null); }
+      catch { console.error("Managed run settlement was not confirmed; its reserved bound stays charged"); }
+    };
     try {
       const result = await this.execute(event, step);
       await record(result.commit ? "completed" : "skipped");
       // A revised change re-enters the merge queue as soon as it is ready again.
       if (result.commit) await step.do("merge-queue-advance", async () => { try { return (await advanceMergeQueue(this.env, event.payload.projectId)).action; } catch { console.warn("Merge queue advance after agent work was not confirmed"); return "unconfirmed"; } });
+      await settle();
       return result;
     } catch (error) {
+      await settle();
       await record("failed");
       throw error;
     }

@@ -164,7 +164,8 @@ import { RepositoryDiscussions, type DiscussionTopic } from "./repository-discus
 import { ArtifactAllocationFence, type PendingArtifactAllocation, type ArtifactAllocationInspection, type ArtifactAllocationOutcome } from "./allocation-fence.js";
 import { ArtifactStorageAdmission, type ArtifactKind, type StorageAdmissionPolicy, type StorageReservation } from "./storage-admission.js";
 import { CoreGitOperationLedger, configuredGitCap, type CoreGitBudget, type CoreGitAdmission, type CoreGitCapacity, type CoreGitExistingReservationProof } from "./core-git-budget.js";
-import { ManagedSpendLedger,enforceManagedBudget, type ManagedEnvelope, type ManagedBudget, type ManagedAdmission, type ManagedReservation } from "./managed-spend-ledger.js";
+import { ManagedSpendLedger,enforceManagedBudget, type ManagedEnvelope, type ManagedBudget, type ManagedAdmission, type ManagedReservation, type ManagedFundingTier, type ManagedSettlement } from "./managed-spend-ledger.js";
+import { CreditLedger, type AutoRecharge, type CreditHold, type CreditSummary, type RechargePrompt } from "./credit-ledger.js";
 import { PlatformCommunity } from "./platform-community.js";
 import { safeContent } from "./public-community.js";
 import { DurableObject } from "cloudflare:workers";
@@ -471,8 +472,10 @@ export interface Ledger {
   cancelUnstartedManagedSpend(runIds: string[], accountKey: string): Promise<void>;
   managedSpendReserved(month: string, accountKey?: string): Promise<number>;
   managedReservationAttribution(input: {month:string;cursor?:string}): ReturnType<ManagedSpendLedger["attributionPage"]>;
-  reserveManagedSpendBatch(inputs: ManagedEnvelope[], budget: ManagedBudget): Promise<ManagedAdmission[]>;
-  reserveManagedSpend(input: ManagedEnvelope, budget: ManagedBudget): Promise<ManagedAdmission>;
+  reserveManagedSpendBatch(inputs: ManagedEnvelope[], budget: ManagedBudget, tier?: ManagedFundingTier): Promise<ManagedAdmission[]>;
+  reserveManagedSpend(input: ManagedEnvelope, budget: ManagedBudget, tier?: ManagedFundingTier): Promise<ManagedAdmission>;
+  recordManagedUsage(runId: string, inputTokens: number, outputTokens: number): Promise<void>;
+  settleManagedSpend(runId: string): Promise<{ accountKey: string; fundingTier: ManagedFundingTier; settlement: ManagedSettlement } | null>;
   managedSpendReservation(runId:string):Promise<ManagedReservation|null>;
   prepareIsolatedExecutionGrant(context:IsolatedExecutionContext):ReturnType<RepositoryController["prepareIsolatedExecutionGrant"]>;
   isolatedExecutionSnapshot(context:IsolatedExecutionContext):Promise<IsolatedExecutionContext>;
@@ -1064,6 +1067,13 @@ export interface Ledger {
   getBilling(): Promise<{ plan: "free" | "pro"; status: string; subscriptionId?: string; updatedAt: string }>;
   setBilling(b: { plan: "free" | "pro"; status: string; subscriptionId?: string; updatedAt: string }): Promise<void>;
   usageToday(): Promise<number>;
+  creditSummary(): Promise<CreditSummary>;
+  applyCreditOrder(input: { orderId: string; paidMicros: number; refundedMicros: number; paid: boolean }): Promise<{ balanceMicros: number; owedMicros: number }>;
+  holdCredits(runIds: string[], envelopeMicros: number): Promise<CreditHold>;
+  releaseCredits(runIds: string[]): Promise<void>;
+  settleCredits(runId: string, actualMicros: number): Promise<{ debitedMicros: number; balanceMicros: number; rechargePrompt: RechargePrompt | null } | null>;
+  setAutoRecharge(value: AutoRecharge): Promise<AutoRecharge>;
+  dismissRechargePrompt(): Promise<void>;
   consumeRun(limit: number, admissionKey?: string): Promise<{ allowed: boolean; used: number }>;
   taskReadyDependency(taskId:string,userId:string,credentialHash?:string,sessionExpiresAt?:number):Promise<boolean>;
   observeTaskReadyGitHead(taskId:string,userId:string,context:RepositoryReadContext,credentialHash?:string,sessionExpiresAt?:number,expectedHead?:string):Promise<string|null>;
@@ -5673,6 +5683,15 @@ export class RepositoryController extends DurableObject<Env> {
     this.ctx.storage.sql.exec("INSERT INTO billing (id, doc) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET doc = excluded.doc", JSON.stringify(b));
   }
 
+  private credits(): CreditLedger { return new CreditLedger(this.ctx.storage); }
+  async creditSummary(): Promise<CreditSummary> { return this.credits().summary(); }
+  async applyCreditOrder(input: { orderId: string; paidMicros: number; refundedMicros: number; paid: boolean }) { return this.credits().applyOrder(input); }
+  async holdCredits(runIds: string[], envelopeMicros: number): Promise<CreditHold> { return this.credits().hold(runIds, envelopeMicros); }
+  async releaseCredits(runIds: string[]): Promise<void> { this.credits().release(runIds); }
+  async settleCredits(runId: string, actualMicros: number) { return this.credits().settle(runId, actualMicros); }
+  async setAutoRecharge(value: AutoRecharge): Promise<AutoRecharge> { return this.credits().setAutoRecharge(value); }
+  async dismissRechargePrompt(): Promise<void> { this.credits().dismissPrompt(); }
+
   async usageToday(): Promise<number> {
     const day = new Date().toISOString().slice(0, 10);
     return this.ctx.storage.sql.exec<{ n: number }>("SELECT n FROM runs WHERE day = ?", day).toArray()[0]?.n ?? 0;
@@ -5874,11 +5893,19 @@ export class RepositoryController extends DurableObject<Env> {
     if(credentialHash&&!await accountOf(this.env,await accountKeyFor(userId)).apiTokenHashCanRead(credentialHash,userId,context.projectId,true))throw new Error("Checkpoint credential changed");
     return this.applyCheckpoint(ev,()=>{if(!credentialHash&&(!Number.isFinite(sessionExpiresAt)||Date.now()>=sessionExpiresAt!))throw new Error("Checkpoint session expired");this.assertReadLocal(context,userId,ev.taskId,true);if(ev.ready&&!this.taskReadyDependencyLocal(this.load().tasks[ev.taskId]!))throw Error("Original dependency checkpoint changed before readiness");});
   }
-  async reserveManagedSpendBatch(inputs: ManagedEnvelope[], budget: ManagedBudget): Promise<ManagedAdmission[]> {
-    return new ManagedSpendLedger(this.ctx.storage).reserveBatch(inputs, enforceManagedBudget(budget,managedBudget(this.env)));
+  async reserveManagedSpendBatch(inputs: ManagedEnvelope[], budget: ManagedBudget, tier: ManagedFundingTier = "free"): Promise<ManagedAdmission[]> {
+    return new ManagedSpendLedger(this.ctx.storage).reserveBatch(inputs, enforceManagedBudget(budget,managedBudget(this.env)), new Date(), tier);
   }
-  async reserveManagedSpend(input: ManagedEnvelope, budget: ManagedBudget): Promise<ManagedAdmission> {
-    return new ManagedSpendLedger(this.ctx.storage).reserve(input, enforceManagedBudget(budget,managedBudget(this.env)));
+  async reserveManagedSpend(input: ManagedEnvelope, budget: ManagedBudget, tier: ManagedFundingTier = "free"): Promise<ManagedAdmission> {
+    return new ManagedSpendLedger(this.ctx.storage).reserve(input, enforceManagedBudget(budget,managedBudget(this.env)), new Date(), tier);
+  }
+  async recordManagedUsage(runId: string, inputTokens: number, outputTokens: number): Promise<void> {
+    new ManagedSpendLedger(this.ctx.storage).recordUsage(runId, inputTokens, outputTokens);
+  }
+  /** Settles a finished run at its actual cost. Replays return the same settlement. */
+  async settleManagedSpend(runId: string): Promise<{ accountKey: string; fundingTier: ManagedFundingTier; settlement: ManagedSettlement } | null> {
+    const settled = new ManagedSpendLedger(this.ctx.storage).settle(runId);
+    return settled ? { accountKey: settled.run.accountKey, fundingTier: settled.run.fundingTier ?? "free", settlement: settled.settlement } : null;
   }
   async consumeManagedSpend(runId: string, inputBytes: number, outputTokens: number, containerSeconds: number): Promise<ManagedReservation> {
     return new ManagedSpendLedger(this.ctx.storage).consume(runId, inputBytes, outputTokens, containerSeconds);

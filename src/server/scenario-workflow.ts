@@ -5,6 +5,7 @@ import type { Task } from "../core/types.js";
 import type { Env } from "./env.js";
 import type { Ledger } from "./durable-object.js";
 import { runAgentTask } from "./agent-run.js";
+import { settleManagedRun } from "./projects.js";
 import {restrictedAgentRuntimeOptions} from './restricted-agent-runtime';
 
 export interface ScenarioParams {
@@ -48,8 +49,11 @@ export class FlareGitScenarioWorkflow extends WorkflowEntrypoint<Env, ScenarioPa
       }
     };
     // Both real model plans run concurrently; proposals survive a pause before either apply stage.
-    const proposals = await Promise.all(tasks.map((task) => stage(task.id, true)));
-    await Promise.all(tasks.map((task, index) => proposals[index]?.commit ? proposals[index] : stage(task.id, false)));
+    const settle = () => Promise.all(tasks.map((task) => step.do(`settle-managed-spend-${task.id}`, { retries: { limit: 5, delay: "30 seconds", backoff: "exponential" } }, async () => (await settleManagedRun(this.env, `${event.instanceId}-${task.id}`))?.usdMicros ?? null).catch(() => null)));
+    try {
+      const proposals = await Promise.all(tasks.map((task) => stage(task.id, true)));
+      await Promise.all(tasks.map((task, index) => proposals[index]?.commit ? proposals[index] : stage(task.id, false)));
+    } finally { await settle(); }
 
     const instance = await step.do("start-integration", async () => {
       const parent = await ledger.getWorkflowRun(event.instanceId);
