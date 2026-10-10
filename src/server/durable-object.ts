@@ -99,6 +99,7 @@ import {GitGatewayLedger,type GitGatewayScope} from "./git-gateway-ledger";
 import {TaskTargetGenerations,type TaskTargetGenerationIntent,type TaskTargetGenerationSettlement} from "./task-target-generations";
 import {freezeProductDecisionScope,planProductDecisionResolution} from "./product-decision-scope";
 import {CoordinationController} from "./coordination-controller";
+import {requirementExamples,requirementGateFailure,type RequirementExample} from "../core/decision/requirement-gate";
 import type {ManualRetry,RevisionClaim,RevisionOutcome} from "./post-land-rebase";
 import {retryDueRebaseRevisions} from "./revision-dispatch";
 import type {ContradictionProof} from "../core/decision/contradiction-proof";
@@ -196,6 +197,7 @@ export type OwnerRebaseApplication=RebaseRecoveryReport & {resumeAvailable:boole
 export type PublicGrantMetadata = PublicRepositoryGrant & { name: string; version: number; canonicalRepoName: string };
 import type {
   CandidateGeneration,
+  RequirementCheck,
   HumanDecisionActor,
   FlareGitProjectState,
   ProductDecision,
@@ -1084,6 +1086,8 @@ export interface Ledger {
   requirementDecisionSources(decisionId:string):Promise<Awaited<ReturnType<CoordinationController["decisionSources"]>>>;
   recordRequirementProof(proof:ContradictionProof):Promise<ContradictionProof>;
   prepareRequirementRevisions(decisionId:string):Promise<Awaited<ReturnType<CoordinationController["prepareRevisions"]>>>;
+  requirementGatePlan(candidateId:string):Promise<RequirementExample[]>;
+  recordRequirementChecks(candidateId:string,commit:string,checks:RequirementCheck[]):Promise<string|null>;
   markRequirementRevision(decisionId:string,taskId:string,outcome:{dispatched:true}|{dispatched:false;reason:string}):Promise<Awaited<ReturnType<CoordinationController["markRevision"]>>>;
   coordinationView(userId:string):Promise<Awaited<ReturnType<CoordinationController["view"]>>>;
   mergeQueueEnqueue(input:unknown,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<Awaited<ReturnType<CoordinationController["enqueue"]>>>;
@@ -6215,6 +6219,7 @@ export class RepositoryController extends DurableObject<Env> {
     const c = s.candidates[candidateId];
     const ev = c?.evidenceId ? s.evidence[c.evidenceId] : undefined;
     if (!c || !ev || !c.candidateCommit) return { ok: false, error: "No verified candidate" };
+    const requirementRefusal=this.requirementGateRefusal(c);if(requirementRefusal)return{ok:false,error:requirementRefusal};
     try{if(c.frozenAttribution)new ContributionAttributionLedger(this.ctx.storage).assert(c.id,c.frozenAttribution);this.assertAcceptedCandidateTarget(c,ev);this.assertOwnerAcceptedTargetReview(c);}catch{return{ok:false,error:"Frozen accepted target or verification evidence changed; publication was not prepared"};}
     if(this.legacyCandidateRerunFrozen(candidateId))return {ok:false,error:"This predecessor is preserved by an owner rerun."};
     const preservationFailure=this.candidatePreservationFailure(c);
@@ -6511,6 +6516,7 @@ export class RepositoryController extends DurableObject<Env> {
   async recordReview(candidateId: string, review: { approved: boolean; actor: HumanDecisionActor; note?: string }, expectedCommit: string, credentialHash?: string,expectedTarget?:{ref:string;acceptedCommit:string|null;acceptedVersion:number}): Promise<{ ok: boolean; instanceId?: string; error?: string; review?: CandidateGeneration["review"] }> {
     const assertCurrent = await this.authorizeHumanDecision(review.actor, credentialHash, true);
     assertCurrent();const decisionVersion=this.acceptancePolicies().get(this.acceptancePolicyScope()).version;
+    if(review.approved){const gated=this.load().candidates[candidateId],refusal=gated?this.requirementGateRefusal(gated):null;if(refusal)return{ok:false,error:refusal};}
     if(review.approved&&!(await this.delegatedReviewGate(candidateId)).passed)return {ok:false,error:"Required delegated reviews have not passed for this exact candidate"};assertCurrent();
     const s = this.load();
     const c = s.candidates[candidateId];
@@ -6587,6 +6593,12 @@ export class RepositoryController extends DurableObject<Env> {
   async requirementDecisionSources(decisionId:string){return this.coordination().decisionSources(decisionId);}
   async recordRequirementProof(proof:ContradictionProof){return this.coordination().recordProof(proof);}
   async prepareRequirementRevisions(decisionId:string){return this.coordination().prepareRevisions(decisionId);}
+  /** Runnable examples a candidate must pass: decided repository requirements plus its own approved requirements. */
+  async requirementGatePlan(candidateId:string):Promise<RequirementExample[]>{const candidate=this.load().candidates[candidateId];if(!candidate)throw Error("Unknown candidate");return requirementExamples(candidate.frozenRequirements,this.coordination().decidedRequirements());}
+  /** Saves requirement check results for the exact candidate commit and returns the blocking reason, if any. */
+  async recordRequirementChecks(candidateId:string,commit:string,checks:RequirementCheck[]):Promise<string|null>{const candidate=this.load().candidates[candidateId];if(!candidate||candidate.candidateCommit!==commit)throw Error("Requirement checks belong to another candidate commit");candidate.requirementChecks={commit,checkedAt:new Date().toISOString(),checks:structuredClone(checks)};candidate.updatedAt=candidate.requirementChecks.checkedAt;this.save();const failure=requirementGateFailure(checks);if(failure)await this.logActivity("FlareGit","verification.requirement_failed",failure);return failure;}
+  /** Acceptance is refused while a requirement check fails, or while required checks have not run on this commit. */
+  private requirementGateRefusal(candidate:CandidateGeneration):string|null{const run=candidate.requirementChecks;if(run&&run.commit===candidate.candidateCommit)return requirementGateFailure(run.checks);if(run)return "Requirement checks ran on a different commit. Run the integration again.";return requirementExamples(candidate.frozenRequirements,this.coordination().decidedRequirements()).some(example=>example.decided)?"The decided requirements have not been checked on this commit. Run the integration again.":null;}
   async markRequirementRevision(decisionId:string,taskId:string,outcome:{dispatched:true}|{dispatched:false;reason:string}){return this.coordination().markRevision(decisionId,taskId,outcome);}
   async coordinationView(userId:string){if(!await this.roleOf(userId))throw new Error("Repository access required");return this.coordination().view();}
   async mergeQueueEnqueue(input:unknown,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const assertCurrent=await this.integrationRequestAuthority(actor,credentialHash,sessionExpiresAt);assertCurrent();return this.coordination().enqueue(input,actor.userId);}

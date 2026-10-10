@@ -1,8 +1,9 @@
 import type { ContradictionProof } from "../core/decision/contradiction-proof.js";
 import type { FlareGitProjectState } from "../core/types.js";
+import type { DecidedRequirements } from "../core/decision/requirement-gate.js";
 import { enqueueChanges, enqueueRequestSchema, MergeQueueLedger, planMergeQueue, removeFromQueue, settleLanding, type LandingOutcome, type MergeQueueEntry, type QueueAction } from "./merge-queue-runner.js";
 import { claimDueRevisions, claimManualRevision, markRebaseRevision, nextRevisionRetryAt, PostLandRebaseLedger, planPostLandRebase, rebaseExecutionSchema, rebaseUpdate, recordPostLandRebase, type PostLandRebaseItem, type ManualRetry, type PostLandRebaseRecord, type RebaseExecution, type RevisionClaim, type RevisionOutcome } from "./post-land-rebase.js";
-import { decisionProofSources, planLosingRevisions, recordDecisionProof, RequirementDecisionLedger, revisionWorkflowId, settleRevisions, type ProofSources, type RequirementDecisionView, type RequirementRevision } from "./requirement-decisions.js";
+import { decisionAffectedTaskIds, decisionProofSources, planLosingRevisions, recordDecisionProof, RequirementDecisionLedger, revisionWorkflowId, settleRevisions, type ProofSources, type RequirementDecisionView, type RequirementRevision } from "./requirement-decisions.js";
 
 /** Repository Durable Object ports used by coordination; the controller never reaches into other state. */
 export interface CoordinationPorts {
@@ -53,12 +54,17 @@ export class CoordinationController {
     const state = this.ports.load(), decision = state.decisions[decisionId];
     if (!decision || decision.status !== "resolved") throw new Error("This decision has not been resolved");
     const ids: Record<string, string> = {};
-    for (const taskId of decision.resolvedTaskIds ?? []) ids[taskId] = await revisionWorkflowId(state.projectId, decisionId, taskId);
+    for (const taskId of decisionAffectedTaskIds(state, decisionId)) ids[taskId] = await revisionWorkflowId(state.projectId, decisionId, taskId);
     return this.transaction(() => {
       const planned = planLosingRevisions(this.decisions, this.ports.load(), decisionId, ids);
       this.ports.save();
       return planned;
     });
+  }
+
+  /** Requirements chosen in resolved decisions; they hold for every later candidate in the repository. */
+  decidedRequirements(): DecidedRequirements {
+    return this.decisions.decided();
   }
 
   markRevision(decisionId: string, taskId: string, outcome: { dispatched: true } | { dispatched: false; reason: string }): RequirementRevision {
