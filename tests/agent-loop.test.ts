@@ -90,3 +90,35 @@ test("check script isolates identity and environment; exit codes map honestly", 
   expect(summarizeTestRun(1, "Tests: 2 failed, 10 passed, 12 total").passed).toBe(10);
   expect(summarizeTestRun(1, "token ghp_abcdefghijklmnopqrstuvwxyz0123 failed").summary).not.toContain("ghp_");
 });
+
+test("a search block that does not match feeds the exact current file into the next round, and the next edit applies", async () => {
+  const landed = { "src/pricing.ts": "export const fee = 5;\nexport function feeFor(amount: number) { return amount * fee / 100; }\n" };
+  const stale = `<plan>\n- Add refundable fee\n</plan>\n<edit path="src/pricing.ts">\n<search>\nexport const fee = 7;\n</search>\n<replace>\nexport const fee = 7;\nexport const refundable = true;\n</replace>\n</edit>`;
+  const failing = { kind: "ran" as const, report: summarizeTestRun(1, " 1 fail\n") };
+  const first = await executeAgentRound({ round: 1, maxRounds: 3, history: [], files: {} }, deps(stale, failing, landed));
+  expect(first.record.edits).toBe("rejected");
+  expect(first.record.mismatch).toEqual({ path: "src/pricing.ts", whole: true, current: landed["src/pricing.ts"] });
+  const prompts: string[] = [];
+  // Deterministic double: copies its search block from the excerpt the feedback showed.
+  const recover = (prompt: string) => {
+    const excerpt = /<current-excerpt path="src\/pricing.ts">\n([\s\S]*?)\n<\/current-excerpt>/.exec(prompt)![1]!;
+    const line = excerpt.split("\n").find((value) => value.includes("feeFor"))!;
+    return `<plan>\n- Add refundable fee\n</plan>\n<edit path="src/pricing.ts">\n<search>\n${line}\n</search>\n<replace>\n${line}\nexport const refundableFee = (amount: number) => feeFor(amount);\n</replace>\n</edit>`;
+  };
+  const second = await executeAgentRound({ round: 2, maxRounds: 3, history: [first.record], files: first.files }, { ...deps("", { kind: "ran", report: summarizeTestRun(0, " 1 pass\n") }, landed), model: async (prompt) => { prompts.push(prompt); return recover(prompt); } });
+  expect(prompts[0]).toContain("The whole current content of src/pricing.ts is exactly");
+  expect(second.record.edits).toBe("applied");
+  expect(second.files["src/pricing.ts"]).toContain("refundableFee");
+});
+
+test("a large file's mismatch feedback is the bounded region around the closest match", async () => {
+  const filler = Array.from({ length: 400 }, (_, index) => `export const value${index} = ${index};`).join("\n");
+  const big = { "src/big.ts": `${filler}\nexport function target(amount: number) { return amount; }\n${filler.replaceAll("value", "other")}\n` };
+  const stale = `<plan>\n- Change target\n</plan>\n<edit path="src/big.ts">\n<search>\nexport function target(amount: number) { return amount * 2; }\n</search>\n<replace>\nx\n</replace>\n</edit>`;
+  const outcome = await executeAgentRound({ round: 1, maxRounds: 2, history: [], files: {} }, deps(stale, { kind: "unavailable", reason: "none" }, big));
+  const mismatch = outcome.record.mismatch!;
+  expect(mismatch.whole).toBe(false);
+  expect(mismatch.current.length).toBeLessThanOrEqual(4000);
+  expect(mismatch.current).toContain("export function target(amount: number) { return amount; }");
+  expect(big["src/big.ts"]).toContain(mismatch.current);
+});

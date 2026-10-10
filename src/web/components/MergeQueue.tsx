@@ -3,20 +3,20 @@ import { ListOrdered } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import type { FlareGitProjectState } from "@/core/types";
+import type { FlareGitProjectState, Task } from "@/core/types";
 import { apiJson } from "../api";
-import { canRunAgentAgain, nextTryText, QUEUE_STATUS, UPDATE_STATUS, type CoordinationView, type UpdateView } from "../coordination";
+import { agentRunFailed, canRunAgentAgain, nextTryText, QUEUE_STATUS, UPDATE_STATUS, type CoordinationView, type UpdateView } from "../coordination";
 
 /**
  * Latest post-land update of one change, shown on the change and in the queue. When the agent's re-run
  * was refused, an owner can send the same re-run again; the server refuses with a reason if it still cannot run.
  */
-export function ChangeUpdateStatus({ update, projectId, isOwner = false, onChange }: { update: UpdateView | undefined; projectId?: string; isOwner?: boolean; onChange?: () => void }) {
+export function ChangeUpdateStatus({ update, task, projectId, isOwner = false, onChange }: { update: UpdateView | undefined; task?: Task; projectId?: string; isOwner?: boolean; onChange?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   if (!update) return null;
   const status = UPDATE_STATUS[update.status];
-  const retryable = canRunAgentAgain(update);
+  const retryable = canRunAgentAgain(update, task), failed = agentRunFailed(update, task);
   const runAgain = async () => {
     if (!projectId) return;
     setBusy(true); setMessage(null);
@@ -34,7 +34,8 @@ export function ChangeUpdateStatus({ update, projectId, isOwner = false, onChang
         <Badge variant={status.variant}>{status.label}</Badge> <span>{update.reason}</span>
         {update.overlappingFiles.length > 0 && <span> · Also changed by the landed work: {update.overlappingFiles.slice(0, 5).join(", ")}{update.overlappingFiles.length > 5 ? "…" : ""}</span>}
       </p>
-      {retryable && update.retry && <p>Last refusal: {update.retry.refusedReason}{nextTry ? ` ${nextTry}` : ""}</p>}
+      {failed && <p>The agent's last run on the latest version failed. Its saved work is kept.</p>}
+      {retryable && !failed && update.retry && <p>Last refusal: {update.retry.refusedReason}{nextTry ? ` ${nextTry}` : ""}</p>}
       {retryable && isOwner && projectId && <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void runAgain()}>{busy ? "Starting the agent…" : "Run the agent again on the latest version"}</Button>}
       {message && <p role={message.error ? "alert" : "status"} className={message.error ? "text-destructive" : undefined}>{message.text}</p>}
     </div>
@@ -104,7 +105,7 @@ export function MergeQueue({ projectId, state, view, isOwner, canQueue, onChange
                   {canRemove && <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void remove(entry.taskId)} aria-label={`Remove “${entry.goal}” from the queue`}>{busy === `remove-${entry.taskId}` ? "Removing…" : "Remove"}</Button>}
                 </div>
                 {entry.reason && <p className="mt-1 text-xs text-muted-foreground break-words">{entry.reason}</p>}
-                <ChangeUpdateStatus update={updates.get(entry.taskId)} projectId={projectId} isOwner={isOwner} onChange={onChange} />
+                <ChangeUpdateStatus update={updates.get(entry.taskId)} task={state.tasks[entry.taskId]} projectId={projectId} isOwner={isOwner} onChange={onChange} />
               </li>
             );
           })}

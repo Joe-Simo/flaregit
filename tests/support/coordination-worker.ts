@@ -45,6 +45,12 @@ export class CoordinationFixture extends RepositoryController {
           });
           return Response.json({ created: true });
         }
+        case "/fail-agent": {
+          // What the agent workflow records when its run fails.
+          const input = await body<{ taskId: string; runId: string }>();
+          await this.failAgentTask(input.taskId, input.runId);
+          return Response.json({ failed: true });
+        }
         case "/landing": {
           const input = await body<{ tasks: string[]; holder: string }>();
           return Response.json(await this.claimLanding({ holder: input.holder, taskIds: input.tasks, preservationProtocolVersion: 1 }));

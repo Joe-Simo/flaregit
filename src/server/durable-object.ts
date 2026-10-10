@@ -99,6 +99,7 @@ import {GitGatewayLedger,type GitGatewayScope} from "./git-gateway-ledger";
 import {TaskTargetGenerations,type TaskTargetGenerationIntent,type TaskTargetGenerationSettlement} from "./task-target-generations";
 import {freezeProductDecisionScope,planProductDecisionResolution} from "./product-decision-scope";
 import {CoordinationController} from "./coordination-controller";
+import {revisionWorkflowId} from "./requirement-decisions";
 import {requirementExamples,requirementGateFailure,type RequirementExample} from "../core/decision/requirement-gate";
 import type {ManualRetry,RevisionClaim,RevisionOutcome} from "./post-land-rebase";
 import {retryDueRebaseRevisions} from "./revision-dispatch";
@@ -6610,7 +6611,12 @@ export class RepositoryController extends DurableObject<Env> {
   async markPostLandRevision(taskId:string,landedCommit:string,workflowId:string,outcome:RevisionOutcome){const record=await this.coordination().markRebaseRevision(taskId,landedCommit,workflowId,outcome);await this.scheduleRevisionRetry();return record;}
   async claimDueRebaseRevisions(){return this.coordination().claimDueRevisions();}
   /** Only a current owner (session or full-access token) may fund and send a re-run of the agent by hand. */
-  async claimManualRebaseRevision(taskId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const assertCurrent=await this.integrationRequestAuthority(actor,credentialHash,sessionExpiresAt);assertCurrent();if(await this.roleOf(actor.userId)!=="owner")throw new Error("Only a repository owner can run the agent again");return this.coordination().claimManualRevision(taskId,actor.userId);}
+  async claimManualRebaseRevision(taskId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const assertCurrent=await this.integrationRequestAuthority(actor,credentialHash,sessionExpiresAt);assertCurrent();if(await this.roleOf(actor.userId)!=="owner")throw new Error("Only a repository owner can run the agent again");
+    // After a failed re-run, the next run's id is derived from the failed one, so repeated presses send one run.
+    const state=this.load(),failed=state.tasks[taskId]?.agentWorkflowInstanceId;
+    const rerun=failed?await revisionWorkflowId(state.projectId,`rerun-${failed}`,taskId):undefined;
+    assertCurrent();
+    return this.coordination().claimManualRevision(taskId,actor.userId,rerun);}
   private async scheduleRevisionRetry(){const next=this.coordination().nextRevisionRetryAt();if(next!==null)await this.ensureRecoveryAlarm(Math.max(1_000,next-Date.now()));}
   /** Repository alarm: sends again the refused post-land re-runs whose backoff elapsed. */
   private async retryRebaseRevisions(){if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='post_land_rebases'").toArray().length||this.coordination().nextRevisionRetryAt()===null)return;try{const projectId=this.load().projectId;await retryDueRebaseRevisions(this.env,projectOf(this.env,projectId),projectId);}catch{console.warn("Waiting agent re-runs were not sent; the next alarm tries again");}await this.scheduleRevisionRetry();}
