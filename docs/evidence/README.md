@@ -45,3 +45,15 @@ Still to capture: contradiction decision end to end, rebase after merge, merge q
 | `signed-in/07-three-landed-in-order.jpg` | Three changes landed one at a time in order: `1cf967e` → `55f0fac` → `b25ed14` |
 
 **Defect found in this run (being fixed):** `b25ed14` was an older change that still carried the losing "Price guarantee" requirement; it passed the repository's own tests and was approved, reverting the decided Group discount (`src/pricing.ts` sets `discountAmount = 0`). The decision updated only the change that took part in it, and merges do not yet check decided requirements. Not to be shown as correct behaviour until fixed and re-run.
+
+## Full dry run on production (Oct 10, repository `demo-run`, `docs/evidence/dry-run/`)
+
+| Step | Evidence | Result |
+|---|---|---|
+| Three agents start with runnable requirements; live board with overlap warnings | `1-live-board.jpg` | Live over WebSocket |
+| Contradiction proven by running both changes (136 vs 160); person picks Group discount | `2-contradiction-proof.jpg` | Decision applied |
+| Requirement check on the review card | `3-requirement-check-passed.jpg` | "Requirement checks · 1 of 1 passed · Group discount · decided" |
+| Discount lands; the other agents redo their changes on the new code | `4-landed-then-agents-rebase.jpg` | Merged `6d80551` |
+| Losing change returns revised with the decided requirement and passes it | `5-revised-change-passes-decided-requirement.jpg` | Merged `39f982a` |
+| Merged code keeps the decision; plain merge message | `6-merged-plain-commit.jpg`, `6-merged-pricing-ts.txt` | 15% discount kept |
+| Third change passes "2 of 2" requirement checks and lands in order | `7-three-landed-in-order.jpg` | Merged `caf4399`: `6d80551` → `39f982a` → `caf4399` |
