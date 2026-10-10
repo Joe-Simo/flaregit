@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef } from "react";
 import { VisiblePolling, type PollingEnvironment, type VisiblePollingOptions } from "./visible-polling";
+import { ApiError, transientRetryDelayMs } from "./api";
+/** A rate-limited read waits at least as long as the server asked before the next background read. */
+const serverRetryDelay = (error: unknown): number | null => error instanceof ApiError && error.status === 429 ? transientRetryDelayMs(error, 0) : null;
 export interface UseVisiblePollingOptions<T> extends VisiblePollingOptions<T> {
   /** Include every repository, candidate revision and other input that changes the read. */
   scope: string;
@@ -30,6 +33,7 @@ export function useVisiblePolling<T>(options: UseVisiblePollingOptions<T>): () =
       },
       onValue:value=>{if(latest.current.scope===scope && latest.current.enabled!==false)latest.current.onValue(value);},
       onError:error=>{if(latest.current.scope===scope && latest.current.enabled!==false)latest.current.onError(error);},
+      retryDelayMs:error=>(latest.current.retryDelayMs ?? serverRetryDelay)(error),
     },browserEnvironment);
     controller.current=polling;polling.start();
     return()=>{polling.stop();if(controller.current===polling)controller.current=null;};

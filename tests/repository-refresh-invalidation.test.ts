@@ -3,17 +3,18 @@ import {apiJson,ApiError,bindApiSession,clearVerifiedApiSession,StaleRepositoryR
 import {repositoryRefreshFailure} from "../src/web/repository-refresh-error";
 function deferred<T>(){let resolve!:(value:T)=>void;const promise=new Promise<T>(done=>{resolve=done;});return {promise,resolve};}
 
-test("a failed mutation supersedes its earlier GET without turning the local cancellation into lost access",async()=>{
+test("a failed mutation supersedes its earlier GET, which is read again instead of returning the earlier snapshot or reporting lost access",async()=>{
  const original=globalThis.fetch,network=deferred<Response>(),started=deferred<void>();
  const release=bindApiSession("synthetic-owner-session",async()=>"synthetic-owner-token");
  try{
   globalThis.fetch=Object.assign(async(_input:Parameters<typeof fetch>[0],init?:RequestInit)=>{if(init?.method==="POST")return new Response("Synthetic mark-ready action was denied",{status:403});started.resolve();return network.promise;},{preconnect:original.preconnect});
-  const read=apiJson<{status:string}>("/p/p123456789abc/state");const result=read.then(()=>{throw Error("Expected superseded GET");},(cause:unknown)=>cause);
+  const read=apiJson<{status:string}>("/p/p123456789abc/state");const result=read.catch((cause:unknown)=>cause);
   await started.promise;
   const action=await apiJson("/p/p123456789abc/tasks/synthetic/ready",{method:"POST"}).then(()=>{throw Error("Expected action error");},(cause:unknown)=>cause);
   expect(action).toBeInstanceOf(ApiError);if(!(action instanceof ApiError))throw action;expect(action.message).toBe("Synthetic mark-ready action was denied");
-  network.resolve(Response.json({status:"earlier snapshot"}));const stale=await result;expect(stale).toBeInstanceOf(StaleRepositoryReadError);if(!(stale instanceof StaleRepositoryReadError))throw stale;expect(stale.name).toBe("AbortError");expect(repositoryRefreshFailure(stale)).toBe("superseded");
-  globalThis.fetch=Object.assign(async()=>Response.json({status:"fresh snapshot"}),{preconnect:original.preconnect});expect(await apiJson<{status:string}>("/p/p123456789abc/state")).toEqual({status:"fresh snapshot"});
+  globalThis.fetch=Object.assign(async()=>Response.json({status:"fresh snapshot"}),{preconnect:original.preconnect});
+  network.resolve(Response.json({status:"earlier snapshot"}));expect(await result).toEqual({status:"fresh snapshot"});
+  const stale=new StaleRepositoryReadError();expect(stale.name).toBe("AbortError");expect(repositoryRefreshFailure(stale)).toBe("superseded");
  }finally{globalThis.fetch=original;release();clearVerifiedApiSession();}
 });
 test("a real session switch still fails closed and is never classified as expected repository invalidation",async()=>{
