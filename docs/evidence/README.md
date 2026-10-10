@@ -57,3 +57,9 @@ Still to capture: contradiction decision end to end, rebase after merge, merge q
 | Losing change returns revised with the decided requirement and passes it | `5-revised-change-passes-decided-requirement.jpg` | Merged `39f982a` |
 | Merged code keeps the decision; plain merge message | `6-merged-plain-commit.jpg`, `6-merged-pricing-ts.txt` | 15% discount kept |
 | Third change passes "2 of 2" requirement checks and lands in order | `7-three-landed-in-order.jpg` | Merged `caf4399`: `6d80551` → `39f982a` → `caf4399` |
+
+## CI on main (Oct 10)
+
+| Commit | Result |
+|---|---|
+| `c053e16` (main, merge of PR #5) | GitHub CI `verify` success, `native-boundary` success |
