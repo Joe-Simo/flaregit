@@ -5,6 +5,7 @@ import type { CoordinationRuntime } from "../../src/server/coordination-runtime"
 import { claimDueRevisions, PostLandRebaseLedger, type RebaseExecution } from "../../src/server/post-land-rebase";
 import { retryDueRebaseRevisions, sendRebaseRevision } from "../../src/server/revision-dispatch";
 import { coordinationHttp } from "../../src/server/coordination-http";
+import { runRequirementGate } from "../../src/server/requirement-gate-runner";
 import type { LandingOutcome } from "../../src/server/merge-queue-runner";
 import { ACT3 } from "../../src/scenarios/ticket-booking";
 import type { Env } from "../../src/server/env";
@@ -35,8 +36,8 @@ export class CoordinationFixture extends RepositoryController {
           await this.addMember("member", "member");
           return Response.json({ seeded: true });
         case "/task": {
-          const input = await body<{ id: string; commit: string; base?: string; agent?: boolean; act3?: 0 | 1; dependsOn?: string }>();
-          const requirements: Requirement[] = input.act3 === undefined ? [] : structuredClone(ACT3[input.act3].requirements);
+          const input = await body<{ id: string; commit: string; base?: string; agent?: boolean; act3?: 0 | 1; dependsOn?: string; requirementId?: string }>();
+          const requirements: Requirement[] = input.act3 === undefined ? [] : structuredClone(ACT3[input.act3].requirements).map((requirement) => (input.requirementId ? { ...requirement, id: input.requirementId } : requirement));
           await this.write((state) => {
             const stamp = new Date().toISOString();
             const task: Task = { id: input.id, goal: `Change ${input.id}`, contributor: input.agent ? { id: `agent-${input.id}`, name: "FlareGit agent", type: "agent" } : { id: "owner", name: "Owner", type: "human" }, baseCommit: input.base ?? state.acceptedState.currentCommit, currentCommit: input.commit, status: "ready", allowedScope: ["src/"], requirements, workspace: { repoName: `ws-${input.id}`, remote: "https://fixture.invalid", branch: `task/${input.id}` }, checkpoints: [], createdAt: stamp, updatedAt: stamp, ...(input.dependsOn ? { dependsOn: input.dependsOn } : {}) };
@@ -88,6 +89,30 @@ export class CoordinationFixture extends RepositoryController {
         }
         case "/alarm-at": return Response.json({ alarm: await this.ctx.storage.getAlarm() });
         case "/comments": return Response.json(await this.listComments(`change:${url.searchParams.get("task")}`));
+        case "/set-candidate-commit": {
+          const input = await body<{ holder: string; commit: string }>();
+          await this.write((state) => {
+            const candidate = Object.values(state.candidates).find((value) => value.workflowInstanceId === input.holder);
+            if (!candidate) throw new Error("No candidate for this landing");
+            candidate.candidateCommit = input.commit;
+            candidate.status = "verified";
+          });
+          return Response.json({ updated: true });
+        }
+        case "/abort": {
+          // The workflow's response to a blocked candidate: it fails and the landing lease is released.
+          const input = await body<{ holder: string; reason: string }>();
+          const candidate = Object.values((await this.getState()).candidates).find((value) => value.workflowInstanceId === input.holder);
+          if (!candidate) throw new Error("No candidate for this landing");
+          await this.abortPublish(candidate.id, undefined, input.reason, "failed");
+          return Response.json({ aborted: true });
+        }
+        case "/review": {
+          const input = await body<{ holder: string; approved: boolean }>();
+          const candidate = Object.values((await this.getState()).candidates).find((value) => value.workflowInstanceId === input.holder);
+          if (!candidate?.candidateCommit) throw new Error("No candidate for this landing");
+          return Response.json(await this.recordReview(candidate.id, { approved: input.approved, actor: actor("owner") }, candidate.candidateCommit));
+        }
         case "/state": return Response.json(await this.getState());
         default: return new Response("Missing fixture route", { status: 404 });
       }
@@ -161,6 +186,19 @@ export default {
         const commands: string[] = [];
         const result = await proveRecordedContradiction(runtimeDouble(commands), stub, decisionId);
         return Response.json({ result, probes: commands.filter((command) => command.includes("probe-cli.ts")).length });
+      }
+      if (url.pathname === "/gate") {
+        // Stands in for the compose step of the integration workflow, then runs the production requirement gate.
+        const { holder, commit } = (await request.json()) as { holder: string; commit: string };
+        await stub.fetch(new Request(`http://test/set-candidate-commit?name=${name}`, { method: "POST", body: JSON.stringify({ holder, commit }) }));
+        const state = await stub.getState();
+        const candidate = Object.values(state.candidates).find((value) => value.workflowInstanceId === holder)!;
+        const examples = await stub.requirementGatePlan(candidate.id);
+        const commands: string[] = [];
+        const shell = await runtimeDouble(commands).shell("requirement-gate");
+        const checks = await runRequirementGate((command) => shell.exec(command), { platformDir: "/opt/flaregit", repoDir: "/workspace/candidate", commit, examples });
+        const failure = await stub.recordRequirementChecks(candidate.id, commit, checks);
+        return Response.json({ failure, checks, probes: commands.length });
       }
       if (url.pathname === "/dispatch-revisions") {
         const { decisionId } = (await request.json()) as { decisionId: string };

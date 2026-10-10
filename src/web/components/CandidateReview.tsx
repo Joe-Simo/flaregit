@@ -15,6 +15,7 @@ import { apiJson,apiSessionIdentity } from "../api";
 import {readReviewDraft,saveReviewDraft,clearReviewDraft,type ReviewDraftScope,type OwnerDraftIntent} from "../review-draft-recovery";
 import { useVisiblePolling } from "../use-visible-polling";
 import { ExternalCheckRows, type ExternalCheckDetail } from "./ExternalCheckRows";
+import { RequirementCheckRows, requirementChecksBlock } from "./RequirementCheckRows";
 import { VERIFIER_IDENTITIES } from "@/core/verification-identities";
 import { externalCheckGate, type ExternalCheckState } from "@/core/external-checks";
 import { blocksExternalAcceptance } from "../review-gate";
@@ -129,7 +130,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks,journal,
   const checkGate = checks ? externalCheckGate(checks) : declaredRequiredChecks ? "pending" : "passed";
   const protectedRepairs=candidate.repairAttempts.flatMap(repair=>repair.protectedRepair?[repair.protectedRepair]:[]);
   const repairAcceptancePending=protectedRepairs.length>0&&(protectedRepairs.some(repair=>repair.status!=="applied"||!validRepairCommit(repair.sourceCommit)||!validRepairCommit(repair.resultCommit))||protectedRepairs.at(-1)?.resultCommit!==candidate.candidateCommit);
-  const acceptanceBlocked = repairAcceptancePending || targetInvalid || recoveredTargetMismatch || !delegatedKnown || rerunReserved || candidate.preservationProtocolVersion !== 1 || !reviewReady || !candidate.candidateCommit || blocksExternalAcceptance({ required: declaredRequiredChecks, known: checksKnown, readFailed: checkError !== null, identityMismatch: Boolean(identityMismatch), gate: checkGate, retryingRequired });
+  const acceptanceBlocked = requirementChecksBlock(candidate) || repairAcceptancePending || targetInvalid || recoveredTargetMismatch || !delegatedKnown || rerunReserved || candidate.preservationProtocolVersion !== 1 || !reviewReady || !candidate.candidateCommit || blocksExternalAcceptance({ required: declaredRequiredChecks, known: checksKnown, readFailed: checkError !== null, identityMismatch: Boolean(identityMismatch), gate: checkGate, retryingRequired });
   const retryCheck = isOwner ? async (checkId: string) => {
     const sequence = ++requestSequence.current;
     retryInFlight.current = true; setRetryingCheck(true); setRetryingRequired(checks?.frozen.policy.checks.find((check) => check.id === checkId)?.required ?? declaredRequiredChecks);
@@ -218,6 +219,7 @@ export function CandidateReview({ projectId, candidate, evidence, tasks,journal,
         {candidate.repairAttempts.map((repair,index)=><CandidateRepairRecord key={`${repair.round}-${index}`} repair={repair}/>)}
       </section>}
       {repairHold}
+      <RequirementCheckRows candidate={candidate} />
       {connectedRows}
       {delegatedRows}
       <LegacyCandidateRerun projectId={projectId} candidate={candidate} isOwner={isOwner} onDone={onDone} onReserved={setRerunReserved} />

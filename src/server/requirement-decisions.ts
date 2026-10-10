@@ -3,6 +3,7 @@ import { contradictionProofPlan, contradictionProofSchema, evaluateContradiction
 import type { FlareGitProjectState, ProductDecision, Requirement, Task } from "../core/types.js";
 import type { CoordinationRuntime } from "./coordination-runtime.js";
 import { gitAuthEnv, q } from "./shell.js";
+import { replacedBy, type DecidedRequirements } from "../core/decision/requirement-gate.js";
 
 /**
  * Requirement contradictions end to end: the platform runs both sides' code on the disputed input,
@@ -38,6 +39,20 @@ export class RequirementDecisionLedger {
   constructor(private readonly storage: DurableObjectStorage) {
     storage.sql.exec("CREATE TABLE IF NOT EXISTS requirement_decision_proofs(decision_id TEXT PRIMARY KEY,doc TEXT NOT NULL)");
     storage.sql.exec("CREATE TABLE IF NOT EXISTS requirement_decision_revisions(decision_id TEXT NOT NULL,task_id TEXT NOT NULL,doc TEXT NOT NULL,PRIMARY KEY(decision_id,task_id))");
+    storage.sql.exec("CREATE TABLE IF NOT EXISTS repository_requirements(requirement_id TEXT PRIMARY KEY,status TEXT NOT NULL CHECK(status IN ('active','superseded')),decision_id TEXT NOT NULL,doc TEXT)");
+  }
+  /**
+   * Records a decision's outcome for the whole repository: the winner becomes an active requirement every
+   * later candidate must satisfy and the loser is superseded. The first record per requirement is kept.
+   */
+  decide(decisionId: string, winner: Requirement, loserId: string): void {
+    this.storage.sql.exec("INSERT INTO repository_requirements VALUES(?,?,?,?) ON CONFLICT(requirement_id) DO NOTHING", loserId, "superseded", decisionId, null);
+    this.storage.sql.exec("INSERT INTO repository_requirements VALUES(?,?,?,?) ON CONFLICT(requirement_id) DO NOTHING", winner.id, "active", decisionId, JSON.stringify({ ...winner, status: "approved" }));
+  }
+  decided(): DecidedRequirements {
+    const rows = this.storage.sql.exec<{ requirement_id: string; status: string; doc: string | null }>("SELECT requirement_id,status,doc FROM repository_requirements ORDER BY rowid").toArray();
+    const supersededIds = rows.filter((row) => row.status === "superseded").map((row) => row.requirement_id);
+    return { active: rows.filter((row) => row.status === "active" && row.doc && !supersededIds.includes(row.requirement_id)).map((row) => JSON.parse(row.doc!) as Requirement), supersededIds };
   }
   proof(decisionId: string): ContradictionProof | null {
     const row = this.storage.sql.exec<{ doc: string }>("SELECT doc FROM requirement_decision_proofs WHERE decision_id=?", decisionId).toArray()[0];
@@ -182,22 +197,54 @@ export async function revisionWorkflowId(projectId: string, decisionId: string, 
   return `rev-${projectId}-${(await digest(`${decisionId}\n${taskId}`)).slice(0, 32)}`;
 }
 
+/** The decision's winning and losing requirements, read from its frozen scope first. */
+function decisionSides(state: FlareGitProjectState, decision: ProductDecision): { winner: Requirement; loserId: string; loser: Requirement | null } {
+  if (decision.status !== "resolved" || !decision.selectedOptionId) throw new Error("This decision has not been resolved");
+  const winnerId = decision.selectedOptionId, loserId = decision.conflictingRequirementIds.find((id) => id !== winnerId)!;
+  const find = (id: string) => decision.scope?.conflictingRequirements.find((requirement) => requirement.id === id) ?? Object.values(state.tasks).flatMap((task) => task.requirements).find((requirement) => requirement.id === id) ?? null;
+  const winner = find(winnerId);
+  if (!winner) throw new Error("The winning requirement is unavailable");
+  return { winner, loserId, loser: find(loserId) };
+}
+
+/** True when a requirement on a change is the decision's loser, or demands a different result than the winner for the same code and input. */
+function carriesLoser(requirement: Requirement, winner: Requirement, loserId: string): boolean {
+  return requirement.id !== winner.id && (requirement.id === loserId || replacedBy(requirement, winner));
+}
+
 /**
- * After a resolved decision: every change that carried the losing requirement gets the winning requirement
- * attached (approved, so the agent prompt and verification include it). Agent changes are planned for a
- * re-run; human changes are flagged for their author. Calling it again returns the saved plan unchanged.
+ * Every change a resolved decision affects: the changes that took part in it and every other open change
+ * that still carries the losing requirement.
+ */
+export function decisionAffectedTaskIds(state: FlareGitProjectState, decisionId: string): string[] {
+  const decision = state.decisions[decisionId];
+  if (!decision) throw new Error("This decision has not been resolved");
+  const { winner, loserId } = decisionSides(state, decision);
+  const resolved = new Set(decision.resolvedTaskIds ?? []);
+  return Object.values(state.tasks)
+    // A change waiting on its own pending decision keeps it: the owner answers that one explicitly.
+    .filter((task) => resolved.has(task.id) || (!["accepted", "cancelled", "needs_decision"].includes(task.status) && task.requirements.some((requirement) => requirement.status === "approved" && carriesLoser(requirement, winner, loserId))))
+    .map((task) => task.id)
+    .sort();
+}
+
+/**
+ * After a resolved decision: the winner becomes a repository requirement, and every open change that carried
+ * the losing requirement has it superseded and the winning requirement attached (approved, so the agent prompt
+ * and verification include it). Agent changes are planned for a re-run; human changes are flagged for their
+ * author. Calling it again returns the saved plan unchanged.
  */
 export function planLosingRevisions(ledger: RequirementDecisionLedger, state: FlareGitProjectState, decisionId: string, workflowIds: Record<string, string>, now = new Date()): RequirementRevision[] {
   const decision = state.decisions[decisionId];
   if (!decision || decision.status !== "resolved" || !decision.selectedOptionId) throw new Error("This decision has not been resolved");
-  const winnerId = decision.selectedOptionId, loserId = decision.conflictingRequirementIds.find((id) => id !== winnerId)!;
-  const winner = Object.values(state.tasks).flatMap((task) => task.requirements).find((requirement) => requirement.id === winnerId) ?? decision.scope?.conflictingRequirements.find((requirement) => requirement.id === winnerId);
-  if (!winner) throw new Error("The winning requirement is unavailable");
-  const losers = (decision.resolvedTaskIds ?? []).map((id) => state.tasks[id]).filter((task): task is Task => Boolean(task && task.requirements.some((requirement) => requirement.id === loserId)));
+  const { winner, loserId } = decisionSides(state, decision);
+  ledger.decide(decisionId, winner, loserId);
+  const affected = decisionAffectedTaskIds(state, decisionId).map((id) => state.tasks[id]).filter((task): task is Task => Boolean(task && task.requirements.some((requirement) => carriesLoser(requirement, winner, loserId))));
   const planned: RequirementRevision[] = [];
-  for (const task of losers) {
+  for (const task of affected) {
     const saved = ledger.revision(decisionId, task.id);
     if (saved) { planned.push(saved); continue; }
+    for (const requirement of task.requirements) if (requirement.status === "approved" && carriesLoser(requirement, winner, loserId)) requirement.status = "superseded";
     if (!task.requirements.some((requirement) => requirement.id === winner.id)) task.requirements.push({ ...structuredClone(winner), status: "approved" });
     const workflowId = workflowIds[task.id];
     if (!workflowId) throw new Error("Revision workflow identity is unavailable");

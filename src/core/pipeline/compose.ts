@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { mergeCommitMessage } from "./merge-message.js";
 import * as path from "node:path";
 import { git, gitOrThrow, PLATFORM_IDENTITY } from "./git.js";
 
@@ -27,8 +28,11 @@ export function composeCandidateCommits(opts: {
   commitB: string;
   labelA: string;
   labelB: string;
+  /** Plain goals for the merge commit subjects; the labels are used when absent. */
+  goalA?: string;
+  goalB?: string;
 }): ComposeResult {
-  const { repoDir, candidateId, acceptedBase, commitA, commitB, labelA, labelB } = opts;
+  const { repoDir, candidateId, acceptedBase, commitA, commitB, labelA, labelB, goalA, goalB } = opts;
   const mergeBranch = `candidate/${candidateId}`;
 
   git(repoDir, ["merge", "--abort"]);
@@ -36,16 +40,16 @@ export function composeCandidateCommits(opts: {
   gitOrThrow(repoDir, ["clean", "-fdq"]);
   gitOrThrow(repoDir, ["checkout", "--quiet", "-B", mergeBranch, acceptedBase]);
 
-  for (const [commit, label] of [
-    [commitA, labelA],
-    [commitB, labelB],
+  for (const [commit, label, goal] of [
+    [commitA, labelA, goalA],
+    [commitB, labelB, goalB],
   ] as const) {
     const merged = git(repoDir, [
       ...PLATFORM_IDENTITY,
       "merge",
       "--no-ff",
       "-m",
-      `FlareGit candidate ${candidateId}: integrate ${label} (${commit.slice(0, 7)})`,
+      mergeCommitMessage({ goal: goal ?? label, candidateId, taskId: label, commit }),
       commit,
     ]);
     if (!merged.ok) {

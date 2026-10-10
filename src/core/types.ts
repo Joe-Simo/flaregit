@@ -51,6 +51,27 @@ export interface Requirement {
   policyPatch?: Record<string, unknown>;
 }
 
+/** One runnable requirement example (probe on an input) executed against a candidate commit. */
+export interface RequirementCheck {
+  requirementId: string;
+  requirementTitle: string;
+  assertionId: string;
+  /** Chosen in a product decision, so it holds for the whole repository. */
+  decided: boolean;
+  input: Record<string, unknown>;
+  expected: unknown;
+  actual?: unknown;
+  error?: string;
+  passed: boolean;
+  /** Plain explanation shown to reviewers; set when the check failed. */
+  reason?: string;
+}
+export interface RequirementCheckRun {
+  commit: string;
+  checkedAt: string;
+  checks: RequirementCheck[];
+}
+
 export interface Checkpoint {
   id: string;
   commitHash: string;
@@ -158,6 +179,8 @@ export interface CandidateGeneration {
   frozenAcceptancePolicy?: AcceptancePolicy;
   policyAuthorization?: AutoAcceptanceAuthority;
   review?: { approved: boolean; by: string; note?: string; at: string; commit: string; actor?: HumanDecisionActor;acceptancePolicyVersion?:number };
+  /** Runnable requirement examples executed against the exact candidate commit; any failure blocks acceptance. */
+  requirementChecks?: RequirementCheckRun;
   createdAt: string;
   updatedAt: string;
 }
