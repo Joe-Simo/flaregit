@@ -42,3 +42,6 @@ Still to capture: contradiction decision end to end, rebase after merge, merge q
 | `signed-in/07-merge-queue-three.jpg` | Three changes queued in order (#1 group discount landing, #2 revised price guarantee, #3 older price guarantee) |
 | `signed-in/07-queue-landed-then-stale-refused.jpg` | After the owner approved #1 it merged (main `1cf967e` → `55f0fac`); the next changes were built on the old base, so the queue refused them as stale ("Being revised · Waiting for the change to be updated and marked ready") and kept their places |
 | same screenshot | Prepaid credits enforced: the re-run was refused with "Your credit balance ($0.00) doesn't cover this run ($0.66 is held until it finishes…)" once the 10 free daily runs were used |
+| `signed-in/07-three-landed-in-order.jpg` | Three changes landed one at a time in order: `1cf967e` → `55f0fac` → `b25ed14` |
+
+**Defect found in this run (being fixed):** `b25ed14` was an older change that still carried the losing "Price guarantee" requirement; it passed the repository's own tests and was approved, reverting the decided Group discount (`src/pricing.ts` sets `discountAmount = 0`). The decision updated only the change that took part in it, and merges do not yet check decided requirements. Not to be shown as correct behaviour until fixed and re-run.
