@@ -1,0 +1,5 @@
+Production repository demo-run (p58716ae3201e), src/pricing.ts at merged commit 39f982a, read on flaregit.com Oct 10 2026.
+Line 19: const discountAmount = ticketCount >= 4 ? ticketTotal * 0.15 : 0;   (decided "Group discount" kept: 4 × $40 → $136)
+Lines 42-46: price-guarantee receipt line added by the revised agent without removing the discount.
+Merge commit subject: "Guarantee the advertised price in calculateQuote (src/pricing.ts): ..." (plain change goal, no internal ids).
+Landing order: 6d80551 (group discount) → 39f982a (revised price guarantee).

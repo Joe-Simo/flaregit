@@ -52,20 +52,47 @@ export function parseAgentResponse(output: string): AgentResponse {
   const plan = section(text, "plan").split("\n").map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim()).filter(Boolean).slice(0, 12).map((line) => line.slice(0, 300));
   const reasoning = section(text, "reasoning").slice(0, 1200);
   const edits: AgentEdit[] = [];
-  const seen = new Set<string>();
   for (const match of text.matchAll(BLOCK)) {
     const [, kind, path, body] = match as unknown as [string, "edit" | "create", string, string];
-    if (seen.has(path)) throw new Error(`The answer edits ${path} more than once; combine its changes into one block`);
-    seen.add(path);
+    const earlier = edits.find((edit) => edit.path === path);
+    // Models often split one file's changes into several edit blocks; apply them in order as one edit.
+    if (earlier && (kind === "create" || earlier.kind === "create")) throw new Error(`The answer both creates and changes ${path}; send one block for a new file`);
     if (kind === "create") { edits.push({ kind: "create", path, content: body }); continue; }
     const replacements = [...body.matchAll(PAIR)].map((pair) => ({ search: pair[1]!, replace: pair[2] ?? "" }));
     if (!replacements.length) throw new Error(`The edit for ${path} has no <search>/<replace> pair`);
+    if (earlier?.kind === "replace") { earlier.replacements.push(...replacements); continue; }
     edits.push({ kind: "replace", path, replacements });
   }
   return agentResponseSchema.parse({ plan, reasoning, edits });
 }
 
-export class EditRejectedError extends Error {}
+/** A refused edit. `mismatch` carries the file, its content at that point and the search text when a search block did not match. */
+export class EditRejectedError extends Error {
+  constructor(message: string, readonly mismatch?: { path: string; content: string; search: string }) { super(message); }
+}
+
+/** Largest excerpt of a file's current content returned after a search block fails to match. */
+export const MISMATCH_EXCERPT_CHARS = 4000;
+
+/**
+ * The exact current text a failed search block was meant to match: the whole file when it is small,
+ * otherwise whole lines around the closest match of the search block's lines, within the bound.
+ */
+export function currentRegion(content: string, search: string, limit = MISMATCH_EXCERPT_CHARS): { text: string; whole: boolean } {
+  if (content.length <= limit) return { text: content, whole: true };
+  const lines = content.split("\n");
+  const wanted = search.split("\n").map((line) => line.trim()).filter((line) => line.length > 2);
+  const score = (line: string) => wanted.reduce((best, target) => line.trim() === target ? Math.max(best, 2) : line.includes(target.slice(0, 40)) ? Math.max(best, 1) : best, 0);
+  let anchor = 0, top = -1;
+  lines.forEach((line, index) => { const value = score(line); if (value > top) { top = value; anchor = index; } });
+  let from = anchor, to = anchor + 1, size = Math.min(lines[anchor]!.length + 1, limit);
+  for (let grew = true; grew;) {
+    grew = false;
+    if (to < lines.length && size + lines[to]!.length + 1 <= limit) { size += lines[to]!.length + 1; to++; grew = true; }
+    if (from > 0 && size + lines[from - 1]!.length + 1 <= limit) { from--; size += lines[from]!.length + 1; grew = true; }
+  }
+  return { text: lines.slice(from, to).join("\n").slice(0, limit), whole: false };
+}
 
 const occurrences = (haystack: string, needle: string) => {
   let count = 0;
@@ -91,7 +118,7 @@ export function applyAgentEdits(current: Readonly<Record<string, string>>, edits
       after = before;
       for (const { search, replace } of edit.replacements) {
         const found = occurrences(after, search);
-        if (found === 0) throw new EditRejectedError(`A search block for ${edit.path} does not match the current file exactly`);
+        if (found === 0) throw new EditRejectedError(`A search block for ${edit.path} does not match the current file exactly`, { path: edit.path, content: before, search });
         if (found > 1) throw new EditRejectedError(`A search block for ${edit.path} matches more than once; include more surrounding lines`);
         after = after.replace(search, () => replace);
       }

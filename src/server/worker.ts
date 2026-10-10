@@ -48,6 +48,7 @@ import {LegacyRerunError} from "./legacy-candidate-rerun.js";
 export {FlareGitRebaseResumeWorkflow} from "./rebase-resume-workflow.js";
 import { openRepositoryRead, RepositoryReadError } from "./repository-read-budget.js";
 import {taskCreationInputSchema} from "./task-creation.js";
+import {pathInScope,requirementsFromDrafts} from "../core/requirement-drafts.js";
 import {storageReconciliationReport,type StorageReconciliationSnapshot} from "./storage-reconciliation-report.js";
 import {createHash} from "node:crypto";
 import type {PreviewGenerationRecord} from "./preview-generations.js";
@@ -72,7 +73,7 @@ import { recoverNativeCompute, claimNativeCompute, admitNativeCompute, NativeCom
 import { allocateArtifact } from "./storage-allocation.js";
 import { gitRemote, gitParentTokenHash } from "./git-gateway-handler.js";
 import { scenarioAgentRunIds } from "./scenario-workflow.js";
-import { reserveManagedAgents } from "./projects.js";
+import { cancelManagedRuns, dailyRunLimit, startManagedRuns } from "./projects.js";
 import { coordinationHttp } from "./coordination-http.js";
 import { afterRequirementDecision } from "./coordination-dispatch.js";
 import { searchAccountMetadata } from "./metadata-search.js";
@@ -95,7 +96,10 @@ import { buildPrefix, generationBuildPrefix, signPreviewGeneration, signPreview,
 import { lookupRepositoryPreviewOrigin } from "./preview-registry.js";
 import { handlePreviewAsset } from "./preview-broker.js";
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { billingFromEvent, createCheckout, planLimits, reportUsage, verifyPolarWebhook } from "./polar.js";
+import { createCheckout, createCreditCheckout, planLimits } from "./polar.js";
+import { handlePolarWebhook } from "./polar-webhook.js";
+import { publicUsageRates } from "./managed-spend-ledger.js";
+import { autoRechargeSchema } from "./credit-ledger.js";
 import { TICKET_BOOKING_POLICY } from "../fixtures/ticket-booking/policy.js";
 import { DEFAULT_PROTECTED_PATHS, isCommandPolicy,isGitIntegrityPolicy, settingsFor, type CommandPolicy } from "../core/command-policy.js";
 import { currentStatus, runProbes, statusIncidents, statusPage, workflowHealth } from "./status.js";
@@ -162,7 +166,7 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
       if (!ip) return text("Public pricing is unavailable", 503);
       if (!(await env.API_LIMITER.limit({ key: `plan-price:${ip}` })).success) return text("Too many price requests; retry shortly", 429);
     }
-    if (url.pathname === "/plan-price" && request.method === "GET") return Response.json({ price: await readPublicPlanPrice(env), limits: planLimits(env), repositoryLimit: 10, sharedRetainedRepositorySlots: artifactStorageSlots(env.ARTIFACT_STORAGE_GLOBAL_SLOTS) }, { headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
+    if (url.pathname === "/plan-price" && request.method === "GET") return Response.json({ price: await readPublicPlanPrice(env), limits: planLimits(env), usage: { ...publicUsageRates, creditsAvailable: env.PAID_CHECKOUT_ENABLED === "true" && Boolean(env.POLAR_CREDIT_PRODUCT_ID) }, repositoryLimit: 10, sharedRetainedRepositorySlots: artifactStorageSlots(env.ARTIFACT_STORAGE_GLOBAL_SLOTS) }, { headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
     if (url.pathname === "/pricing" && request.method === "GET") {
       const limited = await env.API_LIMITER.limit({ key: `pricing:${request.headers.get("CF-Connecting-IP") ?? "unknown"}` });
       if (!limited.success) return text("Too many requests", 429);
@@ -180,19 +184,7 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
     // The publishable key is public by design; the SPA needs it before the user can sign in.
     if (url.pathname === "/auth-config" && request.method === "GET") return json({ publishableKey: env.CLERK_PUBLISHABLE_KEY ?? null });
 
-    // Polar webhooks cannot log in; the HMAC signature is the authentication.
-    if (url.pathname === "/webhooks/polar" && request.method === "POST") {
-      const body = await request.text();
-      let event: unknown;
-      try {
-        event = await verifyPolarWebhook(body, request.headers, env.POLAR_WEBHOOK_SECRET);
-      } catch {
-        return text("Invalid signature", 401);
-      }
-      const change = billingFromEvent(event, env.POLAR_PRODUCT_ID);
-      if (change) await accountOf(env, change.projectId).setBilling(change.billing);
-      return new Response(null, { status: 202 });
-    }
+    if (url.pathname === "/webhooks/polar" && request.method === "POST") return handlePolarWebhook(request, env);
 
     // The authenticated Worker never serves contributor code. Existing shared links fail closed.
     if (url.pathname.startsWith("/preview/")) {
@@ -976,13 +968,34 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
       if (path === "/billing" && method === "GET") {
         const billing = await account.getBilling();
         const managed = await managedSpendStatus(env, accountKey).catch(() => ({ status: "unavailable" as const }));
-        return json({ ...billing, managed, runsToday: await account.usageToday(), runsPerDay: planLimits(env)[billing.plan], checkoutConfigured: env.PAID_CHECKOUT_ENABLED === "true" && Boolean(env.POLAR_PRODUCT_ID && env.POLAR_ACCESS_TOKEN) });
+        const limits = planLimits(env);
+        return json({ ...billing, managed, runsToday: await account.usageToday(), runsPerDay: limits[billing.plan], freeRunsPerDay: limits.free, credits: await account.creditSummary(), creditsConfigured: env.PAID_CHECKOUT_ENABLED === "true" && Boolean(env.POLAR_CREDIT_PRODUCT_ID && env.POLAR_ACCESS_TOKEN), checkoutConfigured: env.PAID_CHECKOUT_ENABLED === "true" && Boolean(env.POLAR_PRODUCT_ID && env.POLAR_ACCESS_TOKEN) });
+      }
+      // Billing changes are account administration: an account session, never a scoped or repository token.
+      if (path.startsWith("/billing/") && method !== "GET") {
+        if (auth.viaToken) return text("Billing changes require signing in to your account", 403);
+        if ((path === "/billing/credits/checkout" || path === "/billing/checkout") && !(await env.API_LIMITER.limit({ key: `billing-checkout:${accountKey}` })).success) return text("Too many checkout attempts; wait a minute and try again", 429);
+      }
+      if (path === "/billing/credits/checkout" && method === "POST") {
+        if (env.PAID_CHECKOUT_ENABLED !== "true" || !env.POLAR_CREDIT_PRODUCT_ID) return text("Buying credits isn't available yet. Free daily agent runs still work.", 503);
+        const b = await body<{ amountCents?: unknown }>();
+        if (typeof b.amountCents !== "number" || !Number.isSafeInteger(b.amountCents) || b.amountCents < 100 || b.amountCents > 1_000_000) return text("Choose an amount between $1 and $10,000", 400);
+        return json({ url: await createCreditCheckout(env, { accountKey, email: auth.email ?? "", amountCents: b.amountCents, successUrl: `${url.origin}/?checkout=credits` }) });
+      }
+      if (path === "/billing/auto-recharge" && method === "PUT") {
+        const parsed = autoRechargeSchema.safeParse(await body<unknown>());
+        if (!parsed.success) return text("Auto-recharge needs on/off, a threshold from $0 to $1,000 and a top-up from $1 to $10,000", 400);
+        return json(await account.setAutoRecharge(parsed.data));
+      }
+      if (path === "/billing/recharge-prompt" && method === "DELETE") {
+        await account.dismissRechargePrompt();
+        return json({ ok: true });
       }
       if (path === "/billing/checkout" && method === "POST") {
         if (env.PAID_CHECKOUT_ENABLED !== "true") return text("Paid plans are still being validated. Free collaboration remains available.", 503);
         const price = await readPublicPlanPrice(env);
         if (price.status !== "known" || price.environment !== "production") return text("The paid price could not be confirmed. Checkout is unavailable; free collaboration remains available.", 503);
-        return json({ url: await createCheckout(env, { projectId: accountKey, email: auth.email ?? "", successUrl: `${url.origin}/?checkout=success` }) });
+        return json({ url: await createCheckout(env, { accountKey, email: auth.email ?? "", successUrl: `${url.origin}/?checkout=success` }) });
       }
 
       // ----- personal API tokens (Clerk session only: a token cannot mint or list tokens) -----
@@ -1498,7 +1511,7 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
             else if(!input.predecessorId&&input.expectedGeneration!==undefined&&input.expectedGeneration!==attempt.generation&&input.expectedGeneration+1!==attempt.generation)return text("Inspection attempt changed; refresh before resuming",409);
             const withinDeliveryWindow=Date.now()<=Date.parse(attempt.deliveryUntil);
             if(attempt.dispatch==="saved"||(attempt.dispatch==="unknown"&&!attempt.terminal&&withinDeliveryWindow)){
-              const {plan}=await account.getBilling();const denied=await admitRun(env,account,planLimits(env)[plan],attempt.workflowId);if(denied)return denied;
+              const {plan}=await account.getBilling();const denied=await admitRun(env,account,dailyRunLimit(env,accountKey,plan),attempt.workflowId);if(denied)return denied;
               if(!await authorizeHistoryOwner())return text("Import inspection owner access changed",403);
               await project.markHistoryInspectionDispatch(operation.instanceId,attempt.generation);
               try{await env.IMPORT_HISTORY_WORKFLOW.createBatch([{id:attempt.workflowId,params:{accountKey,projectId,expectedHead:operation.head,operationId:operation.instanceId,attemptGeneration:attempt.generation},retention:{successRetention:"3 days",errorRetention:"3 days"}}]);workflowStatus="delivery-confirmed";}catch{workflowStatus="unavailable";}
@@ -1915,13 +1928,13 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
 
         // ----- changes (tasks) -----
         if (sub === "/tasks" && method === "POST") {
-          const b = await body<{ taskId?: string; goal?: string; name?: string; dependsOn?: string; issue?: number;expectedTarget?:unknown;externalTool?:unknown;browserEdit?:boolean }>();
+          const b = await body<{ taskId?: string; goal?: string; name?: string; dependsOn?: string; issue?: number;expectedTarget?:unknown;externalTool?:unknown;browserEdit?:boolean;requirements?:unknown }>();
           const goal = clean(b.goal, 300);
           if (!b.taskId || !TASK_ID.test(b.taskId) || !goal) return text("taskId (3-101 chars: a-z, 0-9, -) and goal are required", 400);
-          if(Object.keys(b).some(key=>!["taskId","goal","name","dependsOn","issue","expectedTarget","externalTool","browserEdit"].includes(key)))return text("Invalid change creation input",400);
+          if(Object.keys(b).some(key=>!["taskId","goal","name","dependsOn","issue","expectedTarget","externalTool","browserEdit","requirements"].includes(key)))return text("Invalid change creation input",400);
           if(b.browserEdit!==undefined&&typeof b.browserEdit!=="boolean")return text("Invalid browser contribution mode",400);
-          const input=taskCreationInputSchema.safeParse({goal,dependsOn:b.dependsOn??null,issue:b.issue??null,...(b.expectedTarget!==undefined?{expectedTarget:b.expectedTarget}:{}),...(b.externalTool!==undefined?{externalTool:b.externalTool}:{})});
-          if(!input.success)return text("Invalid change goal, dependency or issue",400);
+          const input=taskCreationInputSchema.safeParse({goal,dependsOn:b.dependsOn??null,issue:b.issue??null,...(b.expectedTarget!==undefined?{expectedTarget:b.expectedTarget}:{}),...(b.externalTool!==undefined?{externalTool:b.externalTool}:{}),...(b.requirements!==undefined&&!(Array.isArray(b.requirements)&&b.requirements.length===0)?{requirements:b.requirements}:{})});
+          if(!input.success)return text(input.error.issues.some(issue=>issue.path[0]==="requirements")?"Invalid requirements: each needs a title and statement; an example needs a repo file path, an exported function name and JSON input and output":"Invalid change goal, dependency or issue",400);
           const requestedTarget=input.data.expectedTarget?{acceptedTargetRef:input.data.expectedTarget.ref}:undefined;
           let creationCredential={viaToken:auth.viaToken===true,...(auth.viaToken?{credentialHash:await gitParentTokenHash(request)}:{sessionExpiresAt:auth.expiresAt})};
           let replay;
@@ -1941,6 +1954,7 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
           if (input.data.issue !== null && !(await project.getIssue(input.data.issue))) return text("Unknown issue", 400);
           const parent = b.dependsOn ? state.tasks[b.dependsOn] : undefined;
           if (b.dependsOn && (!parent || parent.status === "cancelled")) return text("dependsOn must name an existing, uncancelled change", 400);
+          if(input.data.requirements?.some(requirement=>requirement.example&&!pathInScope(settings.allowedScope,requirement.example.module)))return text("A requirement example names a file outside this repository's allowed scope",400);
           let intent:Awaited<ReturnType<typeof project.prepareTaskCreationIntent>>;
           try{intent=await project.prepareTaskCreationIntent(b.taskId,userId,input.data,creationCredential);}catch{return text("The accepted creation target or original request changed; inspect the saved change before creating work",409);}
           const selection=intent.selection;
@@ -1987,7 +2001,7 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
             ...(input.data.issue !== null ? { issue: input.data.issue } : {}),
             allowedScope: creationSettings.allowedScope,
             status: "working",
-            requirements: [],
+            requirements: requirementsFromDrafts(b.taskId, input.data.requirements ?? [], now),
             workspace: { repoName, remote: fork.remote, branch: `task/${b.taskId}` },
             checkpoints: [],
             currentCommit: selection.baseCommit,
@@ -2135,14 +2149,13 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
             } catch { return text("Current permissions no longer allow this saved proposal; its files remain available for review", 409); }
             resumeFrom = previous.runId;
           }
-          const { plan } = await account.getBilling();
           const instanceId = `agent-${projectId}-${task.id}-${crypto.randomUUID()}`;
-          const spendDenied = await reserveManagedAgents(env, accountKey, [instanceId]);
-          if (spendDenied) return spendDenied;
-          const denied = await admitRun(env, account, planLimits(env)[plan], instanceId);
-          if (denied) { await globalOf(env).cancelUnstartedManagedSpend([instanceId], accountKey); return denied; }
+          const limits = planLimits(env), funded = await startManagedRuns(env, accountKey, [instanceId], { free: limits.free, paid: limits.pro });
+          if (funded instanceof Response) return funded;
+          const denied = await admitRun(env, account, funded.dailyLimit, instanceId);
+          if (denied) { await cancelManagedRuns(env, accountKey, [instanceId]); return denied; }
           if (!(await project.beginAgentTask(task.id, instanceId))) {
-            await globalOf(env).cancelUnstartedManagedSpend([instanceId], accountKey);
+            await cancelManagedRuns(env, accountKey, [instanceId]);
             return text("This change already has active agent work or cannot start an agent", 409);
           }
           let instance: WorkflowInstance;
@@ -2153,11 +2166,10 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
             await globalOf(env).markManagedDispatchAttempted([instanceId], accountKey);
             instance = await env.AGENT_WORKFLOW.create({ id: instanceId, params: { projectId, accountKey, taskId: task.id, ...(resumeFrom ? { resumeFrom } : {}) } });
           } catch {
-            if (!dispatchAttempted) await globalOf(env).cancelUnstartedManagedSpend([instanceId], accountKey);
+            if (!dispatchAttempted) await cancelManagedRuns(env, accountKey, [instanceId]);
             await project.failAgentTask(task.id, instanceId);
             return text("Change is saved, but the agent could not start. Retry or continue on its saved branch.", 503);
           }
-          ctx.waitUntil(reportUsage(env, accountKey, "agent_run", instance.id, { plan }));
           return json({ instanceId: instance.id }, 202);
         }
 
@@ -2172,9 +2184,9 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
             const parsed=integrationRequestInputSchema.safeParse(b);if(!parsed.success)return text("Exact request key and observed integration inputs are required",400);
             const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true))return text("Integration requester authentication changed",403);
             const actor={userId,displayName:'Integration requester',viaToken:current.viaToken===true},credentialHash=current.viaToken?await gitParentTokenHash(request):undefined;
-            try{const prepared=await project.prepareIntegrationRequest(parsed.data,actor,credentialHash,current.expiresAt);let intent=prepared.intent;if(intent.dispatch!=='observed'){const nativePhase=await project.integrationNativePhaseAdmission(intent.eventId);const denied=nativePhase?null:await admitRun(env,account,planLimits(env)[plan],intent.eventId);if(denied)return denied;intent=await project.markIntegrationRequestDispatch(intent.key,'unknown',actor,credentialHash,current.expiresAt);await env.INTEGRATION_QUEUE.send({type:'integration.requested',projectId,taskIds:intent.input.taskIds,eventId:intent.eventId} satisfies QueueMessage);intent=await project.markIntegrationRequestDispatch(intent.key,'observed',actor,credentialHash,current.expiresAt);}return json({queued:intent.eventId,replayed:prepared.replayed,dispatch:intent.dispatch},202);}catch{return text("Integration request could not be confirmed. Preserve the original key and context; retrying unchanged inputs cannot create another workflow identity.",409);}
+            try{const prepared=await project.prepareIntegrationRequest(parsed.data,actor,credentialHash,current.expiresAt);let intent=prepared.intent;if(intent.dispatch!=='observed'){const nativePhase=await project.integrationNativePhaseAdmission(intent.eventId);const denied=nativePhase?null:await admitRun(env,account,dailyRunLimit(env,accountKey,plan),intent.eventId);if(denied)return denied;intent=await project.markIntegrationRequestDispatch(intent.key,'unknown',actor,credentialHash,current.expiresAt);await env.INTEGRATION_QUEUE.send({type:'integration.requested',projectId,taskIds:intent.input.taskIds,eventId:intent.eventId} satisfies QueueMessage);intent=await project.markIntegrationRequestDispatch(intent.key,'observed',actor,credentialHash,current.expiresAt);}return json({queued:intent.eventId,replayed:prepared.replayed,dispatch:intent.dispatch},202);}catch{return text("Integration request could not be confirmed. Preserve the original key and context; retrying unchanged inputs cannot create another workflow identity.",409);}
           }
-          const denied=await admitRun(env,account,planLimits(env)[plan]);if(denied)return denied;
+          const denied=await admitRun(env,account,dailyRunLimit(env,accountKey,plan));if(denied)return denied;
           const eventId = `integ-${projectId}-${crypto.randomUUID()}`;
           await project.registerWorkflow(eventId, "integration", undefined, userId,1);
           await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds: b.taskIds as string[], eventId } satisfies QueueMessage);
@@ -2233,7 +2245,7 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
               const accountKey=await accountKeyFor(userId);await authorize();
               const verifyHeads=async()=>{const proof=await project.verifyLegacyCandidateGitHeads(attempt.id,actor,credentialHash,currentAuth.expiresAt);if(!proof.ok){const messages={tip_unavailable:"A contributor branch tip is unavailable. Saved inputs were preserved; rerun was not dispatched.",tip_differs:"A contributor branch tip differs from the saved input. Saved inputs were preserved; rerun was not dispatched.",inspection_unavailable:"Exact Git branch inspection is unavailable. Saved inputs were preserved.",cleanup_unconfirmed:"Git inspection credential cleanup is unconfirmed. Saved inputs were preserved."};throw new LegacyRerunError(messages[proof.reason]);}};await verifyHeads();
               await authorize();attempt=await project.stopLegacyCandidateRerun(attempt.id);await authorize();await verifyHeads();
-              const {plan}=await account.getBilling();const denied=await admitRun(env,account,planLimits(env)[plan],attempt.successorWorkflowId);if(denied)return denied;await authorize();
+              const {plan}=await account.getBilling();const denied=await admitRun(env,account,dailyRunLimit(env,accountKey,plan),attempt.successorWorkflowId);if(denied)return denied;await authorize();
               attempt=await project.commitLegacyCandidateRerunReassignment(attempt.id);await authorize();
               await project.registerWorkflow(attempt.successorWorkflowId,"integration",undefined,userId,1);await authorize();
               if(attempt.dispatch==="unknown"&&Date.now()-Date.parse(attempt.createdAt)>=24*60*60_000)return Response.json({error:"Saved dispatch is too old to safely redeliver. Its outcome requires reconciliation."},{status:409});
@@ -2432,19 +2444,17 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
           if (state.kind !== "demo") return text("Scenarios run only on the demo repository", 400);
           const b = await body<{ act?: string }>();
           if (b.act !== "act1" && b.act !== "act2" && b.act !== "act3") return text("act must be act1, act2 or act3", 400);
-          const { plan } = await account.getBilling();
           const runId = crypto.randomUUID();
           const instanceId = `scn-${projectId}-${runId}`;
           const managedRunIds = scenarioAgentRunIds(instanceId, b.act, runId);
-          const spendDenied = await reserveManagedAgents(env, accountKey, managedRunIds);
-          if (spendDenied) return spendDenied;
-          const denied = await admitRun(env, account, planLimits(env)[plan], instanceId);
-          if (denied) { await globalOf(env).cancelUnstartedManagedSpend(managedRunIds, accountKey); return denied; }
+          const limits = planLimits(env), funded = await startManagedRuns(env, accountKey, managedRunIds, { free: limits.free, paid: limits.pro });
+          if (funded instanceof Response) return funded;
+          const denied = await admitRun(env, account, funded.dailyLimit, instanceId);
+          if (denied) { await cancelManagedRuns(env, accountKey, managedRunIds); return denied; }
           try { await project.registerWorkflow(instanceId, "scenario", undefined, userId); }
-          catch { await globalOf(env).cancelUnstartedManagedSpend(managedRunIds, accountKey); return text("Scenario could not be registered; no managed execution was dispatched", 503); }
+          catch { await cancelManagedRuns(env, accountKey, managedRunIds); return text("Scenario could not be registered; no managed execution was dispatched", 503); }
           await globalOf(env).markManagedDispatchAttempted(managedRunIds, accountKey);
           const instance = await env.SCENARIO_WORKFLOW.create({ id: instanceId, params: { projectId, accountKey, act: b.act, runId } });
-          ctx.waitUntil(reportUsage(env, accountKey, "scenario_run", `${projectId}-${runId}`, { act: b.act, plan }));
           return json({ instanceId: instance.id }, 202);
         }
 

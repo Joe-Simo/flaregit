@@ -1,5 +1,7 @@
 import { z } from "zod";
-import { applyAgentEdits, EDIT_FORMAT_INSTRUCTIONS, EditRejectedError, parseAgentResponse } from "../agents/edit-format.js";
+import { requirementPromptLine } from "../core/requirement-drafts.js";
+import type { Requirement } from "../core/types.js";
+import { applyAgentEdits, currentRegion, EDIT_FORMAT_INSTRUCTIONS, EditRejectedError, MISMATCH_EXCERPT_CHARS, parseAgentResponse } from "../agents/edit-format.js";
 import { redactSecrets } from "../agents/prompt.js";
 
 /** Rounds used when AGENT_MAX_ROUNDS is unset, and the hard ceiling for any configuration. */
@@ -34,6 +36,8 @@ export const agentRoundRecordSchema = z.object({
   filesChanged: z.array(z.string().min(1).max(500)).max(100),
   edits: z.enum(["applied", "rejected", "none"]),
   tests: testReportSchema,
+  /** When a search block did not match: the exact current content of that file (whole when small, else the region around the closest match). */
+  mismatch: z.object({ path: z.string().min(1).max(500), whole: z.boolean(), current: z.string().max(MISMATCH_EXCERPT_CHARS) }).strict().optional(),
 }).strict();
 export const agentExplanationSchema = z.object({
   goal: z.string().max(1000),
@@ -78,24 +82,26 @@ export function failureSummary(output: string, timedOut = false): string {
   return text.length > SUMMARY_CHARS ? `…${text.slice(-(SUMMARY_CHARS - 1))}` : text;
 }
 
-export interface RoundPromptTask { goal: string; requirements: ReadonlyArray<{ title: string; description: string }>; allowedScope: readonly string[] }
+export interface RoundPromptTask { goal: string; requirements: ReadonlyArray<{ title: string; description: string; status?: Requirement["status"]; assertions?: Requirement["assertions"] }>; allowedScope: readonly string[] }
 
 /** Prompt for one round. Earlier rounds' results are fed back so the model revises instead of restarting. */
 export function buildRoundPrompt(task: RoundPromptTask, agentName: string, files: Readonly<Record<string, string>>, input: Pick<AgentRoundInput, "round" | "maxRounds" | "history">, checkCommand?: string, shared?: string): string {
-  const requirements = task.requirements.map((r) => `- ${r.title}: ${r.description}`).join("\n");
+  const requirements = task.requirements.filter((r) => r.status === undefined || r.status === "approved").map(requirementPromptLine).join("\n");
   const feedback = input.history.map((record) => {
     const outcome = record.edits === "rejected" ? "your edits could not be applied" : record.tests.status === "not-run" ? "checks did not run" : `checks ${record.tests.status}${record.tests.passed !== null || record.tests.failed !== null ? ` (${record.tests.passed ?? "?"} passed, ${record.tests.failed ?? "?"} failed)` : ""}`;
-    return `Round ${record.round}: ${outcome}.${record.filesChanged.length ? ` Files changed so far: ${record.filesChanged.join(", ")}.` : ""}\n${record.tests.summary}`;
+    const mismatch = record.mismatch ? `\n${record.mismatch.whole ? `The whole current content of ${record.mismatch.path} is exactly` : `The current content of ${record.mismatch.path} around where your search block should have matched is exactly`}:\n<current-excerpt path="${record.mismatch.path}">\n${record.mismatch.current}\n</current-excerpt>` : "";
+    return `Round ${record.round}: ${outcome}.${record.filesChanged.length ? ` Files changed so far: ${record.filesChanged.join(", ")}.` : ""}\n${record.tests.summary}${mismatch}`;
   }).join("\n\n");
   const context = Object.entries(files).map(([path, content]) => `<current path="${path}">\n${redactSecrets(content)}\n</current>`).join("\n");
   return redactSecrets([
     `You are ${agentName}, a coding agent working in an isolated git workspace. This is round ${input.round} of at most ${input.maxRounds}.`,
     `Task: ${task.goal}`,
     requirements ? `Requirements:\n${requirements}` : "",
-    shared ? `Shared context from the people on this change (issue, review comments, earlier progress):\n${shared}` : "",
+    shared ? `Shared context from the people on this change (issue, review comments, earlier progress). It may quote other versions of files, such as diffs of earlier work; never copy search text from it:\n${shared}` : "",
     `You may only change: ${task.allowedScope.map((x) => (x === "*" ? "any source file" : x)).join(", ")}.`,
     checkCommand ? `After your edits the repository's checks run automatically: ${checkCommand}` : "",
     feedback ? `Results of your earlier rounds (their accepted edits are already applied to the files below). Fix what failed; do not repeat edits that are already present:\n${feedback}` : "",
+    "The <current> files below are the only version your edits are checked against; copy every <search> block from them.",
     "Keep every existing behavior that the task does not change. Do not touch tests, CI, package manifests or verification config. Import every type you use; do not invent exports.",
     "",
     context,
@@ -120,19 +126,25 @@ export interface RoundDependencies {
 
 /** One plan → edit → test round. Policy refusals throw; malformed or stale edits become feedback for the next round. */
 export async function executeAgentRound(input: AgentRoundInput, deps: RoundDependencies): Promise<Extract<AgentRoundStep, { kind: "round" }>> {
-  const prompt = buildRoundPrompt(deps.task, deps.agentName, deps.snapshot, input, deps.checkCommand, deps.shared);
+  // One frozen view: the prompt shows exactly the files the edits are validated against.
+  const shown: Readonly<Record<string, string>> = Object.freeze({ ...deps.snapshot });
+  const prompt = buildRoundPrompt(deps.task, deps.agentName, shown, input, deps.checkCommand, deps.shared);
   const answer = await deps.model(prompt);
-  let files = { ...input.files }, changed: string[] = [], plan: string[] = [], reasoning = "", edits: AgentRoundRecord["edits"] = "none", rejection = "";
+  let files = { ...input.files }, changed: string[] = [], plan: string[] = [], reasoning = "", edits: AgentRoundRecord["edits"] = "none", rejection = "", mismatch: AgentRoundRecord["mismatch"];
   try {
     const parsed = parseAgentResponse(answer);
     plan = parsed.plan.map(redactSecrets); reasoning = redactSecrets(parsed.reasoning);
     deps.assertWrites(parsed.edits.map((edit) => edit.path));
-    const applied = applyAgentEdits(deps.snapshot, parsed.edits);
+    const applied = applyAgentEdits(shown, parsed.edits);
     changed = Object.keys(applied).sort();
     if (changed.length) { files = { ...files, ...applied }; edits = "applied"; }
   } catch (error) {
     if (!(error instanceof EditRejectedError) && !(error instanceof z.ZodError) && !(error instanceof Error && /^The (answer|edit)/.test(error.message))) throw error;
     edits = "rejected"; rejection = redactSecrets(error instanceof z.ZodError ? "The answer did not follow the required edit format" : error.message);
+    if (error instanceof EditRejectedError && error.mismatch) {
+      const region = currentRegion(error.mismatch.content, error.mismatch.search);
+      mismatch = { path: error.mismatch.path, whole: region.whole, current: redactSecrets(region.text).slice(0, MISMATCH_EXCERPT_CHARS) };
+    }
   }
   const last = input.round >= input.maxRounds;
   let tests: TestReport, verification: AgentChangeExplanation["verification"] = "repository-tests", final = last;
@@ -148,7 +160,7 @@ export async function executeAgentRound(input: AgentRoundInput, deps: RoundDepen
       if (tests.status === "passed") final = true;
     }
   }
-  const record = agentRoundRecordSchema.parse({ round: input.round, plan, reasoning, filesChanged: changed, edits, tests });
+  const record = agentRoundRecordSchema.parse({ round: input.round, plan, reasoning, filesChanged: changed, edits, tests, ...(mismatch ? { mismatch } : {}) });
   return { kind: "round", record, files, final, verification };
 }
 

@@ -22,6 +22,8 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ApiError, apiFetch, apiJson, apiSessionIdentity } from "../api";
 import {readIssueDraft,saveIssueDraft,clearIssueDraft,type IssueDraftScope} from "../issue-draft-recovery";
 import {recoverIssueChange,persistIssueChange,type IssueChangeIntent} from "../issue-change-recovery";
+import {RequirementsEditor} from "../components/RequirementsEditor";
+import {draftsFromRows,type RequirementRow} from "../requirement-form";
 import { navigate, timeAgo } from "../router";
 import { changeCreationFollowup, type ChangeCreationResponse } from "../change-creation-followup";
 import { Conversation } from "../components/Conversation";
@@ -45,7 +47,7 @@ function LoadError({ message, onRetry }: { message: string; onRetry: () => void 
   return (
     <div role="alert" className={`${alertCls} flex flex-wrap items-center justify-between gap-2`}>
       <span className="break-words min-w-0">{message}</span>
-      <Button size="sm" variant="outline" onClick={onRetry}>Retry</Button>
+      <Button type="button" size="sm" variant="outline" onClick={onRetry}>Retry</Button>
     </div>
   );
 }
@@ -184,6 +186,7 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
   const creationIntent=useRef<{identity:string;projectId:string;issue:number;payload:IssueChangeIntent} | null>(null);
   const [savedChange,setSavedChange]=useState<string | null>(null);
   const [originalChange,setOriginalChange]=useState<IssueChangeIntent|null>(null);
+  const [requirementRows,setRequirementRows]=useState<RequirementRow[]>([]);
   useEffect(()=>{lifetime.current++;return()=>{lifetime.current++;readSequence.current++;readController.current?.abort();};},[projectId,number]);
   const load = useCallback(async () => {
     const identity=apiSessionIdentity();
@@ -264,11 +267,12 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
       const identity=apiSessionIdentity();
       if(!identity)throw new Error("Sign in again before starting a change.");
       const scope={identity,projectId,issue:number};
+      const requirements=draftsFromRows(requirementRows);
       let payload:IssueChangeIntent;
       try {
         const recovered=recoverIssueChange(sessionStorage,scope);
         const held=creationIntent.current;
-        payload=recovered??(held&&held.identity===identity&&held.projectId===projectId&&held.issue===number?held.payload:{taskId:slug(issue.title)+"-"+crypto.randomUUID().replaceAll("-","").slice(0,12),goal:issue.title,issue:number});
+        payload=recovered??(held&&held.identity===identity&&held.projectId===projectId&&held.issue===number?held.payload:{taskId:slug(issue.title)+"-"+crypto.randomUUID().replaceAll("-","").slice(0,12),goal:issue.title,issue:number,...(requirements?{requirements}:{})});
         persistIssueChange(sessionStorage,scope,payload);
         creationIntent.current={...scope,payload};setOriginalChange(payload);setSavedChange(payload.taskId);
       } catch(cause) {throw new Error(`No change request was sent. Browser recovery must be available. ${errText(cause,"")}`);}
@@ -311,6 +315,7 @@ function IssueView({ projectId, number }: { projectId: string; number: number })
       {savedChange && <Button size="sm" variant="outline" onClick={()=>navigate(`/p/${projectId}/changes`)}>Open saved change</Button>}
       {error && <div role="alert" className={alertCls}>{error}</div>}
       {notice && <div role="status" className={okCls}>{notice}</div>}
+      {issue.state === "open" && !savedChange && !originalChange && <RequirementsEditor idPrefix={`issue-${number}`} rows={requirementRows} disabled={busy !== null||transferLocked||issue.transferPending===true||deleteIntent!==null} onChange={setRequirementRows} />}
       <div className="flex flex-wrap gap-2">
         {issue.state === "open" && <Button size="sm" variant="orange" disabled={busy !== null||transferLocked||issue.transferPending||deleteIntent!==null} onClick={() => void startChange(false)}>{busy === "change" ? "Checking…" : savedChange ? "Check saved change" : "Start a change"}</Button>}
         {issue.state === "open" && <Button size="sm" variant="outline" disabled={busy !== null||transferLocked||issue.transferPending||deleteIntent!==null} onClick={() => void startChange(true)}>{busy === "agent" ? "Checking…" : savedChange ? "Check or request agent" : "Ask an agent"}</Button>}

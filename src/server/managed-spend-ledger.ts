@@ -7,7 +7,25 @@ export type ManagedResourceKind=typeof managedResourceKinds[number];
 export type NativeComputeKind=Extract<ManagedResourceKind,"native-essential"|"native-optional">;
 const envelopeSchema = z.object({ resourceKind:z.enum(managedResourceKinds).optional(), runId: identifier, accountKey: identifier, usdMicros: micros.positive(), maxInputBytes: z.number().int().positive().max(1_000_000), maxOutputTokens: z.number().int().positive().max(32_768), maxCalls: z.number().int().positive().max(100), maxContainerSeconds: z.number().int().nonnegative().max(3600) }).strict().refine(value=>value.maxContainerSeconds>0||value.resourceKind==="managed-agent","Zero container capacity requires an explicit model-only managed-agent envelope");
 export type ManagedEnvelope = z.infer<typeof envelopeSchema>;
-export interface ManagedReservation extends ManagedEnvelope { month: string; state: "reserved" | "reconciled" | "released"; actualUsdMicros: number | null; evidenceId: string | null; calls: number; containerSeconds: number; dispatchAttempted?: boolean; }
+export interface ManagedReservation extends ManagedEnvelope { month: string; state: "reserved" | "reconciled" | "released"; actualUsdMicros: number | null; evidenceId: string | null; calls: number; containerSeconds: number; dispatchAttempted?: boolean;
+  /** "paid" reservations are bounded by the account ceiling only; everything else draws from the shared free pool. */
+  fundingTier?: ManagedFundingTier; modelCalls?: number; measuredCalls?: number; measuredInputTokens?: number; measuredOutputTokens?: number; }
+export type ManagedFundingTier = "paid" | "free";
+/** Rate snapshot shared with the reservation envelope: GPT OSS 120B $0.35/$0.75 per million
+ * input/output tokens (so micros per token), container standard-2 at $0.129024/hour. */
+export const MODEL_INPUT_MICROS_PER_TOKEN = 0.35, MODEL_OUTPUT_MICROS_PER_TOKEN = 0.75, CONTAINER_MICROS_PER_HOUR = 129_024, PROMPT_FRAMING_TOKENS = 4096;
+/** Provider rates passed through at cost, in USD, as published on /plan-price. */
+export const publicUsageRates = { modelInputUsdPerMillionTokens: MODEL_INPUT_MICROS_PER_TOKEN, modelOutputUsdPerMillionTokens: MODEL_OUTPUT_MICROS_PER_TOKEN, containerUsdPerHour: CONTAINER_MICROS_PER_HOUR / 1_000_000 } as const;
+export interface ManagedSettlement { usdMicros: number; modelCalls: number; inputTokens: number; outputTokens: number; containerSeconds: number }
+/** Actual cost of a run from what the ledger admitted and measured. A model call without a
+ * provider usage report is charged at its admitted bound; the total never exceeds the envelope. */
+export function managedSettlement(run: ManagedReservation): ManagedSettlement {
+  const modelCalls = run.modelCalls ?? 0, measured = Math.min(run.measuredCalls ?? 0, modelCalls), unmeasured = modelCalls - measured;
+  const inputTokens = (run.measuredInputTokens ?? 0) + unmeasured * (run.maxInputBytes + PROMPT_FRAMING_TOKENS);
+  const outputTokens = (run.measuredOutputTokens ?? 0) + unmeasured * run.maxOutputTokens;
+  const cost = Math.ceil(inputTokens * MODEL_INPUT_MICROS_PER_TOKEN + outputTokens * MODEL_OUTPUT_MICROS_PER_TOKEN) + Math.ceil(run.containerSeconds * CONTAINER_MICROS_PER_HOUR / 3600);
+  return { usdMicros: Math.min(run.usdMicros, cost), modelCalls, inputTokens, outputTokens, containerSeconds: run.containerSeconds };
+}
 export interface ManagedBudget { accountUsdMicros: number | null; globalUsdMicros: number | null; essentialAccountUsdMicros?:number|null; essentialGlobalUsdMicros?:number|null; }
 /** Current operator floors win over older caller snapshots; stricter aggregate
  * caps remain strict. No caller can spend the essential floor as optional. */
@@ -30,7 +48,8 @@ export class ManagedSpendLedger {
     const row = this.storage.sql.exec<{ doc: string }>("SELECT doc FROM managed_spend WHERE run_id=?", runId).toArray()[0];
     return row ? JSON.parse(row.doc) as ManagedReservation : null;
   }
-  reserve(input: ManagedEnvelope, budget: ManagedBudget, now = new Date()): ManagedAdmission {
+  reserve(input: ManagedEnvelope, budget: ManagedBudget, now = new Date(), tier: ManagedFundingTier = "free"): ManagedAdmission {
+    if (tier !== "paid" && tier !== "free") throw new Error("Invalid managed funding tier");
     const parsed = envelopeSchema.parse(input),value={...parsed,resourceKind:parsed.resourceKind??"optional-unclassified" as const};
     if(value.resourceKind==="native-essential"&&(value.usdMicros!==43008||value.maxInputBytes!==1||value.maxOutputTokens!==1||value.maxCalls!==1||value.maxContainerSeconds!==1200))throw Error("Essential native capacity requires the fixed native resource envelope");
     const accountCap = budget.accountUsdMicros === null ? null : micros.parse(budget.accountUsdMicros);
@@ -52,26 +71,28 @@ export class ManagedSpendLedger {
       if(essentialGlobal>globalCap||essentialAccount>accountCap)return{allowed:false,reason:"unconfigured"};
       const globalUsed = this.used(month), accountUsed = this.used(month, value.accountKey);
       if (value.usdMicros > accountCap - accountUsed) return { allowed: false, reason: "account_budget" };
-      if (value.usdMicros > globalCap - globalUsed) return { allowed: false, reason: "global_budget" };
+      // The global cap is the free pool: paid accounts are bounded by their own account ceiling only.
+      const pooled = tier !== "paid";
+      if (pooled && value.usdMicros > globalCap - globalUsed) return { allowed: false, reason: "global_budget" };
       // The essential allocation is a protected floor, not a core ceiling.
       // Core work may use unused optional funding while staying within totals.
       if(value.resourceKind!=="native-essential"){
         if(value.usdMicros>accountCap-essentialAccount-this.used(month,value.accountKey,"optional"))return{allowed:false,reason:"account_budget"};
-        if(value.usdMicros>globalCap-essentialGlobal-this.used(month,undefined,"optional"))return{allowed:false,reason:"global_budget"};
+        if(pooled&&value.usdMicros>globalCap-essentialGlobal-this.used(month,undefined,"optional"))return{allowed:false,reason:"global_budget"};
       }
-      const reservation: ManagedReservation = { ...value, month, state: "reserved", actualUsdMicros: null, evidenceId: null, calls: 0, containerSeconds: 0 };
+      const reservation: ManagedReservation = { ...value, month, state: "reserved", actualUsdMicros: null, evidenceId: null, calls: 0, containerSeconds: 0, ...(tier === "paid" ? { fundingTier: "paid" as const } : {}) };
       this.storage.sql.exec("INSERT INTO managed_spend VALUES (?,?,?,?,?)", value.runId, value.accountKey, month, value.usdMicros, JSON.stringify(reservation));
       return { allowed: true, reservation, existing: false };
     });
   }
-  reserveBatch(inputs: ManagedEnvelope[], budget: ManagedBudget, now = new Date()): ManagedAdmission[] {
+  reserveBatch(inputs: ManagedEnvelope[], budget: ManagedBudget, now = new Date(), tier: ManagedFundingTier = "free"): ManagedAdmission[] {
     if (inputs.length < 1 || inputs.length > 20) throw new Error("Invalid managed reservation batch");
     const ids = new Set(inputs.map((input) => input.runId));
     if (ids.size !== inputs.length) throw new Error("Duplicate managed batch identity");
     const rejected: { result?: ManagedAdmission } = {};
     try {
       return this.storage.transactionSync(() => inputs.map((input) => {
-        const result = this.reserve(input, budget, now);
+        const result = this.reserve(input, budget, now, tier);
         if (!result.allowed) { rejected.result = result; throw new Error("Managed batch refused"); }
         return result;
       }));
@@ -130,7 +151,9 @@ export class ManagedSpendLedger {
   }
   used(month:string,accountKey?:string,category?:"essential"|"optional"):number{
     const clause=category===undefined?"":category==="essential"?" AND json_extract(doc,'$.resourceKind')='native-essential'":" AND COALESCE(json_extract(doc,'$.resourceKind'),'legacy-unclassified')!='native-essential'";
-    const query=`SELECT COALESCE(SUM(charged),0) AS total FROM managed_spend WHERE month=?${accountKey?" AND account_key=?":""}${clause}`;
+    // Account totals include every tier; platform totals are the free pool and exclude paid accounts.
+    const pool=accountKey?"":" AND COALESCE(json_extract(doc,'$.fundingTier'),'free')!='paid'";
+    const query=`SELECT COALESCE(SUM(charged),0) AS total FROM managed_spend WHERE month=?${accountKey?" AND account_key=?":""}${clause}${pool}`;
     const row=this.storage.sql.exec<{total:number}>(query,...(accountKey?[month,accountKey]:[month])).toArray()[0];return micros.parse(row?.total??0);
   }
   /** Acquire each real dispatch attempt before provider invocation. Workflow
@@ -144,8 +167,37 @@ export class ManagedSpendLedger {
       if (!Number.isFinite(now.getTime()) || now.toISOString().slice(0, 7) !== run.month) throw new Error("Managed reservation period expired");
       if (inputBytes > run.maxInputBytes || outputTokens > run.maxOutputTokens || run.calls >= run.maxCalls || containerSeconds > run.maxContainerSeconds - run.containerSeconds) throw new Error("Managed execution envelope exhausted");
       run.calls += 1; run.containerSeconds += containerSeconds;
+      if (inputBytes > 0 || outputTokens > 0) run.modelCalls = (run.modelCalls ?? 0) + 1;
       this.storage.sql.exec("UPDATE managed_spend SET doc=? WHERE run_id=?", JSON.stringify(run), runId);
       return run;
+    });
+  }
+  /** Provider-reported token usage for one admitted model call, clamped to that call's admitted bound. */
+  recordUsage(runId: string, inputTokens: number, outputTokens: number): ManagedReservation {
+    micros.parse(inputTokens); micros.parse(outputTokens);
+    return this.storage.transactionSync(() => {
+      const run = this.get(runId);
+      if (!run || run.state !== "reserved") throw new Error("Managed reservation unavailable");
+      if ((run.measuredCalls ?? 0) >= (run.modelCalls ?? 0)) throw new Error("No admitted model call awaits a usage report");
+      run.measuredCalls = (run.measuredCalls ?? 0) + 1;
+      run.measuredInputTokens = (run.measuredInputTokens ?? 0) + Math.min(inputTokens, run.maxInputBytes + PROMPT_FRAMING_TOKENS);
+      run.measuredOutputTokens = (run.measuredOutputTokens ?? 0) + Math.min(outputTokens, run.maxOutputTokens);
+      this.storage.sql.exec("UPDATE managed_spend SET doc=? WHERE run_id=?", JSON.stringify(run), runId);
+      return run;
+    });
+  }
+  /** Settles a finished run at its actual cost (replacing the reserved bound). `settled` runs in the
+   * same transaction, so a durable side effect such as a billing outbox row commits atomically. Idempotent. */
+  settle(runId: string, settled?: (run: ManagedReservation, settlement: ManagedSettlement) => void): { run: ManagedReservation; settlement: ManagedSettlement; first: boolean } | null {
+    identifier.parse(runId);
+    return this.storage.transactionSync(() => {
+      const run = this.get(runId);
+      if (!run || run.state === "released") return null;
+      const settlement = managedSettlement(run);
+      if (run.state === "reconciled") return { run, settlement: { ...settlement, usdMicros: run.actualUsdMicros ?? settlement.usdMicros }, first: false };
+      const reconciled = this.reconcile(runId, settlement.usdMicros, `settle-${runId}`.slice(0, 200));
+      settled?.(reconciled, settlement);
+      return { run: reconciled, settlement, first: true };
     });
   }
   /** Server-only reconciler contract. Never accept client-reported cost. Unknown

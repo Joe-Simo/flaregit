@@ -99,6 +99,10 @@ import {GitGatewayLedger,type GitGatewayScope} from "./git-gateway-ledger";
 import {TaskTargetGenerations,type TaskTargetGenerationIntent,type TaskTargetGenerationSettlement} from "./task-target-generations";
 import {freezeProductDecisionScope,planProductDecisionResolution} from "./product-decision-scope";
 import {CoordinationController} from "./coordination-controller";
+import {revisionWorkflowId} from "./requirement-decisions";
+import {requirementExamples,requirementGateFailure,type RequirementExample} from "../core/decision/requirement-gate";
+import type {ManualRetry,RevisionClaim,RevisionOutcome} from "./post-land-rebase";
+import {retryDueRebaseRevisions} from "./revision-dispatch";
 import type {ContradictionProof} from "../core/decision/contradiction-proof";
 import type {LandingOutcome} from "./merge-queue-runner";
 import type {RebaseExecution} from "./post-land-rebase";
@@ -141,6 +145,7 @@ import { bindTaskAcceptedTarget,resolveNewTaskAcceptedTarget, boundTaskCreationP
 import { freezeAcceptedTarget } from "./accepted-target-binding.js";
 import { assertCompatibleAcceptedTargetBatch,effectiveTaskAcceptedTarget,acceptedTargetSchema,acceptedRequirementsSchema, type FrozenAcceptedTarget } from "../core/accepted-target.js";
 import {assertExternalTaskProvenance,taskCreationPayload,type TaskCreationInput} from "./task-creation.js";
+import {requirementsFromDrafts} from "../core/requirement-drafts.js";
 import {ownerStorageContext,copyReportPage,privateRecoveryReportPage,type OwnerStorageContext,type CopyReportPage} from "./storage-reconciliation-ledger.js";
 import {PreviewCredentialIncidents,type PreviewCredentialIncidentStatus} from "./preview-credential-incidents.js";
 import {RepositoryPreviewGenerations,type PreviewGenerationRecord} from "./preview-generations.js";
@@ -163,7 +168,8 @@ import { RepositoryDiscussions, type DiscussionTopic } from "./repository-discus
 import { ArtifactAllocationFence, type PendingArtifactAllocation, type ArtifactAllocationInspection, type ArtifactAllocationOutcome } from "./allocation-fence.js";
 import { ArtifactStorageAdmission, type ArtifactKind, type StorageAdmissionPolicy, type StorageReservation } from "./storage-admission.js";
 import { CoreGitOperationLedger, configuredGitCap, type CoreGitBudget, type CoreGitAdmission, type CoreGitCapacity, type CoreGitExistingReservationProof } from "./core-git-budget.js";
-import { ManagedSpendLedger,enforceManagedBudget, type ManagedEnvelope, type ManagedBudget, type ManagedAdmission, type ManagedReservation } from "./managed-spend-ledger.js";
+import { ManagedSpendLedger,enforceManagedBudget, type ManagedEnvelope, type ManagedBudget, type ManagedAdmission, type ManagedReservation, type ManagedFundingTier, type ManagedSettlement } from "./managed-spend-ledger.js";
+import { CreditLedger, type AutoRecharge, type CreditHold, type CreditSummary, type RechargePrompt } from "./credit-ledger.js";
 import { PlatformCommunity } from "./platform-community.js";
 import { safeContent } from "./public-community.js";
 import { DurableObject } from "cloudflare:workers";
@@ -192,6 +198,7 @@ export type OwnerRebaseApplication=RebaseRecoveryReport & {resumeAvailable:boole
 export type PublicGrantMetadata = PublicRepositoryGrant & { name: string; version: number; canonicalRepoName: string };
 import type {
   CandidateGeneration,
+  RequirementCheck,
   HumanDecisionActor,
   FlareGitProjectState,
   ProductDecision,
@@ -470,8 +477,10 @@ export interface Ledger {
   cancelUnstartedManagedSpend(runIds: string[], accountKey: string): Promise<void>;
   managedSpendReserved(month: string, accountKey?: string): Promise<number>;
   managedReservationAttribution(input: {month:string;cursor?:string}): ReturnType<ManagedSpendLedger["attributionPage"]>;
-  reserveManagedSpendBatch(inputs: ManagedEnvelope[], budget: ManagedBudget): Promise<ManagedAdmission[]>;
-  reserveManagedSpend(input: ManagedEnvelope, budget: ManagedBudget): Promise<ManagedAdmission>;
+  reserveManagedSpendBatch(inputs: ManagedEnvelope[], budget: ManagedBudget, tier?: ManagedFundingTier): Promise<ManagedAdmission[]>;
+  reserveManagedSpend(input: ManagedEnvelope, budget: ManagedBudget, tier?: ManagedFundingTier): Promise<ManagedAdmission>;
+  recordManagedUsage(runId: string, inputTokens: number, outputTokens: number): Promise<void>;
+  settleManagedSpend(runId: string): Promise<{ accountKey: string; fundingTier: ManagedFundingTier; settlement: ManagedSettlement } | null>;
   managedSpendReservation(runId:string):Promise<ManagedReservation|null>;
   prepareIsolatedExecutionGrant(context:IsolatedExecutionContext):ReturnType<RepositoryController["prepareIsolatedExecutionGrant"]>;
   isolatedExecutionSnapshot(context:IsolatedExecutionContext):Promise<IsolatedExecutionContext>;
@@ -1063,6 +1072,13 @@ export interface Ledger {
   getBilling(): Promise<{ plan: "free" | "pro"; status: string; subscriptionId?: string; updatedAt: string }>;
   setBilling(b: { plan: "free" | "pro"; status: string; subscriptionId?: string; updatedAt: string }): Promise<void>;
   usageToday(): Promise<number>;
+  creditSummary(): Promise<CreditSummary>;
+  applyCreditOrder(input: { orderId: string; paidMicros: number; refundedMicros: number; paid: boolean }): Promise<{ balanceMicros: number; owedMicros: number }>;
+  holdCredits(runIds: string[], envelopeMicros: number): Promise<CreditHold>;
+  releaseCredits(runIds: string[]): Promise<void>;
+  settleCredits(runId: string, actualMicros: number): Promise<{ debitedMicros: number; balanceMicros: number; rechargePrompt: RechargePrompt | null } | null>;
+  setAutoRecharge(value: AutoRecharge): Promise<AutoRecharge>;
+  dismissRechargePrompt(): Promise<void>;
   consumeRun(limit: number, admissionKey?: string): Promise<{ allowed: boolean; used: number }>;
   taskReadyDependency(taskId:string,userId:string,credentialHash?:string,sessionExpiresAt?:number):Promise<boolean>;
   observeTaskReadyGitHead(taskId:string,userId:string,context:RepositoryReadContext,credentialHash?:string,sessionExpiresAt?:number,expectedHead?:string):Promise<string|null>;
@@ -1071,6 +1087,8 @@ export interface Ledger {
   requirementDecisionSources(decisionId:string):Promise<Awaited<ReturnType<CoordinationController["decisionSources"]>>>;
   recordRequirementProof(proof:ContradictionProof):Promise<ContradictionProof>;
   prepareRequirementRevisions(decisionId:string):Promise<Awaited<ReturnType<CoordinationController["prepareRevisions"]>>>;
+  requirementGatePlan(candidateId:string):Promise<RequirementExample[]>;
+  recordRequirementChecks(candidateId:string,commit:string,checks:RequirementCheck[]):Promise<string|null>;
   markRequirementRevision(decisionId:string,taskId:string,outcome:{dispatched:true}|{dispatched:false;reason:string}):Promise<Awaited<ReturnType<CoordinationController["markRevision"]>>>;
   coordinationView(userId:string):Promise<Awaited<ReturnType<CoordinationController["view"]>>>;
   mergeQueueEnqueue(input:unknown,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<Awaited<ReturnType<CoordinationController["enqueue"]>>>;
@@ -1079,7 +1097,10 @@ export interface Ledger {
   mergeQueueSettle(eventId:string,outcome:LandingOutcome,reason?:string):Promise<Awaited<ReturnType<CoordinationController["settle"]>>>;
   postLandRebasePlan(landedCommit:string,workflowId:string):Promise<Awaited<ReturnType<CoordinationController["planRebase"]>>>;
   recordPostLandRebase(input:{taskId:string;landedCommit:string;fromCommit:string;execution:RebaseExecution}):Promise<Awaited<ReturnType<CoordinationController["recordRebase"]>>>;
-  markPostLandRevision(taskId:string,landedCommit:string,workflowId:string,outcome:{ok:true}|{ok:false;reason:string}):Promise<Awaited<ReturnType<CoordinationController["markRebaseRevision"]>>>;
+  markPostLandRevision(taskId:string,landedCommit:string,workflowId:string,outcome:RevisionOutcome):Promise<Awaited<ReturnType<CoordinationController["markRebaseRevision"]>>>;
+  claimDueRebaseRevisions():Promise<RevisionClaim[]>;
+  claimManualRebaseRevision(taskId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<ManualRetry>;
+  advancePostLandRevision(taskId:string,landedCommit:string,fromWorkflowId:string,toWorkflowId:string):Promise<Awaited<ReturnType<CoordinationController["advanceRevisionRun"]>>>;
 }
 
 const LEASE_MS = 20 * 60_000;
@@ -3159,7 +3180,7 @@ export class RepositoryController extends DurableObject<Env> {
   async commitTaskCreationIntent(eventId:string,task:Task,actorId:string,credential:TaskCreationCredential):Promise<Task & {creationReplayed?:boolean}>{
     const assert=await this.taskCreationCredentialFence(actorId,credential),ledger=new TaskCreationIntents(this.ctx.storage),record=ledger.get(eventId);if(!record)throw Error("Saved creation intent unavailable");this.assertTaskCreationIntentLocal(record,actorId);
     if(record.phase==="committed"){const saved=await this.taskCreationReplay(record.taskId,actorId,record.input,record.selection.acceptedTarget?{acceptedTargetRef:record.selection.acceptedTarget.ref,expectedTarget:record.selection.acceptedTarget}:undefined,credential);if(!saved)throw Error("Committed task receipt unavailable");return{...saved,creationReplayed:true};}
-    if(!await this.assertTaskCreationTarget(actorId,record.input,record.selection,credential))throw Error("Captured creation source changed before persistence");assert();if(task.id!==record.taskId||task.workspace.repoName!==record.workspaceRepoName||task.workspace.branch!==`task/${record.taskId}`||task.baseCommit!==record.selection.baseCommit||task.currentCommit!==record.selection.baseCommit||task.goal!==record.input.goal||(task.dependsOn??null)!==record.input.dependsOn||(task.issue??null)!==record.input.issue||task.targetGeneration)throw Error("Created task does not match its original fork intent");
+    if(!await this.assertTaskCreationTarget(actorId,record.input,record.selection,credential))throw Error("Captured creation source changed before persistence");assert();if(task.id!==record.taskId||task.workspace.repoName!==record.workspaceRepoName||task.workspace.branch!==`task/${record.taskId}`||task.baseCommit!==record.selection.baseCommit||task.currentCommit!==record.selection.baseCommit||task.goal!==record.input.goal||(task.dependsOn??null)!==record.input.dependsOn||(task.issue??null)!==record.input.issue||JSON.stringify(task.requirements)!==JSON.stringify(requirementsFromDrafts(task.id,record.input.requirements??[],task.createdAt))||task.targetGeneration)throw Error("Created task does not match its original fork intent");
     const state=this.load();if(record.selection.acceptedTarget)task=bindTaskAcceptedTarget(new AcceptedBranchRoots(this.ctx.storage),{...state,tasks:Object.fromEntries(Object.entries(state.tasks).map(([id,value])=>[id,this.projectedTask(value)]))},record.incarnation,task,{acceptedTargetRef:record.selection.acceptedTarget.ref,expectedTarget:record.selection.acceptedTarget});let next:FlareGitProjectState|undefined;
     try{ledger.commit(eventId,saved=>{assert();this.assertTaskCreationIntentLocal(saved,actorId);if(!new InitialForkCredentials(this.ctx.storage).settled(this.initialForkScope(saved)))throw Error("Original fork credential cleanup remains unconfirmed");},()=>{next=this.persistCreatedTask(task,actorId,record.input,assert);});if(next)this.state=next;}catch(error){this.state=null;throw error;}
     await this.logActivity(task.contributor.name,"task.created",`Change started: ${task.goal}`);return{...task,creationReplayed:false};
@@ -3904,13 +3925,19 @@ export class RepositoryController extends DurableObject<Env> {
   async authorizeIsolatedExecution(context:{scope:IsolatedExecutionContext["scope"];sourceDigest:string;image:string}):Promise<boolean>{
     try{const ledger=this.isolatedExecutionGrants(),grant=ledger.get(context.scope.attemptId);if(!grant||JSON.stringify(grant.context.scope)!==JSON.stringify(context.scope)||grant.context.sourceDigest!==context.sourceDigest||grant.context.image!==context.image)return false;await ledger.allow(grant.context);return true;}catch{return false;}
   }
+  /** The verifier a candidate's frozen policy requires; publication and native phase closure must agree on it. */
+  private expectedVerifierIdentity(c:CandidateGeneration):string{
+    if(c.frozenExternalChecksPolicy?.mode==="external")return VERIFIER_IDENTITIES.external;
+    if(isGitIntegrityPolicy(c.frozenVerificationPolicy))return VERIFIER_IDENTITIES["git-integrity"];
+    return isCommandPolicy(c.frozenVerificationPolicy)?VERIFIER_IDENTITIES.custom:VERIFIER_IDENTITIES["ticket-booking"];
+  }
   async closeIntegrationVerification(workflowId:string,candidateId:string,commit:string,evidenceId:string):Promise<void>{
     const scope=await this.integrationRuntimeScope(workflowId,candidateId);this.closeIntegrationVerificationRecord(scope,commit,evidenceId);
   }
   private closeIntegrationVerificationRecord(scope:IntegrationNativeRuntimeScope,commit:string,evidenceId:string){
     this.assertIntegrationNativeLocal(scope);const {workflowId,candidateId}=scope;
     const state=this.load(),candidate=state.candidates[candidateId],evidence=state.evidence[evidenceId];
-    if(!candidate||candidate.candidateCommit!==commit||candidate.evidenceId!==evidenceId||evidence?.status!=="passed"||evidence.candidateCommit!==commit||!evidence.candidateTree||evidence.verifierIdentity!==VERIFIER_IDENTITIES["git-integrity"])throw Error("Exact native verification evidence required for phase closure");
+    if(!candidate||candidate.candidateCommit!==commit||candidate.evidenceId!==evidenceId||evidence?.status!=="passed"||evidence.candidateCommit!==commit||!evidence.candidateTree||evidence.verifierIdentity!==this.expectedVerifierIdentity(candidate))throw Error("Exact native verification evidence required for phase closure");
     new RetainedCredentialIncidents(this.ctx.storage);
     const credentials=this.ctx.storage.sql.exec<{input_id:string;purpose:string;status:string}>("SELECT input_id,purpose,status FROM retained_credential_incidents WHERE json_extract(payload,'$.workflowId')=? ORDER BY input_id,purpose",workflowId).toArray();
     if(credentials.some(row=>row.status!=="revoked"))throw Error("Verification credential cleanup remains unconfirmed");
@@ -3976,7 +4003,7 @@ export class RepositoryController extends DurableObject<Env> {
         const closureExists=this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='integration_verification_closures'").toArray().length>0&&this.ctx.storage.sql.exec("SELECT 1 FROM integration_verification_closures WHERE workflow_id=?",workflowId).toArray().length>0;
         if(closureExists){
           verificationClosure.status='unconfirmed';const evidence=candidate.evidenceId?state.evidence[candidate.evidenceId]:undefined;
-          if(candidate.candidateCommit&&candidate.evidenceId&&evidence?.candidateTree&&evidence.candidateCommit===candidate.candidateCommit&&evidence.status==='passed'&&evidence.verifierIdentity===VERIFIER_IDENTITIES['git-integrity']&&new IntegrationNativeRuntimeLedger(this.ctx.storage,false).verificationClosure(scope,{commit:candidate.candidateCommit,tree:evidence.candidateTree,evidenceId:candidate.evidenceId}))verificationClosure.status='closed';
+          if(candidate.candidateCommit&&candidate.evidenceId&&evidence?.candidateTree&&evidence.candidateCommit===candidate.candidateCommit&&evidence.status==='passed'&&evidence.verifierIdentity===this.expectedVerifierIdentity(candidate)&&new IntegrationNativeRuntimeLedger(this.ctx.storage,false).verificationClosure(scope,{commit:candidate.candidateCommit,tree:evidence.candidateTree,evidenceId:candidate.evidenceId}))verificationClosure.status='closed';
         }
         if(this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='integration_verification_credentials'").toArray().length){
           const row=this.ctx.storage.sql.exec<{scope:string;doc:string}>("SELECT scope,doc FROM integration_verification_credentials WHERE workflow_id=?",workflowId).toArray()[0];
@@ -4001,13 +4028,13 @@ export class RepositoryController extends DurableObject<Env> {
   async legacyCandidateRerunReport(candidateId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){
     const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();const snapshot=this.legacyRerunSnapshot(candidateId),expectedCommit=snapshot.candidate.candidateCommit??null,inputs:Record<string,{commit:string;base:string|null}>={};
     for(const proof of snapshot.candidate.frozenContributorProofs??[])if(snapshot.candidate.participatingCommits[proof.id]===proof.commit)inputs[proof.id]={commit:proof.commit,base:proof.baseCommit};
-    const saved=new LegacyCandidateReruns(this.ctx.storage).forCandidate(candidateId);let eligible=true,detail="Run a fresh candidate from these exact saved contributions. This candidate and its review remain preserved.";
-    try{if(saved?.phase==="abandoned"){assertLegacyRerunEligible(snapshot,expectedCommit);detail="The previous rerun was abandoned before dispatch. Its audit and preserved candidate remain available.";}else if(saved){this.assertLegacyRerunScope(saved);if(saved.phase==="awaiting_decision"){eligible=false;detail="Resolve the linked product decision to continue from these preserved inputs.";}if(saved.phase==="attached"){eligible=false;detail="The fresh candidate is linked below. Its progress and review remain separate from this preserved candidate.";}}else assertLegacyRerunEligible(snapshot,expectedCommit);}catch(error){eligible=false;detail=error instanceof LegacyRerunError?error.message:"Frozen contribution context is unavailable.";}
+    const saved=new LegacyCandidateReruns(this.ctx.storage).forCandidate(candidateId);let eligible=true,detail="Rebuild these exact saved changes as a new attempt. This attempt and its review are kept.";
+    try{if(saved?.phase==="abandoned"){assertLegacyRerunEligible(snapshot,expectedCommit);detail="The previous rebuild was abandoned before it started. This attempt and its history are kept.";}else if(saved){this.assertLegacyRerunScope(saved);if(saved.phase==="awaiting_decision"){eligible=false;detail="Make the linked product decision to continue the rebuild with these saved changes.";}if(saved.phase==="attached"){eligible=false;detail="The new attempt is linked below. Its progress and review are separate from this one.";}}else assertLegacyRerunEligible(snapshot,expectedCommit);}catch(error){eligible=false;detail=error instanceof LegacyRerunError?error.message:"Frozen contribution context is unavailable.";}
     return {candidateId,expectedCommit,inputs,eligible,detail,...(saved?{operation:{id:saved.id,phase:saved.phase,dispatch:saved.dispatch,abandoned:saved.abandoned,successorCandidateId:saved.successorCandidateId,successorWorkflowId:saved.successorWorkflowId,successorDecisionId:saved.successorDecisionId,continuationWorkflowId:saved.continuationWorkflowId}}:{})};
   }
   async prepareLegacyCandidateRerun(candidateId:string,expectedCommit:string|null,requestId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number,expectedInputs?:Record<string,{commit:string;base:string|null}>):Promise<LegacyCandidateRerun>{
     const assert=await this.authorizeRebaseRecovery(actor,credentialHash,sessionExpiresAt);assert();
-    return this.ctx.storage.transactionSync(()=>{assert();const snapshot=this.legacyRerunSnapshot(candidateId);if(!expectedInputs)throw new LegacyRerunError("Exact frozen contribution inputs are required.");const attempt=new LegacyCandidateReruns(this.ctx.storage).prepare({id:requestId,expectedCommit,actor,snapshot,credentialHash,sessionExpiresAt,expectedInputs});this.assertLegacyRerunScope(attempt);attempt.credentialHash=credentialHash;attempt.sessionExpiresAt=sessionExpiresAt;new LegacyCandidateReruns(this.ctx.storage).save(attempt);return attempt;});
+    return this.ctx.storage.transactionSync(()=>{assert();const snapshot=this.legacyRerunSnapshot(candidateId);if(!expectedInputs)throw new LegacyRerunError("The exact saved changes for this attempt are required.");const attempt=new LegacyCandidateReruns(this.ctx.storage).prepare({id:requestId,expectedCommit,actor,snapshot,credentialHash,sessionExpiresAt,expectedInputs});this.assertLegacyRerunScope(attempt);attempt.credentialHash=credentialHash;attempt.sessionExpiresAt=sessionExpiresAt;new LegacyCandidateReruns(this.ctx.storage).save(attempt);return attempt;});
   }
   async verifyLegacyCandidateGitHeads(id:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<RerunGitHeadVerification>{
     const attempt=await this.assertLegacyCandidateRerun(id,actor,credentialHash,sessionExpiresAt);
@@ -4362,6 +4389,7 @@ export class RepositoryController extends DurableObject<Env> {
     await this.retryBranchNativeCleanup();
     await this.retryAgentNativeStops();
     await this.retryRebaseResumeCredentials();
+    await this.retryRebaseRevisions();
     await this.retryPreviewCredentialIncidents();
     await this.reconcileDirectoryRegistration();
     await this.reconcileContributorRegistrations();
@@ -5666,6 +5694,15 @@ export class RepositoryController extends DurableObject<Env> {
     this.ctx.storage.sql.exec("INSERT INTO billing (id, doc) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET doc = excluded.doc", JSON.stringify(b));
   }
 
+  private credits(): CreditLedger { return new CreditLedger(this.ctx.storage); }
+  async creditSummary(): Promise<CreditSummary> { return this.credits().summary(); }
+  async applyCreditOrder(input: { orderId: string; paidMicros: number; refundedMicros: number; paid: boolean }) { return this.credits().applyOrder(input); }
+  async holdCredits(runIds: string[], envelopeMicros: number): Promise<CreditHold> { return this.credits().hold(runIds, envelopeMicros); }
+  async releaseCredits(runIds: string[]): Promise<void> { this.credits().release(runIds); }
+  async settleCredits(runId: string, actualMicros: number) { return this.credits().settle(runId, actualMicros); }
+  async setAutoRecharge(value: AutoRecharge): Promise<AutoRecharge> { return this.credits().setAutoRecharge(value); }
+  async dismissRechargePrompt(): Promise<void> { this.credits().dismissPrompt(); }
+
   async usageToday(): Promise<number> {
     const day = new Date().toISOString().slice(0, 10);
     return this.ctx.storage.sql.exec<{ n: number }>("SELECT n FROM runs WHERE day = ?", day).toArray()[0]?.n ?? 0;
@@ -5867,11 +5904,19 @@ export class RepositoryController extends DurableObject<Env> {
     if(credentialHash&&!await accountOf(this.env,await accountKeyFor(userId)).apiTokenHashCanRead(credentialHash,userId,context.projectId,true))throw new Error("Checkpoint credential changed");
     return this.applyCheckpoint(ev,()=>{if(!credentialHash&&(!Number.isFinite(sessionExpiresAt)||Date.now()>=sessionExpiresAt!))throw new Error("Checkpoint session expired");this.assertReadLocal(context,userId,ev.taskId,true);if(ev.ready&&!this.taskReadyDependencyLocal(this.load().tasks[ev.taskId]!))throw Error("Original dependency checkpoint changed before readiness");});
   }
-  async reserveManagedSpendBatch(inputs: ManagedEnvelope[], budget: ManagedBudget): Promise<ManagedAdmission[]> {
-    return new ManagedSpendLedger(this.ctx.storage).reserveBatch(inputs, enforceManagedBudget(budget,managedBudget(this.env)));
+  async reserveManagedSpendBatch(inputs: ManagedEnvelope[], budget: ManagedBudget, tier: ManagedFundingTier = "free"): Promise<ManagedAdmission[]> {
+    return new ManagedSpendLedger(this.ctx.storage).reserveBatch(inputs, enforceManagedBudget(budget,managedBudget(this.env)), new Date(), tier);
   }
-  async reserveManagedSpend(input: ManagedEnvelope, budget: ManagedBudget): Promise<ManagedAdmission> {
-    return new ManagedSpendLedger(this.ctx.storage).reserve(input, enforceManagedBudget(budget,managedBudget(this.env)));
+  async reserveManagedSpend(input: ManagedEnvelope, budget: ManagedBudget, tier: ManagedFundingTier = "free"): Promise<ManagedAdmission> {
+    return new ManagedSpendLedger(this.ctx.storage).reserve(input, enforceManagedBudget(budget,managedBudget(this.env)), new Date(), tier);
+  }
+  async recordManagedUsage(runId: string, inputTokens: number, outputTokens: number): Promise<void> {
+    new ManagedSpendLedger(this.ctx.storage).recordUsage(runId, inputTokens, outputTokens);
+  }
+  /** Settles a finished run at its actual cost. Replays return the same settlement. */
+  async settleManagedSpend(runId: string): Promise<{ accountKey: string; fundingTier: ManagedFundingTier; settlement: ManagedSettlement } | null> {
+    const settled = new ManagedSpendLedger(this.ctx.storage).settle(runId);
+    return settled ? { accountKey: settled.run.accountKey, fundingTier: settled.run.fundingTier ?? "free", settlement: settled.settlement } : null;
   }
   async consumeManagedSpend(runId: string, inputBytes: number, outputTokens: number, containerSeconds: number): Promise<ManagedReservation> {
     return new ManagedSpendLedger(this.ctx.storage).consume(runId, inputBytes, outputTokens, containerSeconds);
@@ -6176,6 +6221,7 @@ export class RepositoryController extends DurableObject<Env> {
     const c = s.candidates[candidateId];
     const ev = c?.evidenceId ? s.evidence[c.evidenceId] : undefined;
     if (!c || !ev || !c.candidateCommit) return { ok: false, error: "No verified candidate" };
+    const requirementRefusal=this.requirementGateRefusal(c);if(requirementRefusal)return{ok:false,error:requirementRefusal};
     try{if(c.frozenAttribution)new ContributionAttributionLedger(this.ctx.storage).assert(c.id,c.frozenAttribution);this.assertAcceptedCandidateTarget(c,ev);this.assertOwnerAcceptedTargetReview(c);}catch{return{ok:false,error:"Frozen accepted target or verification evidence changed; publication was not prepared"};}
     if(this.legacyCandidateRerunFrozen(candidateId))return {ok:false,error:"This predecessor is preserved by an owner rerun."};
     const preservationFailure=this.candidatePreservationFailure(c);
@@ -6186,7 +6232,7 @@ export class RepositoryController extends DurableObject<Env> {
     if (external && (external.frozen.repositoryId !== s.projectId || external.frozen.candidateId !== candidateId || external.frozen.commit !== c.candidateCommit || external.frozen.tree !== ev.candidateTree || externalCheckGate(external) !== "passed")) return { ok: false, error: "Required external checks have not passed for this exact candidate" };
     const externalOnly = c.frozenExternalChecksPolicy?.mode === "external";
     if (externalOnly && (!(isCommandPolicy(c.frozenVerificationPolicy)||isGitIntegrityPolicy(c.frozenVerificationPolicy)) || !external || !c.frozenContributorProofs?.length || !external.frozen.policy.checks.some((check) => check.required) || JSON.stringify(external.frozen.policy) !== JSON.stringify(c.frozenExternalChecksPolicy))) return { ok: false, error: "External CI policy and contributor proof are unavailable for this candidate" };
-    const verifierIdentity = externalOnly ? VERIFIER_IDENTITIES.external : isGitIntegrityPolicy(c.frozenVerificationPolicy)?VERIFIER_IDENTITIES["git-integrity"]: isCommandPolicy(c.frozenVerificationPolicy) ? VERIFIER_IDENTITIES.custom : VERIFIER_IDENTITIES["ticket-booking"];
+    const verifierIdentity = this.expectedVerifierIdentity(c);
     if (ev.verifierIdentity !== verifierIdentity) return { ok: false, error: "Candidate needs verification with the current isolated verifier before publication" };
     if (ev.expectedAcceptedBase !== c.expectedAcceptedBase || ev.requirementsVersion !== c.frozenPolicyVersion) return { ok: false, error: "Evidence was produced for different inputs" };
     const cancelled = c.participatingTaskIds.filter((id) => s.tasks[id]?.status === "cancelled");
@@ -6472,6 +6518,7 @@ export class RepositoryController extends DurableObject<Env> {
   async recordReview(candidateId: string, review: { approved: boolean; actor: HumanDecisionActor; note?: string }, expectedCommit: string, credentialHash?: string,expectedTarget?:{ref:string;acceptedCommit:string|null;acceptedVersion:number}): Promise<{ ok: boolean; instanceId?: string; error?: string; review?: CandidateGeneration["review"] }> {
     const assertCurrent = await this.authorizeHumanDecision(review.actor, credentialHash, true);
     assertCurrent();const decisionVersion=this.acceptancePolicies().get(this.acceptancePolicyScope()).version;
+    if(review.approved){const gated=this.load().candidates[candidateId],refusal=gated?this.requirementGateRefusal(gated):null;if(refusal)return{ok:false,error:refusal};}
     if(review.approved&&!(await this.delegatedReviewGate(candidateId)).passed)return {ok:false,error:"Required delegated reviews have not passed for this exact candidate"};assertCurrent();
     const s = this.load();
     const c = s.candidates[candidateId];
@@ -6548,6 +6595,12 @@ export class RepositoryController extends DurableObject<Env> {
   async requirementDecisionSources(decisionId:string){return this.coordination().decisionSources(decisionId);}
   async recordRequirementProof(proof:ContradictionProof){return this.coordination().recordProof(proof);}
   async prepareRequirementRevisions(decisionId:string){return this.coordination().prepareRevisions(decisionId);}
+  /** Runnable examples a candidate must pass: decided repository requirements plus its own approved requirements. */
+  async requirementGatePlan(candidateId:string):Promise<RequirementExample[]>{const candidate=this.load().candidates[candidateId];if(!candidate)throw Error("Unknown candidate");return requirementExamples(candidate.frozenRequirements,this.coordination().decidedRequirements());}
+  /** Saves requirement check results for the exact candidate commit and returns the blocking reason, if any. */
+  async recordRequirementChecks(candidateId:string,commit:string,checks:RequirementCheck[]):Promise<string|null>{const candidate=this.load().candidates[candidateId];if(!candidate||candidate.candidateCommit!==commit)throw Error("Requirement checks belong to another candidate commit");candidate.requirementChecks={commit,checkedAt:new Date().toISOString(),checks:structuredClone(checks)};candidate.updatedAt=candidate.requirementChecks.checkedAt;this.save();const failure=requirementGateFailure(checks);if(failure)await this.logActivity("FlareGit","verification.requirement_failed",failure);return failure;}
+  /** Acceptance is refused while a requirement check fails, or while required checks have not run on this commit. */
+  private requirementGateRefusal(candidate:CandidateGeneration):string|null{const run=candidate.requirementChecks;if(run&&run.commit===candidate.candidateCommit)return requirementGateFailure(run.checks);if(run)return "Requirement checks ran on a different commit. Run the integration again.";return requirementExamples(candidate.frozenRequirements??[],this.coordination().decidedRequirements()).some(example=>example.decided)?"The decided requirements have not been checked on this commit. Run the integration again.":null;}
   async markRequirementRevision(decisionId:string,taskId:string,outcome:{dispatched:true}|{dispatched:false;reason:string}){return this.coordination().markRevision(decisionId,taskId,outcome);}
   async coordinationView(userId:string){if(!await this.roleOf(userId))throw new Error("Repository access required");return this.coordination().view();}
   async mergeQueueEnqueue(input:unknown,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const assertCurrent=await this.integrationRequestAuthority(actor,credentialHash,sessionExpiresAt);assertCurrent();return this.coordination().enqueue(input,actor.userId);}
@@ -6556,7 +6609,19 @@ export class RepositoryController extends DurableObject<Env> {
   async mergeQueueSettle(eventId:string,outcome:LandingOutcome,reason?:string){return this.coordination().settle(eventId,outcome,reason);}
   async postLandRebasePlan(landedCommit:string,workflowId:string){return this.coordination().planRebase(landedCommit,workflowId);}
   async recordPostLandRebase(input:{taskId:string;landedCommit:string;fromCommit:string;execution:RebaseExecution}){return this.coordination().recordRebase(input);}
-  async markPostLandRevision(taskId:string,landedCommit:string,workflowId:string,outcome:{ok:true}|{ok:false;reason:string}){return this.coordination().markRebaseRevision(taskId,landedCommit,workflowId,outcome);}
+  async advancePostLandRevision(taskId:string,landedCommit:string,fromWorkflowId:string,toWorkflowId:string){return this.coordination().advanceRevisionRun(taskId,landedCommit,fromWorkflowId,toWorkflowId);}
+  async markPostLandRevision(taskId:string,landedCommit:string,workflowId:string,outcome:RevisionOutcome){const record=await this.coordination().markRebaseRevision(taskId,landedCommit,workflowId,outcome);await this.scheduleRevisionRetry();return record;}
+  async claimDueRebaseRevisions(){return this.coordination().claimDueRevisions();}
+  /** Only a current owner (session or full-access token) may fund and send a re-run of the agent by hand. */
+  async claimManualRebaseRevision(taskId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number){const assertCurrent=await this.integrationRequestAuthority(actor,credentialHash,sessionExpiresAt);assertCurrent();if(await this.roleOf(actor.userId)!=="owner")throw new Error("Only a repository owner can run the agent again");
+    // After a failed re-run, the next run's id is derived from the failed one, so repeated presses send one run.
+    const state=this.load(),failed=state.tasks[taskId]?.agentWorkflowInstanceId;
+    const rerun=failed?await revisionWorkflowId(state.projectId,`rerun-${failed}`,taskId):undefined;
+    assertCurrent();
+    return this.coordination().claimManualRevision(taskId,actor.userId,rerun);}
+  private async scheduleRevisionRetry(){const next=this.coordination().nextRevisionRetryAt();if(next!==null)await this.ensureRecoveryAlarm(Math.max(1_000,next-Date.now()));}
+  /** Repository alarm: sends again the refused post-land re-runs whose backoff elapsed. */
+  private async retryRebaseRevisions(){if(!this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='post_land_rebases'").toArray().length||this.coordination().nextRevisionRetryAt()===null)return;try{const projectId=this.load().projectId;await retryDueRebaseRevisions(this.env,projectOf(this.env,projectId),projectId);}catch{console.warn("Waiting agent re-runs were not sent; the next alarm tries again");}await this.scheduleRevisionRetry();}
 
   async resolveDecision(decisionId: string, selectedOptionId: string, actor: HumanDecisionActor, credentialHash?: string, sessionExpiresAt?:number): Promise<{ taskIds: string[];legacyRerunId?:string;continuationWorkflowId?:string }> {
     let assertCurrent = await this.authorizeHumanDecision(actor, credentialHash, true);

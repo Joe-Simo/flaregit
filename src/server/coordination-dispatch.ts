@@ -8,7 +8,7 @@ import { accountKeyFor, assertManagedInitiator } from "./projects.js";
 import { nativeCoordinationRuntime } from "./coordination-runtime.js";
 import { proveRecordedContradiction, revisionWorkflowId } from "./requirement-decisions.js";
 import { executePostLandRebase } from "./post-land-rebase.js";
-import { dispatchRevisionAgent } from "./revision-dispatch.js";
+import { dispatchRevisionAgent, retryDueRebaseRevisions, sendRebaseRevision } from "./revision-dispatch.js";
 import type { LandingOutcome } from "./merge-queue-runner.js";
 
 /** Environment-level drivers that connect the repository ledger to workflows, queues and agents. */
@@ -16,9 +16,13 @@ import type { LandingOutcome } from "./merge-queue-runner.js";
 export const postLandRebaseParamsSchema = z.object({ mode: z.literal("post-land-rebase"), projectId: z.string().regex(/^[a-z0-9]{12,16}$/), accountKey: z.string().min(1).max(200), landedCommit: z.string().regex(/^[a-f0-9]{40}$/) }).strict();
 export type PostLandRebaseParams = z.infer<typeof postLandRebaseParamsSchema>;
 
-/** Dispatches the queue's next action. Safe to call repeatedly: every dispatch is keyed by a saved identity. */
+/**
+ * Dispatches the queue's next action. Safe to call repeatedly: every dispatch is keyed by a saved identity.
+ * Each advance is also a moment capacity may have returned, so refused agent re-runs that are due go again.
+ */
 export async function advanceMergeQueue(env: Env, projectId: string): Promise<{ action: string; detail: string }> {
   const project = ledgerOf(env, projectId);
+  try { await retryDueRebaseRevisions(env, project, projectId); } catch { console.warn("Waiting agent re-runs were not sent; the repository alarm tries again"); }
   const action = await project.mergeQueueAdvance();
   if (action.kind === "land") {
     await project.registerWorkflow(action.eventId, "integration", undefined, action.actorId, 1);
@@ -62,9 +66,12 @@ export async function runPostLandRebaseWorkflow(env: Env, event: Readonly<Workfl
       await step.do(`revise-${item.taskId}`, async () => {
         const run = await project.getWorkflowRun(event.instanceId);
         const workflowId = await revisionWorkflowId(params.projectId, `update-${item.landedCommit}`, item.taskId);
-        const dispatched = run?.actorId ? await dispatchRevisionAgent(env, project, { projectId: params.projectId, taskId: item.taskId, workflowId, actorId: run.actorId }) : { dispatched: false as const, reason: "The person who started this landing is unavailable" };
-        await project.markPostLandRevision(item.taskId, item.landedCommit, workflowId, dispatched.dispatched ? { ok: true } : { ok: false, reason: dispatched.reason });
-        return dispatched.dispatched;
+        if (!run?.actorId) {
+          await project.markPostLandRevision(item.taskId, item.landedCommit, workflowId, { ok: false, reason: "The person who started this landing is unavailable", refusal: "access", actorId: "unavailable" });
+          return false;
+        }
+        // A refusal (for example spending at its limit) is kept with its context and sent again later.
+        return (await sendRebaseRevision(env, project, params.projectId, { taskId: item.taskId, landedCommit: item.landedCommit, workflowId, actorId: run.actorId })).dispatch.dispatched;
       });
     }
     results.push({ taskId: item.taskId, status: recorded.status });

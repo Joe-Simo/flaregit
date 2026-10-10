@@ -1,8 +1,9 @@
 import type { ContradictionProof } from "../core/decision/contradiction-proof.js";
 import type { FlareGitProjectState } from "../core/types.js";
+import type { DecidedRequirements } from "../core/decision/requirement-gate.js";
 import { enqueueChanges, enqueueRequestSchema, MergeQueueLedger, planMergeQueue, removeFromQueue, settleLanding, type LandingOutcome, type MergeQueueEntry, type QueueAction } from "./merge-queue-runner.js";
-import { markRebaseRevision, PostLandRebaseLedger, planPostLandRebase, rebaseExecutionSchema, rebaseUpdate, recordPostLandRebase, type PostLandRebaseItem, type PostLandRebaseRecord, type RebaseExecution } from "./post-land-rebase.js";
-import { decisionProofSources, planLosingRevisions, recordDecisionProof, RequirementDecisionLedger, revisionWorkflowId, settleRevisions, type ProofSources, type RequirementDecisionView, type RequirementRevision } from "./requirement-decisions.js";
+import { advanceRevisionRun, claimDueRevisions, claimManualRevision, markRebaseRevision, nextRevisionRetryAt, PostLandRebaseLedger, planPostLandRebase, rebaseExecutionSchema, rebaseUpdate, recordPostLandRebase, type PostLandRebaseItem, type ManualRetry, type PostLandRebaseRecord, type RebaseExecution, type RevisionClaim, type RevisionOutcome } from "./post-land-rebase.js";
+import { decisionAffectedTaskIds, decisionProofSources, planLosingRevisions, recordDecisionProof, RequirementDecisionLedger, revisionWorkflowId, settleRevisions, type ProofSources, type RequirementDecisionView, type RequirementRevision } from "./requirement-decisions.js";
 
 /** Repository Durable Object ports used by coordination; the controller never reaches into other state. */
 export interface CoordinationPorts {
@@ -18,7 +19,15 @@ export interface CoordinationPorts {
 export interface CoordinationView {
   queue: Array<MergeQueueEntry & { goal: string; contributor: string }>;
   decisions: RequirementDecisionView[];
-  updates: PostLandRebaseRecord[];
+  updates: UpdateView[];
+}
+
+/** What members see of an update: the frozen agent context and the funding identity stay on the server. */
+export type UpdateView = Omit<PostLandRebaseRecord, "revisionContext" | "revisionRetry"> & { retry: { refusal: string; refusedReason: string; attempts: number; nextAttemptAt: string | null } | null };
+function updateView(record: PostLandRebaseRecord): UpdateView {
+  const { revisionContext: _context, revisionRetry, ...rest } = record;
+  void _context;
+  return { ...rest, retry: revisionRetry ? { refusal: revisionRetry.refusal, refusedReason: revisionRetry.refusedReason, attempts: revisionRetry.attempts, nextAttemptAt: revisionRetry.nextAttemptAt } : null };
 }
 
 export class CoordinationController {
@@ -45,12 +54,17 @@ export class CoordinationController {
     const state = this.ports.load(), decision = state.decisions[decisionId];
     if (!decision || decision.status !== "resolved") throw new Error("This decision has not been resolved");
     const ids: Record<string, string> = {};
-    for (const taskId of decision.resolvedTaskIds ?? []) ids[taskId] = await revisionWorkflowId(state.projectId, decisionId, taskId);
+    for (const taskId of decisionAffectedTaskIds(state, decisionId)) ids[taskId] = await revisionWorkflowId(state.projectId, decisionId, taskId);
     return this.transaction(() => {
       const planned = planLosingRevisions(this.decisions, this.ports.load(), decisionId, ids);
       this.ports.save();
       return planned;
     });
+  }
+
+  /** Requirements chosen in resolved decisions; they hold for every later candidate in the repository. */
+  decidedRequirements(): DecidedRequirements {
+    return this.decisions.decided();
   }
 
   markRevision(decisionId: string, taskId: string, outcome: { dispatched: true } | { dispatched: false; reason: string }): RequirementRevision {
@@ -106,14 +120,35 @@ export class CoordinationController {
     return { record: result.record, revise: result.revision !== null };
   }
 
-  markRebaseRevision(taskId: string, landedCommit: string, revisionWorkflowId: string, outcome: { ok: true } | { ok: false; reason: string }): PostLandRebaseRecord {
-    return this.transaction(() => markRebaseRevision(this.rebases, taskId, landedCommit, revisionWorkflowId, outcome));
+  async markRebaseRevision(taskId: string, landedCommit: string, revisionWorkflowId: string, outcome: RevisionOutcome): Promise<PostLandRebaseRecord> {
+    const before = this.rebases.get(taskId, landedCommit)?.status;
+    const record = this.transaction(() => markRebaseRevision(this.rebases, taskId, landedCommit, revisionWorkflowId, outcome));
+    if (before === "agent_waiting" && record.status !== "agent_waiting") await this.ports.activity("change.revising", `${taskId}: the agent is running again on the latest version`);
+    else if (record.status === "agent_waiting" && before !== "agent_waiting") await this.ports.activity("change.revision_waiting", `${taskId}: ${record.reason}`);
+    return record;
+  }
+
+  /** Refused re-runs due to be sent again; each is claimed so concurrent callers never send it twice. */
+  claimDueRevisions(): RevisionClaim[] {
+    return this.transaction(() => claimDueRevisions(this.rebases, this.ports.load()));
+  }
+
+  advanceRevisionRun(taskId: string, landedCommit: string, fromWorkflowId: string, toWorkflowId: string): PostLandRebaseRecord {
+    return this.transaction(() => advanceRevisionRun(this.rebases, taskId, landedCommit, fromWorkflowId, toWorkflowId));
+  }
+
+  claimManualRevision(taskId: string, actorId: string, rerunWorkflowId?: string): ManualRetry {
+    return this.transaction(() => claimManualRevision(this.rebases, this.ports.load(), taskId, actorId, new Date(), rerunWorkflowId));
+  }
+
+  nextRevisionRetryAt(): number | null {
+    return nextRevisionRetryAt(this.rebases);
   }
 
   view(): CoordinationView {
     const state = this.ports.load();
     const queue = this.queue.entries().filter((entry) => entry.status !== "removed").slice(-100).map((entry) => ({ ...entry, goal: state.tasks[entry.taskId]?.goal ?? entry.taskId, contributor: state.tasks[entry.taskId]?.contributor.name ?? "" }));
     const decisionIds = Object.values(state.decisions).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 50).map((decision) => decision.id);
-    return { queue, decisions: this.decisions.views(decisionIds), updates: this.rebases.latest(100) };
+    return { queue, decisions: this.decisions.views(decisionIds), updates: this.rebases.latest(100).map(updateView) };
   }
 }

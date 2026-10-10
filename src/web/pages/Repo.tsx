@@ -10,7 +10,8 @@ import { glossary } from "../lib/glossary";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { apiJson } from "../api";
+import { ApiError, apiJson } from "../api";
+import { useRepositoryActivity } from "../repository-activity";
 import { useVisiblePolling } from "../use-visible-polling";
 import { navigate } from "../router";
 import { CodeTab } from "../tabs/Code";
@@ -66,6 +67,7 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
   const [error, setError] = useState<string | null>(null);
   const [clone, setClone] = useState<{ token:string; remote: string } | null>(null);
   const [stateError, setStateError] = useState<string | null>(null);
+  const [throttled, setThrottled] = useState(false);
   const [cloneError, setCloneError] = useState<string | null>(null);
   const [cloning, setCloning] = useState(false);
 
@@ -74,7 +76,8 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
   const activeWork = ["changes", "integration", "review"].includes(tab);
   const refresh = useVisiblePolling({
     scope: `${projectId}:${tab}`,
-    intervalMs: activeWork ? 6000 : 30_000,
+    // Live-board activity refreshes sooner (coalesced below); this is only the fallback cadence.
+    intervalMs: activeWork ? 15_000 : 30_000,
     maxBackoffMs: 120_000,
     read: async (signal) => {
       const boundedSignal = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
@@ -88,10 +91,12 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
       if (snapshot.status === "rejected") throw snapshot.reason;
       return { meta: metadata.value, state: snapshot.value };
     },
-    onValue: (next) => { setMeta(next.meta); setState(next.state); setError(null); setStateError(null); },
+    onValue: (next) => { setMeta(next.meta); setState(next.state); setError(null); setStateError(null); setThrottled(false); },
     onError: (cause) => {
       const failure=repositoryRefreshFailure(cause);
       if(failure==="superseded")return;
+      // Rate limiting clears on its own: polling waits for Retry-After and the last state stays authoritative.
+      if (meta && state && cause instanceof ApiError && cause.status === 429) { setThrottled(true); return; }
       const message = cause instanceof Error ? cause.message : "Could not refresh repository";
       if (!meta || !state || failure==="access") {
         setMeta(null); setState(null); setError(message); setStateError(null);
@@ -99,6 +104,7 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
     },
   });
   const reload = useCallback(() => { void refresh(); }, [refresh]);
+  useRepositoryActivity(projectId, reload, activeWork);
   useEffect(() => () => { lifetime.current++; }, [projectId]);
   const refreshManually = async () => {
     const generation = lifetime.current;
@@ -153,6 +159,7 @@ function RepositoryView({ projectId, tab, params }: RepoProps) {
         </div>
       </div>
       {cloneError && <div role="alert" className="mb-4 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">{cloneError}</div>}
+      {throttled && !stateError && <p role="status" className="mb-4 text-xs text-muted-foreground">Updates are paused for a moment because of request limits; they resume on their own.</p>}
       {stateError && <div role="status" className="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-200 flex flex-wrap items-center gap-3"><span>Live updates unavailable: {stateError}. Showing the last loaded state; owner actions are paused.</span><Button size="sm" variant="outline" disabled={refreshing} onClick={() => void refreshManually()}>{refreshing ? "Refreshing…" : "Retry refresh"}</Button></div>}
 
       <nav aria-label="Repository sections" className="-mx-4 sm:mx-0 mb-2">

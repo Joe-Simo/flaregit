@@ -17,7 +17,7 @@ import type { AgentChangeExplanation } from "../src/server/agent-loop.js";
 
 // Native Git with a deterministic model double and in-memory durable-store double.
 // These assertions verify recovery orchestration, not hosted provider execution.
-async function fixture(options: { unborn?:boolean; lostPush?: boolean; lostCheckpoint?: boolean; infoFails?: boolean; secret?: boolean; revokeBeforeModel?: "account" | "membership";badTokenScope?:boolean;revokeFails?:boolean;stopFails?:boolean;revokeDuringModel?:"account"|"membership";primaryPolicy?:Record<string,unknown>;changeTargetDuringModel?:boolean;changePolicyDuringModel?:boolean;changeGenerationDuringModel?:boolean;modelAnswer?:string } = {}) {
+async function fixture(options: { unborn?:boolean; lostPush?: boolean; lostCheckpoint?: boolean; infoFails?: boolean; secret?: boolean; revokeBeforeModel?: "account" | "membership";badTokenScope?:boolean;revokeFails?:boolean;stopFails?:boolean;revokeDuringModel?:"account"|"membership";primaryPolicy?:Record<string,unknown>;changeTargetDuringModel?:boolean;changePolicyDuringModel?:boolean;changeGenerationDuringModel?:boolean;modelAnswer?:string;model?:(prompt:string)=>string } = {}) {
   const root = await mkdtemp(join(tmpdir(), "agent-recovery-")), canonical = join(root, "repo.git"), seed = join(root, "seed");
   const git = async (args: string[]) => {
     const child = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@localhost", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@localhost" } });
@@ -99,7 +99,7 @@ async function fixture(options: { unborn?:boolean; lostPush?: boolean; lostCheck
       };
     } },
     ARTIFACTS: { get: async () => ({ info: async () => { if (options.infoFails) throw new Error("Info unavailable"); return { remote: canonical }; }, createToken: async (scope:"read"|"write",ttl:number) => {credentialIssues++;return ({ plaintext: "fixture-token",scope:options.badTokenScope?"admin":scope,expiresAt:new Date(Date.now()+ttl*1000).toISOString() });}, revokeToken: async () => { revoked++; return true; }, [Symbol.dispose]: () => {} }) },
-    AI: { run: async (_model:string,input:{messages?:Array<{content:string}>}) => { prompts.push(...(input.messages??[]).map(message=>message.content));if(options.changePolicyDuringModel)policyVersion++;if(options.changeGenerationDuringModel&&task.targetGeneration)Object.assign(task,{targetGeneration:{...task.targetGeneration,eventId:crypto.randomUUID(),generation:task.targetGeneration.generation+1}});if(options.changeTargetDuringModel&&task.acceptedTarget)Object.assign(task,{acceptedTarget:{...task.acceptedTarget,acceptedCommit:"f".repeat(40)}});modelCalls++;if(options.revokeDuringModel==="account")lifecycle="deleted";if(options.revokeDuringModel==="membership")membership=false; return { response: options.modelAnswer ?? '<file path="src/app.ts">\nexport const value = 2;\n</file>' }; } },
+    AI: { run: async (_model:string,input:{messages?:Array<{content:string}>}) => { prompts.push(...(input.messages??[]).map(message=>message.content));if(options.changePolicyDuringModel)policyVersion++;if(options.changeGenerationDuringModel&&task.targetGeneration)Object.assign(task,{targetGeneration:{...task.targetGeneration,eventId:crypto.randomUUID(),generation:task.targetGeneration.generation+1}});if(options.changeTargetDuringModel&&task.acceptedTarget)Object.assign(task,{acceptedTarget:{...task.acceptedTarget,acceptedCommit:"f".repeat(40)}});modelCalls++;if(options.revokeDuringModel==="account")lifecycle="deleted";if(options.revokeDuringModel==="membership")membership=false; return { response: options.model ? options.model(input.messages?.at(-1)?.content ?? "") : options.modelAnswer ?? '<file path="src/app.ts">\nexport const value = 2;\n</file>' }; } },
   } as unknown as Env;
   // Synthetic policy port proves orchestration and credential omission only;
   // hosted Internet/HTTP/TLS isolation requires the genuine container canary.
@@ -357,4 +357,43 @@ test("a single agent round edits with validated hunks, records its explanation a
       expect(f.counts().modelCalls).toBe(1);
     } finally { await f.cleanup(); }
   }
+}, 30000);
+
+test("a rebased revision shows the restarted branch and round 1 edits written against the shown file apply", async () => {
+  const shown = (prompt: string, path: string) => { const tag = `<current path="${path}">\n`, start = prompt.indexOf(tag); if (start < 0) return null; const from = start + tag.length; return prompt.slice(from, prompt.indexOf("\n</current>", from)); };
+  let calls = 0;
+  const f = await fixture({ model: (prompt) => {
+    calls++;
+    const pricing = shown(prompt, "src/pricing.ts");
+    if (pricing === null) return "<plan>\n- nothing shown\n</plan>";
+    // Deterministic double: the search block is copied verbatim from the file it was shown.
+    const last = pricing.trimEnd().split("\n").at(-1)!;
+    return `<plan>\n- Add a refundable fee\n</plan>\n<edit path="src/pricing.ts">\n<search>\n${last}\n</search>\n<replace>\n${last}\nexport const refundableFee = (amount: number) => feeFor(amount);\n</replace>\n</edit>\n<reasoning>Adds the refundable fee on top of the landed pricing.</reasoning>`;
+  } });
+  try {
+    const seed = join(f.root, "seed");
+    await Bun.write(join(seed, "src/pricing.ts"), "export const fee = 5;\n");
+    await f.git(["-C", seed, "add", "."]); await f.git(["-C", seed, "commit", "-m", "pricing"]); await f.git(["-C", seed, "push", "origin", "main"]);
+    const base = await f.git(["-C", seed, "rev-parse", "HEAD"]);
+    // The change's earlier version on its own branch, saved by an earlier agent run.
+    await f.git(["-C", seed, "checkout", "-b", "previous"]);
+    await Bun.write(join(seed, "src/pricing.ts"), "export const fee = 7;\nexport const refundable = true;\n");
+    await f.git(["-C", seed, "commit", "-am", "previous version"]); await f.git(["-C", seed, "push", "origin", "HEAD:refs/heads/task/change1"]);
+    const previous = await f.git(["-C", seed, "rev-parse", "HEAD"]);
+    f.runs.set("first-run", { runId: "first-run", taskId: "change1", branch: "task/change1", startingCommit: base, startingBranchHead: null, goal: "Change source", context: { comments: [] }, allowedScope: ["src/"], protectedPaths: [], generation: 1, phase: "checkpointed", pushedCommit: previous, proposal: { files: { "src/pricing.ts": "export const fee = 7;\nexport const refundable = true;\n" }, digest: "fixture-digest", commitDate: "2026-10-01T10:00:00.000Z" }, createdAt: "2026-10-01T10:00:00.000Z", updatedAt: "2026-10-01T10:00:00.000Z" } as AgentRunRecord);
+    // Another change lands; the post-land rebase restarts this branch on the landed commit.
+    await f.git(["-C", seed, "checkout", "main"]);
+    await Bun.write(join(seed, "src/pricing.ts"), "export const fee = 5;\nexport function feeFor(amount: number) { return amount * fee / 100; }\n");
+    await f.git(["-C", seed, "commit", "-am", "landed pricing"]); await f.git(["-C", seed, "push", "origin", "main"]);
+    const landed = await f.git(["-C", seed, "rev-parse", "HEAD"]);
+    await f.git(["-C", seed, "push", "--force", "origin", `${landed}:refs/heads/task/change1`]);
+    Object.assign(f.task, { baseCommit: landed, currentCommit: landed, status: "checkpointed", agentRunId: "first-run" });
+    const result = await runAgentTask(f.env, f.ledger, f.task, "revision-run", { ...f.funding, stopAfterProposal: true, round: { round: 1, maxRounds: 3, history: [], files: {} } });
+    expect(calls).toBe(1);
+    expect(shown(f.prompts.at(-1)!, "src/pricing.ts")).toBe("export const fee = 5;\nexport function feeFor(amount: number) { return amount * fee / 100; }\n");
+    expect(f.prompts.at(-1)).not.toContain("refundable = true");
+    expect(result.round?.record.edits).toBe("applied");
+    expect(result.round?.files["src/pricing.ts"]).toBe("export const fee = 5;\nexport function feeFor(amount: number) { return amount * fee / 100; }\nexport const refundableFee = (amount: number) => feeFor(amount);\n");
+    expect(f.runs.get("revision-run")?.startingCommit).toBe(landed);
+  } finally { await f.cleanup(); }
 }, 30000);

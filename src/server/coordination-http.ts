@@ -6,6 +6,7 @@ import { advanceMergeQueue } from "./coordination-dispatch.js";
 import { gitParentTokenHash } from "./git-gateway-handler.js";
 import { readRequestJson, RequestBodyError } from "./request-body.js";
 import { enqueueRequestSchema } from "./merge-queue-runner.js";
+import { sendRebaseRevision } from "./revision-dispatch.js";
 
 /** Current identity after re-authentication; null when the session or token changed mid-request. */
 export type FreshActor = () => Promise<{ identity: { viaToken?: boolean; tokenScope?: string; expiresAt?: number }; isOwner: boolean } | null>;
@@ -35,6 +36,7 @@ export async function coordinationHttp(input: CoordinationRequest): Promise<Resp
     if (method !== "GET") return text("Coordination status is read with GET", 405);
     try { return json(await project.coordinationView(userId)); } catch { return text("Repository access required", 403); }
   }
+  if (sub === "/changes/run-agent-again") return runAgentAgain(input);
   if (sub !== "/merge-queue" && sub !== "/merge-queue/remove") return null;
   if (method !== "POST") return text("Merge queue changes use POST", 405);
   let raw: unknown;
@@ -61,5 +63,37 @@ export async function coordinationHttp(input: CoordinationRequest): Promise<Resp
     // Ledger refusals carry a reason written for people (for example "Queue a before b").
     const reason = error instanceof Error && error.message.length <= 300 && !/^\[|\{/.test(error.message) ? error.message : "The merge queue change could not be confirmed";
     return text(`${reason}. Retrying with the same request id is safe.`, 409);
+  }
+}
+
+/**
+ * "Run the agent again on the latest version": re-sends a refused post-land re-run of one change under its
+ * saved request id, funded by the owner who asks. Repeating it never starts a second run.
+ */
+async function runAgentAgain(input: CoordinationRequest): Promise<Response> {
+  const { method, request, project, userId } = input;
+  if (method !== "POST") return text("Running the agent again uses POST", 405);
+  let raw: unknown;
+  try { raw = await readRequestJson<unknown>(request, 4096); } catch (error) { return text(error instanceof RequestBodyError ? error.message : "Invalid request body", 400); }
+  const parsed = removeSchema.safeParse(raw);
+  if (!parsed.success) return text("Choose the change to run the agent on again", 400);
+  const current = await input.freshActor(true);
+  if (!current?.isOwner) return text("Only a repository owner with a session or full-access token can run the agent again", 403);
+  const viaToken = current.identity.viaToken === true;
+  const actor: HumanDecisionActor = { userId, displayName: (await input.displayName()).slice(0, 120) || "Repository owner", viaToken };
+  const credentialHash = viaToken ? await gitParentTokenHash(request) : undefined;
+  let claimed;
+  try { claimed = await project.claimManualRebaseRevision(parsed.data.taskId, actor, credentialHash, current.identity.expiresAt); } catch (error) {
+    const reason = error instanceof Error && error.message.length <= 300 && !/^\[|\{/.test(error.message) ? error.message : "Running the agent again could not be confirmed";
+    return text(reason, /owner/.test(reason) ? 403 : 409);
+  }
+  if (claimed.kind === "refused") return text(claimed.reason, 409);
+  if (claimed.kind === "settled") return json({ update: claimed.record, dispatched: claimed.record.status !== "agent_waiting" && claimed.record.status !== "skipped", replayed: true });
+  try {
+    const { record, dispatch } = await sendRebaseRevision(input.env, project, input.projectId, claimed.claim);
+    if (!dispatch.dispatched) return text(`The agent could not be re-run: ${dispatch.reason} Nothing was started; the change keeps its saved work.`, dispatch.refusal === "budget" ? 429 : dispatch.refusal === "access" ? 403 : 503);
+    return json({ update: record, dispatched: true, replayed: dispatch.replayed });
+  } catch {
+    return text("Running the agent again was not confirmed. Pressing the button again is safe; it never starts a second run.", 503);
   }
 }

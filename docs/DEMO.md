@@ -14,24 +14,34 @@ The script is built around four flows, weighted to the judging criteria (agent c
 ## Before recording
 
 - Use the current production deploy and note its source commit (shown in the footer / `/status.json`).
-- Create a fresh test repository from the ticket-booking fixture and say on camera that it is a test repository.
-- Prepare three issues with requirements written so that two of them contradict (for example: "orders of 4+ tickets get 15% off" vs. "the per-ticket price never changes after checkout starts"), and a third independent one (for example: "add a $5 refundable fee").
+- Import the public demo repository `https://github.com/Joe-Simo/flaregit-demo-tickets` as `demo-tickets`, with test command `bun test tests`. Say on camera that it is a test repository.
+- Start three agents with these goals and requirements (A and B contradict on purpose; C is independent):
+
+  | Agent | Goal | Requirement example | Expected |
+  |---|---|---|---|
+  | A | Group discount | 4 tickets × $40 | total `136` |
+  | B | Price guarantee | 4 tickets × $40 | total `160` |
+  | C | Refundable fee | 2 refundable tickets × $40 | total `90`, `isRefundable` `true` |
+
+- The human entrant must personally click **Approve commit** and personally pick the winning requirement in the contradiction decision. Do not automate either step.
 - Sign in with your own account. Keep tokens, emails and personal details off screen; hide the browser bookmark bar.
 - Do one full dry run the same day; record the dry-run evidence in `docs/evidence/`.
 
 ## Script
 
+Every step below was dry-run on production in the repository `demo-run` on October 10 (evidence in `docs/evidence/dry-run/`). Waiting is sped up in the edit and labelled on screen.
+
 | Time | Screen | Narration |
 |---|---|---|
-| 0:00–0:30 | Home with the "Get started" checklist; open the test repository. | "FlareGit is a Git platform where people and coding agents work side by side, and a human decides what lands." |
-| 0:30–1:40 | Start three agents from the three issues. Open the **Agents** board: three rows go live, each showing goal, status, files and round. | "Each agent gets its own real Git workspace. This board updates live — no refreshing." |
-| 1:40–2:30 | An overlap warning appears on the board: two agents are editing the same file. Open one agent's change: its plan now mentions the other agent's work. | "FlareGit checks every agent's saved work against the others while they work, and tells the agents about each other." |
-| 2:30–3:30 | Open an agent's change: goal, plan, files, test rounds (failed → fixed → passed), plain-language reasoning. | "Agents don't rewrite and hope. They edit, run the tests in an isolated container, read the failures and try again." |
-| 3:30–4:50 | **Contradiction decision.** The two conflicting changes are flagged. Show the proof: the same order, two expected prices, each side's actual result from running the code. Pick the winning requirement. The losing agent restarts with the decision as context and produces a revised change. | "Two agents can both be right by their own instructions. FlareGit runs the code to prove the requirements disagree, asks a human to decide once, and the other agent fixes its work to match." |
-| 4:50–5:50 | **Merge queue.** Mark the three changes ready. The queue lands them one at a time. Land one change manually first so a queued change goes stale: it is refused with a clear reason and re-queued. | "Changes land in order, each re-checked against the latest code. Nothing stale slips through." |
-| 5:50–6:30 | **Rebase after landing.** After a merge, the remaining agent change moves onto the new base and re-runs its checks on the board. | "When something lands, the other agents' work catches up on its own." |
-| 6:30–7:10 | Each change's progress bar reads Merged. `git clone` the repository in a terminal and show the merged commits and passing tests. | "What you approved is exactly what's in Git." |
-| 7:10–7:30 | Close on the repository page. | "FlareGit — built on Cloudflare Workers, Durable Objects, Workflows, Containers, Artifacts and Workers AI." |
+| 0:00–0:30 | Home: the Get started checklist and the credits bar. Open `demo-run` (a test repository imported from github.com/Joe-Simo/flaregit-demo-tickets). | "FlareGit is a Git platform where people and coding agents work side by side, and a person decides what lands." |
+| 0:30–1:30 | Changes → Start with an agent, three times, each with a requirement and a runnable example: Group discount (4 × $40 → $136), Price guarantee (4 × $40 → $160), Refundable fee (2 refundable × $40 → $90). | "Each agent gets its own real copy of the repository and a requirement FlareGit can run." |
+| 1:30–2:20 | The Agents board at the top of Changes: three rows live, then "Also editing src/pricing.ts … edits may conflict." | "The board updates live. Agents see each other's work while they're still working." |
+| 2:20–3:00 | Open one change's "What the agent did": plan, reasoning, attempts (tests run in an isolated container; a rejected attempt, then a passing one). | "Agents don't rewrite and hope. They edit, run the repository's tests, read the result and try again." |
+| 3:00–4:20 | Select Group discount and Price guarantee → Combine selected (2). Review → Decisions needed: both requirements, each change's code returning $136 vs $160. Click "This one is right" on Group discount → Apply choice. | "Both agents followed their instructions. FlareGit ran the code to prove the requirements disagree, and asks a person to decide once." |
+| 4:20–5:20 | Review: the discount's card shows "Requirement checks · passed · Group discount · decided". Approve commit. The queue lands it; the other changes conflict and their agents redo them on the new code. | "Changes land one at a time. When something lands, the other agents catch up on their own." |
+| 5:20–6:20 | The revised Price guarantee returns carrying the Group discount requirement and passes it; approve. The refundable change passes "2 of 2" requirement checks; approve. | "The decision sticks. Every later change is checked against it before it can merge." |
+| 6:20–7:00 | Code → src/pricing.ts at the merged commit: the 15% discount is still there, the price-guarantee line and refundable fee were added around it. Landed list shows three merges in order. | "What you approved is exactly what's in Git." |
+| 7:00–7:20 | Close on the repository page. | "FlareGit — built on Cloudflare Workers, Durable Objects, Workflows, Containers, Artifacts and Workers AI." |
 
 ## Rules for the recording
 

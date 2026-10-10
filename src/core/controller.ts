@@ -421,6 +421,8 @@ export class FlareGitRepositoryController {
         commitB: taskB.currentCommit,
         labelA: taskA.id,
         labelB: taskB.id,
+        goalA: taskA.goal,
+        goalB: taskB.goal,
       });
       candidate.compositionMethod = composed.compositionMethod;
       candidate.candidateCommit = composed.candidateCommit ?? undefined;

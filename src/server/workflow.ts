@@ -28,6 +28,8 @@ import { publicationInHistory } from "./publication.js";
 import {checkpointedNativeRefUpdate} from './c03-native-publication-checkpoint';
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { WorkersAIClient, DEFAULT_CODE_MODEL } from "../ai/workers-ai.js";
+import { landingCommitMessage, mergeCommitMessage } from "../core/pipeline/merge-message.js";
+import { runRequirementGate } from "./requirement-gate-runner.js";
 import { buildRepairPrompt, parseRepairResponse, MAX_REPAIR_ROUNDS } from "../core/pipeline/repair.js";
 import {acceptedTargetSchema,assertCompatibleAcceptedTargetBatch,effectiveTaskAcceptedTarget} from "../core/accepted-target.js";
 import type { CandidateGeneration, VerificationEvidence, FlareGitProjectState, PublicationJournalEntry } from "../core/types.js";
@@ -544,7 +546,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       if (!spending || model !== DEFAULT_CODE_MODEL) throw new Error("Managed repair budget unavailable");
       await assertManagedInitiator(this.env, stub, parentWorkflowId, params.accountKey);
       await globalOf(this.env).consumeManagedSpend(spendRunId, inputBytes, maxOutputTokens, 0);
-    } });
+    }, afterDispatch: async ({ inputTokens, outputTokens }) => { await globalOf(this.env).recordManagedUsage(spendRunId, inputTokens, outputTokens); } });
     let round = 0;
     candidate.repairAttempts = structuredClone(state.candidates[candidate.id]?.repairAttempts ?? candidate.repairAttempts);
     round = Math.max(0, ...candidate.repairAttempts.map(attempt => attempt.round));
@@ -689,7 +691,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
         if (!first.success) return { ok: false, error: "First contributor checkpoint is unavailable" };
         continue;
       }
-      const m = await run(`git -C ${WORK} merge ${candidate.expectedAcceptedBase === null ? "--allow-unrelated-histories " : ""}--no-ff -m ${q(`FlareGit candidate ${candidate.id}: ${t.id}`)} refs/flaregit/tasks/${t.id}`);
+      const m = await run(`git -C ${WORK} merge ${candidate.expectedAcceptedBase === null ? "--allow-unrelated-histories " : ""}--no-ff -m ${q(mergeCommitMessage({ goal: t.goal, candidateId: candidate.id, taskId: t.id, commit: candidate.participatingCommits[t.id] }))} refs/flaregit/tasks/${t.id}`);
       if (m.success) continue;
       const files = (await run(`git -C ${WORK} diff --name-only --diff-filter=U`)).stdout.split("\n").filter(Boolean);
       if(isolatedBrowser){if(await protectedConflictRepair())continue;return{ok:false,error:'Protected text conflict could not be safely repaired; unsupported delete/mode/unborn conflicts or pending product decisions require explicit resolution, and original source/model acknowledgements remain preserved'};}
@@ -704,7 +706,7 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       if (candidate.expectedAcceptedBase === null) return false;
       const tree = (await run(`git -C ${WORK} rev-parse ${q("HEAD^{tree}")}`)).stdout.trim();
       const coauthors = [...new Map(tasks.map((t) => [t.contributor.name, `Co-authored-by: ${t.contributor.name} <${t.contributor.id}@users.flaregit.com>`])).values()];
-      const message = [`Land ${tasks.map((t) => t.id).join(" + ")}`, "", ...tasks.map((t) => `- ${t.goal}`), "", ...coauthors].join("\n");
+      const message = landingCommitMessage({ candidateId: candidate.id, changes: tasks.map((t) => ({ id: t.id, goal: t.goal })), coauthors });
       const made = await run(`git -C ${WORK} commit-tree ${q(tree)} -p ${q(candidate.expectedAcceptedBase)} -m ${q(message)}`);
       if (!made.success) return false;
       return (await run(`git -C ${WORK} checkout --quiet --detach ${q(made.stdout.trim())}`)).success;
@@ -730,6 +732,13 @@ export class FlareGitIntegrationWorkflow extends WorkflowEntrypoint<Env, Integra
       }
       await stub.recordVerification(candidate.id, commit, evidence);
       if (evidence.status === "passed") {
+        // Requirement gate: decided and approved requirements' runnable examples must hold on this exact commit.
+        const examples = await stub.requirementGatePlan(candidate.id);
+        if (examples.length) {
+          const checks = await runRequirementGate(run, { platformDir: "/opt/flaregit", repoDir: WORK, commit, examples });
+          const failure = await stub.recordRequirementChecks(candidate.id, commit, checks);
+          if (failure) return { ok: false, error: failure };
+        }
         // Retain the verified Git candidate before optional R2 copies.
         const pin=await retainCandidateGitPin({candidateId:candidate.id,commit,...(protectedRepairCommit===commit&&protectedRepairNeedsRevision?{revision:true as const}:{}),directory:WORK,remote:activeCanonical.remote,token:activeCanonical.token,exec:(command,env)=>sb.exec(command,env,()=>this.retainedAuthority(inputs[0]!,stub)),beforeCommand:async phase=>{if(phase==="before")await this.fundedRetainedCommand(inputs[0]!,stub);else await this.retainedAuthority(inputs[0]!,stub);}});
         await stub.recordCandidateProtectedPin(candidate.id,commit,{...pin,workflowId:parentWorkflowId,...(protectedRepairCommit===commit&&protectedRepairNeedsRevision?{revision:true as const}:{})});

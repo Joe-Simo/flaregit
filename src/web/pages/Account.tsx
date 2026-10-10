@@ -1,4 +1,5 @@
 import { NeedsAttention } from "../components/NeedsAttention";
+import { CreditsCard, type CreditBilling } from "../components/CreditsCard";
 import {SigningKeys} from '../components/SigningKeys';
 import {GitCredential} from '../components/GitCredential';
 import { ProfileDiscoverySettings } from "./CommunityPeople";
@@ -13,7 +14,6 @@ import { Field,FieldGroup,FieldLabel,FieldSet,FieldLegend } from "@/components/u
 import { Select,SelectTrigger,SelectValue,SelectContent,SelectGroup,SelectItem } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { z } from "zod";
-import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiJson } from "../api";
 import { timeAgo } from "../router";
@@ -29,7 +29,7 @@ export function CreatedAccountCredential({token}:{token:string}){
  return <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 space-y-2"><p className="text-xs font-semibold">Save your credential now — it is not shown again</p><GitCredential token={token}/><Button variant="outline" size="sm" onClick={download}>Download credential</Button><p className="text-xs text-muted-foreground">The downloaded file contains a secret. Keep it privately in your secret manager.</p>{error&&<p role="alert" className="text-xs text-destructive">{error}</p>}</div>;
 }
 interface Token { id: string; label: string; created_at: string; last_used: string | null; scope: string; repo: string | null; expires_at: number | null }
-interface Billing { plan: "free" | "pro"; runsToday: number; runsPerDay: number }
+type Billing = CreditBilling;
 interface Profile { handle: string; displayName: string; bio: string; visibility: "private" | "public"; version: number; moderation?: { suppressed: boolean; reason: string; reportId: string; version: number } }
 const field = "w-full rounded-md border border-border bg-background px-3 py-2 text-sm";
 const alertCls = "rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive";
@@ -96,7 +96,7 @@ export function Account() {
   const loadTokenRepositories=useCallback(async()=>{setRepositoryLoadError(null);try{const rows=z.object({projects:z.array(z.object({id:z.string().regex(/^[a-z0-9]{12,16}$/),name:z.string(),kind:z.string()}))}).parse(await apiJson<unknown>('/account'));setTokenRepositories(rows.projects.filter(p=>p.kind==='repository').map(({id,name})=>({id,name})));}catch{setRepositoryLoadError('Repository choices could not be confirmed. Refresh before issuing restricted access.');}},[]);
   const loadBilling = useCallback(async () => {
     setBillingError(null);
-    try { setBilling(await apiJson<Billing>("/billing")); } catch (e) { setBillingError(errText(e, "Could not load your plan")); }
+    try { setBilling(await apiJson<Billing>("/billing")); } catch (e) { setBillingError(errText(e, "Could not load your billing")); }
   }, []);
   const loadProfile = useCallback(async () => {
     setProfileError(null);
@@ -189,16 +189,11 @@ export function Account() {
         </CardContent>
       </Card>
       <Card>
-        <CardHeader className="pb-2"><CardTitle className="text-sm">Plan</CardTitle></CardHeader>
+        <CardHeader className="pb-2"><CardTitle className="text-sm">Billing</CardTitle></CardHeader>
         <CardContent className="text-sm">
           {billingError && <LoadError message={billingError} onRetry={() => void loadBilling()} />}
-          {!billing && !billingError && <p role="status" className="text-muted-foreground">Loading plan…</p>}
-          {billing && (
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span>Plan <Badge variant={billing.plan === "pro" ? "success" : "secondary"}>{billing.plan}</Badge></span>
-              <span className="text-muted-foreground">{billing.runsToday} of {billing.runsPerDay} AI runs used today</span>
-            </div>
-          )}
+          {!billing && !billingError && <p role="status" className="text-muted-foreground">Loading billing…</p>}
+          {billing && <CreditsCard billing={billing} onChanged={() => void loadBilling()} />}
         </CardContent>
       </Card>
       <Card>
@@ -244,7 +239,7 @@ export function Account() {
       </Card>
       </fieldset>
       <SigningKeys disabled={deletionStarted||busy!==null}/>
-      <NeedsAttention><StorageReconciliation /></NeedsAttention>
+      <NeedsAttention label="Storage cleanup needs attention" description="Some uploads or saved copies did not finish cleaning up."><StorageReconciliation /></NeedsAttention>
       <Card>
         <CardHeader><CardTitle className="text-base text-destructive">Delete account</CardTitle></CardHeader>
         <CardContent className="space-y-3">

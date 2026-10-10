@@ -164,7 +164,7 @@ export function SettingsTab({ meta, reload }: { meta: Meta; reload: () => void }
       {isOwner && <ConnectionsCard key={`connections:${meta.id}`} projectId={meta.id} isOwner={isOwner} isCustom={meta.kind === "import" && isCommandPolicy(meta.verification)} />}
       {isOwner && <DeploymentCard key={`deployments:${meta.id}`} projectId={meta.id} />}
       <div id="deployment-deliveries"><WebhooksCard projectId={meta.id} isOwner={isOwner} /></div>
-      <NeedsAttention><PrivateGitRecovery projectId={meta.id} isOwner={isOwner} />{isOwner && <StorageReconciliation projectId={meta.id} />}</NeedsAttention>
+      <NeedsAttention label="Repository recovery needs attention" description="A Git bundle or storage cleanup did not finish."><PrivateGitRecovery projectId={meta.id} isOwner={isOwner} />{isOwner && <StorageReconciliation projectId={meta.id} />}</NeedsAttention>
       <DomainsCard projectId={meta.id} isOwner={isOwner} />
       {isOwner&&meta.kind==="import"&&meta.source?.startsWith("https://github.com/")&&<Suspense fallback={<p role="status" className="text-xs text-muted-foreground">Loading saved conversation migration…</p>}><ConversationMigrationCard key={`conversation-migration:${meta.id}`} projectId={meta.id}/></Suspense>}
       {isOwner && meta.kind === "import" && <ImportHistoryCard key={`import-history:${meta.id}`} projectId={meta.id} />}

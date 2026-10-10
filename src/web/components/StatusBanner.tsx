@@ -132,7 +132,7 @@ export function StatusBanner({
         </div>
 
         {recordedAcceptedCommit(lastAcceptedCommit) && <div className="flex items-center gap-2 text-xs text-muted-foreground self-start sm:self-center">
-          <span>Protected canonical HEAD:</span>
+          <span title="The latest commit merged into the protected branch">Latest merged commit</span>
           <span className="font-mono text-foreground font-semibold px-2 py-0.5 rounded bg-background/80 border border-border">
             {acceptedCommitLabel(lastAcceptedCommit)}
           </span>

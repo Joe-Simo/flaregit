@@ -21,7 +21,7 @@ test("production Worker service routes verify signatures before user login and e
     const legacyPrice=await request("/pricing",{headers:{Accept:"application/json"}});
     expect(await legacyPrice.json<unknown>()).toEqual({status:"unavailable",reason:"not_configured"});
     const publicPrice=await request("/plan-price");
-    expect(await publicPrice.json<unknown>()).toEqual({price:{status:"unavailable",reason:"not_configured"},limits:{free:10,pro:200},repositoryLimit:10,sharedRetainedRepositorySlots:null});
+    expect(await publicPrice.json<unknown>()).toMatchObject({price:{status:"unavailable",reason:"not_configured"},limits:{free:10,pro:200},repositoryLimit:10,sharedRetainedRepositorySlots:null});
     const humanHeaders={Authorization:`Bearer fgt_abcdef123456_${"x".repeat(32)}`};
     for(const endpoint of ["/api/projects","/api/p/abcdef123456/tasks/task-one/agent"]){
       for(const body of ["{invalid","[]","null","x".repeat(131073)])expect((await request(endpoint,{method:"POST",headers:humanHeaders,body})).status).toBe(400);

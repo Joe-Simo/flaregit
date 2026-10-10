@@ -1,0 +1,21 @@
+{
+  "capturedAt": "2026-10-10",
+  "source": "GET https://flaregit.com/api/p/p33dab4f544c2/coordination (signed-in owner; actor ids removed)",
+  "decision": {
+    "decisionId": "dec_daec9d55",
+    "verdict": "proven",
+    "input": { "ticketCount": 4, "basePrice": 40 },
+    "probe": { "module": "src/pricing.ts", "export": "calculateQuote" },
+    "sides": [
+      { "requirementTitle": "Group discount", "commit": "49db379f50e30b2c5e6e5d2023d059b5def5c948", "expected": { "total": 136 }, "actual": { "total": 136 }, "meetsOwnRequirement": true, "meetsOtherRequirement": false },
+      { "requirementTitle": "Price guarantee", "commit": "7e7c3e1d11d5819d7e4f48be1a643263e9391fdf", "expected": { "total": 160 }, "actual": { "total": 160 }, "meetsOwnRequirement": true, "meetsOtherRequirement": false }
+    ],
+    "executedAt": "2026-10-10T04:14:15.222Z"
+  },
+  "humanChoice": "Group discount (chosen in the decision screen, applied by the repository owner)",
+  "revision": { "taskId": "guarantee-the-advertised-be16257f1da0", "winningRequirement": "Group discount", "startCommit": "7e7c3e1d11d5819d7e4f48be1a643263e9391fdf", "status": "revised", "revisedCommit": "3c6265235112f6a9ac1c5c359be93086d7910485" },
+  "mergeQueue": [
+    { "position": 1, "change": "add-a-15-group-discount--cbe56c31fa7b", "status": "landing", "checkedBase": "1cf967e6" },
+    { "position": 2, "change": "guarantee-the-advertised-be16257f1da0", "status": "queued", "checkedCommit": "3c626523" }
+  ]
+}

@@ -24,19 +24,25 @@ FlareGit
 
 ## Project vision — proposed form copy
 
-FlareGit makes concurrent Git work understandable without losing the people and conversations behind it. Each human or coding agent contributes through an isolated real Git workspace. A contribution carries a goal, saved checkpoints, issue context, review conversation, and its relationship to other changes. Maintainers review a composed candidate and decide exactly what becomes accepted history.
+FlareGit is a Git platform where several coding agents work on one repository at the same time, and a person decides what lands. Each part has one purpose and one place:
 
-The prototype treats coordination and recovery as part of that experience. It detects overlapping edits and stale bases, preserves original contributor forks, and binds checks and human approval to an exact candidate commit. Publication uses a durable journal and compare-and-swap update; retries inspect committed Git state instead of silently replacing somebody else's work. Agent proposals and context are saved before file application, so planning and application can resume independently. Recovery never authorizes a merge.
+- **Agents that check their own work.** Each agent edits a real copy of the repository, runs the repository's own tests in an isolated container, reads the failures and tries again, within a fixed number of rounds. A change only reaches review after its tests pass.
+- **A live board.** The Agents board shows every agent's goal, status, files and round as it happens, and warns when two agents are editing the same file. Agents are told about each other's in-flight work, so they can plan around it.
+- **Requirements you can run.** A requirement is a plain statement plus a runnable example: a file, a function, an input and the expected result. When two agents' requirements disagree, FlareGit finds it by running the code, shows both expected and actual results, and asks a person to decide once. The other agent then revises its change to match.
+- **Changes land in order.** A merge queue lands ready changes one at a time, re-checking each against the latest code. After a merge, the other agents' changes are moved onto the new code and re-checked automatically.
+- **A person always decides.** Every change shows what the agent did: its goal, plan, reasoning, files and attempts, with the requirement and test results beside it. Nothing merges until a person approves it.
 
-Contributors can use their own editors and agents through ordinary Git. Repository-scoped services can read candidate metadata and provide signed checks or automated comments. External-only CI retains native Git integrity checks while leaving application checks with the selected service. A service cannot approve history. Public read views and basic private repositories coexist, with explicit access boundaries.
-
-The interface emphasizes contributions, context, and the review decision, using Inter, JetBrains Mono, restrained orange accents, responsive layouts, and clear saved, waiting, and failed states. This is a working prototype with evidence gaps listed below, not a claim of production-scale reliability.
+The interface is built around five tabs plus More, a five-step progress bar on every change, and a Get started checklist that reflects the repository's real state. This is a working prototype; items still awaiting a recorded end-to-end run are listed under "Pending verification" below.
 
 ## How you used Cloudflare — proposed form copy
 
-Cloudflare Workers serves the application and authenticated API. Artifacts stores the canonical Git repositories and isolated contributor forks, accessed through native Git with scoped, short-lived credentials. SQLite-backed Durable Objects hold task context, membership, candidate policy snapshots, agent generations, publication journals, service receipts, and delivery state. Workflows coordinate agent planning/application and candidate composition, verification, human review, and publication; Queues carry integration events.
-
-Containers perform managed Git work and isolated application verification when that mode is selected. External-only CI runs native object, ancestry, scope, and protected-path checks without executing customer install/build/test commands or previews. Workers AI powers the built-in coding agents and explicitly surfaced repair attempts; bring-your-own agents remain supported. R2 stores immutable evidence and permitted preview assets. Integration callbacks use signed, repository-scoped requests and stable event identities; webhook delivery has retries and replay. Durable state and Git refs outlive the ephemeral execution containers.
+- **Workers** serves the app and its API.
+- **Artifacts** stores every repository and each agent's separate copy, reached through ordinary Git.
+- **Durable Objects** hold each repository's shared state: the live agent board (pushed to browsers over WebSocket), requirements and the decisions people make about them, and the merge queue.
+- **Containers** run each agent's edits and the repository's own tests in isolation, so agent code never runs next to the platform.
+- **Workflows** drive the agent loop (plan, edit, test, retry) and the path from review to merge, so work resumes after an interruption.
+- **Queues** carry events between these steps; **R2** stores test output and other files a change produces.
+- **Workers AI** powers the built-in coding agents. You can also bring your own agent through ordinary Git.
 
 ## Judging criteria map — for planning, not form copy
 
@@ -44,9 +50,9 @@ The rules score three criteria from 1 to 5. Weight the video and form copy accor
 
 | Criterion | Weight | What to show |
 |---|---|---|
-| Originality and quality of the agent-oriented collaboration prototype (also the tiebreaker) | 50% | Humans and agents contributing through isolated real Git workspaces, with goals, saved context and review attached to each contribution. |
-| Multi-agent concurrency, coordination, context, review and conflicts | 25% | Two or more agents on one repository at once, a real overlapping edit, stale-base handling, an interruption that resumes from saved context, and exact human acceptance. |
-| Ease of use and product experience | 25% | The contribution-centered review screen, clear saved/waiting/failed states, and a fresh clone showing the accepted history. |
+| Originality and quality of the agent-oriented collaboration prototype (also the tiebreaker) | 50% | Agents that run the repository's tests in isolated containers and retry; runnable requirements; contradictions found by running code and settled once by a person. |
+| Multi-agent concurrency, coordination, context, review and conflicts | 25% | Three agents live on the board with overlap warnings; merge queue; automatic rebase of other agents' changes after a merge. |
+| Ease of use and product experience | 25% | Five tabs plus More, per-change progress bar, Get started checklist, "What the agent did", and the "Waiting for your review" screen. |
 
 Keep the video and copy about FlareGit; the rules prohibit disparaging other people or products.
 
@@ -60,30 +66,56 @@ Use the [seven-minute recording runbook](DEMO.md). Capture real overlapping agen
 
 [https://github.com/Joe-Simo/flaregit](https://github.com/Joe-Simo/flaregit) — public, Apache-2.0, with a LICENSE file; visibility and GitHub's detected license were checked October 2.
 
-Verified implementation snapshot: [`a309fa0`](https://github.com/Joe-Simo/flaregit/commit/a309fa0) (`main`, October 9). On that code `bun run typecheck` and `bun run lint` are clean, and `bun test` passed 2466 tests with 9 pre-existing skips and 0 failures on both Bun 1.3.4 and Bun 1.4.2; GitHub CI (`verify`, `native-boundary`) passed on the same tree. The commands below pin the implementation independently of later documentation updates. Refresh this reference if the final implementation changes.
+Source snapshot: `main` (see final commit at submission). Before submitting, record that commit here along with its `bun run typecheck`, `bun run lint`, `bun test` and GitHub CI results.
 
-Public application: [https://flaregit.com](https://flaregit.com), running the snapshot above as Worker version `458e1a65`; `/` and `/health` returned HTTP 200 and an unauthenticated `/api/account` returned 401 on October 9. This confirms the deployment responds and refuses anonymous API access, not every authenticated workflow. A browser session is required for owned repository work; private exercise repositories are not public demo data.
+Public application: [https://flaregit.com](https://flaregit.com), Worker version `a64ab656` on October 9: `/` and `/health` returned HTTP 200 and an anonymous `/api/account` returned 401 (`docs/evidence/README.md`). Sign-in is required to work in a repository; the public demo repository above is the suggested starting point.
 
 ## Instructions to run your project — proposed form copy
 
-Visit https://flaregit.com and sign in with your own account. Create a repository or import a public HTTPS Git repository. Use isolated changes, issues and comments to coordinate work; inspect the exact candidate diff and checks before explicitly accepting history. Basic private repositories do not require Pro. Managed agent/integration runs have usage limits; external services require maintainer-issued scoped credentials and are not connected to vendor accounts automatically.
+**Try it on flaregit.com**
 
-For the reproducible source snapshot, install Bun and Git, then:
+1. Go to https://flaregit.com and sign in with your own account.
+2. Import the public demo repository `https://github.com/Joe-Simo/flaregit-demo-tickets`. Name it `demo-tickets` and set the test command to `bun test tests`.
+3. Start two or three agents, each with a goal and a requirement (a statement plus an example: file, function, input, expected result).
+4. Open the **Agents** board to watch them work live. Overlapping files are flagged as they happen.
+5. Open a change to see what the agent did and its test rounds. When it reads "Waiting for your review", check the requirement and tests, then approve it yourself.
+
+Private repositories do not require a paid plan. Built-in agent runs have usage limits.
+
+**Run the source**
+
+Install Bun and Git, then:
 
 ```bash
 git clone https://github.com/Joe-Simo/flaregit.git
 cd flaregit
-git checkout a309fa0
 bun install --frozen-lockfile
 bun run lint
 bun run typecheck
 bun test
-bun run demo:proof
 ```
 
-`demo:proof` uses real Git with deterministic scripted contributors; it is labelled accordingly and does not represent live AI agents. Tests that use model/store doubles are fixture checks, not hosted reliability evidence. Some workerd tests require local loopback-server access. Customer code must run under the deployed Linux execution boundary; trusted local test mode must not be used for real model output or imported repositories.
+To host your own copy, follow the README's Cloudflare setup (Workers Paid, Artifacts, Durable Objects, Containers, Workflows, Queues, R2, Workers AI, and Clerk for sign-in). Set secrets with `wrangler secret`, then run `bun run build` and `bunx wrangler deploy`.
 
-To self-host, follow the README Cloudflare setup: Workers Paid, Artifacts namespace, Durable Objects, Containers, Workflows, Queues, R2, Workers AI/AI Gateway, Clerk issuer/key configuration, and Docker for the image build. Set secrets through Wrangler's secret mechanism. Build and deploy with `bun run build` and `bunx wrangler deploy`. The [README](../README.md) specifies the bindings, origin configuration, and optional integrations. The hosted acceptance runner uses environment-only credentials and never accepts human review automatically.
+## Verified on production (October 9–10) — planning, not form copy
+
+Verified on https://flaregit.com while signed in. The end-to-end dry run used the repository `demo-run`, imported from https://github.com/Joe-Simo/flaregit-demo-tickets with test command `bun test tests`.
+
+| Claim | Evidence |
+|---|---|
+| Live agent board over WebSocket: three agents at once, overlap warnings on `src/pricing.ts` passed to the agents | `docs/evidence/dry-run/1-live-board.jpg`, `docs/evidence/signed-in/04-05-live-board-overlap.jpg` |
+| Agents run the repository's tests in an isolated container in bounded rounds (one needed 2 rounds, one 3) | `docs/evidence/signed-in/01-agent-two-rounds.jpg`, `docs/evidence/signed-in/01-03-agent-summary-tests.jpg` |
+| "What the agent did": goal, plan, reasoning, files, attempts | `docs/evidence/signed-in/01-03-agent-summary-plan.jpg` |
+| Contradiction proven by running both changes' code (4 × $40: $136 vs $160); a person chose Group discount | `docs/evidence/dry-run/2-contradiction-proof.jpg`, `docs/evidence/signed-in/02-contradiction-revision-receipt.json` |
+| The losing agent revised its change; every later change is checked against the decided requirement before it can merge | `docs/evidence/dry-run/5-revised-change-passes-decided-requirement.jpg`, `docs/evidence/dry-run/3-requirement-check-passed.jpg` |
+| After a merge, affected agents redo their changes on the new code | `docs/evidence/dry-run/4-landed-then-agents-rebase.jpg`, `docs/evidence/signed-in/06-agent-redoing-after-merge.jpg` |
+| Merge queue lands changes one at a time, in order, and refuses stale ones cleanly | `docs/evidence/signed-in/07-three-landed-in-order.jpg`, `docs/evidence/signed-in/07-queue-landed-then-stale-refused.jpg`, `docs/evidence/dry-run/6-merged-pricing-ts.txt` |
+| Merged code keeps the decided requirement; merge commits read in plain English | `docs/evidence/dry-run/6-merged-pricing-ts.txt`, `docs/evidence/dry-run/6-merged-plain-commit.jpg` |
+| Five primary tabs plus More; five-step progress bar per change; Get started checklist from real state | `docs/evidence/signed-in/08-five-tabs-more.jpg`, `docs/evidence/signed-in/11-get-started-checklist.jpg` |
+| No layout breaks at 390px and 1440px in light and dark; visible keyboard focus | `docs/evidence/signed-in/12-*.jpg`, `docs/evidence/public/*.jpg` |
+| Prepaid credits enforced; a run is refused when the balance can't cover it | `docs/evidence/signed-in/07-queue-landed-then-stale-refused.jpg` |
+
+Production defects found by these runs and fixed: verification closure for test-command repositories; requirement authoring; request storm on the Changes page; decided requirements not enforced at merge (a stale change once reverted a decision before the requirement check existed — see `docs/evidence/README.md`); operator account misconfiguration; post-merge agent redo and run-again.
 
 ## Evidence and remaining gaps — do not paste as completed claims
 
