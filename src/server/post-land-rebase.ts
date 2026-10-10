@@ -12,8 +12,30 @@ import { gitAuthEnv, q } from "./shell.js";
  */
 
 const SHA = z.string().regex(/^[a-f0-9]{40}$/);
-export const rebaseStatusSchema = z.enum(["pending", "updated", "verification_failed", "conflict_revising", "needs_author", "skipped", "failed"]);
+export const rebaseStatusSchema = z.enum(["pending", "updated", "verification_failed", "conflict_revising", "needs_author", "skipped", "failed", "agent_waiting"]);
 export type RebaseStatus = z.infer<typeof rebaseStatusSchema>;
+const WORKFLOW_ID = z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/);
+/** Why a re-run of the agent was refused: spending limits, a passing problem, or lost access/funding. */
+export const revisionRefusalSchema = z.enum(["budget", "transient", "access"]);
+export type RevisionRefusal = z.infer<typeof revisionRefusalSchema>;
+/**
+ * A re-run of the agent that was refused and is kept so it can be sent again. The context it was refused
+ * with is frozen: the same request id, the landed diff and previous work (in `revisionContext`) and the
+ * status it resumes once the agent is running.
+ */
+export const revisionRetrySchema = z
+  .object({
+    actorId: z.string().min(1).max(200),
+    refusal: revisionRefusalSchema,
+    refusedReason: z.string().max(500),
+    resumeStatus: z.enum(["conflict_revising", "verification_failed"]),
+    resumeReason: z.string().max(500),
+    attempts: z.number().int().min(1).max(10_000),
+    nextAttemptAt: z.string().datetime().nullable(),
+    claimedUntil: z.string().datetime().nullable(),
+  })
+  .strict();
+export type RevisionRetry = z.infer<typeof revisionRetrySchema>;
 const failureSchema = z.object({ testId: z.string().max(200), description: z.string().max(500), message: z.string().max(500).optional() }).strict();
 export const postLandRebaseRecordSchema = z
   .object({
@@ -28,7 +50,10 @@ export const postLandRebaseRecordSchema = z
     verification: z.object({ status: z.enum(["passed", "failed", "deferred"]), failures: z.array(failureSchema).max(10) }).strict().nullable(),
     reason: z.string().max(500),
     workflowId: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),
-    revisionWorkflowId: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/).nullable(),
+    revisionWorkflowId: WORKFLOW_ID.nullable(),
+    /** What the agent is told when it is re-run (landed diff, previous work ref, failing checks). */
+    revisionContext: z.string().max(12_000).optional(),
+    revisionRetry: revisionRetrySchema.optional(),
     updatedAt: z.string().datetime(),
   })
   .strict();
@@ -45,6 +70,15 @@ export class PostLandRebaseLedger {
   save(record: PostLandRebaseRecord): void {
     const parsed = postLandRebaseRecordSchema.parse(record);
     this.storage.sql.exec("INSERT INTO post_land_rebases VALUES(?,?,?,?) ON CONFLICT(task_id,landed_commit) DO UPDATE SET doc=excluded.doc,updated_at=excluded.updated_at", parsed.taskId, parsed.landedCommit, JSON.stringify(parsed), parsed.updatedAt);
+  }
+  /** The newest update recorded for one change. */
+  latestFor(taskId: string): PostLandRebaseRecord | null {
+    const row = this.storage.sql.exec<{ doc: string }>("SELECT doc FROM post_land_rebases WHERE task_id=? ORDER BY updated_at DESC LIMIT 1", taskId).toArray()[0];
+    return row ? postLandRebaseRecordSchema.parse(JSON.parse(row.doc)) : null;
+  }
+  /** Updates whose agent re-run was refused and is waiting to be sent again. */
+  waitingRevisions(limit = 20): PostLandRebaseRecord[] {
+    return this.storage.sql.exec<{ doc: string }>("SELECT doc FROM post_land_rebases WHERE json_extract(doc,'$.status')='agent_waiting' ORDER BY updated_at LIMIT ?", limit).toArray().map((row) => postLandRebaseRecordSchema.parse(JSON.parse(row.doc)));
   }
   /** Latest update per change, newest first. */
   latest(limit = 200): PostLandRebaseRecord[] {
@@ -117,7 +151,7 @@ export function recordPostLandRebase(ledger: PostLandRebaseLedger, state: FlareG
   const task = state.tasks[input.taskId];
   const stamp = now.toISOString();
   const finish = (patch: Partial<PostLandRebaseRecord>, revision: RebaseRecordResult["revision"] = null): RebaseRecordResult => {
-    const record = { ...saved, ...patch, updatedAt: stamp };
+    const record = { ...saved, ...patch, ...(revision ? { revisionContext: revision.comment.slice(0, 12_000) } : {}), updatedAt: stamp };
     ledger.save(record);
     return { record, revision };
   };
@@ -153,12 +187,124 @@ export function recordPostLandRebase(ledger: PostLandRebaseLedger, state: FlareG
     { comment: [`The accepted version moved to ${input.landedCommit} and this change no longer applies cleanly (conflicts in ${list(execution.conflictingFiles)}).`, `Your previous version is kept at commit ${saved.fromCommit}; this branch now starts from the latest version. Redo the goal on top of it, keeping the landed behavior.`, "What landed in those files:", execution.landedDiff, "Your previous change to them:", execution.previousDiff].join("\n").slice(0, 12000) });
 }
 
-export function markRebaseRevision(ledger: PostLandRebaseLedger, taskId: string, landedCommit: string, revisionWorkflowId: string, dispatched: { ok: true } | { ok: false; reason: string }, now = new Date()): PostLandRebaseRecord {
+export type RevisionOutcome = { ok: true } | { ok: false; reason: string; refusal: RevisionRefusal; actorId: string };
+
+/** Bounded backoff for automatic re-sends: 5 minutes doubling up to 6 hours, at most 12 tries; then by hand. */
+export const REVISION_RETRY_LIMIT = 12;
+const RETRY_BASE_MS = 5 * 60_000, RETRY_MAX_MS = 6 * 60 * 60_000, CLAIM_MS = 2 * 60_000;
+export function revisionRetryDelay(attempts: number): number {
+  return Math.min(RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1), RETRY_MAX_MS);
+}
+
+const refusalText: Record<RevisionRefusal, string> = {
+  budget: "The agent could not be re-run because managed agent spending is at its limit. FlareGit tries again automatically when capacity may have returned; an owner can also run it again.",
+  transient: "The agent could not be re-run yet. FlareGit tries again automatically; an owner can also run it again now.",
+  access: "The agent could not be re-run because the person or account that would fund it is unavailable. An owner can run it again.",
+};
+
+/** Records written before refused re-runs were kept: status "failed" after a refused re-run. */
+function isLegacyRefusal(record: PostLandRebaseRecord): boolean {
+  return record.status === "failed" && record.revisionWorkflowId !== null && record.reason.startsWith("The agent could not be re-run");
+}
+function resumeStatusOf(record: PostLandRebaseRecord): RevisionRetry["resumeStatus"] {
+  if (record.revisionRetry) return record.revisionRetry.resumeStatus;
+  if (record.status === "conflict_revising" || record.status === "verification_failed") return record.status;
+  return record.conflictingFiles.length ? "conflict_revising" : "verification_failed";
+}
+function resumeReasonOf(record: PostLandRebaseRecord): string {
+  if (record.revisionRetry) return record.revisionRetry.resumeReason;
+  if (record.status === "conflict_revising" || record.status === "verification_failed") return record.reason;
+  return resumeStatusOf(record) === "conflict_revising" ? `Conflicts with the latest version in ${list(record.conflictingFiles)}. The agent is redoing its change on top of it.` : `Updated onto ${short(record.landedCommit)}, but checks fail. The agent is revising it.`;
+}
+
+/** Saves how a re-run of the agent ended. A refusal keeps the frozen re-run so it can be sent again. */
+export function markRebaseRevision(ledger: PostLandRebaseLedger, taskId: string, landedCommit: string, revisionWorkflowId: string, outcome: RevisionOutcome, now = new Date()): PostLandRebaseRecord {
   const saved = ledger.get(taskId, landedCommit);
   if (!saved) throw new Error("Unknown update");
-  const record = dispatched.ok ? { ...saved, revisionWorkflowId, updatedAt: now.toISOString() } : { ...saved, revisionWorkflowId, status: "failed" as const, reason: `The agent could not be re-run: ${dispatched.reason}`.slice(0, 500), updatedAt: now.toISOString() };
+  if (saved.revisionWorkflowId && saved.revisionWorkflowId !== revisionWorkflowId) throw new Error("This update is re-run under a different request");
+  const stamp = now.toISOString();
+  const { revisionRetry: previous, ...rest } = saved;
+  if (outcome.ok) {
+    // Once the agent runs, the change shows the status it was waiting to resume.
+    const record: PostLandRebaseRecord = { ...rest, status: resumeStatusOf(saved), reason: resumeReasonOf(saved), revisionWorkflowId, updatedAt: stamp };
+    ledger.save(record);
+    return record;
+  }
+  if (saved.status !== "agent_waiting" && saved.status !== "conflict_revising" && saved.status !== "verification_failed" && !isLegacyRefusal(saved)) return saved;
+  const attempts = (previous?.attempts ?? 0) + 1;
+  const automatic = outcome.refusal !== "access" && attempts < REVISION_RETRY_LIMIT;
+  const retry: RevisionRetry = {
+    actorId: outcome.actorId,
+    refusal: outcome.refusal,
+    refusedReason: outcome.reason.slice(0, 500),
+    resumeStatus: resumeStatusOf(saved),
+    resumeReason: resumeReasonOf(saved).slice(0, 500),
+    attempts,
+    nextAttemptAt: automatic ? new Date(now.getTime() + revisionRetryDelay(attempts)).toISOString() : null,
+    claimedUntil: null,
+  };
+  const record: PostLandRebaseRecord = { ...rest, status: "agent_waiting", revisionWorkflowId, revisionRetry: retry, reason: refusalText[outcome.refusal], updatedAt: stamp };
   ledger.save(record);
   return record;
+}
+
+export interface RevisionClaim { taskId: string; landedCommit: string; workflowId: string; actorId: string }
+export type ManualRetry = { kind: "claimed"; claim: RevisionClaim } | { kind: "settled"; record: PostLandRebaseRecord } | { kind: "refused"; reason: string };
+
+const RESTING: readonly Task["status"][] = ["accepted", "cancelled", "integrating", "verifying"];
+
+/** The change still sits where the refused re-run left it; otherwise the re-run is no longer wanted. */
+function stillWaiting(state: FlareGitProjectState, record: PostLandRebaseRecord): boolean {
+  const task = state.tasks[record.taskId];
+  const expected = resumeStatusOf(record) === "conflict_revising" ? record.landedCommit : record.newCommit;
+  return Boolean(task && task.contributor.type === "agent" && !RESTING.includes(task.status) && task.baseCommit === record.landedCommit && task.currentCommit === expected);
+}
+
+function claim(ledger: PostLandRebaseLedger, record: PostLandRebaseRecord, actorId: string, now: Date): RevisionClaim {
+  const retry: RevisionRetry = record.revisionRetry ?? { actorId, refusal: "transient", refusedReason: record.reason.slice(0, 500), resumeStatus: resumeStatusOf(record), resumeReason: resumeReasonOf(record).slice(0, 500), attempts: 1, nextAttemptAt: null, claimedUntil: null };
+  ledger.save({ ...record, status: "agent_waiting", revisionRetry: { ...retry, actorId, claimedUntil: new Date(now.getTime() + CLAIM_MS).toISOString() }, updatedAt: now.toISOString() });
+  return { taskId: record.taskId, landedCommit: record.landedCommit, workflowId: record.revisionWorkflowId!, actorId };
+}
+
+function retire(ledger: PostLandRebaseLedger, record: PostLandRebaseRecord, now: Date): PostLandRebaseRecord {
+  const { revisionRetry: _dropped, ...rest } = record;
+  void _dropped;
+  const retired: PostLandRebaseRecord = { ...rest, status: "skipped", reason: "The change moved on after the agent could not be re-run, so nothing is re-run", updatedAt: now.toISOString() };
+  ledger.save(retired);
+  return retired;
+}
+
+/**
+ * Claims the refused re-runs that are due to be sent again. A claim holds for two minutes so two advancers
+ * never send the same re-run at once; the stable request id turns any late duplicate into a replay.
+ */
+export function claimDueRevisions(ledger: PostLandRebaseLedger, state: FlareGitProjectState, now = new Date()): RevisionClaim[] {
+  const claims: RevisionClaim[] = [];
+  for (const record of ledger.waitingRevisions()) {
+    const retry = record.revisionRetry;
+    if (!retry || !record.revisionWorkflowId || retry.nextAttemptAt === null || Date.parse(retry.nextAttemptAt) > now.getTime()) continue;
+    if (retry.claimedUntil && Date.parse(retry.claimedUntil) > now.getTime()) continue;
+    if (ledger.latestFor(record.taskId)?.landedCommit !== record.landedCommit || !stillWaiting(state, record)) { retire(ledger, record, now); continue; }
+    claims.push(claim(ledger, record, retry.actorId, now));
+  }
+  return claims;
+}
+
+/** When the next automatic re-send is due (epoch ms), for the repository alarm. */
+export function nextRevisionRetryAt(ledger: PostLandRebaseLedger): number | null {
+  const due = ledger.waitingRevisions(200).flatMap((record) => record.revisionRetry?.nextAttemptAt ? [Date.parse(record.revisionRetry.nextAttemptAt)] : []);
+  return due.length ? Math.min(...due) : null;
+}
+
+/** A person asks to run the agent again on the latest version of one change. Repeating the request is safe. */
+export function claimManualRevision(ledger: PostLandRebaseLedger, state: FlareGitProjectState, taskId: string, actorId: string, now = new Date()): ManualRetry {
+  const record = ledger.latestFor(taskId);
+  if (!record || !record.revisionWorkflowId) return { kind: "refused", reason: "This change has no agent re-run to send again" };
+  if (record.status === "conflict_revising" || record.status === "verification_failed") return { kind: "settled", record };
+  if (record.status !== "agent_waiting" && !isLegacyRefusal(record)) return { kind: "refused", reason: "This change has no agent re-run waiting" };
+  if (record.revisionRetry?.claimedUntil && Date.parse(record.revisionRetry.claimedUntil) > now.getTime()) return { kind: "settled", record };
+  if (!stillWaiting(state, record)) return { kind: "settled", record: retire(ledger, record, now) };
+  return { kind: "claimed", claim: claim(ledger, record, actorId, now) };
 }
 
 /** For the queue: why a change is still waiting, and whether its update for this commit has finished. */

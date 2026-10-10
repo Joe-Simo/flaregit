@@ -2,8 +2,15 @@ import type { Env } from "./env.js";
 import type { Ledger } from "./durable-object.js";
 import { accountKeyFor, accountOf, admitRun, globalOf, reserveManagedAgents } from "./projects.js";
 import { planLimits } from "./polar.js";
+import type { PostLandRebaseRecord, RevisionClaim, RevisionRefusal } from "./post-land-rebase.js";
 
-export type RevisionDispatch = { dispatched: true; replayed: boolean } | { dispatched: false; reason: string };
+export type RevisionDispatch = { dispatched: true; replayed: boolean } | { dispatched: false; reason: string; refusal: RevisionRefusal };
+
+/** Spending and run limits come back once capacity returns; a pause is passing; anything else is passing too. */
+async function refusalOf(response: Response): Promise<{ reason: string; refusal: RevisionRefusal }> {
+  const reason = (await response.text()).slice(0, 300);
+  return { reason, refusal: /paused/i.test(reason) ? "transient" : "budget" };
+}
 
 /**
  * Re-runs the coding agent on an existing change so it revises its own work. Uses the same funding,
@@ -17,21 +24,21 @@ export async function dispatchRevisionAgent(env: Env, project: Ledger, input: { 
   } catch {
     /* No saved run under this identity yet. */
   }
-  if (!await project.roleOf(input.actorId)) return { dispatched: false, reason: "The person who made this choice no longer has access" };
+  if (!await project.roleOf(input.actorId)) return { dispatched: false, reason: "The person who made this choice no longer has access", refusal: "access" };
   const accountKey = await accountKeyFor(input.actorId);
   const account = accountOf(env, accountKey);
-  if (await account.accountLifecycle() !== "active") return { dispatched: false, reason: "The account that would fund the agent is unavailable" };
+  if (await account.accountLifecycle() !== "active") return { dispatched: false, reason: "The account that would fund the agent is unavailable", refusal: "access" };
   const spendDenied = await reserveManagedAgents(env, accountKey, [input.workflowId]);
-  if (spendDenied) return { dispatched: false, reason: (await spendDenied.text()).slice(0, 300) };
+  if (spendDenied) return { dispatched: false, ...await refusalOf(spendDenied) };
   const { plan } = await account.getBilling();
   const denied = await admitRun(env, account, planLimits(env)[plan], input.workflowId);
   if (denied) {
     await globalOf(env).cancelUnstartedManagedSpend([input.workflowId], accountKey);
-    return { dispatched: false, reason: (await denied.text()).slice(0, 300) };
+    return { dispatched: false, ...await refusalOf(denied) };
   }
   if (!await project.beginAgentTask(input.taskId, input.workflowId)) {
     await globalOf(env).cancelUnstartedManagedSpend([input.workflowId], accountKey);
-    return { dispatched: false, reason: "This change already has active agent work or cannot start an agent" };
+    return { dispatched: false, reason: "This change already has active agent work or cannot start an agent", refusal: "transient" };
   }
   let attempted = false;
   try {
@@ -43,6 +50,26 @@ export async function dispatchRevisionAgent(env: Env, project: Ledger, input: { 
   } catch {
     if (!attempted) await globalOf(env).cancelUnstartedManagedSpend([input.workflowId], accountKey);
     await project.failAgentTask(input.taskId, input.workflowId);
-    return { dispatched: false, reason: "The agent could not start. Its saved branch is unchanged; start it again from the change." };
+    return { dispatched: false, reason: "The agent could not start. Its saved branch is unchanged.", refusal: "transient" };
   }
+}
+
+/** Sends one claimed post-land re-run and saves how it ended. */
+export async function sendRebaseRevision(env: Env, project: Ledger, projectId: string, claim: RevisionClaim): Promise<{ record: PostLandRebaseRecord; dispatch: RevisionDispatch }> {
+  const dispatch = await dispatchRevisionAgent(env, project, { projectId, taskId: claim.taskId, workflowId: claim.workflowId, actorId: claim.actorId });
+  const record = await project.markPostLandRevision(claim.taskId, claim.landedCommit, claim.workflowId, dispatch.dispatched ? { ok: true } : { ok: false, reason: dispatch.reason, refusal: dispatch.refusal, actorId: claim.actorId });
+  return { record, dispatch };
+}
+
+/**
+ * Sends again every refused post-land re-run whose backoff has elapsed. Called when capacity may have
+ * returned: after each merge queue advance and from the repository alarm. One failure never stops the rest.
+ */
+export async function retryDueRebaseRevisions(env: Env, project: Ledger, projectId: string): Promise<PostLandRebaseRecord[]> {
+  const claims = await project.claimDueRebaseRevisions();
+  const records: PostLandRebaseRecord[] = [];
+  for (const claim of claims) {
+    try { records.push((await sendRebaseRevision(env, project, projectId, claim)).record); } catch { console.warn("A waiting agent re-run was not confirmed; it is sent again after its claim expires"); }
+  }
+  return records;
 }
