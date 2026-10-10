@@ -11,7 +11,7 @@ export function RequirementsEditor({ rows, onChange, disabled, idPrefix }: { row
   const update = (key: string, patch: Partial<RequirementRow>) => onChange(rows.map((row) => (row.key === key ? { ...row, ...patch } : row)));
   if (rows.length === 0)
     return (
-      <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onChange([emptyRequirementRow()])}>
+      <Button type="button" size="sm" variant="ghost" disabled={disabled} onClick={() => onChange([emptyRequirementRow()])}>
         <Plus className="h-4 w-4 mr-1.5" aria-hidden="true" /> Add requirements
       </Button>
     );
@@ -29,7 +29,7 @@ export function RequirementsEditor({ rows, onChange, disabled, idPrefix }: { row
               <div className="flex items-center gap-2">
                 <label htmlFor={`${id}-title`} className="sr-only">Requirement {index + 1} title</label>
                 <Input id={`${id}-title`} disabled={disabled} value={row.title} maxLength={REQUIREMENT_LIMITS.title} placeholder="Short title, e.g. Group discount" onChange={(event) => update(row.key, { title: event.target.value })} />
-                <Button size="sm" variant="ghost" disabled={disabled} aria-label={`Remove requirement ${index + 1}`} onClick={() => onChange(rows.filter((item) => item.key !== row.key))}>
+                <Button type="button" size="sm" variant="ghost" disabled={disabled} aria-label={`Remove requirement ${index + 1}`} onClick={() => onChange(rows.filter((item) => item.key !== row.key))}>
                   <X className="h-4 w-4" aria-hidden="true" />
                 </Button>
               </div>
@@ -64,7 +64,7 @@ export function RequirementsEditor({ rows, onChange, disabled, idPrefix }: { row
         })}
       </ol>
       {rows.length < REQUIREMENT_LIMITS.count && (
-        <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onChange([...rows, emptyRequirementRow()])}>
+        <Button type="button" size="sm" variant="ghost" disabled={disabled} onClick={() => onChange([...rows, emptyRequirementRow()])}>
           <Plus className="h-4 w-4 mr-1.5" aria-hidden="true" /> Add another requirement
         </Button>
       )}

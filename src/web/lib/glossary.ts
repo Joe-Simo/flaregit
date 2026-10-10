@@ -20,6 +20,13 @@ export const glossary = {
   Contribution: "Contribution",
 } as const;
 
+/** How a combined preview was built, said as an outcome rather than a Git method name. */
+export const combinedHow: Readonly<Record<"clean_git_merge" | "repaired_merge" | "rebase_linear", string>> = {
+  clean_git_merge: "Combined cleanly with the latest merged version",
+  repaired_merge: "Combined after AI repaired conflicting edits",
+  rebase_linear: "Replayed on top of the latest merged version",
+};
+
 /** One horizontal lifecycle shared by every change, in display order. */
 export const changeSteps = [
   { id: "contribution", label: "Contribution", hint: "Work is being pushed to its own isolated copy. Mark ready verifies the pushed branch." },

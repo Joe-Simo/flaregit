@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import type { storageReconciliationReport } from "@/server/storage-reconciliation-report";
 import { apiJson } from "../api";
 import { storageRepositoryId } from "../storage-repository-input";
+import { useReportAttention } from "./NeedsAttention";
 
 type Report = Awaited<ReturnType<typeof storageReconciliationReport>>;
 const kindLabel = { preview: "Previews", evidence: "Checks", "private-recovery": "Git recovery bundles" } as const;
@@ -47,6 +48,7 @@ function StorageReportPanel({ projectId }: { projectId?: string }) {
   const present = report?.observations.filter(item => item.status === "present") ?? [];
   const absent = report?.observations.filter(item => item.status === "absent").length ?? 0;
   const unknown = report?.observations.filter(item => item.status === "unknown").length ?? 0;
+  useReportAttention(unresolved > 0 || absent > 0);
   return <Card>
     <CardHeader className="pb-2"><CardTitle className="text-base">Storage recovery</CardTitle></CardHeader>
     <CardContent className="space-y-4 min-w-0">

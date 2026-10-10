@@ -8,6 +8,7 @@ import type { RebaseRecoveryReceipt, RebaseRecoveryReport } from "@/server/rebas
 import { useVisiblePolling } from "../use-visible-polling";
 import type { RebaseResumeAttempt } from "@/server/rebase-resume-attempts";
 import type { Task } from "@/core/types";
+import { useReportAttention } from "./NeedsAttention";
 type SafeRecoveryReceipt=Omit<RebaseRecoveryReceipt,"actor"> & {actor:Pick<RebaseRecoveryReceipt["actor"],"displayName"|"viaToken">};
 type ResumeSummary=Pick<RebaseResumeAttempt,"id"|"applicationId"|"generation"|"dispatch"|"nativeState"|"terminal"|"pauseReason">;
 type RecoveryReport=RebaseRecoveryReport & {resumeAvailable?:boolean;resume?:Omit<ResumeSummary,"applicationId">};
@@ -28,6 +29,8 @@ const explanation = (report: RecoveryReport) => {
     : report.status === "already_applied" || report.status === "reconciled" ? "The saved update is recorded on the change."
     : report.detail;
 };
+/** A saved update needs the owner when it is blocked, paused, unconfirmed or waiting to be applied. */
+const needsRecovery=(report:RecoveryReport)=>report.resume?report.resume.dispatch==="unknown"||report.resume.terminal==="failed":blockedStatus.has(report.status);
 export function RebaseRecovery({ projectId, isOwner, tasks, onRecovered }: { projectId: string; isOwner: boolean; tasks?: Record<string,Task>; onRecovered:()=>void }) {
   return isOwner ? <OwnerRecovery key={projectId} projectId={projectId} tasks={tasks} onRecovered={onRecovered} /> : null;
 }
@@ -110,6 +113,7 @@ function OwnerRecovery({ projectId, tasks, onRecovered }: { projectId:string; ta
     }catch(cause){if(generation===epoch.current){setResumeError(true);setActionError(`Dispatch is unconfirmed. The saved update is retained; retrying unchanged revisions reuses this request. ${cause instanceof Error?cause.message:""}`);}}
     finally{mutationLock.current=false;if(generation===epoch.current)setBusy(false);}
   };
+  useReportAttention(Boolean(actionError)||Boolean(loaded?.applications.some(needsRecovery)));
   if(loaded?.applications.length===0&&!error)return null;
   const recordCurrent=Boolean(selected&&loaded?.applications.some(report=>report.id===selected.id&&report.version===selected.version));
   const canApply=Boolean(selected?.resumeAvailable && selected.status==="remote_old_resume_required" && selected.observedHead===selected.originalCommit && (!selectedResume || selectedResume.terminal==="failed" && selectedResume.nativeState==="stopped" && selectedResume.dispatch!=="unknown"));

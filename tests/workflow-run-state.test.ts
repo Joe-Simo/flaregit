@@ -48,7 +48,7 @@ test("saved approval and rejection summaries do not claim accepted history or ru
  const commit = "a".repeat(40);
  const candidate = { id: "candidate", attemptNumber: 1, participatingTaskIds: [], participatingCommits: {}, expectedAcceptedBase: "b".repeat(40), frozenPolicyVersion: 1, frozenVerificationPolicy: {}, frozenRequirements: [], repairAttempts: [], status: "verified" as const, candidateCommit: commit, workflowInstanceId: "saved-run", createdAt: "2026-10-03", updatedAt: "2026-10-03", review: { approved: true, by: "Synthetic reviewer", commit, at: "2026-10-03" } };
  const state = { projectId: "synthetic", projectName: "Synthetic", canonicalRepoName: "synthetic", acceptedState: { currentCommit: "b".repeat(40), acceptedAt: "2026-01-01", buildDigest: "synthetic", activeRequirements: [], history: [] }, tasks: {}, candidates: { candidate }, evidence: {}, decisions: {}, journal: [], policyVersion: 1, verificationPolicy: {} };
- expect(summarizeIntegration(state)).toMatchObject({ stage: "review_saved", message: "Approval saved; integration pending" });
+ expect(summarizeIntegration(state)).toMatchObject({ stage: "review_saved", message: "Approved — waiting to merge" });
  expect(summarizeIntegration({ ...state, candidates: { candidate: { ...candidate, status: "failed", review: { ...candidate.review, approved: false } } } })).toMatchObject({ stage: "review_saved", message: "Rejection saved" });
  expect(summarizeIntegration({ ...state, candidates: { candidate: { ...candidate, status: "failed", review: undefined } } })).toMatchObject({ stage: "blocked", message: "Integration failed" });
  expect(summarizeIntegration({ ...state, candidates: { candidate: { ...candidate, status: "accepted" } } }).stage).toBe("accepted");
