@@ -22,5 +22,6 @@ Receipts for the competition goal, captured against https://flaregit.com.
 | Review | `signed-in/review-waiting-for-human.jpg` | Combined preview with its requirement and passing checks waits for a person |
 | Production bug | commits `5bd12cb`, `68440e6` | Native verification closure for test-command repositories fixed and covered by a regression test |
 
-Still to capture: contradiction decision end to end, rebase after merge, merge queue with 3+ changes, signed-in light/dark at 1440px.
-| Oct 9 | Signed-in Changes tab at 390px light | No horizontal page overflow (tab strip scrolls within itself) |
+Still to capture: contradiction decision end to end, rebase after merge, merge queue with 3+ changes, 
+| Oct 10 | Signed-in Changes tab at 390px and 1440px, light and dark (`signed-in/12-changes-*.jpg`) | No horizontal page overflow; both themes render; healthy changes show no attention alert |
+| Oct 10 | Rebase after merge (`signed-in/06-rebase-after-merge.jpg`) | After the human merged the refundable change (`1cf967e`), both other agent changes were restarted on `1cf967e` with their previous work kept; re-running the agents was refused by the managed spend cap (global_budget) |
