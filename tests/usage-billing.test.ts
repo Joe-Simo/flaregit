@@ -24,7 +24,7 @@ test("prepaid credits: deposit once, free pool ceiling, hold, actual-cost debit,
   const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{
     name: "usage-billing", modules: true, script: await Bun.file(file).text(), compatibilityDate: "2026-10-02", compatibilityFlags: ["nodejs_compat"],
     // Free pool fits exactly two agent envelopes (659,444 micros each); each account may spend $10/month.
-    bindings: { MANAGED_GLOBAL_MONTHLY_USD_MICROS: "1400000", MANAGED_ACCOUNT_MONTHLY_USD_MICROS: "10000000", MANAGED_ESSENTIAL_GLOBAL_MONTHLY_USD_MICROS: "0", MANAGED_ESSENTIAL_ACCOUNT_MONTHLY_USD_MICROS: "0", POLAR_WEBHOOK_SECRET: SECRET, POLAR_CREDIT_PRODUCT_ID: CREDIT_PRODUCT },
+    bindings: { MANAGED_GLOBAL_MONTHLY_USD_MICROS: "1400000", MANAGED_ACCOUNT_MONTHLY_USD_MICROS: "10000000", MANAGED_ESSENTIAL_GLOBAL_MONTHLY_USD_MICROS: "0", MANAGED_ESSENTIAL_ACCOUNT_MONTHLY_USD_MICROS: "0", POLAR_WEBHOOK_SECRET: SECRET, POLAR_CREDIT_PRODUCT_ID: CREDIT_PRODUCT, OPERATOR_ACCOUNTS: "0a0a0a0a0a0a" },
     durableObjects: { REPOSITORY_CONTROLLER: { className: "UsageBillingController", useSQLite: true } },
   }] }));
   try {
@@ -32,10 +32,15 @@ test("prepaid credits: deposit once, free pool ceiling, hold, actual-cost debit,
     const call = async (path: string, init?: Init) => { const response = await worker.fetch(`http://fixture${path}`, init); expect(response.status).toBeLessThan(300); return response.json() as Promise<Record<string, unknown>>; };
     const paid = "aaaaaaaaaaaa";
 
+    // The platform operator runs on the platform budget with no credits and the paid daily limit; cancelling returns the reservation.
+    expect(await call("/start?account=0a0a0a0a0a0a&run=operator-1")).toEqual({ tier: "free", dailyLimit: 50 });
+    await call("/cancel?account=0a0a0a0a0a0a&run=operator-1");
     // Free accounts share the pool: however many accounts start, only two envelopes fit.
     const free = await Promise.all(["f00000000001", "f00000000002", "f00000000003", "f00000000004", "f00000000005"].map((account, index) => call(`/start?account=${account}&run=free-${index}`)));
     expect(free.filter((result) => result.tier === "free")).toHaveLength(2);
     for (const refused of free.filter((result) => !result.tier)) expect(refused).toEqual({ refused: 402, message: expect.stringMatching(/^This month's free agent allowance is used up — add credits to keep running agents, or wait until [A-Z][a-z]+ 1, \d{4}\.$/) });
+    // The operator allowance still stops at the shared monthly ceiling.
+    expect((await call("/start?account=0a0a0a0a0a0a&run=operator-2")).refused).toBe(402);
     const pool = await call("/pool");
     expect(pool.pool as number).toBeLessThanOrEqual(1_400_000);
 

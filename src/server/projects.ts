@@ -96,6 +96,12 @@ export async function startManagedRuns(env: Env, accountKey: string, runIds: str
   if (env.RUNS_ENABLED === "false") return new Response("Managed execution is temporarily paused", { status: 503 });
   const envelopes = runIds.map((runId) => managedAgentEnvelope(accountKey, runId)), budget = managedBudget(env), account = accountOf(env, accountKey);
   let poolExhausted = false;
+  // Platform operators run their own testing and demos on the platform's budget: no daily free-run limit and no
+  // credits, but still inside the shared monthly ceiling and the per-account ceiling.
+  if ((env.OPERATOR_ACCOUNTS ?? "").split(",").map((value) => value.trim()).filter(Boolean).includes(accountKey)) {
+    const refused = (await globalOf(env).reserveManagedSpendBatch(envelopes, budget, "free")).find((result) => !result.allowed);
+    return refused && !refused.allowed ? managedRefusal(refused.reason, "free") : { tier: "free", dailyLimit: limits.paid };
+  }
   if ((await account.usageToday()) + 1 <= limits.free) {
     const refused = (await globalOf(env).reserveManagedSpendBatch(envelopes, budget, "free")).find((result) => !result.allowed);
     if (!refused) return { tier: "free", dailyLimit: limits.free };
