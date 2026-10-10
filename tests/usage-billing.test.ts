@@ -13,7 +13,7 @@ async function signed(body: unknown): Promise<Init> {
   const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${id}.${ts}.${text}`)));
   return { method: "POST", body: text, headers: { "webhook-id": id, "webhook-timestamp": String(ts), "webhook-signature": `v1,${btoa(String.fromCharCode(...sig))}` } };
 }
-const order = (type: string, account: string, data: Record<string, unknown>) => ({ type, data: { id: "order_1", product_id: CREDIT_PRODUCT, customer: { external_id: `flaregit:${account}` }, ...data } });
+const order = (type: string, account: string, data: Record<string, unknown>) => ({ type, data: { id: "order_1", currency: "usd", product_id: CREDIT_PRODUCT, customer: { external_id: `flaregit:${account}` }, ...data } });
 
 test("prepaid credits: deposit once, free pool ceiling, hold, actual-cost debit, auto-recharge prompt, refund clawback", async () => {
   if (await workerdChild("tests/usage-billing.test.ts")) return;
@@ -45,6 +45,9 @@ test("prepaid credits: deposit once, free pool ceiling, hold, actual-cost debit,
     // A verified paid order deposits exactly once, however often Polar redelivers it.
     for (let i = 0; i < 3; i++) expect((await worker.fetch("http://fixture/webhooks/polar", await signed(order("order.paid", paid, { status: "paid", paid: true, net_amount: 500, refunded_amount: 0 })))).status).toBe(202);
     expect((await worker.fetch("http://fixture/webhooks/polar", { ...(await signed(order("order.paid", paid, { status: "paid", paid: true, net_amount: 99999 }))), headers: { "webhook-id": "x", "webhook-timestamp": String(Math.floor(Date.now() / 1000)), "webhook-signature": "v1,AAAA" } })).status).toBe(401);
+    expect((await call(`/credits?account=${paid}`)).balanceMicros).toBe(5_000_000);
+    // An order in another currency is never credited at face value.
+    expect((await worker.fetch("http://fixture/webhooks/polar", await signed(order("order.paid", paid, { id: "order_eur", currency: "eur", status: "paid", paid: true, net_amount: 500, refunded_amount: 0 })))).status).toBe(202);
     expect((await call(`/credits?account=${paid}`)).balanceMicros).toBe(5_000_000);
 
     // Credit-funded runs are not blocked by the exhausted free pool; the full envelope is held.

@@ -971,6 +971,11 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
         const limits = planLimits(env);
         return json({ ...billing, managed, runsToday: await account.usageToday(), runsPerDay: limits[billing.plan], freeRunsPerDay: limits.free, credits: await account.creditSummary(), creditsConfigured: env.PAID_CHECKOUT_ENABLED === "true" && Boolean(env.POLAR_CREDIT_PRODUCT_ID && env.POLAR_ACCESS_TOKEN), checkoutConfigured: env.PAID_CHECKOUT_ENABLED === "true" && Boolean(env.POLAR_PRODUCT_ID && env.POLAR_ACCESS_TOKEN) });
       }
+      // Billing changes are account administration: an account session, never a scoped or repository token.
+      if (path.startsWith("/billing/") && method !== "GET") {
+        if (auth.viaToken) return text("Billing changes require signing in to your account", 403);
+        if ((path === "/billing/credits/checkout" || path === "/billing/checkout") && !(await env.API_LIMITER.limit({ key: `billing-checkout:${accountKey}` })).success) return text("Too many checkout attempts; wait a minute and try again", 429);
+      }
       if (path === "/billing/credits/checkout" && method === "POST") {
         if (env.PAID_CHECKOUT_ENABLED !== "true" || !env.POLAR_CREDIT_PRODUCT_ID) return text("Buying credits isn't available yet. Free daily agent runs still work.", 503);
         const b = await body<{ amountCents?: unknown }>();

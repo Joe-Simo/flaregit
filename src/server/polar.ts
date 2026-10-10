@@ -97,13 +97,15 @@ export interface CreditOrderChange { accountKey: string; orderId: string; paidMi
 export function creditOrderFromEvent(event: unknown, creditProductId: string | undefined): CreditOrderChange | null {
   const e = event as {
     type?: string;
-    data?: { id?: string; status?: string; paid?: boolean; net_amount?: number; subtotal_amount?: number; discount_amount?: number; refunded_amount?: number; product_id?: string | null; product?: { id?: string } | null; customer?: { external_id?: string | null } };
+    data?: { id?: string; currency?: string; status?: string; paid?: boolean; net_amount?: number; subtotal_amount?: number; discount_amount?: number; refunded_amount?: number; product_id?: string | null; product?: { id?: string } | null; customer?: { external_id?: string | null } };
   };
   if (!e?.type?.startsWith("order.") || !creditProductId) return null;
   const data = e.data;
   if (!data?.id || !/^[A-Za-z0-9_-]{1,100}$/.test(data.id) || (data.product_id ?? data.product?.id) !== creditProductId) return null;
   const accountKey = accountKeyFromExternalId(data.customer?.external_id);
   if (!accountKey) return null;
+  // Credits are denominated in US dollars; any other currency must never be credited at face value.
+  if (data.currency?.toLowerCase() !== "usd") return null;
   const net = data.net_amount ?? (data.subtotal_amount ?? 0) - (data.discount_amount ?? 0);
   const refunded = data.refunded_amount ?? 0;
   if (!Number.isSafeInteger(net) || net < 0 || !Number.isSafeInteger(refunded) || refunded < 0) return null;
