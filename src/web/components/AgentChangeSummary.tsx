@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { apiJson } from "../api";
+import { apiJsonWithRetry } from "../api";
 import type { AgentRunRecord } from "@/server/agent-run-ledger";
 import type { AgentRoundRecord } from "@/server/agent-loop";
 
@@ -23,7 +23,7 @@ export function AgentChangeSummary({ projectId, taskId, runId, revision }: { pro
     let active = true;
     const controller = new AbortController();
     setLoading(true); setError(null);
-    void apiJson<{ run: AgentRunRecord | null }>(`/p/${projectId}/tasks/${taskId}/agent-run`, { signal: controller.signal })
+    void apiJsonWithRetry<{ run: AgentRunRecord | null }>(`/p/${projectId}/tasks/${taskId}/agent-run`, controller.signal)
       .then((response) => { if (active) setRun(response.run && response.run.runId === runId && response.run.taskId === taskId ? response.run : null); })
       .catch((cause: unknown) => { if (active) setError(cause instanceof Error ? cause.message : "Could not load the agent's summary"); })
       .finally(() => { if (active) setLoading(false); });

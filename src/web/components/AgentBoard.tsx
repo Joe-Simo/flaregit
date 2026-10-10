@@ -6,6 +6,7 @@ import {
   type AgentBoardAgent, type AgentBoardClientMessage, type AgentBoardEvent, type OverlapWarning,
 } from "@/core/agent-board";
 import { apiJson } from "../api";
+import { notifyRepositoryActivity } from "../repository-activity";
 
 /** Navigation entry for the live board; placed by the repository navigation. */
 export const AGENTS_ENTRY = { key: "agents", label: "Agents", description: "Live board of every running agent: progress, files touched and overlap warnings between concurrent agents." } as const;
@@ -30,6 +31,8 @@ export function overlapSentence(overlap: Pick<OverlapWarning, "kind" | "path">, 
   return `Also editing ${overlap.path}: “${otherTitle}” — ${OVERLAP_CONSEQUENCE[overlap.kind]}`;
 }
 const MAX_BACKOFF_MS = 30_000;
+/** A connection must stay open this long before reconnect backoff resets; a socket that drops right after its snapshot keeps backing off. */
+const STABLE_CONNECTION_MS = 30_000;
 
 /** Applies one event; returns null when a sequence gap requires a fresh snapshot. */
 function apply(state: BoardState | null, event: AgentBoardEvent): BoardState | null | "ignore" {
@@ -48,7 +51,7 @@ function useAgentBoard(projectId: string) {
   const [board, setBoard] = useState<BoardState | null>(null);
   const [connection, setConnection] = useState<Connection>("connecting");
   useEffect(() => {
-    let stopped = false, socket: WebSocket | null = null, timer: ReturnType<typeof setTimeout> | undefined, attempt = 0, current: BoardState | null = null;
+    let stopped = false, socket: WebSocket | null = null, timer: ReturnType<typeof setTimeout> | undefined, stable: ReturnType<typeof setTimeout> | undefined, attempt = 0, current: BoardState | null = null;
     const schedule = () => {
       if (stopped) return;
       const delay = Math.min(MAX_BACKOFF_MS, 1000 * 2 ** attempt) * (0.5 + Math.random() / 2);
@@ -59,7 +62,8 @@ function useAgentBoard(projectId: string) {
     const send = (message: AgentBoardClientMessage) => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message)); };
     const connect = async () => {
       let ticket: string;
-      try { ticket = agentBoardTicketSchema.parse(await apiJson<unknown>(`/p/${projectId}/agents/board/ticket`, { method: "POST" })).ticket; }
+      // Minting a ticket changes no repository state, so it must not supersede concurrent repository reads.
+      try { ticket = agentBoardTicketSchema.parse(await apiJson<unknown>(`/p/${projectId}/agents/board/ticket`, { method: "POST", preservesReads: true })).ticket; }
       catch { schedule(); return; }
       if (stopped) return;
       const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -74,19 +78,20 @@ function useAgentBoard(projectId: string) {
         const next = apply(current, parsed.data);
         if (next === "ignore") return;
         if (next === null) { send({ type: "resync" }); return; }
-        if (parsed.data.type === "snapshot") { attempt = 0; setConnection("live"); }
+        if (parsed.data.type === "snapshot") { clearTimeout(stable); stable = setTimeout(() => { attempt = 0; }, STABLE_CONNECTION_MS); setConnection("live"); }
         current = next; setBoard(next);
+        notifyRepositoryActivity(projectId);
       };
       ws.onclose = (event) => {
         if (socket !== ws || stopped) return;
-        socket = null;
+        socket = null; clearTimeout(stable);
         if (event.code === AGENT_BOARD_ACCESS_CLOSED) setConnection("access-withdrawn");
         // A withdrawn viewer retries too: the ticket request is refused until access returns.
         schedule();
       };
     };
     void connect();
-    return () => { stopped = true; clearTimeout(timer); socket?.close(1000, "Board closed"); };
+    return () => { stopped = true; clearTimeout(timer); clearTimeout(stable); socket?.close(1000, "Board closed"); };
   }, [projectId]);
   return { board, connection };
 }

@@ -69,10 +69,16 @@ class SessionResponse extends Response {
   }
 }
 
-export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
-  const mutation = !["GET", "HEAD"].includes((init.method ?? "GET").toUpperCase());
+/**
+ * `preservesReads` marks a non-GET request that changes no repository state (for example minting a
+ * live-board socket ticket), so it does not supersede concurrent repository reads.
+ */
+export type ApiRequestInit = RequestInit & { preservesReads?: boolean };
+export async function apiFetch(input: string, init: ApiRequestInit = {}): Promise<Response> {
+  const { preservesReads = false, ...request } = init;
+  const mutation = !preservesReads && !["GET", "HEAD"].includes((request.method ?? "GET").toUpperCase());
   if (mutation) invalidateSharedReads();
-  try { return await sessionFetch(input, init); }
+  try { return await sessionFetch(input, request); }
   finally { if (mutation) invalidateSharedReads(); }
 }
 async function sessionFetch(input: string, init: RequestInit): Promise<Response> {
@@ -120,8 +126,22 @@ export class StaleRepositoryReadError extends DOMException {
 export class ApiError extends Error {
   constructor(message: string, readonly status: number, readonly retryAfter: number | null) { super(message); this.name="ApiError"; }
 }
-/** JSON helper: throws an Error carrying the server's message on any non-2xx response. */
-export async function apiJson<T>(path: string, init: RequestInit & { json?: unknown } = {}): Promise<T> {
+/** A read superseded by a concurrent mutation is read again this many times before it is reported. */
+const STALE_READ_ATTEMPTS = 3;
+type ApiJsonInit = ApiRequestInit & { json?: unknown };
+/**
+ * JSON helper: throws an Error carrying the server's message on any non-2xx response. A shared GET
+ * superseded by a mutation is never returned; it is read again after the mutation, a bounded number of times.
+ */
+export async function apiJson<T>(path: string, init: ApiJsonInit = {}): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try { return await apiJsonOnce<T>(path, init); }
+    catch (cause) {
+      if (!(cause instanceof StaleRepositoryReadError) || attempt >= STALE_READ_ATTEMPTS || init.signal?.aborted) throw cause;
+    }
+  }
+}
+async function apiJsonOnce<T>(path: string, init: ApiJsonInit): Promise<T> {
   const binding = session, requestEpoch = epoch, revision = readRevision;
   const shareable = binding && Object.keys(init).every(key => key === "signal" || key === "method") && (init.method ?? "GET").toUpperCase() === "GET";
   if (!shareable) return JSON.parse(await jsonText(path, init)) as T;
@@ -152,7 +172,7 @@ export async function apiJson<T>(path: string, init: RequestInit & { json?: unkn
     if (entry.consumers === 0) { entry.controller.abort(); if (sharedReads.get(key) === entry) sharedReads.delete(key); }
   }
 }
-async function jsonText(path: string, init: RequestInit & { json?: unknown }): Promise<string> {
+async function jsonText(path: string, init: ApiJsonInit): Promise<string> {
   const { json, ...rest } = init;
   const res = await apiFetch(`/api${path}`, {
     ...rest,
@@ -166,6 +186,28 @@ async function jsonText(path: string, init: RequestInit & { json?: unknown }): P
     throw new ApiError(message,res.status,apiRetryAfterSeconds(res.headers.get("Retry-After")));
   }
   return text || "{}";
+}
+/** True for a refusal that clears on its own: rate limiting, a superseded read or a transient outage. */
+export function isTransientReadFailure(cause: unknown): boolean {
+  return cause instanceof StaleRepositoryReadError || cause instanceof ApiError && [429, 502, 503, 504].includes(cause.status);
+}
+/** How long to wait before reading again after a transient failure; honours the server's Retry-After. */
+export function transientRetryDelayMs(cause: unknown, fallbackMs: number): number {
+  return cause instanceof ApiError && cause.retryAfter !== null ? Math.max(fallbackMs, cause.retryAfter * 1000) : fallbackMs;
+}
+/** One read, retried once after a transient failure (with backoff) instead of surfacing it to the person. */
+export async function apiJsonWithRetry<T>(path: string, signal: AbortSignal, backoffMs = 1500): Promise<T> {
+  try { return await apiJson<T>(path, { signal }); }
+  catch (cause) {
+    if (!isTransientReadFailure(cause) || signal.aborted) throw cause;
+    const delay = Math.min(60_000, transientRetryDelayMs(cause, backoffMs));
+    await new Promise<void>((resolve, reject) => {
+      const abort = () => { clearTimeout(timer); reject(signal.reason); };
+      const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, delay);
+      signal.addEventListener("abort", abort, { once: true });
+    });
+    return apiJson<T>(path, { signal });
+  }
 }
 import { clearSessionConversationDrafts } from "./conversation-recovery";
 

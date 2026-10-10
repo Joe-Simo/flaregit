@@ -22,7 +22,7 @@ test("concurrent session reads share transport but cancellation and parsed value
   } finally { release(); clearVerifiedApiSession(); globalThis.fetch = original; await Promise.resolve(); }
 });
 
-test("mutation invalidates preexisting reads and postmutation reads use fresh transport", async () => {
+test("mutation supersedes preexisting reads, which are read again after it; postmutation reads use fresh transport", async () => {
   const original = globalThis.fetch;
   const release = bindApiSession("synthetic-mutation-session", async () => "synthetic-token");
   let finish!: (response: Response) => void;
@@ -37,7 +37,8 @@ test("mutation invalidates preexisting reads and postmutation reads use fresh tr
     await apiJson("/p/test/connections", { method: "POST", json: { change: true } });
     expect(await apiJson<{version:number}>("/p/test/connections")).toEqual({ version: 2 });
     finish(Response.json({ version: 1 }));
-    expect(await stale).toMatchObject({ name: "AbortError" });
-    expect(gets).toBe(2);
+    // The premutation value is never returned: the read is repeated against the postmutation state.
+    expect(await stale).toEqual({ version: 2 });
+    expect(gets).toBe(3);
   } finally { release(); clearVerifiedApiSession(); globalThis.fetch = original; await Promise.resolve(); }
 });

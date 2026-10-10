@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { z } from "zod";
-import { apiJson } from "./api";
+import { apiJson, isTransientReadFailure } from "./api";
 import { useVisiblePolling } from "./use-visible-polling";
+import { useRepositoryActivity } from "./repository-activity";
 
 /** Client view of merge queue, requirement decisions and post-land updates (validated, never trusted raw). */
 
@@ -83,18 +84,26 @@ export function nextTryText(update: UpdateView, now = Date.now()): string | null
   return minutes >= 90 ? `FlareGit tries again in about ${Math.round(minutes / 60)} hours.` : `FlareGit tries again in about ${minutes} minutes.`;
 }
 
-/** Polls the coordination view while the page is visible. */
+/**
+ * Background read cadence when nothing is reported live. Board activity refreshes sooner (coalesced),
+ * and every caller shares one in-flight read per repository.
+ */
+export const COORDINATION_FALLBACK_INTERVAL_MS = 30_000;
+
+/** Reads the coordination view on live-board activity, with a slow fallback read while the page is visible. */
 export function useCoordination(projectId: string, enabled = true): { view: CoordinationView | null; error: string | null; refresh: () => Promise<void> } {
   const [loaded, setLoaded] = useState<{ projectId: string; view: CoordinationView } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const refresh = useVisiblePolling({
     scope: projectId,
     enabled,
-    intervalMs: 6000,
+    intervalMs: COORDINATION_FALLBACK_INTERVAL_MS,
     read: async (signal) => coordinationViewSchema.parse(await apiJson<unknown>(`/p/${encodeURIComponent(projectId)}/coordination`, { signal })),
     onValue: (view) => { setLoaded({ projectId, view }); setError(null); },
-    onError: (cause) => setError(cause instanceof Error ? cause.message : "Coordination status is unavailable"),
+    // Rate limiting and superseded reads recover on the next read; the last view stays shown meanwhile.
+    onError: (cause) => isTransientReadFailure(cause) ? undefined : setError(cause instanceof Error ? cause.message : "Coordination status is unavailable"),
   });
+  useRepositoryActivity(projectId, () => void refresh(), enabled);
   return { view: loaded?.projectId === projectId ? loaded.view : null, error, refresh };
 }
 

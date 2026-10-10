@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { apiJson } from "../api";
+import { apiJson, apiJsonWithRetry } from "../api";
 import { useReportAttention } from "./NeedsAttention";
 import { timeAgo } from "../router";
 import type { AgentRunRecord } from "@/server/agent-run-ledger";
@@ -26,7 +26,7 @@ export function AgentRecoveryPanel({ projectId, taskId, runId, canResume = false
     let active = true;
     const controller = new AbortController();
     setLoading(true); setError(null);
-    void apiJson<{ run: AgentRunRecord | null }>(`/p/${projectId}/tasks/${taskId}/agent-run`, { signal: controller.signal }).then((response) => {
+    void apiJsonWithRetry<{ run: AgentRunRecord | null }>(`/p/${projectId}/tasks/${taskId}/agent-run`, controller.signal).then((response) => {
       if (!active) return;
       if (response.run && (response.run.runId !== runId || response.run.taskId !== taskId)) throw new Error("The active agent run changed. Refresh the change before viewing its saved work.");
       setRun(response.run); setLoaded(true);
