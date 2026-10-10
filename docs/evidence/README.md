@@ -34,3 +34,11 @@ Still to capture: contradiction decision end to end, rebase after merge, merge q
 | Prepaid credits, Polar webhooks, checkout, auto-recharge, plan-price | Three findings fixed in `62140a4c` deploy: billing changes need an account session, checkout creation rate-limited, only USD orders credited |
 | Run-agent-again, post-merge retry, requirement authoring | No vulnerabilities; one low-severity scope-check mismatch noted (requirement examples checked against current rather than target-branch scope) |
 
+
+## Merge queue and credits on production (Oct 10)
+
+| Evidence | Result |
+|---|---|
+| `signed-in/07-merge-queue-three.jpg` | Three changes queued in order (#1 group discount landing, #2 revised price guarantee, #3 older price guarantee) |
+| `signed-in/07-queue-landed-then-stale-refused.jpg` | After the owner approved #1 it merged (main `1cf967e` → `55f0fac`); the next changes were built on the old base, so the queue refused them as stale ("Being revised · Waiting for the change to be updated and marked ready") and kept their places |
+| same screenshot | Prepaid credits enforced: the re-run was refused with "Your credit balance ($0.00) doesn't cover this run ($0.66 is held until it finishes…)" once the 10 free daily runs were used |
