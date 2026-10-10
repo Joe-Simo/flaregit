@@ -114,6 +114,8 @@ export interface Env {
   /** New paid checkout requires a verified offering; existing billing remains manageable. */
   PAID_CHECKOUT_ENABLED?: string;
   POLAR_WEBHOOK_SECRET?: string;
+  /** One-time Polar product with a pay-what-you-want price; each paid order deposits prepaid credits. */
+  POLAR_CREDIT_PRODUCT_ID?: string;
   /** Conservative retained-repository envelope, not customer storage entitlement. */
   ARTIFACT_STORAGE_NAMESPACE?: string;
   ARTIFACT_STORAGE_GLOBAL_SLOTS?: string;

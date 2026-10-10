@@ -18,6 +18,16 @@ export interface WorkersAIConfig {
   maxCalls?: number;
   /** Server-only durable admission, invoked before every real provider attempt. */
   beforeDispatch?: (input: { model: string; inputBytes: number; maxOutputTokens: number }) => Promise<void>;
+  /** Provider-reported token usage after a successful call, when the response includes it. */
+  afterDispatch?: (usage: { inputTokens: number; outputTokens: number }) => Promise<void>;
+}
+
+/** Reads OpenAI-style `usage` (prompt/completion tokens) from a Workers AI response, if present. */
+export function responseUsage(result: unknown): { inputTokens: number; outputTokens: number } | null {
+  const r = (result as { result?: unknown })?.result ?? result;
+  const usage = (r as { usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } } | null)?.usage;
+  const input = usage?.prompt_tokens, output = usage?.completion_tokens;
+  return Number.isSafeInteger(input) && Number.isSafeInteger(output) && (input as number) >= 0 && (output as number) >= 0 ? { inputTokens: input as number, outputTokens: output as number } : null;
 }
 
 export const DEFAULT_CODE_MODEL = "@cf/openai/gpt-oss-120b";
@@ -67,7 +77,7 @@ export class WorkersAIClient {
 
     if (this.cfg.binding) {
       const options = this.cfg.gatewayId ? { gateway: { id: this.cfg.gatewayId } } : undefined;
-      return extractText(await this.cfg.binding.run(this.model, input, options));
+      return this.finish(await this.cfg.binding.run(this.model, input, options));
     }
 
     const base = this.cfg.gatewayId
@@ -80,7 +90,13 @@ export class WorkersAIClient {
       signal: AbortSignal.timeout(120_000),
     });
     if (!res.ok) throw new Error(`Workers AI error ${res.status}`);
-    return extractText(await res.json());
+    return this.finish(await res.json());
+  }
+
+  private async finish(result: unknown): Promise<string> {
+    const usage = responseUsage(result);
+    if (usage) await this.cfg.afterDispatch?.(usage);
+    return extractText(result);
   }
 
   asModel(): RepairModel {

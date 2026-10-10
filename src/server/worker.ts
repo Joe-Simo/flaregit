@@ -73,7 +73,7 @@ import { recoverNativeCompute, claimNativeCompute, admitNativeCompute, NativeCom
 import { allocateArtifact } from "./storage-allocation.js";
 import { gitRemote, gitParentTokenHash } from "./git-gateway-handler.js";
 import { scenarioAgentRunIds } from "./scenario-workflow.js";
-import { reserveManagedAgents } from "./projects.js";
+import { cancelManagedRuns, startManagedRuns } from "./projects.js";
 import { coordinationHttp } from "./coordination-http.js";
 import { afterRequirementDecision } from "./coordination-dispatch.js";
 import { searchAccountMetadata } from "./metadata-search.js";
@@ -96,7 +96,10 @@ import { buildPrefix, generationBuildPrefix, signPreviewGeneration, signPreview,
 import { lookupRepositoryPreviewOrigin } from "./preview-registry.js";
 import { handlePreviewAsset } from "./preview-broker.js";
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { billingFromEvent, createCheckout, planLimits, reportUsage, verifyPolarWebhook } from "./polar.js";
+import { createCheckout, createCreditCheckout, planLimits } from "./polar.js";
+import { handlePolarWebhook } from "./polar-webhook.js";
+import { publicUsageRates } from "./managed-spend-ledger.js";
+import { autoRechargeSchema } from "./credit-ledger.js";
 import { TICKET_BOOKING_POLICY } from "../fixtures/ticket-booking/policy.js";
 import { DEFAULT_PROTECTED_PATHS, isCommandPolicy,isGitIntegrityPolicy, settingsFor, type CommandPolicy } from "../core/command-policy.js";
 import { currentStatus, runProbes, statusIncidents, statusPage, workflowHealth } from "./status.js";
@@ -163,7 +166,7 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
       if (!ip) return text("Public pricing is unavailable", 503);
       if (!(await env.API_LIMITER.limit({ key: `plan-price:${ip}` })).success) return text("Too many price requests; retry shortly", 429);
     }
-    if (url.pathname === "/plan-price" && request.method === "GET") return Response.json({ price: await readPublicPlanPrice(env), limits: planLimits(env), repositoryLimit: 10, sharedRetainedRepositorySlots: artifactStorageSlots(env.ARTIFACT_STORAGE_GLOBAL_SLOTS) }, { headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
+    if (url.pathname === "/plan-price" && request.method === "GET") return Response.json({ price: await readPublicPlanPrice(env), limits: planLimits(env), usage: { ...publicUsageRates, creditsAvailable: env.PAID_CHECKOUT_ENABLED === "true" && Boolean(env.POLAR_CREDIT_PRODUCT_ID) }, repositoryLimit: 10, sharedRetainedRepositorySlots: artifactStorageSlots(env.ARTIFACT_STORAGE_GLOBAL_SLOTS) }, { headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
     if (url.pathname === "/pricing" && request.method === "GET") {
       const limited = await env.API_LIMITER.limit({ key: `pricing:${request.headers.get("CF-Connecting-IP") ?? "unknown"}` });
       if (!limited.success) return text("Too many requests", 429);
@@ -181,19 +184,7 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
     // The publishable key is public by design; the SPA needs it before the user can sign in.
     if (url.pathname === "/auth-config" && request.method === "GET") return json({ publishableKey: env.CLERK_PUBLISHABLE_KEY ?? null });
 
-    // Polar webhooks cannot log in; the HMAC signature is the authentication.
-    if (url.pathname === "/webhooks/polar" && request.method === "POST") {
-      const body = await request.text();
-      let event: unknown;
-      try {
-        event = await verifyPolarWebhook(body, request.headers, env.POLAR_WEBHOOK_SECRET);
-      } catch {
-        return text("Invalid signature", 401);
-      }
-      const change = billingFromEvent(event, env.POLAR_PRODUCT_ID);
-      if (change) await accountOf(env, change.projectId).setBilling(change.billing);
-      return new Response(null, { status: 202 });
-    }
+    if (url.pathname === "/webhooks/polar" && request.method === "POST") return handlePolarWebhook(request, env);
 
     // The authenticated Worker never serves contributor code. Existing shared links fail closed.
     if (url.pathname.startsWith("/preview/")) {
@@ -977,13 +968,29 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
       if (path === "/billing" && method === "GET") {
         const billing = await account.getBilling();
         const managed = await managedSpendStatus(env, accountKey).catch(() => ({ status: "unavailable" as const }));
-        return json({ ...billing, managed, runsToday: await account.usageToday(), runsPerDay: planLimits(env)[billing.plan], checkoutConfigured: env.PAID_CHECKOUT_ENABLED === "true" && Boolean(env.POLAR_PRODUCT_ID && env.POLAR_ACCESS_TOKEN) });
+        const limits = planLimits(env);
+        return json({ ...billing, managed, runsToday: await account.usageToday(), runsPerDay: limits[billing.plan], freeRunsPerDay: limits.free, credits: await account.creditSummary(), creditsConfigured: env.PAID_CHECKOUT_ENABLED === "true" && Boolean(env.POLAR_CREDIT_PRODUCT_ID && env.POLAR_ACCESS_TOKEN), checkoutConfigured: env.PAID_CHECKOUT_ENABLED === "true" && Boolean(env.POLAR_PRODUCT_ID && env.POLAR_ACCESS_TOKEN) });
+      }
+      if (path === "/billing/credits/checkout" && method === "POST") {
+        if (env.PAID_CHECKOUT_ENABLED !== "true" || !env.POLAR_CREDIT_PRODUCT_ID) return text("Buying credits isn't available yet. Free daily agent runs still work.", 503);
+        const b = await body<{ amountCents?: unknown }>();
+        if (typeof b.amountCents !== "number" || !Number.isSafeInteger(b.amountCents) || b.amountCents < 100 || b.amountCents > 1_000_000) return text("Choose an amount between $1 and $10,000", 400);
+        return json({ url: await createCreditCheckout(env, { accountKey, email: auth.email ?? "", amountCents: b.amountCents, successUrl: `${url.origin}/?checkout=credits` }) });
+      }
+      if (path === "/billing/auto-recharge" && method === "PUT") {
+        const parsed = autoRechargeSchema.safeParse(await body<unknown>());
+        if (!parsed.success) return text("Auto-recharge needs on/off, a threshold from $0 to $1,000 and a top-up from $1 to $10,000", 400);
+        return json(await account.setAutoRecharge(parsed.data));
+      }
+      if (path === "/billing/recharge-prompt" && method === "DELETE") {
+        await account.dismissRechargePrompt();
+        return json({ ok: true });
       }
       if (path === "/billing/checkout" && method === "POST") {
         if (env.PAID_CHECKOUT_ENABLED !== "true") return text("Paid plans are still being validated. Free collaboration remains available.", 503);
         const price = await readPublicPlanPrice(env);
         if (price.status !== "known" || price.environment !== "production") return text("The paid price could not be confirmed. Checkout is unavailable; free collaboration remains available.", 503);
-        return json({ url: await createCheckout(env, { projectId: accountKey, email: auth.email ?? "", successUrl: `${url.origin}/?checkout=success` }) });
+        return json({ url: await createCheckout(env, { accountKey, email: auth.email ?? "", successUrl: `${url.origin}/?checkout=success` }) });
       }
 
       // ----- personal API tokens (Clerk session only: a token cannot mint or list tokens) -----
@@ -2137,14 +2144,13 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
             } catch { return text("Current permissions no longer allow this saved proposal; its files remain available for review", 409); }
             resumeFrom = previous.runId;
           }
-          const { plan } = await account.getBilling();
           const instanceId = `agent-${projectId}-${task.id}-${crypto.randomUUID()}`;
-          const spendDenied = await reserveManagedAgents(env, accountKey, [instanceId]);
-          if (spendDenied) return spendDenied;
-          const denied = await admitRun(env, account, planLimits(env)[plan], instanceId);
-          if (denied) { await globalOf(env).cancelUnstartedManagedSpend([instanceId], accountKey); return denied; }
+          const limits = planLimits(env), funded = await startManagedRuns(env, accountKey, [instanceId], { free: limits.free, paid: limits.pro });
+          if (funded instanceof Response) return funded;
+          const denied = await admitRun(env, account, funded.dailyLimit, instanceId);
+          if (denied) { await cancelManagedRuns(env, accountKey, [instanceId]); return denied; }
           if (!(await project.beginAgentTask(task.id, instanceId))) {
-            await globalOf(env).cancelUnstartedManagedSpend([instanceId], accountKey);
+            await cancelManagedRuns(env, accountKey, [instanceId]);
             return text("This change already has active agent work or cannot start an agent", 409);
           }
           let instance: WorkflowInstance;
@@ -2155,11 +2161,10 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
             await globalOf(env).markManagedDispatchAttempted([instanceId], accountKey);
             instance = await env.AGENT_WORKFLOW.create({ id: instanceId, params: { projectId, accountKey, taskId: task.id, ...(resumeFrom ? { resumeFrom } : {}) } });
           } catch {
-            if (!dispatchAttempted) await globalOf(env).cancelUnstartedManagedSpend([instanceId], accountKey);
+            if (!dispatchAttempted) await cancelManagedRuns(env, accountKey, [instanceId]);
             await project.failAgentTask(task.id, instanceId);
             return text("Change is saved, but the agent could not start. Retry or continue on its saved branch.", 503);
           }
-          ctx.waitUntil(reportUsage(env, accountKey, "agent_run", instance.id, { plan }));
           return json({ instanceId: instance.id }, 202);
         }
 
@@ -2434,19 +2439,17 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
           if (state.kind !== "demo") return text("Scenarios run only on the demo repository", 400);
           const b = await body<{ act?: string }>();
           if (b.act !== "act1" && b.act !== "act2" && b.act !== "act3") return text("act must be act1, act2 or act3", 400);
-          const { plan } = await account.getBilling();
           const runId = crypto.randomUUID();
           const instanceId = `scn-${projectId}-${runId}`;
           const managedRunIds = scenarioAgentRunIds(instanceId, b.act, runId);
-          const spendDenied = await reserveManagedAgents(env, accountKey, managedRunIds);
-          if (spendDenied) return spendDenied;
-          const denied = await admitRun(env, account, planLimits(env)[plan], instanceId);
-          if (denied) { await globalOf(env).cancelUnstartedManagedSpend(managedRunIds, accountKey); return denied; }
+          const limits = planLimits(env), funded = await startManagedRuns(env, accountKey, managedRunIds, { free: limits.free, paid: limits.pro });
+          if (funded instanceof Response) return funded;
+          const denied = await admitRun(env, account, funded.dailyLimit, instanceId);
+          if (denied) { await cancelManagedRuns(env, accountKey, managedRunIds); return denied; }
           try { await project.registerWorkflow(instanceId, "scenario", undefined, userId); }
-          catch { await globalOf(env).cancelUnstartedManagedSpend(managedRunIds, accountKey); return text("Scenario could not be registered; no managed execution was dispatched", 503); }
+          catch { await cancelManagedRuns(env, accountKey, managedRunIds); return text("Scenario could not be registered; no managed execution was dispatched", 503); }
           await globalOf(env).markManagedDispatchAttempted(managedRunIds, accountKey);
           const instance = await env.SCENARIO_WORKFLOW.create({ id: instanceId, params: { projectId, accountKey, act: b.act, runId } });
-          ctx.waitUntil(reportUsage(env, accountKey, "scenario_run", `${projectId}-${runId}`, { act: b.act, plan }));
           return json({ instanceId: instance.id }, 202);
         }
 

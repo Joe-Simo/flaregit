@@ -193,7 +193,7 @@ export async function runAgentTask(env: Env, ledger: AgentExecutionLedger, task:
         await authorize();
         await globalOf(env).consumeManagedSpend(runId, inputBytes, maxOutputTokens, 0);
         await authorize();
-      } });
+      }, afterDispatch: async ({ inputTokens, outputTokens }) => { await globalOf(env).recordManagedUsage(runId, inputTokens, outputTokens); } });
       const protectedPaths = durable.protectedPaths, startingCommit = durable.startingCommit;
       const assertWrites = (paths: Iterable<string>) => {
         assertAgentWrites(frozenTask, paths, protectedPaths);

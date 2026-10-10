@@ -1,4 +1,5 @@
-import type { ManagedEnvelope } from "./managed-spend-ledger.js";
+import type { ManagedAdmission, ManagedEnvelope, ManagedFundingTier } from "./managed-spend-ledger.js";
+import type { CreditHold } from "./credit-ledger.js";
 import type { Ledger } from "./durable-object.js";
 import type { Env } from "./env.js";
 import { projectIdFor } from "./shell.js";
@@ -64,7 +65,7 @@ export async function reserveManagedAgent(env: Env, accountKey: string | undefin
   if (!accountKey) throw new Error("Managed spending account is unavailable");
   if (env.RUNS_ENABLED === "false") throw new Error("Managed execution is paused");
   const result = await globalOf(env).reserveManagedSpend(managedAgentEnvelope(accountKey, runId), managedBudget(env));
-  if (!result.allowed) throw new Error(`Managed execution unavailable: ${result.reason}`);
+  if (!result.allowed) throw new Error(await managedRefusal(result.reason, "free").text());
   return result.reservation;
 }
 
@@ -75,11 +76,50 @@ export function managedAgentEnvelope(accountKey: string, runId: string):ManagedE
   const containerMicros = Math.ceil(maxContainerSeconds * 129_024 / 3600);
   return { resourceKind:"managed-agent",runId, accountKey, usdMicros: modelMicros + containerMicros, maxInputBytes, maxOutputTokens, maxCalls, maxContainerSeconds };
 }
-export async function reserveManagedAgents(env: Env, accountKey: string, runIds: string[]): Promise<Response | null> {
+const usd = (value: number) => `$${(value / 1_000_000).toFixed(2)}`;
+/** First day of next month (UTC), when monthly managed limits reset. */
+export const managedResetDate = (now = new Date()) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+/** Plain text a person sees when a managed run cannot start. */
+export function managedRefusal(reason: Extract<ManagedAdmission, { allowed: false }>["reason"] | Extract<CreditHold, { allowed: false }>["reason"], tier: ManagedFundingTier, detail?: { balanceMicros: number; requiredMicros: number }, now = new Date()): Response {
+  const date = managedResetDate(now);
+  if (reason === "account_budget") return new Response(tier === "free" ? `Your plan's monthly agent limit is reached — upgrade or wait until ${date}.` : `Your account's monthly agent limit is reached — wait until ${date}.`, { status: 429 });
+  if (reason === "global_budget") return new Response(`This month's free agent allowance is used up — add credits to keep running agents, or wait until ${date}.`, { status: 402 });
+  if (reason === "insufficient_credit") return new Response(`Your credit balance (${usd(detail?.balanceMicros ?? 0)}) doesn't cover this run (${usd(detail?.requiredMicros ?? 0)} is held until it finishes; unused credit comes back). Add credits to keep running agents.`, { status: 402 });
+  if (reason === "payment_reversed") return new Response("A credit purchase was refunded or reversed. Add credits to cover it before running more agents.", { status: 402 });
+  return new Response("Agent runs aren't available right now. Repository browsing, review and external tools still work.", { status: 503 });
+}
+export type ManagedStart = { tier: ManagedFundingTier; dailyLimit: number };
+/** Funds new managed runs. The daily free allowance draws from the shared free pool
+ * (MANAGED_GLOBAL_MONTHLY_USD_MICROS); beyond it, each run holds its full envelope from the
+ * account's prepaid credits. Every run stays inside MANAGED_ACCOUNT_MONTHLY_USD_MICROS. */
+export async function startManagedRuns(env: Env, accountKey: string, runIds: string[], limits: { free: number; paid: number }): Promise<Response | ManagedStart> {
   if (env.RUNS_ENABLED === "false") return new Response("Managed execution is temporarily paused", { status: 503 });
-  const results = await globalOf(env).reserveManagedSpendBatch(runIds.map((runId) => managedAgentEnvelope(accountKey, runId)), managedBudget(env));
-  const refused = results.find((result) => !result.allowed);
-  return refused && !refused.allowed ? new Response(`Managed execution unavailable: ${refused.reason}. Repository browsing, review and external tools remain available.`, { status: refused.reason === "account_budget" ? 429 : 503 }) : null;
+  const envelopes = runIds.map((runId) => managedAgentEnvelope(accountKey, runId)), budget = managedBudget(env), account = accountOf(env, accountKey);
+  let poolExhausted = false;
+  if ((await account.usageToday()) + 1 <= limits.free) {
+    const refused = (await globalOf(env).reserveManagedSpendBatch(envelopes, budget, "free")).find((result) => !result.allowed);
+    if (!refused) return { tier: "free", dailyLimit: limits.free };
+    if (!refused.allowed && refused.reason !== "global_budget") return managedRefusal(refused.reason, "free");
+    poolExhausted = true;
+  }
+  const hold = await account.holdCredits(runIds, envelopes[0]!.usdMicros);
+  if (!hold.allowed) return poolExhausted && hold.reason === "insufficient_credit" && hold.balanceMicros === 0 ? managedRefusal("global_budget", "free") : managedRefusal(hold.reason, "paid", hold);
+  const refused = (await globalOf(env).reserveManagedSpendBatch(envelopes, budget, "paid")).find((result) => !result.allowed);
+  if (refused && !refused.allowed) { await account.releaseCredits(runIds); return managedRefusal(refused.reason, "paid"); }
+  return { tier: "paid", dailyLimit: limits.paid };
+}
+/** Returns spend reservations and credit holds for runs that were never dispatched. */
+export async function cancelManagedRuns(env: Env, accountKey: string, runIds: string[]): Promise<void> {
+  await globalOf(env).cancelUnstartedManagedSpend(runIds, accountKey);
+  await accountOf(env, accountKey).releaseCredits(runIds);
+}
+/** Settles a finished run at its actual cost; a credit-funded run debits that cost and releases the rest of its hold.
+ * Both steps are idempotent, so a retried workflow step never debits twice. */
+export async function settleManagedRun(env: Env, runId: string): Promise<{ usdMicros: number; tier: ManagedFundingTier } | null> {
+  const settled = await globalOf(env).settleManagedSpend(runId);
+  if (!settled) return null;
+  if (settled.fundingTier === "paid") await accountOf(env, settled.accountKey).settleCredits(runId, settled.settlement.usdMicros);
+  return { usdMicros: settled.settlement.usdMicros, tier: settled.fundingTier };
 }
 
 /** Revalidate the durable initiator on every funded dispatch. Workflow payloads
