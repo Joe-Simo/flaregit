@@ -64,7 +64,7 @@ test("internal Git terminology never reaches the interface", async () => {
     violations.push(...visibleTerminologyViolations(path, await Bun.file(path).text()));
   }
   expect(violations).toEqual([]);
-});
+}, 30_000); // Scans every source file in src/web; allow for loaded CI machines.
 
 test("the scanner flags visible copy and ignores protocol values", () => {
   const flagged = visibleTerminologyViolations("x.tsx", `const a = <p>Candidate failed</p>; const b = <Badge title="Open journal" />; const c = \`Epoch \${n} ended\`;`);
