@@ -94,6 +94,41 @@ test("a re-run refused for budget is kept and an owner can send the same re-run 
   } finally { await mf.dispose(); }
 }, 120_000);
 
+test("after the agent's re-run fails, an owner can run it again on the latest version as one new run", async () => {
+  if (await workerdChild(FILE, "after the agent's re-run fails, an owner can run it again on the latest version as one new run")) return;
+  const { mf, json } = await fixture("failed-run");
+  try {
+    const workflowId = "rev-failed-conflicting";
+    const sent = await json<Sent>("/revise-post-land", { taskId: "conflicting", landedCommit: LANDED, workflowId });
+    expect(sent.dispatch).toMatchObject({ dispatched: true });
+    // The run nothing could fix ends: the change is blocked on the latest version.
+    await json("/fail-agent", { taskId: "conflicting", runId: workflowId });
+    const blocked = await json<FlareGitProjectState>("/state");
+    expect([blocked.tasks.conflicting?.status, blocked.tasks.conflicting?.blockedReason]).toEqual(["blocked", "Agent run failed. Pushed checkpoints are preserved; retry the agent or continue on the saved branch."]);
+    expect((await update(json, "conflicting")).status).toBe("conflict_revising");
+
+    const denied = await json<Route>("/run-agent-again?actor=member", { taskId: "conflicting" });
+    expect(denied.status).toBe(403);
+    expect(denied.created).toEqual([workflowId]);
+
+    const again = await json<Route>("/run-agent-again", { taskId: "conflicting" });
+    expect(again.status).toBe(200);
+    const body = JSON.parse(again.body) as { dispatched: boolean; replayed: boolean; update: { status: string; revisionWorkflowId: string } };
+    expect(body).toMatchObject({ dispatched: true, replayed: false, update: { status: "conflict_revising" } });
+    const rerun = body.update.revisionWorkflowId;
+    expect(rerun).not.toBe(workflowId);
+    expect(again.created).toEqual([workflowId, rerun]);
+    const running = await json<FlareGitProjectState>("/state");
+    expect([running.tasks.conflicting?.status, running.tasks.conflicting?.agentWorkflowInstanceId, running.tasks.conflicting?.baseCommit]).toEqual(["working", rerun, LANDED]);
+
+    // Pressing it again never starts a second run.
+    const replay = await json<Route>("/run-agent-again", { taskId: "conflicting" });
+    expect(replay.status).toBe(200);
+    expect(JSON.parse(replay.body)).toMatchObject({ replayed: true });
+    expect(replay.created).toEqual([workflowId, rerun]);
+  } finally { await mf.dispose(); }
+}, 120_000);
+
 test("a refused re-run is sent again automatically once its backoff elapses and capacity has returned", async () => {
   if (await workerdChild(FILE, "a refused re-run is sent again automatically once its backoff elapses and capacity has returned")) return;
   const { mf, json } = await fixture("automatic");

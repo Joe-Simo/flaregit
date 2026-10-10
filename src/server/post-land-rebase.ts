@@ -296,10 +296,27 @@ export function nextRevisionRetryAt(ledger: PostLandRebaseLedger): number | null
   return due.length ? Math.min(...due) : null;
 }
 
-/** A person asks to run the agent again on the latest version of one change. Repeating the request is safe. */
-export function claimManualRevision(ledger: PostLandRebaseLedger, state: FlareGitProjectState, taskId: string, actorId: string, now = new Date()): ManualRetry {
+/** The agent re-run on the latest version was sent, ran and failed; the change is blocked where that run left it. */
+export function revisionRunFailed(state: FlareGitProjectState, record: PostLandRebaseRecord): boolean {
+  const task = state.tasks[record.taskId];
+  return Boolean(task && record.revisionWorkflowId && (record.status === "conflict_revising" || record.status === "verification_failed") && task.contributor.type === "agent" && task.status === "blocked" && task.agentWorkflowInstanceId === record.revisionWorkflowId && task.baseCommit === record.landedCommit);
+}
+
+/**
+ * A person asks to run the agent again on the latest version of one change. Repeating the request is safe.
+ * When the earlier re-run failed, `rerunWorkflowId` is the next stable request id, derived from the failed
+ * run, so every press for that failure sends one and the same new run.
+ */
+export function claimManualRevision(ledger: PostLandRebaseLedger, state: FlareGitProjectState, taskId: string, actorId: string, now = new Date(), rerunWorkflowId?: string): ManualRetry {
   const record = ledger.latestFor(taskId);
   if (!record || !record.revisionWorkflowId) return { kind: "refused", reason: "This change has no agent re-run to send again" };
+  if (revisionRunFailed(state, record)) {
+    if (!rerunWorkflowId || !WORKFLOW_ID.safeParse(rerunWorkflowId).success || rerunWorkflowId === record.revisionWorkflowId) return { kind: "refused", reason: "This change has no agent re-run to send again" };
+    const { revisionRetry: _previous, ...rest } = record;
+    void _previous;
+    const retry: RevisionRetry = { actorId, refusal: "transient", refusedReason: "The agent's last run on the latest version failed.", resumeStatus: resumeStatusOf(record), resumeReason: resumeReasonOf(record).slice(0, 500), attempts: 1, nextAttemptAt: null, claimedUntil: null };
+    return { kind: "claimed", claim: claim(ledger, { ...rest, revisionWorkflowId: rerunWorkflowId, revisionRetry: retry }, actorId, now) };
+  }
   if (record.status === "conflict_revising" || record.status === "verification_failed") return { kind: "settled", record };
   if (record.status !== "agent_waiting" && !isLegacyRefusal(record)) return { kind: "refused", reason: "This change has no agent re-run waiting" };
   if (record.revisionRetry?.claimedUntil && Date.parse(record.revisionRetry.claimedUntil) > now.getTime()) return { kind: "settled", record };

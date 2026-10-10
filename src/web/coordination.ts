@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { z } from "zod";
+import type { Task } from "@/core/types";
 import { apiJson, isTransientReadFailure } from "./api";
 import { useVisiblePolling } from "./use-visible-polling";
 import { useRepositoryActivity } from "./repository-activity";
@@ -71,9 +72,16 @@ export const UPDATE_STATUS: Record<UpdateView["status"], { label: string; varian
   agent_waiting: { label: "Agent waiting to re-run", variant: "warning" },
 };
 
-/** True when the agent's re-run on the latest version was refused and can be sent again. */
-export function canRunAgentAgain(update: UpdateView): boolean {
-  return update.revisionWorkflowId !== null && (update.status === "agent_waiting" || update.status === "failed" && update.reason.startsWith("The agent could not be re-run"));
+type RunTask = Pick<Task, "status" | "baseCommit" | "agentWorkflowInstanceId" | "contributor">;
+
+/** The change's agent re-run on the latest version started and then failed, leaving the change blocked. */
+export function agentRunFailed(update: UpdateView, task?: RunTask): boolean {
+  return Boolean(task && update.revisionWorkflowId !== null && (update.status === "conflict_revising" || update.status === "verification_failed") && task.contributor.type === "agent" && task.status === "blocked" && task.agentWorkflowInstanceId === update.revisionWorkflowId && task.baseCommit === update.landedCommit);
+}
+
+/** True when the agent's re-run on the latest version was refused or failed and can be sent again. */
+export function canRunAgentAgain(update: UpdateView, task?: RunTask): boolean {
+  return update.revisionWorkflowId !== null && (update.status === "agent_waiting" || update.status === "failed" && update.reason.startsWith("The agent could not be re-run") || agentRunFailed(update, task));
 }
 
 /** When FlareGit next tries on its own, in words. */

@@ -133,8 +133,8 @@ export class CoordinationController {
     return this.transaction(() => claimDueRevisions(this.rebases, this.ports.load()));
   }
 
-  claimManualRevision(taskId: string, actorId: string): ManualRetry {
-    return this.transaction(() => claimManualRevision(this.rebases, this.ports.load(), taskId, actorId));
+  claimManualRevision(taskId: string, actorId: string, rerunWorkflowId?: string): ManualRetry {
+    return this.transaction(() => claimManualRevision(this.rebases, this.ports.load(), taskId, actorId, new Date(), rerunWorkflowId));
   }
 
   nextRevisionRetryAt(): number | null {
