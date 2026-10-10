@@ -3905,13 +3905,19 @@ export class RepositoryController extends DurableObject<Env> {
   async authorizeIsolatedExecution(context:{scope:IsolatedExecutionContext["scope"];sourceDigest:string;image:string}):Promise<boolean>{
     try{const ledger=this.isolatedExecutionGrants(),grant=ledger.get(context.scope.attemptId);if(!grant||JSON.stringify(grant.context.scope)!==JSON.stringify(context.scope)||grant.context.sourceDigest!==context.sourceDigest||grant.context.image!==context.image)return false;await ledger.allow(grant.context);return true;}catch{return false;}
   }
+  /** The verifier a candidate's frozen policy requires; publication and native phase closure must agree on it. */
+  private expectedVerifierIdentity(c:CandidateGeneration):string{
+    if(c.frozenExternalChecksPolicy?.mode==="external")return VERIFIER_IDENTITIES.external;
+    if(isGitIntegrityPolicy(c.frozenVerificationPolicy))return VERIFIER_IDENTITIES["git-integrity"];
+    return isCommandPolicy(c.frozenVerificationPolicy)?VERIFIER_IDENTITIES.custom:VERIFIER_IDENTITIES["ticket-booking"];
+  }
   async closeIntegrationVerification(workflowId:string,candidateId:string,commit:string,evidenceId:string):Promise<void>{
     const scope=await this.integrationRuntimeScope(workflowId,candidateId);this.closeIntegrationVerificationRecord(scope,commit,evidenceId);
   }
   private closeIntegrationVerificationRecord(scope:IntegrationNativeRuntimeScope,commit:string,evidenceId:string){
     this.assertIntegrationNativeLocal(scope);const {workflowId,candidateId}=scope;
     const state=this.load(),candidate=state.candidates[candidateId],evidence=state.evidence[evidenceId];
-    if(!candidate||candidate.candidateCommit!==commit||candidate.evidenceId!==evidenceId||evidence?.status!=="passed"||evidence.candidateCommit!==commit||!evidence.candidateTree||evidence.verifierIdentity!==VERIFIER_IDENTITIES["git-integrity"])throw Error("Exact native verification evidence required for phase closure");
+    if(!candidate||candidate.candidateCommit!==commit||candidate.evidenceId!==evidenceId||evidence?.status!=="passed"||evidence.candidateCommit!==commit||!evidence.candidateTree||evidence.verifierIdentity!==this.expectedVerifierIdentity(candidate))throw Error("Exact native verification evidence required for phase closure");
     new RetainedCredentialIncidents(this.ctx.storage);
     const credentials=this.ctx.storage.sql.exec<{input_id:string;purpose:string;status:string}>("SELECT input_id,purpose,status FROM retained_credential_incidents WHERE json_extract(payload,'$.workflowId')=? ORDER BY input_id,purpose",workflowId).toArray();
     if(credentials.some(row=>row.status!=="revoked"))throw Error("Verification credential cleanup remains unconfirmed");
@@ -3977,7 +3983,7 @@ export class RepositoryController extends DurableObject<Env> {
         const closureExists=this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='integration_verification_closures'").toArray().length>0&&this.ctx.storage.sql.exec("SELECT 1 FROM integration_verification_closures WHERE workflow_id=?",workflowId).toArray().length>0;
         if(closureExists){
           verificationClosure.status='unconfirmed';const evidence=candidate.evidenceId?state.evidence[candidate.evidenceId]:undefined;
-          if(candidate.candidateCommit&&candidate.evidenceId&&evidence?.candidateTree&&evidence.candidateCommit===candidate.candidateCommit&&evidence.status==='passed'&&evidence.verifierIdentity===VERIFIER_IDENTITIES['git-integrity']&&new IntegrationNativeRuntimeLedger(this.ctx.storage,false).verificationClosure(scope,{commit:candidate.candidateCommit,tree:evidence.candidateTree,evidenceId:candidate.evidenceId}))verificationClosure.status='closed';
+          if(candidate.candidateCommit&&candidate.evidenceId&&evidence?.candidateTree&&evidence.candidateCommit===candidate.candidateCommit&&evidence.status==='passed'&&evidence.verifierIdentity===this.expectedVerifierIdentity(candidate)&&new IntegrationNativeRuntimeLedger(this.ctx.storage,false).verificationClosure(scope,{commit:candidate.candidateCommit,tree:evidence.candidateTree,evidenceId:candidate.evidenceId}))verificationClosure.status='closed';
         }
         if(this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='integration_verification_credentials'").toArray().length){
           const row=this.ctx.storage.sql.exec<{scope:string;doc:string}>("SELECT scope,doc FROM integration_verification_credentials WHERE workflow_id=?",workflowId).toArray()[0];
@@ -6187,7 +6193,7 @@ export class RepositoryController extends DurableObject<Env> {
     if (external && (external.frozen.repositoryId !== s.projectId || external.frozen.candidateId !== candidateId || external.frozen.commit !== c.candidateCommit || external.frozen.tree !== ev.candidateTree || externalCheckGate(external) !== "passed")) return { ok: false, error: "Required external checks have not passed for this exact candidate" };
     const externalOnly = c.frozenExternalChecksPolicy?.mode === "external";
     if (externalOnly && (!(isCommandPolicy(c.frozenVerificationPolicy)||isGitIntegrityPolicy(c.frozenVerificationPolicy)) || !external || !c.frozenContributorProofs?.length || !external.frozen.policy.checks.some((check) => check.required) || JSON.stringify(external.frozen.policy) !== JSON.stringify(c.frozenExternalChecksPolicy))) return { ok: false, error: "External CI policy and contributor proof are unavailable for this candidate" };
-    const verifierIdentity = externalOnly ? VERIFIER_IDENTITIES.external : isGitIntegrityPolicy(c.frozenVerificationPolicy)?VERIFIER_IDENTITIES["git-integrity"]: isCommandPolicy(c.frozenVerificationPolicy) ? VERIFIER_IDENTITIES.custom : VERIFIER_IDENTITIES["ticket-booking"];
+    const verifierIdentity = this.expectedVerifierIdentity(c);
     if (ev.verifierIdentity !== verifierIdentity) return { ok: false, error: "Candidate needs verification with the current isolated verifier before publication" };
     if (ev.expectedAcceptedBase !== c.expectedAcceptedBase || ev.requirementsVersion !== c.frozenPolicyVersion) return { ok: false, error: "Evidence was produced for different inputs" };
     const cancelled = c.participatingTaskIds.filter((id) => s.tasks[id]?.status === "cancelled");
