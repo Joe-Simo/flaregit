@@ -1,4 +1,5 @@
 import type { Task } from "../core/types.js";
+import { requirementPromptLine } from "../core/requirement-drafts.js";
 
 const matches = (file: string, patterns: readonly string[]) =>
   patterns.some((p) => p === "*" || (p.endsWith("/") ? file.startsWith(p) : p.endsWith("/**/*") ? file.startsWith(p.slice(0, -4)) : file === p));
@@ -36,7 +37,7 @@ export function redactSecrets(text: string): string {
 }
 
 export function buildAgentPrompt(task: Task, agentName: string, files: Record<string, string>, checkCommand?: string, shared?: string): string {
-  const requirements = task.requirements.filter((r) => r.status === "approved").map((r) => `- ${r.title}: ${r.description}`).join("\n");
+  const requirements = task.requirements.filter((r) => r.status === "approved").map(requirementPromptLine).join("\n");
   // A maintainer chose another requirement over these; the change must stop implementing them.
   const superseded = task.requirements.filter((r) => r.status === "superseded").map((r) => `- ${r.title}: ${r.description}`).join("\n");
   const context = Object.entries(files)

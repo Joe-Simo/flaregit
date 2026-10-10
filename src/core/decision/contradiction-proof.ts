@@ -1,6 +1,9 @@
 import { z } from "zod";
 import type { Requirement, RequirementAssertion } from "../types.js";
 import { findContradiction } from "./contradiction.js";
+import { requirementProbeSchema } from "../requirement-drafts.js";
+
+export { requirementProbeSchema };
 
 /**
  * Executable proof that two requirements contradict. The structural check in contradiction.ts finds two
@@ -8,12 +11,6 @@ import { findContradiction } from "./contradiction.js";
  * person can trust: each side's change is checked out and its code is run on that exact input.
  */
 
-export const requirementProbeSchema = z
-  .object({
-    module: z.string().regex(/^(?!\/)(?!.*(?:^|\/)\.\.?(?:\/|$))[A-Za-z0-9_./-]{1,200}\.(?:ts|tsx|js|mjs)$/),
-    export: z.string().regex(/^[A-Za-z_$][A-Za-z0-9_$]{0,100}$/),
-  })
-  .strict();
 export type RequirementProbe = z.infer<typeof requirementProbeSchema>;
 
 const probeOutcomeSchema = z.union([

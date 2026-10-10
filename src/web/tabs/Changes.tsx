@@ -5,6 +5,8 @@ import { NeedsAttention } from "../components/NeedsAttention";
 import {changeInspectionStatus} from '../change-inspection-status';
 import {acceptedCommitLabel} from "../accepted-commit-display";
 import {PendingTaskCreations} from "../components/PendingTaskCreations";
+import {RequirementsEditor} from "../components/RequirementsEditor";
+import {draftsFromRows,rowsFromDrafts,type RequirementRow} from "../requirement-form";
 import {readTaskCreationRecovery,restoreTaskCreationRequest,type TaskCreationRecoveryRow,type PendingTaskCreation} from "../task-creation-recovery";
 import {ContributionTargetChoices} from "../components/ContributionTargetChoices";
 import {parseContributionTargets,contributionExpectation,contributionCreationIntent,type ContributionTarget,type ContributionCreationIntent} from "../contribution-target-selection";
@@ -199,6 +201,7 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
   const [goal, setGoal] = useState("");
   const creationIntent = useRef<ContributionCreationIntent | null>(null);
   const [relationships, setRelationships] = useState(false);
+  const [requirementRows, setRequirementRows] = useState<RequirementRow[]>([]);
   const [dependsOn, setDependsOn] = useState<string | null>(null);
   const [issue, setIssue] = useState<{ number: number; title: string } | null>(null);
   const [picker, setPicker] = useState<"change" | "issue" | "target" | null>(null);
@@ -265,17 +268,18 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
     }
   };
 
-  const restoreCreation=(record:PendingTaskCreation)=>{if(!canContribute)return;const authoritative=creations.find(item=>item.taskId===record.taskId);if(!authoritative?.canRestore||!authoritative.canRetryOriginal)return;const restored=restoreTaskCreationRequest(authoritative.taskId,authoritative.input);creationIntent.current=restored.intent;setGoal(restored.goal);setDependsOn(restored.dependsOn);setIssue(restored.issue===null?null:{number:restored.issue,title:""});setSelectedTarget(restored.target);setUseAgent(false);setRelationships(restored.dependsOn!==null||restored.issue!==null);setError(null);toast.success("Original creation request restored. Submit unchanged fields to retry the same identity; no replacement fork is requested.");};
+  const restoreCreation=(record:PendingTaskCreation)=>{if(!canContribute)return;const authoritative=creations.find(item=>item.taskId===record.taskId);if(!authoritative?.canRestore||!authoritative.canRetryOriginal)return;const restored=restoreTaskCreationRequest(authoritative.taskId,authoritative.input);creationIntent.current=restored.intent;setGoal(restored.goal);setDependsOn(restored.dependsOn);setIssue(restored.issue===null?null:{number:restored.issue,title:""});setSelectedTarget(restored.target);setRequirementRows(rowsFromDrafts(restored.requirements));setUseAgent(false);setRelationships(restored.dependsOn!==null||restored.issue!==null);setError(null);toast.success("Original creation request restored. Submit unchanged fields to retry the same identity; no replacement fork is requested.");};
   const create = () =>
     run("create", async () => {
       if (!canContribute) throw new Error("Write permission is required to create a change.");
       const generation = lifetime.current;
-      const formSignature=JSON.stringify({goal,dependsOn,issue:issue?.number??null,target:selectedTarget});
+      const requirements=draftsFromRows(requirementRows);
+      const formSignature=JSON.stringify({goal,dependsOn,issue:issue?.number??null,target:selectedTarget,...(requirements?{requirements}:{})});
       const replay=creationIntent.current?.signature===formSignature;
       if (!replay&&dependsOn && (!state.tasks[dependsOn] || state.tasks[dependsOn]?.status === "cancelled")) throw new Error("The selected base change is no longer available. Choose another change or clear it.");
       let target=selectedTarget;
       if(!replay&&dependsOn){const parent=state.tasks[dependsOn]!;const bound=effectiveTaskAcceptedTarget(parent);if(bound){const current=targets?.find(item=>item.ref===bound.ref);if(!current)throw new Error("The selected parent accepted branch is unavailable. Refresh its recorded target before creating this change.");if(parent.status!=="accepted"&&(current.acceptedCommit!==bound.acceptedCommit||current.acceptedVersion!==bound.acceptedVersion||current.policyVersion!==bound.policyVersion))throw new Error("The unaccepted parent target changed. Preserve its context and refresh before continuing.");target=current;}}
-      if(!replay)creationIntent.current=contributionCreationIntent(null,{goal,dependsOn,issue:issue?.number??null,target,signatureOverride:formSignature},()=>`${slug(goal)}-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`);
+      if(!replay)creationIntent.current=contributionCreationIntent(null,{goal,dependsOn,issue:issue?.number??null,target,...(requirements?{requirements}:{}),signatureOverride:formSignature},()=>`${slug(goal)}-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`);
       const intent=creationIntent.current;if(!intent)throw new Error("Saved creation intent is unavailable");
       const taskId=intent.taskId;
       const created = await apiJson<ChangeCreationResponse>(`/p/${projectId}/tasks`, { method: "POST", json:intent.payload });
@@ -300,7 +304,7 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
       } else {
         setInstructions({ ...separateGitCommands(created.commands,created.token), task: taskId });
       }
-      void loadCreations();setGoal("");setSelectedTarget(null); setDependsOn(null); setIssue(null); setRelationships(false);
+      void loadCreations();setGoal("");setRequirementRows([]);setSelectedTarget(null); setDependsOn(null); setIssue(null); setRelationships(false);
     });
 
   const act = (task: Task, action: "ready" | "cancel" | "agent") =>
@@ -394,6 +398,7 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
             <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busy !== null} onClick={() => { setSearch(""); setPicker("change"); }}>{dependsOn ? `Builds on: ${state.tasks[dependsOn]?.goal ?? dependsOn}` : "Choose base change"}</Button>{dependsOn && <Button variant="ghost" size="sm" disabled={busy !== null} onClick={() => { creationIntent.current = null; setDependsOn(null); }}>Clear base</Button>}</div>
             <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busy !== null} onClick={() => { setSearch(""); setPicker("issue"); void loadIssues(); }}>{issue ? `Resolves #${issue.number}${issue.title?`: ${issue.title}`:""}` : "Choose issue"}</Button>{issue && <Button variant="ghost" size="sm" disabled={busy !== null} onClick={() => { creationIntent.current = null; setIssue(null); }}>Clear issue</Button>}</div>
           </div>}
+          <RequirementsEditor idPrefix="new-change" rows={requirementRows} disabled={!canContribute || busy !== null} onChange={(rows) => { creationIntent.current = null; setRequirementRows(rows); }} />
           <div className="flex items-center justify-between gap-3 flex-wrap">
             {managedActions&&<label className="flex items-center gap-2 text-sm">
               <input type="checkbox" disabled={busy !== null} checked={useAgent} onChange={(e) => setUseAgent(e.target.checked)} />
