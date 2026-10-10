@@ -73,7 +73,7 @@ import { recoverNativeCompute, claimNativeCompute, admitNativeCompute, NativeCom
 import { allocateArtifact } from "./storage-allocation.js";
 import { gitRemote, gitParentTokenHash } from "./git-gateway-handler.js";
 import { scenarioAgentRunIds } from "./scenario-workflow.js";
-import { cancelManagedRuns, startManagedRuns } from "./projects.js";
+import { cancelManagedRuns, dailyRunLimit, startManagedRuns } from "./projects.js";
 import { coordinationHttp } from "./coordination-http.js";
 import { afterRequirementDecision } from "./coordination-dispatch.js";
 import { searchAccountMetadata } from "./metadata-search.js";
@@ -1511,7 +1511,7 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
             else if(!input.predecessorId&&input.expectedGeneration!==undefined&&input.expectedGeneration!==attempt.generation&&input.expectedGeneration+1!==attempt.generation)return text("Inspection attempt changed; refresh before resuming",409);
             const withinDeliveryWindow=Date.now()<=Date.parse(attempt.deliveryUntil);
             if(attempt.dispatch==="saved"||(attempt.dispatch==="unknown"&&!attempt.terminal&&withinDeliveryWindow)){
-              const {plan}=await account.getBilling();const denied=await admitRun(env,account,planLimits(env)[plan],attempt.workflowId);if(denied)return denied;
+              const {plan}=await account.getBilling();const denied=await admitRun(env,account,dailyRunLimit(env,accountKey,plan),attempt.workflowId);if(denied)return denied;
               if(!await authorizeHistoryOwner())return text("Import inspection owner access changed",403);
               await project.markHistoryInspectionDispatch(operation.instanceId,attempt.generation);
               try{await env.IMPORT_HISTORY_WORKFLOW.createBatch([{id:attempt.workflowId,params:{accountKey,projectId,expectedHead:operation.head,operationId:operation.instanceId,attemptGeneration:attempt.generation},retention:{successRetention:"3 days",errorRetention:"3 days"}}]);workflowStatus="delivery-confirmed";}catch{workflowStatus="unavailable";}
@@ -2184,9 +2184,9 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
             const parsed=integrationRequestInputSchema.safeParse(b);if(!parsed.success)return text("Exact request key and observed integration inputs are required",400);
             const current=await authenticate(request,env);if(current instanceof Response)return current;if(current.id!==userId||(current.viaToken===true)!==(auth.viaToken===true))return text("Integration requester authentication changed",403);
             const actor={userId,displayName:'Integration requester',viaToken:current.viaToken===true},credentialHash=current.viaToken?await gitParentTokenHash(request):undefined;
-            try{const prepared=await project.prepareIntegrationRequest(parsed.data,actor,credentialHash,current.expiresAt);let intent=prepared.intent;if(intent.dispatch!=='observed'){const nativePhase=await project.integrationNativePhaseAdmission(intent.eventId);const denied=nativePhase?null:await admitRun(env,account,planLimits(env)[plan],intent.eventId);if(denied)return denied;intent=await project.markIntegrationRequestDispatch(intent.key,'unknown',actor,credentialHash,current.expiresAt);await env.INTEGRATION_QUEUE.send({type:'integration.requested',projectId,taskIds:intent.input.taskIds,eventId:intent.eventId} satisfies QueueMessage);intent=await project.markIntegrationRequestDispatch(intent.key,'observed',actor,credentialHash,current.expiresAt);}return json({queued:intent.eventId,replayed:prepared.replayed,dispatch:intent.dispatch},202);}catch{return text("Integration request could not be confirmed. Preserve the original key and context; retrying unchanged inputs cannot create another workflow identity.",409);}
+            try{const prepared=await project.prepareIntegrationRequest(parsed.data,actor,credentialHash,current.expiresAt);let intent=prepared.intent;if(intent.dispatch!=='observed'){const nativePhase=await project.integrationNativePhaseAdmission(intent.eventId);const denied=nativePhase?null:await admitRun(env,account,dailyRunLimit(env,accountKey,plan),intent.eventId);if(denied)return denied;intent=await project.markIntegrationRequestDispatch(intent.key,'unknown',actor,credentialHash,current.expiresAt);await env.INTEGRATION_QUEUE.send({type:'integration.requested',projectId,taskIds:intent.input.taskIds,eventId:intent.eventId} satisfies QueueMessage);intent=await project.markIntegrationRequestDispatch(intent.key,'observed',actor,credentialHash,current.expiresAt);}return json({queued:intent.eventId,replayed:prepared.replayed,dispatch:intent.dispatch},202);}catch{return text("Integration request could not be confirmed. Preserve the original key and context; retrying unchanged inputs cannot create another workflow identity.",409);}
           }
-          const denied=await admitRun(env,account,planLimits(env)[plan]);if(denied)return denied;
+          const denied=await admitRun(env,account,dailyRunLimit(env,accountKey,plan));if(denied)return denied;
           const eventId = `integ-${projectId}-${crypto.randomUUID()}`;
           await project.registerWorkflow(eventId, "integration", undefined, userId,1);
           await env.INTEGRATION_QUEUE.send({ type: "integration.requested", projectId, taskIds: b.taskIds as string[], eventId } satisfies QueueMessage);
@@ -2245,7 +2245,7 @@ async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): 
               const accountKey=await accountKeyFor(userId);await authorize();
               const verifyHeads=async()=>{const proof=await project.verifyLegacyCandidateGitHeads(attempt.id,actor,credentialHash,currentAuth.expiresAt);if(!proof.ok){const messages={tip_unavailable:"A contributor branch tip is unavailable. Saved inputs were preserved; rerun was not dispatched.",tip_differs:"A contributor branch tip differs from the saved input. Saved inputs were preserved; rerun was not dispatched.",inspection_unavailable:"Exact Git branch inspection is unavailable. Saved inputs were preserved.",cleanup_unconfirmed:"Git inspection credential cleanup is unconfirmed. Saved inputs were preserved."};throw new LegacyRerunError(messages[proof.reason]);}};await verifyHeads();
               await authorize();attempt=await project.stopLegacyCandidateRerun(attempt.id);await authorize();await verifyHeads();
-              const {plan}=await account.getBilling();const denied=await admitRun(env,account,planLimits(env)[plan],attempt.successorWorkflowId);if(denied)return denied;await authorize();
+              const {plan}=await account.getBilling();const denied=await admitRun(env,account,dailyRunLimit(env,accountKey,plan),attempt.successorWorkflowId);if(denied)return denied;await authorize();
               attempt=await project.commitLegacyCandidateRerunReassignment(attempt.id);await authorize();
               await project.registerWorkflow(attempt.successorWorkflowId,"integration",undefined,userId,1);await authorize();
               if(attempt.dispatch==="unknown"&&Date.now()-Date.parse(attempt.createdAt)>=24*60*60_000)return Response.json({error:"Saved dispatch is too old to safely redeliver. Its outcome requires reconciliation."},{status:409});

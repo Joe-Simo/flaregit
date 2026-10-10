@@ -1,3 +1,4 @@
+import { planLimits, type Plan } from "./polar.js";
 import type { ManagedAdmission, ManagedEnvelope, ManagedFundingTier } from "./managed-spend-ledger.js";
 import type { CreditHold } from "./credit-ledger.js";
 import type { Ledger } from "./durable-object.js";
@@ -92,13 +93,21 @@ export type ManagedStart = { tier: ManagedFundingTier; dailyLimit: number };
 /** Funds new managed runs. The daily free allowance draws from the shared free pool
  * (MANAGED_GLOBAL_MONTHLY_USD_MICROS); beyond it, each run holds its full envelope from the
  * account's prepaid credits. Every run stays inside MANAGED_ACCOUNT_MONTHLY_USD_MICROS. */
+/** Platform operators (OPERATOR_ACCOUNTS) test and demo on the platform budget, so they get the paid daily run limit. */
+export function isOperatorAccount(env: Env, accountKey: string): boolean {
+  return (env.OPERATOR_ACCOUNTS ?? "").split(",").map((value) => value.trim()).filter(Boolean).includes(accountKey);
+}
+export function dailyRunLimit(env: Env, accountKey: string, plan: Plan): number {
+  const limits = planLimits(env);
+  return isOperatorAccount(env, accountKey) ? limits.pro : limits[plan];
+}
 export async function startManagedRuns(env: Env, accountKey: string, runIds: string[], limits: { free: number; paid: number }): Promise<Response | ManagedStart> {
   if (env.RUNS_ENABLED === "false") return new Response("Managed execution is temporarily paused", { status: 503 });
   const envelopes = runIds.map((runId) => managedAgentEnvelope(accountKey, runId)), budget = managedBudget(env), account = accountOf(env, accountKey);
   let poolExhausted = false;
   // Platform operators run their own testing and demos on the platform's budget: no daily free-run limit and no
   // credits, but still inside the shared monthly ceiling and the per-account ceiling.
-  if ((env.OPERATOR_ACCOUNTS ?? "").split(",").map((value) => value.trim()).filter(Boolean).includes(accountKey)) {
+  if (isOperatorAccount(env, accountKey)) {
     const refused = (await globalOf(env).reserveManagedSpendBatch(envelopes, budget, "free")).find((result) => !result.allowed);
     return refused && !refused.allowed ? managedRefusal(refused.reason, "free") : { tier: "free", dailyLimit: limits.paid };
   }
