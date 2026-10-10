@@ -52,14 +52,15 @@ export function parseAgentResponse(output: string): AgentResponse {
   const plan = section(text, "plan").split("\n").map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim()).filter(Boolean).slice(0, 12).map((line) => line.slice(0, 300));
   const reasoning = section(text, "reasoning").slice(0, 1200);
   const edits: AgentEdit[] = [];
-  const seen = new Set<string>();
   for (const match of text.matchAll(BLOCK)) {
     const [, kind, path, body] = match as unknown as [string, "edit" | "create", string, string];
-    if (seen.has(path)) throw new Error(`The answer edits ${path} more than once; combine its changes into one block`);
-    seen.add(path);
+    const earlier = edits.find((edit) => edit.path === path);
+    // Models often split one file's changes into several edit blocks; apply them in order as one edit.
+    if (earlier && (kind === "create" || earlier.kind === "create")) throw new Error(`The answer both creates and changes ${path}; send one block for a new file`);
     if (kind === "create") { edits.push({ kind: "create", path, content: body }); continue; }
     const replacements = [...body.matchAll(PAIR)].map((pair) => ({ search: pair[1]!, replace: pair[2] ?? "" }));
     if (!replacements.length) throw new Error(`The edit for ${path} has no <search>/<replace> pair`);
+    if (earlier?.kind === "replace") { earlier.replacements.push(...replacements); continue; }
     edits.push({ kind: "replace", path, replacements });
   }
   return agentResponseSchema.parse({ plan, reasoning, edits });

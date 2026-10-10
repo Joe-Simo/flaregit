@@ -52,8 +52,9 @@ test("rejects stale, ambiguous, unseen and recreated files without partial resul
   expect(replacementWithDollar["a.ts"]).toBe("x = '$&$1';\n");
 });
 
-test("refuses duplicated paths and edit blocks without hunks; tolerates answers with no edits", () => {
-  expect(() => parseAgentResponse(`<edit path="a.ts">\n<search>\na\n</search>\n<replace>\nb\n</replace>\n</edit>\n<edit path="a.ts">\n<search>\nc\n</search>\n<replace>\nd\n</replace>\n</edit>`)).toThrow(/more than once/);
+test("merges repeated edit blocks for one file, refuses create-and-edit, and edit blocks without hunks; tolerates answers with no edits", () => {
+  expect(parseAgentResponse(`<edit path="a.ts">\n<search>\na\n</search>\n<replace>\nb\n</replace>\n</edit>\n<edit path="a.ts">\n<search>\nc\n</search>\n<replace>\nd\n</replace>\n</edit>`).edits).toEqual([{ kind: "replace", path: "a.ts", replacements: [{ search: "a", replace: "b" }, { search: "c", replace: "d" }] }]);
+  expect(() => parseAgentResponse(`<create path="n.ts">\nx\n</create>\n<edit path="n.ts">\n<search>\nx\n</search>\n<replace>\ny\n</replace>\n</edit>`)).toThrow(/both creates and changes/);
   expect(() => parseAgentResponse(`<edit path="a.ts">\nwhole file\n</edit>`)).toThrow(/no <search>/);
   expect(parseAgentResponse("<think>hidden</think>I could not find anything to change.").edits).toEqual([]);
 });
