@@ -54,7 +54,7 @@ test("a re-run refused for budget is kept and an owner can send the same re-run 
     const waiting = await update(json, "conflicting");
     expect(waiting).toMatchObject({ status: "agent_waiting", revisionWorkflowId: workflowId, conflictingFiles: ["src/pricing.ts"], retry: { refusal: "budget", attempts: 1 } });
     expect(waiting.reason).toContain("spending is at its limit");
-    expect(waiting.retry?.refusedReason).toContain("global_budget");
+    expect(waiting.retry?.refusedReason).toContain("free agent allowance is used up");
     expect("revisionContext" in waiting).toBe(false);
     expect((await json<{ alarm: number | null }>("/alarm-at")).alarm).not.toBeNull();
     const state = await json<FlareGitProjectState>("/state");
@@ -71,7 +71,7 @@ test("a re-run refused for budget is kept and an owner can send the same re-run 
     const stillFull = await json<Route>("/run-agent-again?capacity=none", { taskId: "conflicting" });
     expect(stillFull.status).toBe(429);
     expect(stillFull.body).toContain("The agent could not be re-run");
-    expect(stillFull.body).toContain("global_budget");
+    expect(stillFull.body).toContain("free agent allowance is used up");
     expect(stillFull.created).toEqual([]);
     expect((await update(json, "conflicting")).retry?.attempts).toBe(2);
 
