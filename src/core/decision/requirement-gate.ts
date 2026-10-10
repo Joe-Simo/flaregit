@@ -63,7 +63,7 @@ export function gateRequirements(frozen: readonly Requirement[], decided: Decide
 /** Every assertion that names code, an input and an expected result can be run. */
 export function requirementExamples(frozen: readonly Requirement[], decided: DecidedRequirements): RequirementExample[] {
   return gateRequirements(frozen, decided).flatMap(({ requirement, decided: isDecided }) =>
-    requirement.assertions.flatMap((assertion): RequirementExample[] => {
+    (requirement.assertions ?? []).flatMap((assertion): RequirementExample[] => {
       const probe = probeOf(assertion);
       if (!probe || !assertion.input || assertion.expectedOutput === undefined) return [];
       return [{ requirementId: requirement.id, requirementTitle: requirement.title.slice(0, 500), assertionId: assertion.id, description: assertion.description.slice(0, 500), decided: isDecided, input: structuredClone(assertion.input), expected: structuredClone(assertion.expectedOutput), probe }];
