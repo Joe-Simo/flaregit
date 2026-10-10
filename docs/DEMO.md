@@ -14,8 +14,16 @@ The script is built around four flows, weighted to the judging criteria (agent c
 ## Before recording
 
 - Use the current production deploy and note its source commit (shown in the footer / `/status.json`).
-- Create a fresh test repository from the ticket-booking fixture and say on camera that it is a test repository.
-- Prepare three issues with requirements written so that two of them contradict (for example: "orders of 4+ tickets get 15% off" vs. "the per-ticket price never changes after checkout starts"), and a third independent one (for example: "add a $5 refundable fee").
+- Import the public demo repository `https://github.com/Joe-Simo/flaregit-demo-tickets` as `demo-tickets`, with test command `bun test tests`. Say on camera that it is a test repository.
+- Start three agents with these goals and requirements (A and B contradict on purpose; C is independent):
+
+  | Agent | Goal | Requirement example | Expected |
+  |---|---|---|---|
+  | A | Group discount | 4 tickets × $40 | total `136` |
+  | B | Price guarantee | 4 tickets × $40 | total `160` |
+  | C | Refundable fee | 2 refundable tickets × $40 | total `90`, `isRefundable` `true` |
+
+- The human entrant must personally click **Approve commit** and personally pick the winning requirement in the contradiction decision. Do not automate either step.
 - Sign in with your own account. Keep tokens, emails and personal details off screen; hide the browser bookmark bar.
 - Do one full dry run the same day; record the dry-run evidence in `docs/evidence/`.
 
