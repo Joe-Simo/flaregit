@@ -156,8 +156,10 @@ function runtimeDouble(commands: string[]): CoordinationRuntime {
 }
 
 const created = new Map<string, unknown>();
+/** How each saved instance stands; an instance without an entry is still running. */
+const statuses = new Map<string, string>();
 const agentWorkflowDouble = {
-  get: async (id: string) => { if (!created.has(id)) throw new Error("instance.not_found"); return { id, status: async () => ({ status: "running" }) }; },
+  get: async (id: string) => { if (!created.has(id)) throw new Error("instance.not_found"); return { id, status: async () => ({ status: statuses.get(id) ?? "running" }) }; },
   create: async ({ id, params }: { id: string; params: unknown }) => { if (created.has(id)) throw new Error("instance.already_exists"); created.set(id, params); return { id }; },
 };
 
@@ -175,6 +177,13 @@ export default {
         const input = (await request.json()) as { taskId: string; landedCommit: string; workflowId: string };
         const sent = await sendRebaseRevision(envWith(env, capacity), stub, PROJECT_ID, { ...input, actorId: "owner" });
         return Response.json({ ...sent, created: [...created.keys()] });
+      }
+      if (url.pathname === "/agent-instance") {
+        // A workflow instance saved under this id, finished with this status (for example "errored").
+        const input = (await request.json()) as { id: string; status: string };
+        if (!created.has(input.id)) created.set(input.id, null);
+        statuses.set(input.id, input.status);
+        return Response.json({ created: [...created.keys()] });
       }
       if (url.pathname === "/retry-due") {
         const records = await retryDueRebaseRevisions(envWith(env, capacity), stub, PROJECT_ID);

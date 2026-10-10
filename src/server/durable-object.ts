@@ -1100,6 +1100,7 @@ export interface Ledger {
   markPostLandRevision(taskId:string,landedCommit:string,workflowId:string,outcome:RevisionOutcome):Promise<Awaited<ReturnType<CoordinationController["markRebaseRevision"]>>>;
   claimDueRebaseRevisions():Promise<RevisionClaim[]>;
   claimManualRebaseRevision(taskId:string,actor:HumanDecisionActor,credentialHash?:string,sessionExpiresAt?:number):Promise<ManualRetry>;
+  advancePostLandRevision(taskId:string,landedCommit:string,fromWorkflowId:string,toWorkflowId:string):Promise<Awaited<ReturnType<CoordinationController["advanceRevisionRun"]>>>;
 }
 
 const LEASE_MS = 20 * 60_000;
@@ -6608,6 +6609,7 @@ export class RepositoryController extends DurableObject<Env> {
   async mergeQueueSettle(eventId:string,outcome:LandingOutcome,reason?:string){return this.coordination().settle(eventId,outcome,reason);}
   async postLandRebasePlan(landedCommit:string,workflowId:string){return this.coordination().planRebase(landedCommit,workflowId);}
   async recordPostLandRebase(input:{taskId:string;landedCommit:string;fromCommit:string;execution:RebaseExecution}){return this.coordination().recordRebase(input);}
+  async advancePostLandRevision(taskId:string,landedCommit:string,fromWorkflowId:string,toWorkflowId:string){return this.coordination().advanceRevisionRun(taskId,landedCommit,fromWorkflowId,toWorkflowId);}
   async markPostLandRevision(taskId:string,landedCommit:string,workflowId:string,outcome:RevisionOutcome){const record=await this.coordination().markRebaseRevision(taskId,landedCommit,workflowId,outcome);await this.scheduleRevisionRetry();return record;}
   async claimDueRebaseRevisions(){return this.coordination().claimDueRevisions();}
   /** Only a current owner (session or full-access token) may fund and send a re-run of the agent by hand. */

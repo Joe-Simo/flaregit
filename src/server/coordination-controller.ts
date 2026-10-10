@@ -2,7 +2,7 @@ import type { ContradictionProof } from "../core/decision/contradiction-proof.js
 import type { FlareGitProjectState } from "../core/types.js";
 import type { DecidedRequirements } from "../core/decision/requirement-gate.js";
 import { enqueueChanges, enqueueRequestSchema, MergeQueueLedger, planMergeQueue, removeFromQueue, settleLanding, type LandingOutcome, type MergeQueueEntry, type QueueAction } from "./merge-queue-runner.js";
-import { claimDueRevisions, claimManualRevision, markRebaseRevision, nextRevisionRetryAt, PostLandRebaseLedger, planPostLandRebase, rebaseExecutionSchema, rebaseUpdate, recordPostLandRebase, type PostLandRebaseItem, type ManualRetry, type PostLandRebaseRecord, type RebaseExecution, type RevisionClaim, type RevisionOutcome } from "./post-land-rebase.js";
+import { advanceRevisionRun, claimDueRevisions, claimManualRevision, markRebaseRevision, nextRevisionRetryAt, PostLandRebaseLedger, planPostLandRebase, rebaseExecutionSchema, rebaseUpdate, recordPostLandRebase, type PostLandRebaseItem, type ManualRetry, type PostLandRebaseRecord, type RebaseExecution, type RevisionClaim, type RevisionOutcome } from "./post-land-rebase.js";
 import { decisionAffectedTaskIds, decisionProofSources, planLosingRevisions, recordDecisionProof, RequirementDecisionLedger, revisionWorkflowId, settleRevisions, type ProofSources, type RequirementDecisionView, type RequirementRevision } from "./requirement-decisions.js";
 
 /** Repository Durable Object ports used by coordination; the controller never reaches into other state. */
@@ -131,6 +131,10 @@ export class CoordinationController {
   /** Refused re-runs due to be sent again; each is claimed so concurrent callers never send it twice. */
   claimDueRevisions(): RevisionClaim[] {
     return this.transaction(() => claimDueRevisions(this.rebases, this.ports.load()));
+  }
+
+  advanceRevisionRun(taskId: string, landedCommit: string, fromWorkflowId: string, toWorkflowId: string): PostLandRebaseRecord {
+    return this.transaction(() => advanceRevisionRun(this.rebases, taskId, landedCommit, fromWorkflowId, toWorkflowId));
   }
 
   claimManualRevision(taskId: string, actorId: string, rerunWorkflowId?: string): ManualRetry {
