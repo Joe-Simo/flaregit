@@ -25,3 +25,12 @@ Receipts for the competition goal, captured against https://flaregit.com.
 Still to capture: contradiction decision end to end, rebase after merge, merge queue with 3+ changes, 
 | Oct 10 | Signed-in Changes tab at 390px and 1440px, light and dark (`signed-in/12-changes-*.jpg`) | No horizontal page overflow; both themes render; healthy changes show no attention alert |
 | Oct 10 | Rebase after merge (`signed-in/06-rebase-after-merge.jpg`) | After the human merged the refundable change (`1cf967e`), both other agent changes were restarted on `1cf967e` with their previous work kept; re-running the agents was refused by the managed spend cap (global_budget) |
+
+## Security reviews (Oct 10)
+
+| Scope | Result |
+|---|---|
+| Live board, overlap, agent loop, coordination, merge queue, rebase, probe runner (Oct 9) | One finding (probe reporter bound before untrusted code) fixed in `7833306` |
+| Prepaid credits, Polar webhooks, checkout, auto-recharge, plan-price | Three findings fixed in `62140a4c` deploy: billing changes need an account session, checkout creation rate-limited, only USD orders credited |
+| Run-agent-again, post-merge retry, requirement authoring | No vulnerabilities; one low-severity scope-check mismatch noted (requirement examples checked against current rather than target-branch scope) |
+
