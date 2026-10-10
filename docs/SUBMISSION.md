@@ -97,26 +97,25 @@ bun test
 
 To host your own copy, follow the README's Cloudflare setup (Workers Paid, Artifacts, Durable Objects, Containers, Workflows, Queues, R2, Workers AI, and Clerk for sign-in). Set secrets with `wrangler secret`, then run `bun run build` and `bunx wrangler deploy`.
 
-## Verified on production (October 9) and pending verification — planning, not form copy
+## Verified on production (October 9–10) — planning, not form copy
 
-Verified on https://flaregit.com while signed in:
+Verified on https://flaregit.com while signed in. The end-to-end dry run used the repository `demo-run`, imported from https://github.com/Joe-Simo/flaregit-demo-tickets with test command `bun test tests`.
 
 | Claim | Evidence |
 |---|---|
-| Live agent board over WebSocket with three agents and overlap warnings on `src/pricing.ts` | `docs/evidence/signed-in/04-05-live-board-overlap.jpg` |
-| Agents run the repository's tests (`bun test`, 5 tests) in an isolated container with bounded rounds; one agent used two rounds after its first edit was rejected | `docs/evidence/signed-in/01-agent-two-rounds.jpg`, `docs/evidence/signed-in/01-03-agent-summary-tests.jpg` |
+| Live agent board over WebSocket: three agents at once, overlap warnings on `src/pricing.ts` passed to the agents | `docs/evidence/dry-run/1-live-board.jpg`, `docs/evidence/signed-in/04-05-live-board-overlap.jpg` |
+| Agents run the repository's tests in an isolated container in bounded rounds (one needed 2 rounds, one 3) | `docs/evidence/signed-in/01-agent-two-rounds.jpg`, `docs/evidence/signed-in/01-03-agent-summary-tests.jpg` |
 | "What the agent did": goal, plan, reasoning, files, attempts | `docs/evidence/signed-in/01-03-agent-summary-plan.jpg` |
-| Five primary tabs plus More; five-step progress bar per change | `docs/evidence/signed-in/08-five-tabs-more.jpg` |
-| Get started checklist built from real repository state | `docs/evidence/signed-in/11-get-started-checklist.jpg` |
-| Requirements attached to changes (title, statement, runnable example) and a review screen reading "Waiting for your review" with the requirement and checks | `docs/evidence/signed-in/review-waiting-for-human.jpg` |
-| A production bug found and fixed: verification for repositories with a test command now closes with the right checker | commits `5bd12cb`, `68440e6` |
+| Contradiction proven by running both changes' code (4 × $40: $136 vs $160); a person chose Group discount | `docs/evidence/dry-run/2-contradiction-proof.jpg`, `docs/evidence/signed-in/02-contradiction-revision-receipt.json` |
+| The losing agent revised its change; every later change is checked against the decided requirement before it can merge | `docs/evidence/dry-run/5-revised-change-passes-decided-requirement.jpg`, `docs/evidence/dry-run/3-requirement-check-passed.jpg` |
+| After a merge, affected agents redo their changes on the new code | `docs/evidence/dry-run/4-landed-then-agents-rebase.jpg`, `docs/evidence/signed-in/06-agent-redoing-after-merge.jpg` |
+| Merge queue lands changes one at a time, in order, and refuses stale ones cleanly | `docs/evidence/signed-in/07-three-landed-in-order.jpg`, `docs/evidence/signed-in/07-queue-landed-then-stale-refused.jpg`, `docs/evidence/dry-run/6-merged-pricing-ts.txt` |
+| Merged code keeps the decided requirement; merge commits read in plain English | `docs/evidence/dry-run/6-merged-pricing-ts.txt`, `docs/evidence/dry-run/6-merged-plain-commit.jpg` |
+| Five primary tabs plus More; five-step progress bar per change; Get started checklist from real state | `docs/evidence/signed-in/08-five-tabs-more.jpg`, `docs/evidence/signed-in/11-get-started-checklist.jpg` |
+| No layout breaks at 390px and 1440px in light and dark; visible keyboard focus | `docs/evidence/signed-in/12-*.jpg`, `docs/evidence/public/*.jpg` |
+| Prepaid credits enforced; a run is refused when the balance can't cover it | `docs/evidence/signed-in/07-queue-landed-then-stale-refused.jpg` |
 
-Pending verification (do not claim as done until recorded):
-
-- Contradiction decision, end to end (proof shown, person picks, the other agent revises).
-- Automatic rebase of other agents' changes after a merge.
-- Merge queue landing three or more changes.
-- Signed-in layouts in light and dark at 390px and 1440px.
+Production defects found by these runs and fixed: verification closure for test-command repositories; requirement authoring; request storm on the Changes page; decided requirements not enforced at merge (a stale change once reverted a decision before the requirement check existed — see `docs/evidence/README.md`); operator account misconfiguration; post-merge agent redo and run-again.
 
 ## Evidence and remaining gaps — do not paste as completed claims
 
