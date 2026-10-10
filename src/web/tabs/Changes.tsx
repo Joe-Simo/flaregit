@@ -29,7 +29,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { AgentRecoveryPanel } from "../components/AgentRecoveryPanel";
 import { AgentChangeSummary } from "../components/AgentChangeSummary";
-import {prepareIntegrationIntent,readIntegrationIntents,saveIntegrationIntent,acknowledgeIntegrationIntent,type IntegrationIntent} from "../integration-intent-recovery";
+import {readIntegrationIntents,saveIntegrationIntent,acknowledgeIntegrationIntent,type IntegrationIntent} from "../integration-intent-recovery";
+import {combinableSelection,combineSelectionBlocker,integrationIntentFor,MAX_COMBINED_CHANGES} from "../integration-selection";
 import { apiFetch, apiJson, apiSessionIdentity } from "../api";
 import { navigate, timeAgo } from "../router";
 import type { FlareGitProjectState, Task, TaskStatus } from "@/core/types";
@@ -243,7 +244,8 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
 
   const tasks = Object.values(state.tasks).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const active = tasks.filter((task) => task.status !== "accepted" && task.status !== "cancelled");
-  const integrationSelection = selected.filter((id) => { const task = state.tasks[id]; return task?.status === "ready" || task?.status === "blocked"; });
+  const integrationSelection = combinableSelection(state, selected);
+  const combineBlocker = combineSelectionBlocker(integrationSelection);
   const paths = new Map<string, Task[]>();
   for (const task of active) {
     for (const file of new Set(task.checkpoints.flatMap((checkpoint) => checkpoint.filesChanged))) {
@@ -339,21 +341,22 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
     void run("integrate",async()=>{
       const identity=apiSessionIdentity();if(!identity)throw Error("Your verified session is unavailable. Sign in before preparing an integration request.");
       const scope={identity,projectId};
+      const fromSelection=!saved&&!only;
       const chosen=only??integrationSelection;
-      let intent=saved ?? savedIntegrations.find(record=>JSON.stringify(record.request.taskIds)===JSON.stringify(chosen));
-      if(!intent)intent=prepareIntegrationIntent(state,chosen);
+      const blocker=fromSelection?combineSelectionBlocker(chosen):null;if(blocker)throw Error(blocker);
+      const intent=saved ?? integrationIntentFor(state,chosen,savedIntegrations);
       try{setSavedIntegrations(saveIntegrationIntent(sessionStorage,scope,intent));setIntegrationRecoveryError(null);}catch{setIntegrationRecoveryError("The original integration request could not be saved for recovery. No request was sent.");throw Error("Integration recovery storage is unavailable. Your selection is unchanged; no integration was sent.");}
       try{
         const response=await apiJson<{queued:string;replayed:boolean;dispatch:'unknown'|'observed'}>(`/p/${projectId}/integrations`,{method:"POST",json:intent.request});
         if(generation!==lifetime.current||apiSessionIdentity()!==identity)return;
         if(typeof response.queued!=="string"||!response.queued||typeof response.replayed!=="boolean"||!["unknown","observed"].includes(response.dispatch))throw Error("The integration acknowledgement could not be verified.");
         if(response.dispatch==="unknown"){const retained={...intent,phase:'unknown' as const};setSavedIntegrations(saveIntegrationIntent(sessionStorage,scope,retained));toast.warning(`Request ${response.queued} is recorded, but delivery is unconfirmed. Retrying its saved request keeps the same identity and revisions.`);}
-        else{try{setSavedIntegrations(acknowledgeIntegrationIntent(sessionStorage,scope,intent.request.idempotencyKey));}catch{setIntegrationRecoveryError("Delivery was confirmed, but the browser could not clear its recovery copy. Retrying that copy remains idempotent.");}setSelected([]);toast.success(`Integration delivery confirmed: ${response.queued}. Review its combined preview and checks in Review before merging repository history.`);}
+        else{try{setSavedIntegrations(acknowledgeIntegrationIntent(sessionStorage,scope,intent.request.idempotencyKey));}catch{setIntegrationRecoveryError("Delivery was confirmed, but the browser could not clear its recovery copy. Retrying that copy remains idempotent.");}if(fromSelection)setSelected([]);toast.success(`Integration delivery confirmed: ${response.queued}. Review its combined preview and checks in Review before merging repository history.`);}
       }catch(cause){if(generation!==lifetime.current||apiSessionIdentity()!==identity)return;try{setSavedIntegrations(saveIntegrationIntent(sessionStorage,scope,{...intent,phase:'unknown'}));}catch{setIntegrationRecoveryError("The original request was saved before dispatch, but its browser recovery status could not be updated.");}throw Error(`${cause instanceof Error?cause.message:"Integration result is unknown"} The original request and revisions are retained; retrying it does not create a replacement integration.`);}
     }).finally(()=>{integrationLock.current=false;});
   };
 
-  const toggle = (id: string) => setSelected(() => (integrationSelection.includes(id) ? integrationSelection.filter((value) => value !== id) : integrationSelection.length >= 8 ? integrationSelection : [...integrationSelection, id]));
+  const toggle = (id: string) => setSelected((current) => { const valid = combinableSelection(state, current); return valid.includes(id) ? valid.filter((value) => value !== id) : valid.length >= MAX_COMBINED_CHANGES ? valid : [...valid, id]; });
 
   return (
     <div className="space-y-5">
@@ -419,9 +422,10 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
           <h2 className="text-sm font-semibold">Changes ({tasks.length})</h2>
           <p className="text-xs text-muted-foreground">Select up to 8 ready or blocked changes to prepare a review combined preview.</p>
         </div>
-        <Button type="button" variant="outline" size="sm" disabled={integrationSelection.length < 1 || integrationSelection.length > 8 || busy !== null} onClick={()=>integrate()}>
-          <GitPullRequestArrow className="h-4 w-4 mr-1.5" aria-hidden="true" /> {busy === "integrate" ? "Starting…" : savedIntegrations.some(record=>JSON.stringify(record.request.taskIds)===JSON.stringify(integrationSelection)) ? "Retry original integration" : savedIntegrations.length>0 ? "Start separate integration" : integrationSelection.length <= 1 ? "Combine and check" : `Combine ${integrationSelection.length} together`}
+        <Button type="button" variant="outline" size="sm" disabled={combineBlocker !== null || busy !== null} title={combineBlocker ?? undefined} aria-describedby="combine-selected-reason" onClick={()=>integrate()}>
+          <GitPullRequestArrow className="h-4 w-4 mr-1.5" aria-hidden="true" /> {busy === "integrate" ? "Starting…" : savedIntegrations.some(record=>JSON.stringify(record.request.taskIds)===JSON.stringify(integrationSelection)) ? "Retry original integration" : `Combine selected (${integrationSelection.length})`}
         </Button>
+        <p id="combine-selected-reason" className="w-full text-xs text-muted-foreground">{combineBlocker ?? (savedIntegrations.length>0&&!savedIntegrations.some(record=>JSON.stringify(record.request.taskIds)===JSON.stringify(integrationSelection)) ? "Starts a separate integration from the saved requests below." : `Combines exactly the ${integrationSelection.length} selected ${integrationSelection.length===1?"change":"changes"}.`)}</p>
       </div>
 
       {taskId&&!linkedTask&&<p role="status" className="text-sm text-muted-foreground">The linked change is unavailable in this repository. Current changes remain below.</p>}
@@ -440,7 +444,7 @@ function ChangesPanel({ projectId, state, reload,taskId,canContribute=true,manag
             const primaryAction = progress.step === "contribution" && canChangeTask(t) && (t.status === "working" || t.status === "checkpointed")
               ? <Button type="button" size="sm" disabled={busy !== null} title="Verify the pushed Git branch and mark this change ready" onClick={() => act(t, "ready")}><Check className="h-3.5 w-3.5 mr-1" aria-hidden="true" />{busy === `ready-${t.id}` ? "Verifying…" : "Mark ready"}</Button>
               : progress.step === "ready" && t.status === "ready" && canContribute
-                ? <Button type="button" size="sm" disabled={busy !== null} title="Combine this change with the latest merged version and run checks" onClick={() => integrate(undefined, [t.id])}><GitPullRequestArrow className="h-3.5 w-3.5 mr-1" aria-hidden="true" />{busy === "integrate" ? "Combining…" : "Combine and check"}</Button>
+                ? <Button type="button" size="sm" disabled={busy !== null} title="Combine this change with the latest merged version and run checks" onClick={() => integrate(undefined, [t.id])}><GitPullRequestArrow className="h-3.5 w-3.5 mr-1" aria-hidden="true" />{busy === "integrate" ? "Combining…" : "Combine this change"}</Button>
                 : progress.step === "verifying"
                   ? <Button type="button" size="sm" variant="secondary" onClick={() => navigate(reviewHref)}>Watch checks</Button>
                   : progress.step === "review"
